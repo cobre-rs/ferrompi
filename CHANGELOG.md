@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-03-27
+
+### Fixed
+
+- **Remove RPATH from linked binaries** -- Build script no longer embeds
+  `-Wl,-rpath` with the build machine's library paths. Pre-built release
+  binaries were failing on HPC clusters and containers where MPI is installed
+  in a different path. Users must ensure `libmpi` is discoverable at runtime
+  via `LD_LIBRARY_PATH`, `ldconfig`, or their cluster's module system.
+
+### Changed
+
+- **Repository URLs** -- Updated all URLs after migration to `cobre-rs` org.
+
 ## [0.2.0] - 2026-02-13
 
 ### Breaking Changes
@@ -55,6 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive documentation
 - Initial CI/CD setup with GitHub Actions
 
-[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/cobre-rs/ferrompi/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/cobre-rs/ferrompi/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cobre-rs/ferrompi/releases/tag/v0.1.0

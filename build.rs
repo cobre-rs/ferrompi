@@ -40,8 +40,11 @@ fn main() {
     // Link MPI library
     for path in &mpi_config.link_paths {
         println!("cargo:rustc-link-search=native={}", path.display());
-        // Add RPATH so the binary finds the correct libmpi at runtime
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", path.display());
+        // RPATH is intentionally NOT embedded. Pre-built release binaries should
+        // not bake in the build machine's library paths — they are almost never
+        // correct on the target machine (HPC clusters, containers, etc.). Users
+        // must ensure libmpi is discoverable at runtime via LD_LIBRARY_PATH,
+        // ldconfig, or their cluster's module system.
     }
 
     // Only link the main MPI library and essential system libraries
