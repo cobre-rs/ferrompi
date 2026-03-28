@@ -108,8 +108,9 @@ impl Communicator {
     pub fn processor_name(&self) -> Result<String> {
         let mut buf = [0u8; 256];
         let mut len: i32 = 0;
-        let ret =
-            unsafe { ffi::ferrompi_get_processor_name(buf.as_mut_ptr().cast::<i8>(), &mut len) };
+        let ret = unsafe {
+            ffi::ferrompi_get_processor_name(buf.as_mut_ptr().cast::<std::ffi::c_char>(), &mut len)
+        };
         Error::check(ret)?;
         let len = len.max(0) as usize;
         let s = std::str::from_utf8(&buf[..len])

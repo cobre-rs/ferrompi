@@ -190,7 +190,7 @@ impl Error {
             ffi::ferrompi_error_info(
                 code,
                 &mut class,
-                msg_buf.as_mut_ptr().cast::<i8>(),
+                msg_buf.as_mut_ptr().cast::<std::ffi::c_char>(),
                 &mut msg_len,
             )
         };

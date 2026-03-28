@@ -140,6 +140,8 @@
 #![allow(clippy::cast_precision_loss)]
 #![allow(clippy::similar_names)]
 
+use std::ffi::c_char;
+
 mod comm;
 mod datatype;
 mod error;
@@ -291,7 +293,7 @@ impl Mpi {
     pub fn version() -> Result<String> {
         let mut buf = [0u8; 256];
         let mut len: i32 = 0;
-        let ret = unsafe { ffi::ferrompi_get_version(buf.as_mut_ptr().cast::<i8>(), &mut len) };
+        let ret = unsafe { ffi::ferrompi_get_version(buf.as_mut_ptr().cast::<c_char>(), &mut len) };
 
         if ret != 0 {
             return Err(Error::from_code(ret));

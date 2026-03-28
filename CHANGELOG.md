@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-03-27
+
+### Fixed
+
+- **aarch64 compatibility** -- All `c_char` casts now use `std::ffi::c_char`
+  instead of hardcoded `i8`. On aarch64 (ARM), `c_char` is `u8` (unsigned),
+  while on x86_64 it is `i8` (signed). The previous `.cast::<i8>()` calls
+  caused type mismatches on ARM targets. Affected: `get_version`,
+  `get_processor_name`, `error_info`, `info_get`.
+
 ## [0.2.1] - 2026-03-27
 
 ### Fixed
@@ -69,7 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive documentation
 - Initial CI/CD setup with GitHub Actions
 
-[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/cobre-rs/ferrompi/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/cobre-rs/ferrompi/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/cobre-rs/ferrompi/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cobre-rs/ferrompi/releases/tag/v0.1.0

@@ -173,7 +173,7 @@ impl Info {
             ffi::ferrompi_info_get(
                 self.handle,
                 c_key.as_ptr(),
-                buf.as_mut_ptr().cast::<i8>(),
+                buf.as_mut_ptr().cast::<std::ffi::c_char>(),
                 &mut valuelen,
                 &mut flag,
             )
@@ -184,7 +184,7 @@ impl Info {
         }
         // SAFETY: The C layer writes a null-terminated string into buf.
         // CStr::from_ptr finds the first null terminator.
-        let c_str = unsafe { CStr::from_ptr(buf.as_ptr().cast::<i8>()) };
+        let c_str = unsafe { CStr::from_ptr(buf.as_ptr().cast::<std::ffi::c_char>()) };
         let value = c_str
             .to_str()
             .map_err(|_| Error::Internal("info value is not valid UTF-8".into()))?;
