@@ -95,16 +95,14 @@ cargo bench
 
 All pull requests automatically run:
 
-- ✅ **Tests** on Ubuntu and macOS with stable and nightly Rust
-- ✅ **Clippy** with pedantic lints
+- ✅ **Tests** on Ubuntu with stable Rust (MPICH and OpenMPI matrix)
+- ✅ **Clippy** lints
 - ✅ **Format checking** with rustfmt
-- ✅ **Documentation build** to catch broken links
 - ✅ **Security audit** for vulnerabilities
-- ✅ **Benchmarks** to detect performance regressions
 
 Your PR will be automatically labeled based on changed files.
 
-See [CI/CD Documentation](.github/CI_CD.md) for details.
+See the workflow files under `.github/workflows/` for details.
 
 ## Code Style
 
@@ -263,7 +261,7 @@ Include:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the same license as the project (MIT).
+By contributing, you agree that your contributions will be licensed under the same license as the project (MIT OR Apache-2.0).
 
 ## Questions?
 

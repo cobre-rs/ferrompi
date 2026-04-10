@@ -3,8 +3,23 @@
 //! This module provides structured MPI error handling with error class
 //! categorization and human-readable messages obtained from the MPI runtime.
 
+use std::sync::OnceLock;
+
 use crate::ffi;
 use thiserror::Error;
+
+/// Cached implementation-specific MPI error class values.
+/// Returns (MPI_ERR_FILE, MPI_ERR_INFO, MPI_ERR_WIN) from the C layer.
+fn impl_error_classes() -> (i32, i32, i32) {
+    static CLASSES: OnceLock<(i32, i32, i32)> = OnceLock::new();
+    *CLASSES.get_or_init(|| unsafe {
+        (
+            ffi::ferrompi_err_file(),
+            ffi::ferrompi_err_info(),
+            ffi::ferrompi_err_win(),
+        )
+    })
+}
 
 /// Result type for MPI operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -75,6 +90,9 @@ impl MpiErrorClass {
     /// 17=INTERN, 18=IN_STATUS, 19=PENDING, plus implementation-
     /// specific classes for WIN (45), INFO (28), FILE (27).
     pub fn from_raw(class: i32) -> Self {
+        // Standard MPI error classes (0-19) have fixed values per the MPI spec.
+        // Implementation-specific classes (File, Info, Win) are queried from
+        // the C layer to support both MPICH and Open MPI.
         match class {
             0 => MpiErrorClass::Success,
             1 => MpiErrorClass::Buffer,
@@ -96,11 +114,19 @@ impl MpiErrorClass {
             17 => MpiErrorClass::Intern,
             18 => MpiErrorClass::InStatus,
             19 => MpiErrorClass::Pending,
-            // Implementation-specific classes (MPICH/Open MPI values)
-            27 => MpiErrorClass::File,
-            28 => MpiErrorClass::Info,
-            45 => MpiErrorClass::Win,
-            other => MpiErrorClass::Raw(other),
+            other => {
+                // Query implementation-specific error class values from C layer
+                let (err_file, err_info, err_win) = impl_error_classes();
+                if other == err_file {
+                    MpiErrorClass::File
+                } else if other == err_info {
+                    MpiErrorClass::Info
+                } else if other == err_win {
+                    MpiErrorClass::Win
+                } else {
+                    MpiErrorClass::Raw(other)
+                }
+            }
         }
     }
 }
@@ -258,9 +284,7 @@ mod tests {
         assert_eq!(MpiErrorClass::from_raw(17), MpiErrorClass::Intern);
         assert_eq!(MpiErrorClass::from_raw(18), MpiErrorClass::InStatus);
         assert_eq!(MpiErrorClass::from_raw(19), MpiErrorClass::Pending);
-        assert_eq!(MpiErrorClass::from_raw(27), MpiErrorClass::File);
-        assert_eq!(MpiErrorClass::from_raw(28), MpiErrorClass::Info);
-        assert_eq!(MpiErrorClass::from_raw(45), MpiErrorClass::Win);
+        // File, Info, Win are implementation-specific — cannot test without MPI runtime
     }
 
     #[test]

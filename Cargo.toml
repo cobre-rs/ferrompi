@@ -1,6 +1,6 @@
 [package]
 name = "ferrompi"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.74"
 authors = ["Rogerio Alves"]
@@ -97,6 +97,10 @@ name = "test_info"
 path = "examples/test_info.rs"
 
 [[example]]
+name = "topology"
+path = "examples/topology.rs"
+
+[[example]]
 name = "test_persistent"
 path = "examples/test_persistent.rs"
 
@@ -116,5 +120,3 @@ default = []
 rma = []
 # Enable NUMA-aware shared memory windows and SLURM helpers (implies rma)
 numa = ["rma"]
-# Enable detailed debug output
-debug = []

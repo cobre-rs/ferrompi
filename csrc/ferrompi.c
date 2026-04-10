@@ -201,7 +201,7 @@ static MPI_Op get_op(int32_t op) {
         case 1: return MPI_MAX;
         case 2: return MPI_MIN;
         case 3: return MPI_PROD;
-        default: return MPI_SUM;
+        default: return MPI_OP_NULL;
     }
 }
 
@@ -268,14 +268,22 @@ int ferrompi_init(void) {
 }
 
 int ferrompi_finalize(void) {
-    // Clean up any remaining info objects (before windows and comms)
+    // Clean up requests first (they may reference communicators)
+    for (int i = 0; i < MAX_REQUESTS; i++) {
+        if (request_used[i] && request_table[i] != MPI_REQUEST_NULL) {
+            MPI_Request_free(&request_table[i]);
+        }
+        request_used[i] = 0;
+    }
+
+    // Clean up any remaining info objects
     for (int i = 0; i < MAX_INFOS; i++) {
         if (info_used[i] && info_table[i] != MPI_INFO_NULL) {
             MPI_Info_free(&info_table[i]);
         }
         info_used[i] = 0;
     }
-    
+
     // Clean up any remaining windows (before communicators, since windows reference comms)
     for (int i = 0; i < MAX_WINDOWS; i++) {
         if (win_used[i] && win_table[i] != MPI_WIN_NULL) {
@@ -283,21 +291,13 @@ int ferrompi_finalize(void) {
         }
         win_used[i] = 0;
     }
-    
+
     // Clean up any remaining communicators
     for (int i = 1; i < comm_count; i++) {
         if (comm_table[i] != MPI_COMM_NULL) {
             MPI_Comm_free(&comm_table[i]);
             comm_table[i] = MPI_COMM_NULL;
         }
-    }
-    
-    // Clean up any remaining requests
-    for (int i = 0; i < MAX_REQUESTS; i++) {
-        if (request_used[i] && request_table[i] != MPI_REQUEST_NULL) {
-            MPI_Request_free(&request_table[i]);
-        }
-        request_used[i] = 0;
     }
     
     tables_initialized = 0;
@@ -474,11 +474,17 @@ int ferrompi_recv(
     if (ret == MPI_SUCCESS) {
         *actual_source = status.MPI_SOURCE;
         *actual_tag = status.MPI_TAG;
+#if MPI_VERSION >= 4
+        MPI_Count cnt;
+        MPI_Get_count_c(&status, dt, &cnt);
+        *actual_count = (int64_t)cnt;
+#else
         int cnt;
         MPI_Get_count(&status, dt, &cnt);
         *actual_count = (int64_t)cnt;
+#endif
     }
-    
+
     return ret;
 }
 
@@ -630,9 +636,15 @@ int ferrompi_probe(int32_t source, int32_t tag, int32_t comm_handle,
     if (ret == MPI_SUCCESS) {
         *actual_source = status.MPI_SOURCE;
         *actual_tag = status.MPI_TAG;
+#if MPI_VERSION >= 4
+        MPI_Count cnt;
+        MPI_Get_count_c(&status, dt, &cnt);
+        *count = (int64_t)cnt;
+#else
         int cnt;
         MPI_Get_count(&status, dt, &cnt);
         *count = (int64_t)cnt;
+#endif
     }
     return ret;
 }
@@ -655,9 +667,15 @@ int ferrompi_iprobe(int32_t source, int32_t tag, int32_t comm_handle,
         if (f) {
             *actual_source = status.MPI_SOURCE;
             *actual_tag = status.MPI_TAG;
+#if MPI_VERSION >= 4
+            MPI_Count cnt;
+            MPI_Get_count_c(&status, dt, &cnt);
+            *count = (int64_t)cnt;
+#else
             int cnt;
             MPI_Get_count(&status, dt, &cnt);
             *count = (int64_t)cnt;
+#endif
         }
     }
     return ret;
@@ -730,9 +748,19 @@ int ferrompi_reduce_inplace(void* buf, int64_t count, int32_t datatype_tag,
 
     if (is_root) {
         /* Root uses MPI_IN_PLACE as sendbuf; buf is both input and output */
+#if MPI_VERSION >= 4
+        if (count > INT_MAX) {
+            return MPI_Reduce_c(MPI_IN_PLACE, buf, (MPI_Count)count, dt, mpi_op, root, comm);
+        }
+#endif
         return MPI_Reduce(MPI_IN_PLACE, buf, (int)count, dt, mpi_op, root, comm);
     } else {
         /* Non-root sends buf, recvbuf is ignored */
+#if MPI_VERSION >= 4
+        if (count > INT_MAX) {
+            return MPI_Reduce_c(buf, NULL, (MPI_Count)count, dt, mpi_op, root, comm);
+        }
+#endif
         return MPI_Reduce(buf, NULL, (int)count, dt, mpi_op, root, comm);
     }
 }
@@ -894,6 +922,11 @@ int ferrompi_reduce_scatter_block(
     MPI_Datatype dt = get_datatype(datatype_tag);
     MPI_Op mpi_op = get_op(op);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+#if MPI_VERSION >= 4
+    if (recvcount > INT_MAX) {
+        return MPI_Reduce_scatter_block_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op, comm);
+    }
+#endif
     return MPI_Reduce_scatter_block(sendbuf, recvbuf, (int)recvcount, dt, mpi_op, comm);
 }
 
@@ -2129,19 +2162,25 @@ int ferrompi_waitall(int64_t count, int64_t* request_handles) {
         reqs[i] = *req;
     }
     
+    if (count > INT_MAX) {
+        free(reqs);
+        return MPI_ERR_COUNT;
+    }
     int ret = MPI_Waitall((int)count, reqs, MPI_STATUSES_IGNORE);
     
-    // Update handles and free completed non-persistent requests
-    for (int64_t i = 0; i < count; i++) {
-        MPI_Request* req = get_request_ptr(request_handles[i]);
-        if (req) {
-            *req = reqs[i];
-            if (*req == MPI_REQUEST_NULL) {
-                free_request(request_handles[i]);
+    // Only update handles and free slots on success
+    if (ret == MPI_SUCCESS) {
+        for (int64_t i = 0; i < count; i++) {
+            MPI_Request* req = get_request_ptr(request_handles[i]);
+            if (req) {
+                *req = reqs[i];
+                if (*req == MPI_REQUEST_NULL) {
+                    free_request(request_handles[i]);
+                }
             }
         }
     }
-    
+
     free(reqs);
     return ret;
 }
@@ -2167,6 +2206,10 @@ int ferrompi_startall(int64_t count, int64_t* request_handles) {
         reqs[i] = *req;
     }
 
+    if (count > INT_MAX) {
+        free(reqs);
+        return MPI_ERR_COUNT;
+    }
     int ret = MPI_Startall((int)count, reqs);
 
     // Update handles with post-start state
@@ -2341,19 +2384,36 @@ int ferrompi_win_flush_all(int32_t win_handle) {
  * Utility Functions
  * ============================================================ */
 
+int ferrompi_get_library_version(char* buf, int32_t* len) {
+    int l = 0;
+    int ret = MPI_Get_library_version(buf, &l);
+    if (ret == MPI_SUCCESS) {
+        *len = l;
+    } else {
+        *len = 0;
+    }
+    return ret;
+}
+
 int ferrompi_get_version(char* version, int32_t* len) {
     int version_num, subversion_num;
     int ret = MPI_Get_version(&version_num, &subversion_num);
     if (ret == MPI_SUCCESS) {
-        *len = snprintf(version, 256, "MPI %d.%d", version_num, subversion_num);
+        int n = snprintf(version, 256, "MPI %d.%d", version_num, subversion_num);
+        /* Clamp: snprintf can return a value > buffer size per C standard */
+        *len = (n < 0) ? 0 : (n > 255 ? 255 : n);
     }
     return ret;
 }
 
 int ferrompi_get_processor_name(char* name, int32_t* len) {
-    int l;
+    int l = 0;
     int ret = MPI_Get_processor_name(name, &l);
-    *len = l;
+    if (ret == MPI_SUCCESS) {
+        *len = l;
+    } else {
+        *len = 0;
+    }
     return ret;
 }
 
@@ -2365,3 +2425,11 @@ int ferrompi_abort(int32_t comm_handle, int32_t errorcode) {
     MPI_Comm comm = get_comm(comm_handle);
     return MPI_Abort(comm, errorcode);
 }
+
+/* ============================================================
+ * Error Class Constants
+ * ============================================================ */
+
+int32_t ferrompi_err_file(void)  { return MPI_ERR_FILE; }
+int32_t ferrompi_err_info(void)  { return MPI_ERR_INFO; }
+int32_t ferrompi_err_win(void)   { return MPI_ERR_WIN; }

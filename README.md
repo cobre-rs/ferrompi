@@ -64,7 +64,6 @@ All communication operations are generic over `MpiDatatype`:
 | ------- | -------------------------------------------------- | ------------ |
 | `rma`   | RMA shared memory window operations                | —            |
 | `numa`  | NUMA-aware shared memory windows and SLURM helpers | `rma`        |
-| `debug` | Detailed debug output from the C layer             | —            |
 
 Enable features in your `Cargo.toml`:
 
@@ -539,14 +538,17 @@ The C layer provides:
 
 - Handle tables for MPI opaque objects (256 comms, 16384 requests, 256 windows, 64 infos)
 - Automatic large-count operation selection
-- Thread-safe request management
+- Request management
 - Graceful degradation for MPI <4.0
 
 ## License
 
-Licensed under:
+Licensed under either of:
 
-- MIT license ([LICENSE](LICENSE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option.
 
 ## Contributing
 

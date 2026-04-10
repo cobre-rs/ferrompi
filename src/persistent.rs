@@ -114,8 +114,9 @@ impl PersistentRequest {
             return Ok(());
         }
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
+        Error::check(ret)?;
         self.active = false;
-        Error::check(ret)
+        Ok(())
     }
 
     /// Test if the operation has completed without blocking.
@@ -171,13 +172,14 @@ impl PersistentRequest {
 
         let mut handles: Vec<i64> = requests.iter().map(|r| r.handle).collect();
         let ret = unsafe { ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr()) };
+        Error::check(ret)?;
 
-        // Mark all as inactive
+        // Only mark as inactive after successful wait
         for req in requests.iter_mut() {
             req.active = false;
         }
 
-        Error::check(ret)
+        Ok(())
     }
 }
 

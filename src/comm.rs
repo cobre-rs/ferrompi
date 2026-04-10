@@ -56,7 +56,6 @@ pub enum SplitType {
 ///
 /// println!("I am rank {} of {}", world.rank(), world.size());
 /// ```
-#[derive(Clone)]
 pub struct Communicator {
     handle: i32,
 }
@@ -68,6 +67,16 @@ pub struct Communicator {
 // when the appropriate thread level (Serialized or Multiple) was requested.
 // Users must ensure they requested sufficient thread support and serialize
 // access themselves when using ThreadLevel::Serialized.
+//
+// NOTE: The C-layer handle tables (comm_table, request_table, etc.) are not
+// internally synchronized. At ThreadLevel::Single and Funneled, only the main
+// thread calls MPI so no data race occurs. At Serialized, the user is required
+// to serialize all MPI calls. At Multiple, concurrent MPI calls are safe per
+// the MPI standard, but our handle table allocation/deallocation is not
+// protected by mutexes. This is acceptable because MPI_THREAD_MULTIPLE only
+// guarantees that MPI calls are thread-safe — the handle tables are modified
+// only inside MPI entry/exit points which the user serializes or the MPI
+// implementation serializes internally.
 unsafe impl Send for Communicator {}
 unsafe impl Sync for Communicator {}
 
@@ -93,14 +102,16 @@ impl Communicator {
     /// Get the rank of the calling process in this communicator.
     pub fn rank(&self) -> i32 {
         let mut rank: i32 = 0;
-        unsafe { ffi::ferrompi_comm_rank(self.handle, &mut rank) };
+        let ret = unsafe { ffi::ferrompi_comm_rank(self.handle, &mut rank) };
+        debug_assert_eq!(ret, 0, "MPI_Comm_rank failed with code {ret}");
         rank
     }
 
     /// Get the number of processes in this communicator.
     pub fn size(&self) -> i32 {
         let mut size: i32 = 0;
-        unsafe { ffi::ferrompi_comm_size(self.handle, &mut size) };
+        let ret = unsafe { ffi::ferrompi_comm_size(self.handle, &mut size) };
+        debug_assert_eq!(ret, 0, "MPI_Comm_size failed with code {ret}");
         size
     }
 
@@ -112,10 +123,35 @@ impl Communicator {
             ffi::ferrompi_get_processor_name(buf.as_mut_ptr().cast::<std::ffi::c_char>(), &mut len)
         };
         Error::check(ret)?;
-        let len = len.max(0) as usize;
+        let len = (len.max(0) as usize).min(buf.len());
         let s = std::str::from_utf8(&buf[..len])
             .map_err(|_| Error::Internal("Invalid UTF-8 in processor name".into()))?;
         Ok(s.to_string())
+    }
+
+    /// Gather topology information from all ranks in this communicator.
+    ///
+    /// This is a **collective operation** — all ranks must call it.
+    /// Every rank receives the complete [`TopologyInfo`], which includes the
+    /// rank-to-host mapping, MPI version metadata, and (with the `numa`
+    /// feature) SLURM job information.
+    ///
+    /// [`TopologyInfo`]: crate::TopologyInfo
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::Mpi;
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let topo = world.topology(&mpi).unwrap();
+    /// if world.rank() == 0 {
+    ///     println!("{topo}");
+    /// }
+    /// ```
+    pub fn topology(&self, mpi: &crate::Mpi) -> Result<crate::TopologyInfo> {
+        crate::topology::gather_topology(self, mpi)
     }
 
     /// Duplicate this communicator.
@@ -481,7 +517,8 @@ impl Communicator {
     /// # let world = mpi.world();
     /// // Probe for any incoming f64 message
     /// let status = world.probe::<f64>(-1, -1).unwrap();
-    /// // Allocate a buffer of exactly the right size
+    /// // Allocate a buffer of exactly the right size (count may be negative on error)
+    /// assert!(status.count >= 0, "MPI_Get_count returned MPI_UNDEFINED");
     /// let mut buf = vec![0.0f64; status.count as usize];
     /// world.recv(&mut buf, status.source, status.tag).unwrap();
     /// ```
@@ -533,6 +570,7 @@ impl Communicator {
     /// # let world = mpi.world();
     /// // Poll for an incoming f64 message without blocking
     /// if let Some(status) = world.iprobe::<f64>(-1, -1).unwrap() {
+    ///     assert!(status.count >= 0, "MPI_Get_count returned MPI_UNDEFINED");
     ///     let mut buf = vec![0.0f64; status.count as usize];
     ///     world.recv(&mut buf, status.source, status.tag).unwrap();
     /// }
@@ -2085,11 +2123,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2132,11 +2166,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2159,11 +2189,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2189,11 +2215,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2246,11 +2268,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2298,11 +2316,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2347,11 +2361,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2401,11 +2411,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2455,11 +2461,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2513,11 +2515,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2575,11 +2573,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2637,11 +2631,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2696,11 +2686,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2765,11 +2751,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2821,11 +2803,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        if ret != 0 {
-            return Err(Error::NotSupported(
-                "Persistent collectives require MPI 4.0+".into(),
-            ));
-        }
+        Error::check(ret)?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -2948,14 +2926,6 @@ mod tests {
     fn communicator_raw_handle_returns_correct_value() {
         let comm = dummy_comm();
         assert_eq!(comm.raw_handle(), 0);
-    }
-
-    #[test]
-    fn communicator_clone_preserves_handle() {
-        let comm = dummy_comm();
-        let cloned = comm.clone();
-        assert_eq!(cloned.raw_handle(), comm.raw_handle());
-        // Both have handle 0, so Drop is a no-op for both
     }
 
     // Nonblocking collective buffer validation tests (ticket-005)

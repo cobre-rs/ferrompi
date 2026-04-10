@@ -9,7 +9,7 @@
 //! ```no_run
 //! use ferrompi::Info;
 //!
-//! let info = Info::new().unwrap();
+//! let mut info = Info::new().unwrap();
 //! info.set("alloc_shared_noncontig", "true").unwrap();
 //! assert_eq!(info.get("alloc_shared_noncontig").unwrap(), Some("true".to_string()));
 //! ```
@@ -36,7 +36,7 @@ const INFO_VALUE_MAX_LEN: i32 = 1024;
 /// use ferrompi::Info;
 ///
 /// // Create an info object with hints
-/// let info = Info::new().unwrap();
+/// let mut info = Info::new().unwrap();
 /// info.set("alloc_shared_noncontig", "true").unwrap();
 ///
 /// // Use Info::null() when no hints are needed
@@ -64,7 +64,7 @@ impl Info {
     /// ```no_run
     /// use ferrompi::Info;
     ///
-    /// let info = Info::new().unwrap();
+    /// let mut info = Info::new().unwrap();
     /// info.set("key", "value").unwrap();
     /// ```
     pub fn new() -> Result<Self> {
@@ -117,10 +117,10 @@ impl Info {
     /// ```no_run
     /// use ferrompi::Info;
     ///
-    /// let info = Info::new().unwrap();
+    /// let mut info = Info::new().unwrap();
     /// info.set("alloc_shared_noncontig", "true").unwrap();
     /// ```
-    pub fn set(&self, key: &str, value: &str) -> Result<()> {
+    pub fn set(&mut self, key: &str, value: &str) -> Result<()> {
         if self.is_null {
             return Err(Error::Internal(
                 "cannot set key-value on MPI_INFO_NULL".into(),
@@ -153,7 +153,7 @@ impl Info {
     /// ```no_run
     /// use ferrompi::Info;
     ///
-    /// let info = Info::new().unwrap();
+    /// let mut info = Info::new().unwrap();
     /// info.set("my_key", "my_value").unwrap();
     /// assert_eq!(info.get("my_key").unwrap(), Some("my_value".to_string()));
     /// assert_eq!(info.get("nonexistent").unwrap(), None);
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn null_info_set_returns_error() {
-        let info = Info::null();
+        let mut info = Info::null();
         let result = info.set("key", "value");
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn set_key_with_null_byte_returns_error() {
-        let info = Info {
+        let mut info = Info {
             handle: -1,
             is_null: false,
         };
@@ -259,7 +259,7 @@ mod tests {
 
     #[test]
     fn set_value_with_null_byte_returns_error() {
-        let info = Info {
+        let mut info = Info {
             handle: -1,
             is_null: false,
         };

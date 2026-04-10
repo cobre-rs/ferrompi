@@ -161,7 +161,10 @@ impl<T: MpiDatatype> SharedWindow<T> {
     /// let win = SharedWindow::<f64>::allocate(&node, 1024).unwrap();
     /// ```
     pub fn allocate(comm: &Communicator, local_count: usize) -> Result<Self> {
-        let size = (local_count * std::mem::size_of::<T>()) as i64;
+        let byte_size = local_count
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or(Error::InvalidBuffer)?;
+        let size = i64::try_from(byte_size).map_err(|_| Error::InvalidBuffer)?;
         let disp_unit = std::mem::size_of::<T>() as i32;
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut win_handle: i32 = 0;
@@ -275,6 +278,18 @@ impl<T: MpiDatatype> SharedWindow<T> {
         Error::check(ret)?;
 
         let count = size as usize / std::mem::size_of::<T>();
+        if baseptr.is_null() {
+            if count == 0 {
+                // Null with zero count: return an empty slice using a dangling pointer
+                // SAFETY: NonNull::dangling() is a valid, aligned pointer for zero-length slices
+                return Ok(unsafe {
+                    std::slice::from_raw_parts(NonNull::<T>::dangling().as_ptr(), 0)
+                });
+            }
+            return Err(Error::Internal(
+                "MPI_Win_shared_query returned null for non-zero size".into(),
+            ));
+        }
         // SAFETY: MPI_Win_shared_query returns a valid pointer to the shared
         // memory segment of the specified rank. The pointer is valid for `count`
         // elements of type T for the lifetime of the window.

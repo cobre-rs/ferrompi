@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-10
+
+### Added
+
+- **Topology reporting** -- New `Communicator::topology(&mpi)` collective that
+  gathers rank-to-host mapping across all processes and returns a `TopologyInfo`
+  struct. The `Display` implementation produces a human-readable report showing
+  MPI library version, standard version, thread level, process distribution
+  across nodes, and (with the `numa` feature) SLURM job metadata.
+- **`Mpi::library_version()`** -- Returns the MPI implementation version string
+  (e.g. "Open MPI v4.1.6") by wrapping `MPI_Get_library_version`.
+- **`TopologyInfo`**, **`HostEntry`**, and **`SlurmInfo`** public types with
+  accessors for programmatic inspection of job topology.
+- **`topology` example** -- Demonstrates one-liner topology reporting and
+  programmatic access to host/rank mapping.
+
+### Fixed
+
+- 34 findings from security/correctness assessment addressed.
+
 ## [0.2.2] - 2026-03-27
 
 ### Fixed
@@ -53,8 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - V-collectives: `gatherv`, `scatterv`, `allgatherv`, `alltoallv` (blocking, nonblocking, persistent)
 - Alltoall: `alltoall` (blocking, nonblocking, persistent)
 - Reduce-scatter-block: `reduce_scatter_block` (blocking, nonblocking, persistent)
-- All 13 nonblocking collective variants: `ibroadcast`, `iallreduce`, `ireduce`, `igather`, `iallgather`, `iscatter`, `ibarrier`, `iscan`, `iexscan`, `ialltoall`, `igatherv`, `iscatterv`, `iallgatherv`, `ialltoallv`, `ireduce_scatter_block`
-- All 11 persistent collective variants (MPI 4.0+): `bcast_init`, `allreduce_init`, `allreduce_init_inplace`, `reduce_init`, `gather_init`, `scatter_init`, `allgather_init`, `scan_init`, `exscan_init`, `alltoall_init`, `gatherv_init`, `scatterv_init`, `allgatherv_init`, `alltoallv_init`, `reduce_scatter_block_init`
+- All 15 nonblocking collective variants: `ibroadcast`, `iallreduce`, `ireduce`, `igather`, `iallgather`, `iscatter`, `ibarrier`, `iscan`, `iexscan`, `ialltoall`, `igatherv`, `iscatterv`, `iallgatherv`, `ialltoallv`, `ireduce_scatter_block`
+- All 15 persistent collective variants (MPI 4.0+): `bcast_init`, `allreduce_init`, `allreduce_init_inplace`, `reduce_init`, `gather_init`, `scatter_init`, `allgather_init`, `scan_init`, `exscan_init`, `alltoall_init`, `gatherv_init`, `scatterv_init`, `allgatherv_init`, `alltoallv_init`, `reduce_scatter_block_init`
 - Shared memory windows: `SharedWindow<T>` with RAII lock guards (`LockGuard`, `LockAllGuard`) (feature: `rma`)
 - Window synchronization: `fence`, `lock`, `lock_all`, `flush`, `flush_all`
 - SLURM environment helpers: `is_slurm_job`, `job_id`, `local_rank`, `local_size`, `num_nodes`, `cpus_per_task`, `node_name`, `node_list` (feature: `numa`)

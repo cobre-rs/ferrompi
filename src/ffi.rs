@@ -715,9 +715,18 @@ extern "C" {
     // Utility Functions
     // ============================================================
 
+    pub fn ferrompi_get_library_version(buf: *mut c_char, len: *mut int32_t) -> c_int;
     pub fn ferrompi_get_version(version: *mut c_char, len: *mut int32_t) -> c_int;
     pub fn ferrompi_get_processor_name(name: *mut c_char, len: *mut int32_t) -> c_int;
     pub fn ferrompi_wtime() -> c_double;
     pub fn ferrompi_abort(comm: int32_t, errorcode: int32_t) -> c_int;
+
+    // ============================================================
+    // Error Class Constants
+    // ============================================================
+
+    pub fn ferrompi_err_file() -> int32_t;
+    pub fn ferrompi_err_info() -> int32_t;
+    pub fn ferrompi_err_win() -> int32_t;
 
 }

@@ -49,15 +49,14 @@
 //! |---------|-------------|--------------|
 //! | `rma`   | RMA shared memory window operations | — |
 //! | `numa`  | NUMA-aware windows and SLURM helpers | `rma` |
-//! | `debug` | Detailed debug output | — |
 //!
 //! ## Capabilities
 //!
 //! - **Generic API**: All operations work with any [`MpiDatatype`] (`f32`, `f64`, `i32`, `i64`, `u8`, `u32`, `u64`)
 //! - **Blocking collectives**: barrier, broadcast, reduce, allreduce, gather, scatter, allgather,
 //!   alltoall, scan, exscan, reduce\_scatter\_block, plus V-variants (gatherv, scatterv, allgatherv, alltoallv)
-//! - **Nonblocking collectives**: All 13 `i`-prefixed variants with [`Request`] handles
-//! - **Persistent collectives** (MPI 4.0+): All 11+ `_init` variants with [`PersistentRequest`] handles
+//! - **Nonblocking collectives**: All 15 `i`-prefixed variants with [`Request`] handles
+//! - **Persistent collectives** (MPI 4.0+): All 15 `_init` variants with [`PersistentRequest`] handles
 //! - **Scalar and in-place variants**: `reduce_scalar`, `allreduce_scalar`, `reduce_inplace`,
 //!   `allreduce_inplace`, `scan_scalar`, `exscan_scalar`
 //! - **Point-to-point**: `send`, `recv`, `isend`, `irecv`, `sendrecv`, `probe`, `iprobe`
@@ -152,6 +151,7 @@ mod request;
 #[cfg(feature = "numa")]
 pub mod slurm;
 mod status;
+mod topology;
 #[cfg(feature = "rma")]
 mod window;
 
@@ -162,6 +162,9 @@ pub use info::Info;
 pub use persistent::PersistentRequest;
 pub use request::Request;
 pub use status::Status;
+#[cfg(feature = "numa")]
+pub use topology::SlurmInfo;
+pub use topology::{HostEntry, TopologyInfo};
 #[cfg(feature = "rma")]
 pub use window::{LockAllGuard, LockGuard, LockType, SharedWindow};
 
@@ -256,7 +259,13 @@ impl Mpi {
 
         if ret != 0 {
             MPI_INITIALIZED.store(false, Ordering::SeqCst);
-            return Err(Error::from_code(ret));
+            // Cannot call Error::from_code here because MPI runtime is not
+            // initialized — MPI_Error_class/MPI_Error_string would be UB.
+            return Err(Error::Mpi {
+                class: MpiErrorClass::Raw(ret),
+                code: ret,
+                message: format!("MPI_Init_thread failed with code {ret}"),
+            });
         }
 
         let thread_level = match provided {
@@ -289,7 +298,26 @@ impl Mpi {
         unsafe { ffi::ferrompi_wtime() }
     }
 
-    /// Get the MPI library version string.
+    /// Get the MPI library version string (implementation-specific).
+    ///
+    /// Returns a string such as `"Open MPI v4.1.6"` or `"Intel(R) MPI Library 2021.7"`.
+    /// This wraps `MPI_Get_library_version`.
+    pub fn library_version() -> Result<String> {
+        // MPI_MAX_LIBRARY_VERSION_STRING is 8192 in most implementations.
+        let mut buf = [0u8; 8192];
+        let mut len: i32 = 0;
+        let ret = unsafe {
+            ffi::ferrompi_get_library_version(buf.as_mut_ptr().cast::<c_char>(), &mut len)
+        };
+        Error::check(ret)?;
+        let len = (len.max(0) as usize).min(buf.len());
+        // Trim trailing whitespace/newlines that some implementations append.
+        let s = std::str::from_utf8(&buf[..len])
+            .map_err(|_| Error::Internal("Invalid UTF-8 in library version string".into()))?;
+        Ok(s.trim_end().to_string())
+    }
+
+    /// Get the MPI standard version string (e.g., "MPI 4.0").
     pub fn version() -> Result<String> {
         let mut buf = [0u8; 256];
         let mut len: i32 = 0;
@@ -299,7 +327,7 @@ impl Mpi {
             return Err(Error::from_code(ret));
         }
 
-        let len = len.max(0) as usize;
+        let len = (len.max(0) as usize).min(buf.len());
         let s = std::str::from_utf8(&buf[..len])
             .map_err(|_| Error::Internal("Invalid UTF-8 in version string".into()))?;
         Ok(s.to_string())

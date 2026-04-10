@@ -882,7 +882,15 @@ int ferrompi_win_flush_all(int32_t win);
  * ============================================================ */
 
 /**
- * Get MPI library version string
+ * Get MPI library version string (implementation-specific, e.g. "Open MPI v4.1.6")
+ * @param buf Output buffer (at least MPI_MAX_LIBRARY_VERSION_STRING bytes)
+ * @param len Output: actual length
+ * @return MPI error code
+ */
+int ferrompi_get_library_version(char* buf, int32_t* len);
+
+/**
+ * Get MPI standard version string (e.g. "MPI 4.0")
  * @param version Output buffer (at least 256 bytes)
  * @param len Output: actual length
  * @return MPI error code
@@ -910,6 +918,17 @@ double ferrompi_wtime(void);
  * @return Does not return
  */
 int ferrompi_abort(int32_t comm, int32_t errorcode);
+
+/* ============================================================
+ * Error Class Constants
+ * ============================================================ */
+
+/** Get the MPI_ERR_FILE error class value (implementation-specific). */
+int32_t ferrompi_err_file(void);
+/** Get the MPI_ERR_INFO error class value (implementation-specific). */
+int32_t ferrompi_err_info(void);
+/** Get the MPI_ERR_WIN error class value (implementation-specific). */
+int32_t ferrompi_err_win(void);
 
 #ifdef __cplusplus
 }

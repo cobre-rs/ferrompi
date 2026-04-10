@@ -45,7 +45,7 @@ fn main() {
     // Test 3: Info::set() and Info::get() for a single key-value pair
     // ========================================================================
     {
-        let info = Info::new().expect("Info::new failed");
+        let mut info = Info::new().expect("Info::new failed");
         info.set("test_key", "test_value")
             .expect("Info::set failed");
         let value = info
@@ -82,7 +82,7 @@ fn main() {
     // Test 5: Multiple key-value pairs
     // ========================================================================
     {
-        let info = Info::new().expect("Info::new failed");
+        let mut info = Info::new().expect("Info::new failed");
         info.set("key_a", "value_a").expect("set key_a failed");
         info.set("key_b", "value_b").expect("set key_b failed");
         info.set("key_c", "value_c").expect("set key_c failed");
@@ -113,7 +113,7 @@ fn main() {
     // Test 6: Overwrite existing key
     // ========================================================================
     {
-        let info = Info::new().expect("Info::new failed");
+        let mut info = Info::new().expect("Info::new failed");
         info.set("overwrite_key", "original")
             .expect("set original failed");
         info.set("overwrite_key", "updated")

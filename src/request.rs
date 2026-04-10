@@ -9,6 +9,17 @@ use crate::ffi;
 /// `test()` to complete the operation before the associated buffers can be
 /// safely accessed.
 ///
+/// # Safety — Buffer Lifetime
+///
+/// **The caller must ensure that all buffers passed to the nonblocking operation
+/// (e.g., `isend`, `irecv`, `iallreduce`) remain valid and are not moved,
+/// reallocated, or dropped until the `Request` is completed (via `wait()` or
+/// `test()` returning `true`) or dropped.** MPI holds raw pointers to these
+/// buffers; violating this invariant is undefined behavior.
+///
+/// This cannot currently be enforced by the Rust type system because `Request`
+/// does not carry a lifetime parameter tying it to the buffers.
+///
 /// # Example
 ///
 /// ```no_run
@@ -64,8 +75,9 @@ impl Request {
             return Ok(());
         }
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
+        Error::check(ret)?;
         self.completed = true;
-        Error::check(ret)
+        Ok(())
     }
 
     /// Test if this operation has completed without blocking.
@@ -100,10 +112,17 @@ impl Request {
         let mut handles: Vec<i64> = requests.iter().map(|r| r.handle).collect();
         let ret = unsafe { ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr()) };
 
-        // Mark all as completed (they're consumed anyway)
-        std::mem::forget(requests);
-
-        Error::check(ret)
+        if ret == 0 {
+            // Success: all requests completed, skip Drop (handles already freed by MPI)
+            for mut req in requests {
+                req.completed = true;
+                std::mem::forget(req);
+            }
+            Ok(())
+        } else {
+            // Error: let Drop handle cleanup (will re-wait each active request)
+            Err(Error::from_code(ret))
+        }
     }
 }
 
