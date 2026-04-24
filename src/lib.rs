@@ -236,12 +236,12 @@ pub enum ReduceOp {
     LogicalXor = 9,
     /// Maximum value with location (`MPI_MAXLOC`). Returns the maximum value
     /// and the rank (index) where it occurred. Only valid with
-    /// [`MpiIndexedDatatype`](crate::MpiIndexedDatatype) via
+    /// [`MpiIndexedDatatype`] via
     /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
     MaxLoc = 10,
     /// Minimum value with location (`MPI_MINLOC`). Returns the minimum value
     /// and the rank (index) where it occurred. Only valid with
-    /// [`MpiIndexedDatatype`](crate::MpiIndexedDatatype) via
+    /// [`MpiIndexedDatatype`] via
     /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
     MinLoc = 11,
     /// Replace the target buffer with the source value (`MPI_REPLACE`).

@@ -96,7 +96,7 @@ pub enum DatatypeTag {
     /// Opaque 1-byte unit (`MPI_BYTE`) for type-erased bitwise reductions.
     ///
     /// Used exclusively with [`BytePermutable`]-bounded types and
-    /// [`Communicator::allreduce_bytes`]. The count passed to MPI is the
+    /// [`Communicator::allreduce_bytes`](crate::Communicator::allreduce_bytes). The count passed to MPI is the
     /// total byte count (`element_count * size_of::<T>()`), so MPI treats
     /// the buffer as a flat array of bytes.
     Byte = 13,
@@ -154,8 +154,8 @@ impl_mpi_datatype!(u64, DatatypeTag::U64);
 /// This is a **sealed trait** — it cannot be implemented outside this crate.
 /// Only the six MPI predefined paired value+index types implement it.
 ///
-/// Use these types exclusively with [`Communicator::allreduce_indexed`] and
-/// [`ReduceOp::MaxLoc`] / [`ReduceOp::MinLoc`]. They are **not** valid for
+/// Use these types exclusively with [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed) and
+/// [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) / [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc). They are **not** valid for
 /// `broadcast`, `send`, `recv`, or other collectives (MPI treats them as
 /// opaque structure types that require `MPI_Type_commit`; ferrompi does not
 /// yet manage committed derived types — that is Epic 6).
@@ -194,8 +194,8 @@ pub trait MpiIndexedDatatype: sealed_indexed::Sealed + Copy + Send + 'static {
 /// Paired `{ f32 value; i32 index }` — maps to `MPI_FLOAT_INT`.
 ///
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`] or [`ReduceOp::MinLoc`] via
-/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
+/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed)(crate::Communicator::allreduce_indexed).
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct FloatInt {
@@ -208,8 +208,8 @@ pub struct FloatInt {
 /// Paired `{ f64 value; i32 index }` — maps to `MPI_DOUBLE_INT`.
 ///
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`] or [`ReduceOp::MinLoc`] via
-/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
+/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed)(crate::Communicator::allreduce_indexed).
 ///
 /// Layout on 64-bit Linux: `sizeof == 16`, `alignof == 8` (4 bytes of trailing
 /// padding after the `i32` index to satisfy the `f64` alignment of the next
@@ -227,8 +227,8 @@ pub struct DoubleInt {
 ///
 /// On 64-bit Linux, C `long` is 8 bytes, so `value` is `i64`.
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`] or [`ReduceOp::MinLoc`] via
-/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
+/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed)(crate::Communicator::allreduce_indexed).
 ///
 /// Layout on 64-bit Linux: `sizeof == 16`, `alignof == 8`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -243,8 +243,8 @@ pub struct LongInt {
 /// Paired `{ i32 value; i32 index }` — maps to `MPI_2INT`.
 ///
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`] or [`ReduceOp::MinLoc`] via
-/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
+/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed)(crate::Communicator::allreduce_indexed).
 ///
 /// Layout: `sizeof == 8`, `alignof == 4`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -259,8 +259,8 @@ pub struct Int2 {
 /// Paired `{ i16 value; i32 index }` — maps to `MPI_SHORT_INT`.
 ///
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`] or [`ReduceOp::MinLoc`] via
-/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
+/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed)(crate::Communicator::allreduce_indexed).
 ///
 /// Layout on 64-bit Linux: `sizeof == 8`, `alignof == 4` (2 bytes of padding
 /// between `i16` value and `i32` index to satisfy `i32` alignment).
@@ -282,8 +282,8 @@ pub struct ShortInt {
 /// `long double` representation via FFI if needed.
 ///
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`] or [`ReduceOp::MinLoc`] via
-/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
+/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed)(crate::Communicator::allreduce_indexed).
 ///
 /// Layout on x86_64 Linux: `sizeof == 32`, `alignof == 16`.
 /// Layout on aarch64 Linux: `sizeof == 32`, `alignof == 16`
