@@ -12,7 +12,7 @@ impl Communicator {
         let ret = unsafe {
             ffi::ferrompi_get_processor_name(buf.as_mut_ptr().cast::<std::ffi::c_char>(), &mut len)
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "get_processor_name")?;
         let len = (len.max(0) as usize).min(buf.len());
         let s = std::str::from_utf8(&buf[..len])
             .map_err(|_| Error::Internal("Invalid UTF-8 in processor name".into()))?;
@@ -48,7 +48,7 @@ impl Communicator {
     pub fn duplicate(&self) -> Result<Self> {
         let mut new_handle: i32 = 0;
         let ret = unsafe { ffi::ferrompi_comm_dup(self.handle, &mut new_handle) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "comm_dup")?;
         Self::from_handle(new_handle)
     }
 
@@ -74,7 +74,7 @@ impl Communicator {
     pub fn split(&self, color: i32, key: i32) -> Result<Option<Communicator>> {
         let mut new_handle: i32 = 0;
         let ret = unsafe { ffi::ferrompi_comm_split(self.handle, color, key, &mut new_handle) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "comm_split")?;
         if new_handle < 0 {
             Ok(None)
         } else {
@@ -106,7 +106,7 @@ impl Communicator {
         let ret = unsafe {
             ffi::ferrompi_comm_split_type(self.handle, split_type as i32, key, &mut new_handle)
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "comm_split_type")?;
         if new_handle < 0 {
             Ok(None)
         } else {

@@ -185,6 +185,8 @@ run_test test_allgather_init_inplace 4
 run_test test_scatter_init_inplace 4
 run_test test_alltoall_init_inplace 4
 run_test test_allreduce_bytes 4
+run_test test_error_context 2
+run_test test_request_table_concurrency 2
 
 echo ""
 echo -e "${BOLD}────────────────────────────────────────${RESET}"

@@ -7,6 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-24
+
+### Breaking Changes
+
+- **`Error::Mpi` gains an `operation` field.** A new field
+  `operation: Option<&'static str>` is appended to the `Error::Mpi`
+  variant. Consumers pattern-matching `Error::Mpi { class, code, message }`
+  without a trailing `..` will fail to compile. Recommended migrations:
+  `Error::Mpi { class, code, message, .. }` if the operation tag is
+  not needed, or `Error::Mpi { class, code, message, operation }` to
+  read it. This bundles the breaking-change boundary that motivates
+  the v0.4.0 minor bump.
+- **`Display` format change.** When `operation.is_some()`, the error
+  message now reads `"MPI error in {op}: ..."` (e.g.
+  `"MPI error in bcast: invalid rank (class=ERR_RANK, code=6)"`)
+  instead of `"MPI error: ..."`. Consumers parsing the human-readable
+  `Display` output (not recommended, but extant) must account for the
+  new prefix.
+
+### Added
+
+- **`Error::from_code_with_op(code, op)`** -- Constructs `Error::Mpi`
+  with the operation tag pre-populated. Replaces the pattern of
+  constructing `Error::from_code` and patching `operation` separately.
+- **`Error::check_with_op(code, op)`** -- Mirror of `check` that
+  propagates the operation tag on the error path.
+- **`examples/test_error_context.rs`** -- Integration example that
+  triggers an out-of-range broadcast root and asserts the new
+  operation-tagged error format end-to-end.
+- **`examples/test_request_table_concurrency.rs`** -- Multi-threaded
+  isend/irecv stress test (4 threads × 100 iterations) that exercises
+  the request table under `MPI_THREAD_MULTIPLE`.
+- **`docs/adr/0002-handle-tables.md`** -- Architecture Decision Record
+  explaining the C11-atomics-with-CAS strategy chosen for the request
+  handle table and the rejected alternatives (pthread mutex, Treiber
+  stack).
+
+### Changed
+
+- **All 101 internal FFI call sites now tag errors with the underlying
+  C function name** (e.g., `"bcast"`, `"allreduce"`,
+  `"allreduce_init"`, `"wait"`, `"isend"`). When an MPI call fails,
+  the resulting `Error::Mpi.operation` is populated with the tag,
+  giving downstream code (notably cobre) structured error context
+  without needing to invent sentinel values.
+
+### Fixed
+
+- **Request handle table is now safe under `MPI_THREAD_MULTIPLE`.**
+  Previously, concurrent `alloc_request` calls could observe the same
+  `request_used[i] == 0` slot and both write `1`, with the second
+  thread's `request_table[i]` write clobbering the first -- a silent
+  lost-request data race that TSan would flag. The C wrapper now uses
+  `atomic_compare_exchange_strong_explicit` on `request_used[i]` with
+  `memory_order_acq_rel` semantics, paired with an
+  `atomic_store_explicit(..., memory_order_release)` on free and an
+  `atomic_load_explicit(..., memory_order_acquire)` on read. The
+  comm/win/info tables retain their existing implementations and are
+  scheduled for hardening in a later release.
+
 ## [0.3.0] - 2026-04-10
 
 ### Added
@@ -99,7 +159,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive documentation
 - Initial CI/CD setup with GitHub Actions
 
-[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/cobre-rs/ferrompi/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cobre-rs/ferrompi/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/cobre-rs/ferrompi/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/cobre-rs/ferrompi/compare/v0.2.0...v0.2.1

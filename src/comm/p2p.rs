@@ -36,7 +36,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "send")
     }
 
     /// Receive a slice of values from another process.
@@ -77,7 +77,7 @@ impl Communicator {
                 &mut actual_count,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "recv")?;
         Ok((actual_source, actual_tag, actual_count))
     }
 
@@ -117,7 +117,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "isend")?;
         Ok(Request::new(request_handle))
     }
 
@@ -159,7 +159,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "irecv")?;
         Ok(Request::new(request_handle))
     }
 
@@ -225,7 +225,7 @@ impl Communicator {
                 &mut actual_count,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "sendrecv")?;
         Ok((actual_source, actual_tag, actual_count))
     }
 
@@ -276,7 +276,7 @@ impl Communicator {
                 T::TAG as i32,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "probe")?;
         Ok(Status {
             source: actual_source,
             tag: actual_tag,
@@ -331,7 +331,7 @@ impl Communicator {
                 T::TAG as i32,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "iprobe")?;
         if flag != 0 {
             Ok(Some(Status {
                 source: actual_source,

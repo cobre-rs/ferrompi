@@ -51,7 +51,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "bcast_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -94,7 +94,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "allreduce_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -117,7 +117,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "allreduce_init_inplace")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -170,7 +170,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "reduce_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -196,7 +196,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "gather_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -244,7 +244,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "scatter_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -289,7 +289,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "allgather_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -339,7 +339,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "scan_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -389,7 +389,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "exscan_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -443,7 +443,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "alltoall_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -495,7 +495,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "reduce_scatter_block_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -560,7 +560,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "gather_init_inplace")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -619,7 +619,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "allgather_init_inplace")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -710,7 +710,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "scatter_init_inplace")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -773,7 +773,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "alltoall_init_inplace")?;
         Ok(PersistentRequest::new(request_handle))
     }
 }

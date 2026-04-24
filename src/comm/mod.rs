@@ -111,11 +111,11 @@ impl Communicator {
         // SAFETY: `handle` is a valid MPI communicator handle obtained from MPI
         // functions. `rank` is a local variable so the pointer is valid for writes.
         let ret = unsafe { ffi::ferrompi_comm_rank(handle, &mut rank) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "comm_rank")?;
         let mut size: i32 = 0;
         // SAFETY: same as above — `size` is a local variable, `handle` is valid.
         let ret = unsafe { ffi::ferrompi_comm_size(handle, &mut size) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "comm_size")?;
         Ok(Communicator { handle, rank, size })
     }
 

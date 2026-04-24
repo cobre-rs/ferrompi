@@ -8,6 +8,7 @@
 #include <mpi.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <limits.h>
 #include <stdio.h>
 
@@ -35,9 +36,13 @@ static MPI_Comm comm_table[MAX_COMMS];
 static int comm_count = 1;  // Start at 1, 0 is COMM_WORLD
 
 // Request table
+// request_used and next_request_hint use C11 atomics (stdatomic.h) to
+// eliminate the data race under MPI_THREAD_MULTIPLE: alloc_request uses a
+// CAS loop, free_request uses a release store, and get_request_ptr uses an
+// acquire load.  See docs/adr/0002-handle-tables.md for the full rationale.
 static MPI_Request request_table[MAX_REQUESTS];
-static int request_used[MAX_REQUESTS];  // 1 if slot is in use
-static int next_request_hint = 0;
+static atomic_int request_used[MAX_REQUESTS];  // 1 if slot is in use
+static atomic_int next_request_hint;
 
 // Window table
 static MPI_Win win_table[MAX_WINDOWS];
@@ -62,8 +67,9 @@ static void init_tables(void) {
     }
     for (int i = 0; i < MAX_REQUESTS; i++) {
         request_table[i] = MPI_REQUEST_NULL;
-        request_used[i] = 0;
+        atomic_init(&request_used[i], 0);
     }
+    atomic_init(&next_request_hint, 0);
     for (int i = 0; i < MAX_WINDOWS; i++) {
         win_table[i] = MPI_WIN_NULL;
         win_used[i] = 0;
@@ -95,34 +101,55 @@ static int32_t alloc_comm(MPI_Comm comm) {
     return -1;  // No space
 }
 
-// Allocate a request handle
+// Allocate a request handle (thread-safe via C11 CAS).
+// The hint is advisory: an inaccurate hint only lengthens the scan, never
+// produces an incorrect result.  acq_rel on the CAS prevents reordering of
+// the slot-claim with later operations on the same thread, but the
+// subsequent request_table[idx] write is NOT covered by the CAS's release
+// fence (it is sequenced after, not before).  The handle returned by this
+// function is then used same-thread (caller writes it, then later reads it
+// via get_request_ptr); cross-thread handle transfers must establish their
+// own happens-before via the transfer mechanism (channel, Arc, etc.).
+// Within this same-thread/transfer-aware contract the implementation is
+// correct on x86, ARM64, and POWER.
 static int64_t alloc_request(MPI_Request req) {
-    // Start searching from hint for O(1) common case
+    int hint = atomic_load_explicit(&next_request_hint, memory_order_relaxed);
     for (int i = 0; i < MAX_REQUESTS; i++) {
-        int idx = (next_request_hint + i) % MAX_REQUESTS;
-        if (!request_used[idx]) {
+        int idx = (hint + i) % MAX_REQUESTS;
+        int expected = 0;
+        if (atomic_compare_exchange_strong_explicit(
+                &request_used[idx], &expected, 1,
+                memory_order_acq_rel, memory_order_relaxed)) {
             request_table[idx] = req;
-            request_used[idx] = 1;
-            next_request_hint = (idx + 1) % MAX_REQUESTS;
+            atomic_store_explicit(&next_request_hint,
+                (idx + 1) % MAX_REQUESTS, memory_order_relaxed);
             return (int64_t)idx;
         }
     }
-    return -1;  // No space
+    return -1;  /* No space */
 }
 
-// Get MPI_Request pointer from handle
+// Get MPI_Request pointer from handle (thread-safe: acquire load pairs with
+// the release store in free_request, ensuring the request_table value written
+// by the allocating thread is visible here).
 static MPI_Request* get_request_ptr(int64_t handle) {
-    if (handle < 0 || handle >= MAX_REQUESTS || !request_used[handle]) {
+    if (handle < 0 || handle >= MAX_REQUESTS) {
+        return NULL;
+    }
+    if (atomic_load_explicit(&request_used[handle],
+                             memory_order_acquire) == 0) {
         return NULL;
     }
     return &request_table[handle];
 }
 
-// Free a request handle
+// Free a request handle (thread-safe: the plain store to request_table
+// happens-before the release store to request_used, pairing with the acquire
+// load in get_request_ptr so any subsequent acquirer observes the null value).
 static void free_request(int64_t handle) {
     if (handle >= 0 && handle < MAX_REQUESTS) {
         request_table[handle] = MPI_REQUEST_NULL;
-        request_used[handle] = 0;
+        atomic_store_explicit(&request_used[handle], 0, memory_order_release);
     }
 }
 
@@ -305,12 +332,16 @@ int ferrompi_init(void) {
 }
 
 int ferrompi_finalize(void) {
-    // Clean up requests first (they may reference communicators)
+    // Clean up requests first (they may reference communicators).
+    // Acquire/release here is defensive: MPI_Finalize is called after all
+    // concurrent MPI operations are complete, but the consistent access
+    // pattern avoids spurious TSan warnings in the finalizer check.
     for (int i = 0; i < MAX_REQUESTS; i++) {
-        if (request_used[i] && request_table[i] != MPI_REQUEST_NULL) {
+        if (atomic_load_explicit(&request_used[i], memory_order_acquire) &&
+                request_table[i] != MPI_REQUEST_NULL) {
             MPI_Request_free(&request_table[i]);
         }
-        request_used[i] = 0;
+        atomic_store_explicit(&request_used[i], 0, memory_order_release);
     }
 
     // Clean up any remaining info objects

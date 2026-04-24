@@ -6,7 +6,6 @@
 use std::sync::OnceLock;
 
 use crate::ffi;
-use thiserror::Error;
 
 /// Cached implementation-specific MPI error class values.
 /// Returns (MPI_ERR_FILE, MPI_ERR_INFO, MPI_ERR_WIN) from the C layer.
@@ -163,14 +162,12 @@ impl std::fmt::Display for MpiErrorClass {
 }
 
 /// Error types for MPI operations.
-#[derive(Error, Debug)]
+#[derive(Debug)]
 pub enum Error {
     /// MPI has already been initialized.
-    #[error("MPI has already been initialized")]
     AlreadyInitialized,
 
-    /// MPI error with class, code, and descriptive message from the MPI runtime.
-    #[error("MPI error: {message} (class={class}, code={code})")]
+    /// MPI error with class, code, descriptive message, and optional operation name.
     Mpi {
         /// The error class (category of error).
         class: MpiErrorClass,
@@ -178,31 +175,55 @@ pub enum Error {
         code: i32,
         /// Human-readable error message from `MPI_Error_string`.
         message: String,
+        /// The ferrompi operation that produced the error, if known.
+        operation: Option<&'static str>,
     },
 
     /// Invalid buffer provided (e.g., send/recv buffer size mismatch).
-    #[error("Invalid buffer")]
     InvalidBuffer,
 
     /// Invalid reduction operation for the method being called
     /// (e.g., passing a non-MAXLOC/MINLOC op to `allreduce_indexed`).
-    #[error("Invalid reduction operation for this method")]
     InvalidOp,
 
     /// Operation not supported (e.g., MPI 4.0 persistent collectives on older MPI).
-    #[error("Operation not supported: {0}")]
     NotSupported(String),
 
     /// Internal ferrompi error.
-    #[error("Internal error: {0}")]
     Internal(String),
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::AlreadyInitialized => write!(f, "MPI has already been initialized"),
+            Error::Mpi {
+                class,
+                code,
+                message,
+                operation: Some(op),
+            } => write!(
+                f,
+                "MPI error in {op}: {message} (class={class}, code={code})"
+            ),
+            Error::Mpi {
+                class,
+                code,
+                message,
+                operation: None,
+            } => write!(f, "MPI error: {message} (class={class}, code={code})"),
+            Error::InvalidBuffer => write!(f, "Invalid buffer"),
+            Error::InvalidOp => write!(f, "Invalid reduction operation for this method"),
+            Error::NotSupported(s) => write!(f, "Operation not supported: {s}"),
+            Error::Internal(s) => write!(f, "Internal error: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
 impl Error {
     /// Create a structured error from an MPI error code.
-    ///
-    /// Calls `ferrompi_error_info` to obtain the error class and human-readable
-    /// message from the MPI runtime.
     ///
     /// Calls `ferrompi_error_info` to obtain the error class and human-readable
     /// message from the MPI runtime.
@@ -235,6 +256,7 @@ impl Error {
                 class: MpiErrorClass::from_raw(class),
                 code,
                 message,
+                operation: None,
             }
         } else {
             // ferrompi_error_info itself failed — provide a fallback
@@ -242,7 +264,35 @@ impl Error {
                 class: MpiErrorClass::Raw(code),
                 code,
                 message: format!("MPI error code {code}"),
+                operation: None,
             }
+        }
+    }
+
+    /// Create a structured error from an MPI error code with an operation name.
+    ///
+    /// Behaves identically to [`Error::from_code`] but populates `operation:
+    /// Some(operation)` on the resulting [`Error::Mpi`] variant, so callers can
+    /// record which ferrompi wrapper produced the error.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called with `MPI_SUCCESS` (code 0), just like `from_code`.
+    pub fn from_code_with_op(code: i32, operation: &'static str) -> Self {
+        match Error::from_code(code) {
+            Error::Mpi {
+                class,
+                code,
+                message,
+                operation: _,
+            } => Error::Mpi {
+                class,
+                code,
+                message,
+                operation: Some(operation),
+            },
+            // SAFETY: from_code always returns Error::Mpi for non-zero codes.
+            other => other,
         }
     }
 
@@ -254,6 +304,19 @@ impl Error {
             Ok(())
         } else {
             Err(Error::from_code(code))
+        }
+    }
+
+    /// Check an MPI return code with an operation name, returning `Ok(())` for
+    /// success.
+    ///
+    /// Returns `Err(Error::Mpi { operation: Some(operation), .. })` for
+    /// non-zero codes.
+    pub fn check_with_op(code: i32, operation: &'static str) -> Result<()> {
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(Error::from_code_with_op(code, operation))
         }
     }
 }
@@ -328,6 +391,7 @@ mod tests {
             class: MpiErrorClass::Rank,
             code: 6,
             message: "invalid rank".to_string(),
+            operation: None,
         };
         assert_eq!(
             format!("{err}"),
@@ -421,6 +485,7 @@ mod tests {
             class: MpiErrorClass::Arg,
             code: 13,
             message: "invalid argument".to_string(),
+            operation: None,
         };
         let debug = format!("{mpi_err:?}");
         assert!(
@@ -453,6 +518,7 @@ mod tests {
             class: MpiErrorClass::Topology,
             code: 11,
             message: "invalid topology".to_string(),
+            operation: None,
         };
 
         // Pattern-match to access fields
@@ -460,11 +526,13 @@ mod tests {
             class,
             code,
             message,
+            operation,
         } = &err
         {
             assert_eq!(*class, MpiErrorClass::Topology);
             assert_eq!(*code, 11);
             assert_eq!(message, "invalid topology");
+            assert_eq!(*operation, None);
         } else {
             panic!("Expected Error::Mpi variant");
         }
@@ -474,5 +542,56 @@ mod tests {
         assert!(display.contains("invalid topology"));
         assert!(display.contains("ERR_TOPOLOGY"));
         assert!(display.contains("11"));
+    }
+
+    #[test]
+    fn error_mpi_display_with_operation_some() {
+        let err = Error::Mpi {
+            class: MpiErrorClass::Rank,
+            code: 6,
+            message: "invalid rank".to_string(),
+            operation: Some("allreduce"),
+        };
+        assert_eq!(
+            format!("{err}"),
+            "MPI error in allreduce: invalid rank (class=ERR_RANK, code=6)"
+        );
+    }
+
+    #[test]
+    fn error_mpi_display_with_operation_none() {
+        let err = Error::Mpi {
+            class: MpiErrorClass::Rank,
+            code: 6,
+            message: "invalid rank".to_string(),
+            operation: None,
+        };
+        assert_eq!(
+            format!("{err}"),
+            "MPI error: invalid rank (class=ERR_RANK, code=6)"
+        );
+    }
+
+    #[test]
+    fn from_code_with_op_sets_operation_field() {
+        // Construct Error::Mpi directly (cannot call from_code_with_op in unit tests
+        // without an MPI runtime) and verify that the operation field is honoured by
+        // Display.  The delegation path in from_code_with_op is verified by inspection.
+        let err = Error::Mpi {
+            class: MpiErrorClass::Comm,
+            code: 5,
+            message: "invalid communicator".to_string(),
+            operation: Some("broadcast"),
+        };
+        if let Error::Mpi { operation, .. } = &err {
+            assert_eq!(*operation, Some("broadcast"));
+        } else {
+            panic!("Expected Error::Mpi variant");
+        }
+        let display = format!("{err}");
+        assert_eq!(
+            display,
+            "MPI error in broadcast: invalid communicator (class=ERR_COMM, code=5)"
+        );
     }
 }

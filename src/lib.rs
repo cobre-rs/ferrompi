@@ -327,6 +327,7 @@ impl Mpi {
                 class: MpiErrorClass::Raw(ret),
                 code: ret,
                 message: format!("MPI_Init_thread failed with code {ret}"),
+                operation: Some("init_thread"),
             });
         }
 
@@ -371,7 +372,7 @@ impl Mpi {
         let ret = unsafe {
             ffi::ferrompi_get_library_version(buf.as_mut_ptr().cast::<c_char>(), &mut len)
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "get_library_version")?;
         let len = (len.max(0) as usize).min(buf.len());
         // Trim trailing whitespace/newlines that some implementations append.
         let s = std::str::from_utf8(&buf[..len])
@@ -386,7 +387,7 @@ impl Mpi {
         let ret = unsafe { ffi::ferrompi_get_version(buf.as_mut_ptr().cast::<c_char>(), &mut len) };
 
         if ret != 0 {
-            return Err(Error::from_code(ret));
+            return Err(Error::from_code_with_op(ret, "get_version"));
         }
 
         let len = (len.max(0) as usize).min(buf.len());

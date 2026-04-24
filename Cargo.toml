@@ -1,6 +1,6 @@
 [package]
 name = "ferrompi"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.74"
 authors = ["Rogerio Alves"]
@@ -116,8 +116,15 @@ path = "examples/test_persistent.rs"
 name = "test_errhandler_returns"
 path = "examples/test_errhandler_returns.rs"
 
+[[example]]
+name = "test_error_context"
+path = "examples/test_error_context.rs"
+
+[[example]]
+name = "test_request_table_concurrency"
+path = "examples/test_request_table_concurrency.rs"
+
 [dependencies]
-thiserror = "2.0"
 
 [build-dependencies]
 cc = "1.2"

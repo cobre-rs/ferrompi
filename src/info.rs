@@ -70,7 +70,7 @@ impl Info {
     pub fn new() -> Result<Self> {
         let mut handle: i32 = 0;
         let ret = unsafe { ffi::ferrompi_info_create(&mut handle) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "info_create")?;
         Ok(Info {
             handle,
             is_null: false,
@@ -131,7 +131,7 @@ impl Info {
         let c_value = CString::new(value)
             .map_err(|_| Error::Internal("info value contains null byte".into()))?;
         let ret = unsafe { ffi::ferrompi_info_set(self.handle, c_key.as_ptr(), c_value.as_ptr()) };
-        Error::check(ret)
+        Error::check_with_op(ret, "info_set")
     }
 
     /// Get the value associated with a key.
@@ -178,7 +178,7 @@ impl Info {
                 &mut flag,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "info_get")?;
         if flag == 0 {
             return Ok(None);
         }

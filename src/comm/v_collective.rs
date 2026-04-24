@@ -66,7 +66,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "gatherv")
     }
 
     /// Scatter variable amounts of data from the root process.
@@ -121,7 +121,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "scatterv")
     }
 
     /// All-gather variable amounts of data (gather and broadcast to all).
@@ -173,7 +173,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "allgatherv")
     }
 
     /// All-to-all with variable counts.
@@ -228,7 +228,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "alltoallv")
     }
 
     // ========================================================================
@@ -288,7 +288,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "igatherv")?;
         Ok(Request::new(request_handle))
     }
 
@@ -345,7 +345,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "iscatterv")?;
         Ok(Request::new(request_handle))
     }
 
@@ -399,7 +399,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "iallgatherv")?;
         Ok(Request::new(request_handle))
     }
 
@@ -456,7 +456,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "ialltoallv")?;
         Ok(Request::new(request_handle))
     }
 
@@ -518,7 +518,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "gatherv_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -576,7 +576,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "scatterv_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -631,7 +631,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "allgatherv_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 
@@ -696,7 +696,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "alltoallv_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
 }

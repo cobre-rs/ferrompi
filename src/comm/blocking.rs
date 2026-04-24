@@ -18,7 +18,7 @@ impl Communicator {
     #[inline]
     pub fn barrier(&self) -> Result<()> {
         let ret = unsafe { ffi::ferrompi_barrier(self.handle) };
-        Error::check(ret)
+        Error::check_with_op(ret, "barrier")
     }
 
     // ========================================================================
@@ -55,7 +55,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "bcast")
     }
 
     /// Reduce values to the root process.
@@ -98,7 +98,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "reduce")
     }
 
     /// Reduce a single scalar value to the root process.
@@ -175,7 +175,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "reduce_inplace")
     }
 
     /// All-reduce values (reduce and broadcast result to all).
@@ -216,7 +216,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "allreduce")
     }
 
     /// All-reduce values in place.
@@ -240,7 +240,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "allreduce_inplace")
     }
 
     /// All-reduce a single scalar value.
@@ -333,7 +333,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "allreduce")
     }
 
     /// All-reduce arbitrary `Copy` types using `MPI_BYTE`-typed bitwise reductions.
@@ -421,7 +421,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "allreduce")
     }
 
     /// Inclusive prefix reduction (scan).
@@ -465,7 +465,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "scan")
     }
 
     /// Exclusive prefix reduction (exscan).
@@ -515,7 +515,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "exscan")
     }
 
     /// Inclusive scan of a single scalar value.
@@ -600,7 +600,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "gather")
     }
 
     /// All-gather values (gather and broadcast to all).
@@ -626,7 +626,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "allgather")
     }
 
     /// Gather values in place. At root, `data` is both the send contribution and the
@@ -685,7 +685,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "gather_inplace")
     }
 
     /// All-gather values in place. Every rank's `data` is both send contribution and
@@ -731,7 +731,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "allgather_inplace")
     }
 
     /// Scatter values in place. At root, `data` is the `sendcount * size()` send buffer;
@@ -807,7 +807,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "scatter_inplace")
     }
 
     /// All-to-all personalized communication in place. `data` is both send and receive
@@ -860,7 +860,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "alltoall_inplace")
     }
 
     /// Scatter values from root to all processes.
@@ -890,7 +890,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "scatter")
     }
 
     /// All-to-all personalized communication.
@@ -934,7 +934,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "alltoall")
     }
 
     /// Reduce-scatter with uniform block size.
@@ -982,7 +982,7 @@ impl Communicator {
                 self.handle,
             )
         };
-        Error::check(ret)
+        Error::check_with_op(ret, "reduce_scatter_block")
     }
 }
 

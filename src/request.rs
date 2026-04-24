@@ -75,7 +75,7 @@ impl Request {
             return Ok(());
         }
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "wait")?;
         self.completed = true;
         Ok(())
     }
@@ -94,7 +94,7 @@ impl Request {
         }
         let mut flag: i32 = 0;
         let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "test")?;
         if flag != 0 {
             self.completed = true;
         }
@@ -119,7 +119,7 @@ impl Request {
         let ret = unsafe {
             ffi::ferrompi_waitany(handles.len() as i64, handles.as_mut_ptr(), &mut index)
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "waitany")?;
         if index < 0 {
             return Ok(None);
         }
@@ -152,7 +152,7 @@ impl Request {
                 indices.as_mut_ptr(),
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "waitsome")?;
         if outcount <= 0 {
             // outcount == -1 means all null; 0 means none completed (shouldn't
             // happen for waitsome, but guard defensively).
@@ -192,7 +192,7 @@ impl Request {
                 &mut flag,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "testany")?;
         if flag == 0 {
             return Ok(None);
         }
@@ -229,7 +229,7 @@ impl Request {
                 indices.as_mut_ptr(),
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "testsome")?;
         if outcount <= 0 {
             // outcount == -1 means all null; 0 means none completed yet.
             return Ok(vec![]);
@@ -259,7 +259,7 @@ impl Request {
         // SAFETY: self.handle is a valid request handle issued by the C shim.
         // flag is a valid stack-allocated i32 output parameter.
         let ret = unsafe { ffi::ferrompi_request_get_status(self.handle, &mut flag) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "request_get_status")?;
         Ok(flag != 0)
     }
 
@@ -294,7 +294,7 @@ impl Request {
         }
         // SAFETY: self.handle is a valid request handle issued by the C shim.
         let ret = unsafe { ffi::ferrompi_cancel(self.handle) };
-        Error::check(ret)
+        Error::check_with_op(ret, "cancel")
     }
 
     /// Wait for all requests in a collection to complete.
@@ -317,7 +317,7 @@ impl Request {
             Ok(())
         } else {
             // Error: let Drop handle cleanup (will re-wait each active request)
-            Err(Error::from_code(ret))
+            Err(Error::from_code_with_op(ret, "waitall"))
         }
     }
 }

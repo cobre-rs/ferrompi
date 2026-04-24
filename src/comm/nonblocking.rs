@@ -43,7 +43,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "ibcast")?;
         Ok(Request::new(request_handle))
     }
 
@@ -83,7 +83,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "iallreduce")?;
         Ok(Request::new(request_handle))
     }
 
@@ -133,7 +133,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "ireduce")?;
         Ok(Request::new(request_handle))
     }
 
@@ -179,7 +179,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "igather")?;
         Ok(Request::new(request_handle))
     }
 
@@ -213,7 +213,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "iallgather")?;
         Ok(Request::new(request_handle))
     }
 
@@ -253,7 +253,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "iscatter")?;
         Ok(Request::new(request_handle))
     }
 
@@ -275,7 +275,7 @@ impl Communicator {
     pub fn ibarrier(&self) -> Result<Request> {
         let mut request_handle: i64 = 0;
         let ret = unsafe { ffi::ferrompi_ibarrier(self.handle, &mut request_handle) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "ibarrier")?;
         Ok(Request::new(request_handle))
     }
 
@@ -321,7 +321,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "iscan")?;
         Ok(Request::new(request_handle))
     }
 
@@ -371,7 +371,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "iexscan")?;
         Ok(Request::new(request_handle))
     }
 
@@ -415,7 +415,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "ialltoall")?;
         Ok(Request::new(request_handle))
     }
 
@@ -464,7 +464,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "ireduce_scatter_block")?;
         Ok(Request::new(request_handle))
     }
 
@@ -520,7 +520,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "igather_inplace")?;
         Ok(Request::new(request_handle))
     }
 
@@ -569,7 +569,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "iallgather_inplace")?;
         Ok(Request::new(request_handle))
     }
 
@@ -647,7 +647,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "iscatter_inplace")?;
         Ok(Request::new(request_handle))
     }
 
@@ -701,7 +701,7 @@ impl Communicator {
                 &mut request_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "ialltoall_inplace")?;
         Ok(Request::new(request_handle))
     }
 }
