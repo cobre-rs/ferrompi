@@ -23,3 +23,4 @@ target
 # Coverage
 lcov.info
 *.profraw
+plans/

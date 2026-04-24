@@ -101,6 +101,14 @@ name = "topology"
 path = "examples/topology.rs"
 
 [[example]]
+name = "reduce_op_bitwise"
+path = "examples/reduce_op_bitwise.rs"
+
+[[example]]
+name = "reduce_op_maxloc"
+path = "examples/reduce_op_maxloc.rs"
+
+[[example]]
 name = "test_persistent"
 path = "examples/test_persistent.rs"
 

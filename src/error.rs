@@ -184,6 +184,11 @@ pub enum Error {
     #[error("Invalid buffer")]
     InvalidBuffer,
 
+    /// Invalid reduction operation for the method being called
+    /// (e.g., passing a non-MAXLOC/MINLOC op to `allreduce_indexed`).
+    #[error("Invalid reduction operation for this method")]
+    InvalidOp,
+
     /// Operation not supported (e.g., MPI 4.0 persistent collectives on older MPI).
     #[error("Operation not supported: {0}")]
     NotSupported(String),

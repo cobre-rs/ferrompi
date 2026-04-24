@@ -201,6 +201,16 @@ static MPI_Op get_op(int32_t op) {
         case 1: return MPI_MAX;
         case 2: return MPI_MIN;
         case 3: return MPI_PROD;
+        case 4: return MPI_BOR;
+        case 5: return MPI_BAND;
+        case 6: return MPI_BXOR;
+        case 7: return MPI_LOR;
+        case 8: return MPI_LAND;
+        case 9: return MPI_LXOR;
+        case 10: return MPI_MAXLOC;
+        case 11: return MPI_MINLOC;
+        case 12: return MPI_REPLACE;
+        case 13: return MPI_NO_OP;
         default: return MPI_OP_NULL;
     }
 }
@@ -208,14 +218,20 @@ static MPI_Op get_op(int32_t op) {
 // Map datatype tag to MPI_Datatype
 static MPI_Datatype get_datatype(int32_t tag) {
     switch (tag) {
-        case FERROMPI_F32: return MPI_FLOAT;
-        case FERROMPI_F64: return MPI_DOUBLE;
-        case FERROMPI_I32: return MPI_INT32_T;
-        case FERROMPI_I64: return MPI_INT64_T;
-        case FERROMPI_U8:  return MPI_UINT8_T;
-        case FERROMPI_U32: return MPI_UINT32_T;
-        case FERROMPI_U64: return MPI_UINT64_T;
-        default: return MPI_DATATYPE_NULL;
+        case FERROMPI_F32:             return MPI_FLOAT;
+        case FERROMPI_F64:             return MPI_DOUBLE;
+        case FERROMPI_I32:             return MPI_INT32_T;
+        case FERROMPI_I64:             return MPI_INT64_T;
+        case FERROMPI_U8:              return MPI_UINT8_T;
+        case FERROMPI_U32:             return MPI_UINT32_T;
+        case FERROMPI_U64:             return MPI_UINT64_T;
+        case FERROMPI_FLOAT_INT:       return MPI_FLOAT_INT;
+        case FERROMPI_DOUBLE_INT:      return MPI_DOUBLE_INT;
+        case FERROMPI_LONG_INT:        return MPI_LONG_INT;
+        case FERROMPI_2INT:            return MPI_2INT;
+        case FERROMPI_SHORT_INT:       return MPI_SHORT_INT;
+        case FERROMPI_LONG_DOUBLE_INT: return MPI_LONG_DOUBLE_INT;
+        default:                       return MPI_DATATYPE_NULL;
     }
 }
 

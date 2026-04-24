@@ -180,6 +180,8 @@ run_test ring
 run_test allreduce
 run_test nonblocking
 run_test comm_split
+run_test reduce_op_bitwise 2
+run_test reduce_op_maxloc 4
 
 # persistent_bcast may fail on MPI < 4.0 — run but don't count failure as fatal
 echo ""

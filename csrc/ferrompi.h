@@ -37,6 +37,15 @@ extern "C" {
 #define FERROMPI_U32  5
 #define FERROMPI_U64  6
 
+/* Paired value+index types for MPI_MAXLOC / MPI_MINLOC.
+ * These must match the Rust DatatypeTag enum discriminants 7-12. */
+#define FERROMPI_FLOAT_INT        7
+#define FERROMPI_DOUBLE_INT       8
+#define FERROMPI_LONG_INT         9
+#define FERROMPI_2INT            10
+#define FERROMPI_SHORT_INT       11
+#define FERROMPI_LONG_DOUBLE_INT 12
+
 /* ============================================================
  * Communicator Split Type Constants
  * ============================================================

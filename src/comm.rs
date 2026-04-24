@@ -3,7 +3,7 @@
 //! All communication methods are generic over [`MpiDatatype`], supporting
 //! `f32`, `f64`, `i32`, `i64`, `u8`, `u32`, and `u64`.
 
-use crate::datatype::MpiDatatype;
+use crate::datatype::{MpiDatatype, MpiIndexedDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::persistent::PersistentRequest;
@@ -844,6 +844,78 @@ impl Communicator {
         let mut recv = [value]; // placeholder, will be overwritten
         self.allreduce(&send, &mut recv, op)?;
         Ok(recv[0])
+    }
+
+    /// All-reduce paired value+index types using `MPI_MAXLOC` or `MPI_MINLOC`.
+    ///
+    /// This method finds the global maximum (or minimum) value across all ranks
+    /// together with the rank index where it occurred. Only [`ReduceOp::MaxLoc`]
+    /// and [`ReduceOp::MinLoc`] are accepted; passing any other op returns
+    /// [`Error::InvalidOp`].
+    ///
+    /// The type parameter `T` must implement [`MpiIndexedDatatype`], which is
+    /// only satisfied by the six MPI predefined paired types: [`FloatInt`],
+    /// [`DoubleInt`], [`LongInt`], [`Int2`], [`ShortInt`], [`LongDoubleInt`].
+    /// These types are **not** interchangeable with the primitive types used by
+    /// `allreduce` — they are distinct at the type-system level.
+    ///
+    /// # Arguments
+    ///
+    /// * `send` - Slice of paired values contributed by this process
+    /// * `recv` - Output buffer; must be the same length as `send`
+    /// * `op` - Must be [`ReduceOp::MaxLoc`] or [`ReduceOp::MinLoc`]
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if `send.len() != recv.len()`
+    /// - [`Error::InvalidOp`] if `op` is not `MaxLoc` or `MinLoc`
+    /// - An MPI error if the library rejects the combination
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::{Mpi, ReduceOp, DoubleInt};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let rank = world.rank();
+    ///
+    /// // Each rank contributes its rank as value and index.
+    /// let send = [DoubleInt { value: rank as f64, index: rank }];
+    /// let mut recv = [DoubleInt { value: 0.0, index: 0 }];
+    /// world.allreduce_indexed(&send, &mut recv, ReduceOp::MaxLoc).unwrap();
+    /// // Every rank now holds { value: (size-1) as f64, index: size-1 }
+    /// ```
+    ///
+    /// [`FloatInt`]: crate::FloatInt
+    /// [`DoubleInt`]: crate::DoubleInt
+    /// [`LongInt`]: crate::LongInt
+    /// [`Int2`]: crate::Int2
+    /// [`ShortInt`]: crate::ShortInt
+    /// [`LongDoubleInt`]: crate::LongDoubleInt
+    pub fn allreduce_indexed<T: MpiIndexedDatatype>(
+        &self,
+        send: &[T],
+        recv: &mut [T],
+        op: ReduceOp,
+    ) -> Result<()> {
+        if !matches!(op, ReduceOp::MaxLoc | ReduceOp::MinLoc) {
+            return Err(Error::InvalidOp);
+        }
+        if send.len() != recv.len() {
+            return Err(Error::InvalidBuffer);
+        }
+        let ret = unsafe {
+            ffi::ferrompi_allreduce(
+                send.as_ptr().cast::<std::ffi::c_void>(),
+                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                send.len() as i64,
+                T::TAG as i32,
+                op as i32,
+                self.handle,
+            )
+        };
+        Error::check(ret)
     }
 
     /// Inclusive prefix reduction (scan).
@@ -3086,6 +3158,68 @@ mod tests {
             &rdispls,
         );
         assert!(matches!(result, Err(Error::InvalidBuffer)));
+    }
+
+    // allreduce_indexed validation tests
+
+    #[test]
+    fn allreduce_indexed_mismatched_buffers_returns_invalid_buffer() {
+        use crate::datatype::DoubleInt;
+        let comm = dummy_comm();
+        let send = vec![
+            DoubleInt {
+                value: 1.0,
+                index: 0
+            };
+            10
+        ];
+        let mut recv = vec![
+            DoubleInt {
+                value: 0.0,
+                index: 0
+            };
+            5
+        ];
+        let result = comm.allreduce_indexed(&send, &mut recv, ReduceOp::MaxLoc);
+        assert!(matches!(result, Err(Error::InvalidBuffer)));
+    }
+
+    #[test]
+    fn allreduce_indexed_invalid_op_returns_invalid_op() {
+        use crate::datatype::DoubleInt;
+        let comm = dummy_comm();
+        let send = vec![
+            DoubleInt {
+                value: 1.0,
+                index: 0
+            };
+            4
+        ];
+        let mut recv = vec![
+            DoubleInt {
+                value: 0.0,
+                index: 0
+            };
+            4
+        ];
+        for op in [
+            ReduceOp::Sum,
+            ReduceOp::Max,
+            ReduceOp::Min,
+            ReduceOp::Prod,
+            ReduceOp::BitwiseOr,
+            ReduceOp::BitwiseAnd,
+            ReduceOp::BitwiseXor,
+            ReduceOp::LogicalOr,
+            ReduceOp::LogicalAnd,
+            ReduceOp::LogicalXor,
+        ] {
+            let result = comm.allreduce_indexed(&send, &mut recv, op);
+            assert!(
+                matches!(result, Err(Error::InvalidOp)),
+                "Expected InvalidOp for op {op:?} on indexed type"
+            );
+        }
     }
 
     // ========================================================================
