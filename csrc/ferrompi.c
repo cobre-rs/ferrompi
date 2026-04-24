@@ -2403,6 +2403,42 @@ int ferrompi_alltoall_init(const void* sendbuf, int64_t sendcount, void* recvbuf
     return MPI_ERR_OTHER;
 }
 
+int ferrompi_gather_init_inplace(void* recvbuf, int64_t recvcount,
+                                  int32_t datatype_tag, int32_t root,
+                                  int32_t is_root, int32_t comm_handle,
+                                  int64_t* request_handle) {
+    (void)recvbuf; (void)recvcount; (void)datatype_tag; (void)root;
+    (void)is_root; (void)comm_handle; (void)request_handle;
+    return MPI_ERR_OTHER;
+}
+
+int ferrompi_allgather_init_inplace(void* recvbuf, int64_t recvcount,
+                                     int32_t datatype_tag, int32_t comm_handle,
+                                     int64_t* request_handle) {
+    (void)recvbuf; (void)recvcount; (void)datatype_tag;
+    (void)comm_handle; (void)request_handle;
+    return MPI_ERR_OTHER;
+}
+
+int ferrompi_scatter_init_inplace(const void* sendbuf, int64_t sendcount,
+                                   void* recvbuf, int64_t recvcount,
+                                   int32_t datatype_tag, int32_t root,
+                                   int32_t is_root, int32_t comm_handle,
+                                   int64_t* request_handle) {
+    (void)sendbuf; (void)sendcount; (void)recvbuf; (void)recvcount;
+    (void)datatype_tag; (void)root; (void)is_root;
+    (void)comm_handle; (void)request_handle;
+    return MPI_ERR_OTHER;
+}
+
+int ferrompi_alltoall_init_inplace(void* recvbuf, int64_t recvcount,
+                                    int32_t datatype_tag, int32_t comm_handle,
+                                    int64_t* request_handle) {
+    (void)recvbuf; (void)recvcount; (void)datatype_tag;
+    (void)comm_handle; (void)request_handle;
+    return MPI_ERR_OTHER;
+}
+
 int ferrompi_gatherv_init(const void* sendbuf, int64_t sendcount, void* recvbuf,
                           const int32_t* recvcounts, const int32_t* displs,
                           int32_t datatype_tag, int32_t root, int32_t comm_handle, int64_t* request_handle) {
