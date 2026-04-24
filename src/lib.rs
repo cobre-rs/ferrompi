@@ -128,16 +128,8 @@
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
-// Allow certain pedantic lints for existing code
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::similar_names)]
+// Clippy suppressions live at the call site (`#[allow(clippy::NAME)]`
+// with a justification comment) rather than crate-wide.
 
 use std::ffi::c_char;
 
@@ -156,7 +148,10 @@ mod topology;
 mod window;
 
 pub use comm::{Communicator, SplitType};
-pub use datatype::{DatatypeTag, MpiDatatype};
+pub use datatype::{
+    BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, LongDoubleInt, LongInt, MpiDatatype,
+    MpiIndexedDatatype, ShortInt,
+};
 pub use error::{Error, MpiErrorClass, Result};
 pub use info::Info;
 pub use persistent::PersistentRequest;
@@ -189,6 +184,27 @@ pub enum ThreadLevel {
 }
 
 /// Reduction operations
+///
+/// The `Replace` and `NoOp` variants are only available with the `rma` feature.
+///
+/// # Feature-gated variants
+///
+/// Without `--features rma`, referencing `ReduceOp::Replace` is a compile error:
+///
+#[cfg_attr(not(feature = "rma"), doc = "```compile_fail")]
+#[cfg_attr(
+    not(feature = "rma"),
+    doc = "// This must not compile without --features rma."
+)]
+#[cfg_attr(not(feature = "rma"), doc = "let _ = ferrompi::ReduceOp::Replace;")]
+#[cfg_attr(not(feature = "rma"), doc = "```")]
+#[cfg_attr(feature = "rma", doc = "```no_run")]
+#[cfg_attr(
+    feature = "rma",
+    doc = "// With --features rma, ReduceOp::Replace is available."
+)]
+#[cfg_attr(feature = "rma", doc = "let _ = ferrompi::ReduceOp::Replace;")]
+#[cfg_attr(feature = "rma", doc = "```")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ReduceOp {
@@ -200,6 +216,52 @@ pub enum ReduceOp {
     Min = 2,
     /// Product of values
     Prod = 3,
+    /// Bitwise OR (`MPI_BOR`). Valid only for integer types; MPI returns
+    /// `MPI_ERR_OP` when used with floating-point types.
+    BitwiseOr = 4,
+    /// Bitwise AND (`MPI_BAND`). Valid only for integer types; MPI returns
+    /// `MPI_ERR_OP` when used with floating-point types.
+    BitwiseAnd = 5,
+    /// Bitwise XOR (`MPI_BXOR`). Valid only for integer types; MPI returns
+    /// `MPI_ERR_OP` when used with floating-point types.
+    BitwiseXor = 6,
+    /// Logical OR (`MPI_LOR`). Interprets nonzero as `true`. Valid for
+    /// integer types.
+    LogicalOr = 7,
+    /// Logical AND (`MPI_LAND`). Interprets nonzero as `true`. Valid for
+    /// integer types.
+    LogicalAnd = 8,
+    /// Logical XOR (`MPI_LXOR`). Interprets nonzero as `true`. Valid for
+    /// integer types.
+    LogicalXor = 9,
+    /// Maximum value with location (`MPI_MAXLOC`). Returns the maximum value
+    /// and the rank (index) where it occurred. Only valid with
+    /// [`MpiIndexedDatatype`] via
+    /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
+    MaxLoc = 10,
+    /// Minimum value with location (`MPI_MINLOC`). Returns the minimum value
+    /// and the rank (index) where it occurred. Only valid with
+    /// [`MpiIndexedDatatype`] via
+    /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
+    MinLoc = 11,
+    /// Replace the target buffer with the source value (`MPI_REPLACE`).
+    ///
+    /// Only valid for `MPI_Accumulate`-family operations (Epic 7). Passing to
+    /// `allreduce`, `reduce`, `scan`, etc. returns `MPI_ERR_OP` from MPI.
+    ///
+    /// This variant is only present when the `rma` feature is enabled.
+    #[cfg(feature = "rma")]
+    Replace = 12,
+    /// No-op: leaves the target buffer unchanged (`MPI_NO_OP`).
+    ///
+    /// Only valid for `MPI_Accumulate`-family operations (Epic 7). Passing to
+    /// `allreduce`, `reduce`, `scan`, etc. returns `MPI_ERR_OP` from MPI.
+    ///
+    /// # Compile-time availability
+    ///
+    /// This variant is only present when the `rma` feature is enabled.
+    #[cfg(feature = "rma")]
+    NoOp = 13,
 }
 
 /// MPI environment handle.
@@ -265,6 +327,7 @@ impl Mpi {
                 class: MpiErrorClass::Raw(ret),
                 code: ret,
                 message: format!("MPI_Init_thread failed with code {ret}"),
+                operation: Some("init_thread"),
             });
         }
 
@@ -309,7 +372,7 @@ impl Mpi {
         let ret = unsafe {
             ffi::ferrompi_get_library_version(buf.as_mut_ptr().cast::<c_char>(), &mut len)
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "get_library_version")?;
         let len = (len.max(0) as usize).min(buf.len());
         // Trim trailing whitespace/newlines that some implementations append.
         let s = std::str::from_utf8(&buf[..len])
@@ -324,7 +387,7 @@ impl Mpi {
         let ret = unsafe { ffi::ferrompi_get_version(buf.as_mut_ptr().cast::<c_char>(), &mut len) };
 
         if ret != 0 {
-            return Err(Error::from_code(ret));
+            return Err(Error::from_code_with_op(ret, "get_version"));
         }
 
         let len = (len.max(0) as usize).min(buf.len());
@@ -378,8 +441,6 @@ mod tests {
         assert!(ThreadLevel::Single < ThreadLevel::Funneled);
         assert!(ThreadLevel::Funneled < ThreadLevel::Serialized);
         assert!(ThreadLevel::Serialized < ThreadLevel::Multiple);
-        // Transitive: smallest < largest
-        assert!(ThreadLevel::Single < ThreadLevel::Multiple);
     }
 
     #[test]
@@ -415,10 +476,28 @@ mod tests {
 
     #[test]
     fn reduce_op_repr_values() {
-        assert_eq!(ReduceOp::Sum as i32, 0);
-        assert_eq!(ReduceOp::Max as i32, 1);
-        assert_eq!(ReduceOp::Min as i32, 2);
-        assert_eq!(ReduceOp::Prod as i32, 3);
+        let ops = [
+            (ReduceOp::Sum, 0),
+            (ReduceOp::Max, 1),
+            (ReduceOp::Min, 2),
+            (ReduceOp::Prod, 3),
+            (ReduceOp::BitwiseOr, 4),
+            (ReduceOp::BitwiseAnd, 5),
+            (ReduceOp::BitwiseXor, 6),
+            (ReduceOp::LogicalOr, 7),
+            (ReduceOp::LogicalAnd, 8),
+            (ReduceOp::LogicalXor, 9),
+            (ReduceOp::MaxLoc, 10),
+            (ReduceOp::MinLoc, 11),
+        ];
+        for (op, expected) in ops {
+            assert_eq!(op as i32, expected);
+        }
+        #[cfg(feature = "rma")]
+        {
+            assert_eq!(ReduceOp::Replace as i32, 12);
+            assert_eq!(ReduceOp::NoOp as i32, 13);
+        }
     }
 
     #[test]
@@ -427,9 +506,22 @@ mod tests {
         assert_eq!(ReduceOp::Max, ReduceOp::Max);
         assert_eq!(ReduceOp::Min, ReduceOp::Min);
         assert_eq!(ReduceOp::Prod, ReduceOp::Prod);
+        assert_eq!(ReduceOp::BitwiseOr, ReduceOp::BitwiseOr);
+        assert_eq!(ReduceOp::BitwiseAnd, ReduceOp::BitwiseAnd);
+        assert_eq!(ReduceOp::BitwiseXor, ReduceOp::BitwiseXor);
+        assert_eq!(ReduceOp::LogicalOr, ReduceOp::LogicalOr);
+        assert_eq!(ReduceOp::LogicalAnd, ReduceOp::LogicalAnd);
+        assert_eq!(ReduceOp::LogicalXor, ReduceOp::LogicalXor);
+        assert_eq!(ReduceOp::MaxLoc, ReduceOp::MaxLoc);
+        assert_eq!(ReduceOp::MinLoc, ReduceOp::MinLoc);
         assert_ne!(ReduceOp::Sum, ReduceOp::Max);
         assert_ne!(ReduceOp::Min, ReduceOp::Prod);
         assert_ne!(ReduceOp::Sum, ReduceOp::Prod);
+        assert_ne!(ReduceOp::BitwiseOr, ReduceOp::BitwiseAnd);
+        assert_ne!(ReduceOp::LogicalOr, ReduceOp::LogicalAnd);
+        assert_ne!(ReduceOp::Sum, ReduceOp::BitwiseOr);
+        assert_ne!(ReduceOp::MaxLoc, ReduceOp::MinLoc);
+        assert_ne!(ReduceOp::MaxLoc, ReduceOp::Max);
     }
 
     #[test]
@@ -441,5 +533,46 @@ mod tests {
         assert_eq!(format!("{:?}", ReduceOp::Max), "Max");
         assert_eq!(format!("{:?}", ReduceOp::Min), "Min");
         assert_eq!(format!("{:?}", ReduceOp::Prod), "Prod");
+        assert_eq!(format!("{:?}", ReduceOp::BitwiseOr), "BitwiseOr");
+        assert_eq!(format!("{:?}", ReduceOp::BitwiseAnd), "BitwiseAnd");
+        assert_eq!(format!("{:?}", ReduceOp::BitwiseXor), "BitwiseXor");
+        assert_eq!(format!("{:?}", ReduceOp::LogicalOr), "LogicalOr");
+        assert_eq!(format!("{:?}", ReduceOp::LogicalAnd), "LogicalAnd");
+        assert_eq!(format!("{:?}", ReduceOp::LogicalXor), "LogicalXor");
+        assert_eq!(format!("{:?}", ReduceOp::MaxLoc), "MaxLoc");
+        assert_eq!(format!("{:?}", ReduceOp::MinLoc), "MinLoc");
+    }
+
+    #[test]
+    fn reduce_op_all_variants_match_c_switch() {
+        let variants = [
+            (ReduceOp::Sum, 0i32),
+            (ReduceOp::Max, 1),
+            (ReduceOp::Min, 2),
+            (ReduceOp::Prod, 3),
+            (ReduceOp::BitwiseOr, 4),
+            (ReduceOp::BitwiseAnd, 5),
+            (ReduceOp::BitwiseXor, 6),
+            (ReduceOp::LogicalOr, 7),
+            (ReduceOp::LogicalAnd, 8),
+            (ReduceOp::LogicalXor, 9),
+            (ReduceOp::MaxLoc, 10),
+            (ReduceOp::MinLoc, 11),
+        ];
+        for (op, expected) in variants {
+            assert_eq!(op as i32, expected);
+        }
+        #[cfg(feature = "rma")]
+        {
+            assert_eq!(ReduceOp::Replace as i32, 12);
+            assert_eq!(ReduceOp::NoOp as i32, 13);
+        }
+    }
+
+    #[cfg(feature = "rma")]
+    #[test]
+    fn replace_noop_discriminants() {
+        assert_eq!(ReduceOp::Replace as i32, 12);
+        assert_eq!(ReduceOp::NoOp as i32, 13);
     }
 }

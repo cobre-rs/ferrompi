@@ -116,6 +116,11 @@ run_test() {
     local name="$1"
     local procs="${2:-$NP}"
     local binary="./target/${BUILD_MODE}/examples/${name}"
+    # Per-test wall-clock cap. Picked larger than any healthy mpiexec on the
+    # examples we run (most finish in <1s; the concurrency stress test in <30s),
+    # but small enough that an MPI deadlock fails the test cleanly instead of
+    # consuming the GitHub Actions 30-minute job budget.
+    local test_timeout="${MPI_TEST_TIMEOUT:-90}"
 
     if [ ! -f "$binary" ]; then
         echo -e "  ${YELLOW}SKIP${RESET}  ${name} (binary not found)"
@@ -128,11 +133,19 @@ run_test() {
     local output
     local exit_code=0
     # shellcheck disable=SC2086
-    output=$("$MPIEXEC" $MPIEXEC_ARGS -n "$procs" "$binary" 2>&1) || exit_code=$?
+    output=$(timeout --kill-after=10 "$test_timeout" \
+        "$MPIEXEC" $MPIEXEC_ARGS -n "$procs" "$binary" 2>&1) || exit_code=$?
 
     if [ $exit_code -eq 0 ]; then
         echo -e "${GREEN}PASS${RESET}"
         PASSED=$((PASSED + 1))
+    elif [ $exit_code -eq 124 ] || [ $exit_code -eq 137 ]; then
+        echo -e "${RED}FAIL${RESET} (timeout after ${test_timeout}s)"
+        FAILED=$((FAILED + 1))
+        FAILED_TESTS+=("$name (timeout)")
+        echo "    --- last output ---"
+        echo "$output" | tail -20 | sed 's/^/    /'
+        echo "    --- end ---"
     else
         echo -e "${RED}FAIL${RESET} (exit code: ${exit_code})"
         FAILED=$((FAILED + 1))
@@ -166,9 +179,27 @@ run_test test_blocking_extra
 run_test test_nonblocking
 run_test test_p2p_extra
 run_test test_nonblocking_collectives
+run_test test_waitany 4
+run_test test_cancel 2
 run_test test_persistent
 run_test test_info 2
 run_test test_comm_split 4
+run_test test_errhandler_returns
+run_test test_gather_inplace 4
+run_test test_allgather_inplace 4
+run_test test_scatter_inplace 4
+run_test test_alltoall_inplace 4
+run_test test_igather_inplace 4
+run_test test_iallgather_inplace 4
+run_test test_iscatter_inplace 4
+run_test test_ialltoall_inplace 4
+run_test test_gather_init_inplace 4
+run_test test_allgather_init_inplace 4
+run_test test_scatter_init_inplace 4
+run_test test_alltoall_init_inplace 4
+run_test test_allreduce_bytes 4
+run_test test_error_context 2
+run_test test_request_table_concurrency 2
 
 echo ""
 echo -e "${BOLD}────────────────────────────────────────${RESET}"
@@ -180,6 +211,8 @@ run_test ring
 run_test allreduce
 run_test nonblocking
 run_test comm_split
+run_test reduce_op_bitwise 2
+run_test reduce_op_maxloc 4
 
 # persistent_bcast may fail on MPI < 4.0 — run but don't count failure as fatal
 echo ""

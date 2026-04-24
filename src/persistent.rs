@@ -94,7 +94,7 @@ impl PersistentRequest {
             return Err(Error::Internal("Request is already active".into()));
         }
         let ret = unsafe { ffi::ferrompi_start(self.handle) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "start")?;
         self.active = true;
         Ok(())
     }
@@ -114,7 +114,7 @@ impl PersistentRequest {
             return Ok(());
         }
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "wait")?;
         self.active = false;
         Ok(())
     }
@@ -128,7 +128,7 @@ impl PersistentRequest {
         }
         let mut flag: i32 = 0;
         let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "test")?;
         if flag != 0 {
             self.active = false;
         }
@@ -154,7 +154,7 @@ impl PersistentRequest {
 
         let mut handles: Vec<i64> = requests.iter().map(|r| r.handle).collect();
         let ret = unsafe { ffi::ferrompi_startall(handles.len() as i64, handles.as_mut_ptr()) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "startall")?;
 
         // Mark all as active
         for req in requests.iter_mut() {
@@ -172,7 +172,7 @@ impl PersistentRequest {
 
         let mut handles: Vec<i64> = requests.iter().map(|r| r.handle).collect();
         let ret = unsafe { ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr()) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "waitall")?;
 
         // Only mark as inactive after successful wait
         for req in requests.iter_mut() {

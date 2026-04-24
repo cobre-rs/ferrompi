@@ -181,7 +181,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
                 &mut win_handle,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "win_allocate_shared")?;
 
         let local_ptr = NonNull::new(baseptr.cast::<T>())
             .ok_or_else(|| Error::Internal("Win_allocate_shared returned null".into()))?;
@@ -275,7 +275,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
                 &mut baseptr,
             )
         };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "win_shared_query")?;
 
         let count = size as usize / std::mem::size_of::<T>();
         if baseptr.is_null() {
@@ -329,7 +329,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
     pub fn fence(&self) -> Result<()> {
         // SAFETY: win_handle is a valid MPI window handle.
         let ret = unsafe { ffi::ferrompi_win_fence(0, self.win_handle) };
-        Error::check(ret)
+        Error::check_with_op(ret, "win_fence")
     }
 
     /// Lock a specific rank's window (passive target synchronization).
@@ -370,7 +370,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
         };
         // SAFETY: win_handle is a valid MPI window handle.
         let ret = unsafe { ffi::ferrompi_win_lock(lt, rank, 0, self.win_handle) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "win_lock")?;
         Ok(LockGuard { window: self, rank })
     }
 
@@ -408,7 +408,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
     pub fn lock_all(&self) -> Result<LockAllGuard<'_, T>> {
         // SAFETY: win_handle is a valid MPI window handle.
         let ret = unsafe { ffi::ferrompi_win_lock_all(0, self.win_handle) };
-        Error::check(ret)?;
+        Error::check_with_op(ret, "win_lock_all")?;
         Ok(LockAllGuard { window: self })
     }
 
@@ -480,7 +480,7 @@ impl<T: MpiDatatype> LockGuard<'_, T> {
         // SAFETY: The window handle is valid (borrowed from SharedWindow)
         // and the rank was locked in the constructor.
         let ret = unsafe { ffi::ferrompi_win_flush(self.rank, self.window.win_handle) };
-        Error::check(ret)
+        Error::check_with_op(ret, "win_flush")
     }
 }
 
@@ -528,7 +528,7 @@ impl<T: MpiDatatype> LockAllGuard<'_, T> {
         // SAFETY: The window handle is valid (borrowed from SharedWindow)
         // and all ranks were locked in the constructor.
         let ret = unsafe { ffi::ferrompi_win_flush_all(self.window.win_handle) };
-        Error::check(ret)
+        Error::check_with_op(ret, "win_flush_all")
     }
 
     /// Flush pending RMA operations to a specific rank.
@@ -547,7 +547,7 @@ impl<T: MpiDatatype> LockAllGuard<'_, T> {
         // SAFETY: The window handle is valid (borrowed from SharedWindow)
         // and all ranks were locked in the constructor.
         let ret = unsafe { ffi::ferrompi_win_flush(rank, self.window.win_handle) };
-        Error::check(ret)
+        Error::check_with_op(ret, "win_flush")
     }
 }
 

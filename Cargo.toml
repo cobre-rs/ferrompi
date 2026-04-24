@@ -1,6 +1,6 @@
 [package]
 name = "ferrompi"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.74"
 authors = ["Rogerio Alves"]
@@ -101,11 +101,30 @@ name = "topology"
 path = "examples/topology.rs"
 
 [[example]]
+name = "reduce_op_bitwise"
+path = "examples/reduce_op_bitwise.rs"
+
+[[example]]
+name = "reduce_op_maxloc"
+path = "examples/reduce_op_maxloc.rs"
+
+[[example]]
 name = "test_persistent"
 path = "examples/test_persistent.rs"
 
+[[example]]
+name = "test_errhandler_returns"
+path = "examples/test_errhandler_returns.rs"
+
+[[example]]
+name = "test_error_context"
+path = "examples/test_error_context.rs"
+
+[[example]]
+name = "test_request_table_concurrency"
+path = "examples/test_request_table_concurrency.rs"
+
 [dependencies]
-thiserror = "2.0"
 
 [build-dependencies]
 cc = "1.2"
@@ -113,6 +132,27 @@ pkg-config = "0.3"
 
 [dev-dependencies]
 rand = "0.9"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
+
+[[bench]]
+name = "bench_smoke"
+path = "benches/bench_smoke.rs"
+harness = false
+
+[[bench]]
+name = "allreduce_roundtrip"
+path = "benches/allreduce_roundtrip.rs"
+harness = false
+
+[[bench]]
+name = "persistent_vs_iallreduce"
+path = "benches/persistent_vs_iallreduce.rs"
+harness = false
+
+[[bench]]
+name = "ffi_overhead"
+path = "benches/ffi_overhead.rs"
+harness = false
 
 [features]
 default = []

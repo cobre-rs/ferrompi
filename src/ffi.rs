@@ -190,6 +190,40 @@ extern "C" {
         comm: int32_t,
     ) -> c_int;
 
+    pub fn ferrompi_gather_inplace(
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        root: int32_t,
+        is_root: int32_t,
+        comm: int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_allgather_inplace(
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        comm: int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_scatter_inplace(
+        sendbuf: *const c_void,
+        sendcount: int64_t,
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        root: int32_t,
+        is_root: int32_t,
+        comm: int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_alltoall_inplace(
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        comm: int32_t,
+    ) -> c_int;
+
     pub fn ferrompi_scan(
         sendbuf: *const c_void,
         recvbuf: *mut c_void,
@@ -400,6 +434,44 @@ extern "C" {
         request: *mut int64_t,
     ) -> c_int;
 
+    pub fn ferrompi_igather_inplace(
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        root: int32_t,
+        is_root: int32_t,
+        comm: int32_t,
+        request: *mut int64_t,
+    ) -> c_int;
+
+    pub fn ferrompi_iallgather_inplace(
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        comm: int32_t,
+        request: *mut int64_t,
+    ) -> c_int;
+
+    pub fn ferrompi_iscatter_inplace(
+        sendbuf: *const c_void,
+        sendcount: int64_t,
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        root: int32_t,
+        is_root: int32_t,
+        comm: int32_t,
+        request: *mut int64_t,
+    ) -> c_int;
+
+    pub fn ferrompi_ialltoall_inplace(
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        comm: int32_t,
+        request: *mut int64_t,
+    ) -> c_int;
+
     pub fn ferrompi_igatherv(
         sendbuf: *const c_void,
         sendcount: int64_t,
@@ -562,6 +634,44 @@ extern "C" {
         request: *mut int64_t,
     ) -> c_int;
 
+    pub fn ferrompi_gather_init_inplace(
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        root: int32_t,
+        is_root: int32_t,
+        comm: int32_t,
+        request: *mut int64_t,
+    ) -> c_int;
+
+    pub fn ferrompi_allgather_init_inplace(
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        comm: int32_t,
+        request: *mut int64_t,
+    ) -> c_int;
+
+    pub fn ferrompi_scatter_init_inplace(
+        sendbuf: *const c_void,
+        sendcount: int64_t,
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        root: int32_t,
+        is_root: int32_t,
+        comm: int32_t,
+        request: *mut int64_t,
+    ) -> c_int;
+
+    pub fn ferrompi_alltoall_init_inplace(
+        recvbuf: *mut c_void,
+        recvcount: int64_t,
+        datatype_tag: int32_t,
+        comm: int32_t,
+        request: *mut int64_t,
+    ) -> c_int;
+
     pub fn ferrompi_gatherv_init(
         sendbuf: *const c_void,
         sendcount: int64_t,
@@ -657,6 +767,27 @@ extern "C" {
     pub fn ferrompi_test(request: int64_t, flag: *mut int32_t) -> c_int;
     pub fn ferrompi_waitall(count: int64_t, requests: *mut int64_t) -> c_int;
     pub fn ferrompi_request_free(request: int64_t) -> c_int;
+    pub fn ferrompi_request_get_status(request: int64_t, flag: *mut int32_t) -> c_int;
+    pub fn ferrompi_cancel(request: int64_t) -> c_int;
+    pub fn ferrompi_waitany(count: int64_t, requests: *mut int64_t, index: *mut int32_t) -> c_int;
+    pub fn ferrompi_waitsome(
+        count: int64_t,
+        requests: *mut int64_t,
+        outcount: *mut int64_t,
+        indices: *mut int32_t,
+    ) -> c_int;
+    pub fn ferrompi_testany(
+        count: int64_t,
+        requests: *mut int64_t,
+        index: *mut int32_t,
+        flag: *mut int32_t,
+    ) -> c_int;
+    pub fn ferrompi_testsome(
+        count: int64_t,
+        requests: *mut int64_t,
+        outcount: *mut int64_t,
+        indices: *mut int32_t,
+    ) -> c_int;
 
     // ============================================================
     // Persistent Request Management

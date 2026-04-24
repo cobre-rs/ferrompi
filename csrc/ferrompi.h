@@ -37,6 +37,19 @@ extern "C" {
 #define FERROMPI_U32  5
 #define FERROMPI_U64  6
 
+/* Paired value+index types for MPI_MAXLOC / MPI_MINLOC.
+ * These must match the Rust DatatypeTag enum discriminants 7-12. */
+#define FERROMPI_FLOAT_INT        7
+#define FERROMPI_DOUBLE_INT       8
+#define FERROMPI_LONG_INT         9
+#define FERROMPI_2INT            10
+#define FERROMPI_SHORT_INT       11
+#define FERROMPI_LONG_DOUBLE_INT 12
+
+/* Opaque 1-byte unit for type-erased bitwise reductions (MPI_BYTE).
+ * Must match Rust DatatypeTag::Byte = 13. */
+#define FERROMPI_BYTE            13
+
 /* ============================================================
  * Communicator Split Type Constants
  * ============================================================
@@ -384,6 +397,84 @@ int ferrompi_allreduce(const void* sendbuf, void* recvbuf, int64_t count, int32_
 /** In-place all-reduce (generic) */
 int ferrompi_allreduce_inplace(void* buf, int64_t count, int32_t datatype_tag, int32_t op, int32_t comm);
 
+/** In-place gather (generic). Valid only at root; non-root returns MPI_ERR_ARG. */
+int ferrompi_gather_inplace(void* recvbuf, int64_t recvcount,
+                             int32_t datatype_tag, int32_t root,
+                             int32_t is_root, int32_t comm);
+
+/** In-place all-gather (generic). Valid at every rank. */
+int ferrompi_allgather_inplace(void* recvbuf, int64_t recvcount,
+                                int32_t datatype_tag, int32_t comm);
+
+/**
+ * In-place scatter (generic).
+ *
+ * At root (is_root != 0): sendbuf is the full sendcount*size buffer; MPI_IN_PLACE
+ * is passed as recvbuf so root's own slot is retained in place. recvbuf is ignored.
+ * At non-root (is_root == 0): regular scatter path; sendbuf is ignored (NULL), recvbuf
+ * receives recvcount elements.
+ *
+ * @param sendbuf Send buffer (significant only at root)
+ * @param sendcount Number of elements sent to each process (significant only at root)
+ * @param recvbuf Receive buffer (significant only at non-root; ignored at root)
+ * @param recvcount Number of elements to receive (significant only at non-root)
+ * @param datatype_tag Datatype tag
+ * @param root Root rank
+ * @param is_root Non-zero if this process is the root
+ * @param comm Communicator handle
+ * @return MPI error code
+ */
+int ferrompi_scatter_inplace(const void* sendbuf, int64_t sendcount,
+                              void* recvbuf, int64_t recvcount,
+                              int32_t datatype_tag, int32_t root,
+                              int32_t is_root, int32_t comm);
+
+/**
+ * In-place all-to-all personalized communication (generic).
+ *
+ * recvbuf serves as both send and receive buffer (MPI_IN_PLACE as sendbuf).
+ * Before the call, rank r must pre-write into slot s the payload destined for rank s.
+ * After the call, slot s contains the data received FROM rank s.
+ *
+ * @param recvbuf Combined send/receive buffer (recvcount * size elements)
+ * @param recvcount Number of elements per rank
+ * @param datatype_tag Datatype tag
+ * @param comm Communicator handle
+ * @return MPI error code
+ */
+int ferrompi_alltoall_inplace(void* recvbuf, int64_t recvcount,
+                               int32_t datatype_tag, int32_t comm);
+
+/** Nonblocking in-place gather (generic). Valid only at root (is_root != 0); non-root returns MPI_ERR_ARG. */
+int ferrompi_igather_inplace(void* recvbuf, int64_t recvcount,
+                              int32_t datatype_tag, int32_t root,
+                              int32_t is_root, int32_t comm,
+                              int64_t* request);
+
+/** Nonblocking in-place all-gather (generic). Valid at every rank. */
+int ferrompi_iallgather_inplace(void* recvbuf, int64_t recvcount,
+                                 int32_t datatype_tag, int32_t comm,
+                                 int64_t* request);
+
+/**
+ * Nonblocking in-place scatter (generic).
+ *
+ * At root (is_root != 0): sendbuf is the full sendcount*size buffer; MPI_IN_PLACE
+ * is passed as recvbuf so root's own slot is retained in place.
+ * At non-root (is_root == 0): regular scatter path; sendbuf is NULL, recvbuf
+ * receives recvcount elements.
+ */
+int ferrompi_iscatter_inplace(const void* sendbuf, int64_t sendcount,
+                               void* recvbuf, int64_t recvcount,
+                               int32_t datatype_tag, int32_t root,
+                               int32_t is_root, int32_t comm,
+                               int64_t* request);
+
+/** Nonblocking in-place all-to-all (generic). Valid at every rank. */
+int ferrompi_ialltoall_inplace(void* recvbuf, int64_t recvcount,
+                                int32_t datatype_tag, int32_t comm,
+                                int64_t* request);
+
 /**
  * Inclusive prefix reduction (scan).
  *
@@ -601,6 +692,35 @@ int ferrompi_allreduce_init(const void* sendbuf, void* recvbuf, int64_t count, i
 /** Initialize persistent all-reduce in-place (generic) */
 int ferrompi_allreduce_init_inplace(void* buf, int64_t count, int32_t datatype_tag, int32_t op, int32_t comm, int64_t* request);
 
+/** Initialize persistent in-place gather (generic). Valid only at root (is_root != 0); non-root returns MPI_ERR_ARG. */
+int ferrompi_gather_init_inplace(void* recvbuf, int64_t recvcount,
+                                  int32_t datatype_tag, int32_t root,
+                                  int32_t is_root, int32_t comm,
+                                  int64_t* request);
+
+/** Initialize persistent in-place all-gather (generic). Valid at every rank. */
+int ferrompi_allgather_init_inplace(void* recvbuf, int64_t recvcount,
+                                     int32_t datatype_tag, int32_t comm,
+                                     int64_t* request);
+
+/**
+ * Initialize persistent in-place scatter (generic).
+ *
+ * At root (is_root != 0): sendbuf is the full sendcount*size buffer; MPI_IN_PLACE
+ * is passed as recvbuf so root's own slot is retained in place.
+ * At non-root (is_root == 0): sendbuf is NULL, recvbuf receives recvcount elements.
+ */
+int ferrompi_scatter_init_inplace(const void* sendbuf, int64_t sendcount,
+                                   void* recvbuf, int64_t recvcount,
+                                   int32_t datatype_tag, int32_t root,
+                                   int32_t is_root, int32_t comm,
+                                   int64_t* request);
+
+/** Initialize persistent in-place all-to-all (generic). Valid at every rank. */
+int ferrompi_alltoall_init_inplace(void* recvbuf, int64_t recvcount,
+                                    int32_t datatype_tag, int32_t comm,
+                                    int64_t* request);
+
 /** Initialize persistent gather (generic) */
 int ferrompi_gather_init(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t root, int32_t comm, int64_t* request);
 
@@ -722,6 +842,63 @@ int ferrompi_waitall(int64_t count, int64_t* requests);
  * @return MPI error code
  */
 int ferrompi_request_free(int64_t request);
+
+/**
+ * Non-destructive status query (MPI_Request_get_status).
+ * Sets *flag = 1 if the request is complete, 0 otherwise.
+ * Does NOT free the request handle.
+ * @param request Request handle to query
+ * @param flag    Output: 1 if complete, 0 otherwise
+ * @return MPI error code
+ */
+int ferrompi_request_get_status(int64_t request, int32_t* flag);
+
+/**
+ * Request cancellation of a pending nonblocking operation (MPI_Cancel).
+ * Does NOT free the request handle; the caller must still call wait.
+ * @param request Request handle to cancel
+ * @return MPI error code
+ */
+int ferrompi_cancel(int64_t request);
+
+/**
+ * Wait for any one request to complete (MPI_Waitany).
+ * @param count    Number of requests
+ * @param requests Array of request handles (updated in place)
+ * @param index    Output: index of completed request, or -1 if all null
+ * @return MPI error code
+ */
+int ferrompi_waitany(int64_t count, int64_t* requests, int32_t* index);
+
+/**
+ * Wait until at least one request completes (MPI_Waitsome).
+ * @param count    Number of requests
+ * @param requests Array of request handles (updated in place)
+ * @param outcount Output: number of completed requests, or -1 if all null
+ * @param indices  Output array (length >= count): indices of completed requests
+ * @return MPI error code
+ */
+int ferrompi_waitsome(int64_t count, int64_t* requests, int64_t* outcount, int32_t* indices);
+
+/**
+ * Test if any one request has completed (MPI_Testany).
+ * @param count    Number of requests
+ * @param requests Array of request handles (updated in place)
+ * @param index    Output: index of completed request, or -1 if all null / none done
+ * @param flag     Output: 1 if a request completed (or all null), 0 otherwise
+ * @return MPI error code
+ */
+int ferrompi_testany(int64_t count, int64_t* requests, int32_t* index, int32_t* flag);
+
+/**
+ * Test how many requests have completed (MPI_Testsome).
+ * @param count    Number of requests
+ * @param requests Array of request handles (updated in place)
+ * @param outcount Output: number completed, 0 if none, -1 if all null
+ * @param indices  Output array (length >= count): indices of completed requests
+ * @return MPI error code
+ */
+int ferrompi_testsome(int64_t count, int64_t* requests, int64_t* outcount, int32_t* indices);
 
 /**
  * Start a persistent request
