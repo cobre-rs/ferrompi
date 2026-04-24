@@ -236,6 +236,18 @@ static MPI_Datatype get_datatype(int32_t tag) {
 }
 
 /* ============================================================
+ * Error Handler Installation
+ * ============================================================ */
+
+/* Install MPI_ERRORS_RETURN on the given communicator so that MPI
+ * errors are returned as codes to ferrompi rather than aborting the
+ * process via MPI_ERRORS_ARE_FATAL. Called from every site that
+ * creates or adopts an MPI_Comm before handing it to Rust. */
+static int install_errors_return(MPI_Comm comm) {
+    return MPI_Comm_set_errhandler(comm, MPI_ERRORS_RETURN);
+}
+
+/* ============================================================
  * Initialization and Finalization
  * ============================================================ */
 
@@ -253,11 +265,15 @@ int ferrompi_init_thread(int required, int* provided) {
     int mpi_provided;
     int ret = MPI_Init_thread(NULL, NULL, mpi_required, &mpi_provided);
     
-    // Initialize COMM_WORLD after MPI_Init
+    // Initialize COMM_WORLD after MPI_Init and install the error handler
     if (ret == MPI_SUCCESS) {
         comm_table[0] = MPI_COMM_WORLD;
+        int eh_ret = install_errors_return(MPI_COMM_WORLD);
+        if (eh_ret != MPI_SUCCESS) {
+            return eh_ret;
+        }
     }
-    
+
     if (provided) {
         switch (mpi_provided) {
             case MPI_THREAD_SINGLE: *provided = 0; break;
@@ -274,12 +290,16 @@ int ferrompi_init_thread(int required, int* provided) {
 int ferrompi_init(void) {
     init_tables();
     int ret = MPI_Init(NULL, NULL);
-    
-    // Initialize COMM_WORLD after MPI_Init
+
+    // Initialize COMM_WORLD after MPI_Init and install the error handler
     if (ret == MPI_SUCCESS) {
         comm_table[0] = MPI_COMM_WORLD;
+        int eh_ret = install_errors_return(MPI_COMM_WORLD);
+        if (eh_ret != MPI_SUCCESS) {
+            return eh_ret;
+        }
     }
-    
+
     return ret;
 }
 
@@ -357,6 +377,11 @@ int ferrompi_comm_dup(int32_t comm_handle, int32_t* newcomm_handle) {
     MPI_Comm newcomm;
     int ret = MPI_Comm_dup(comm, &newcomm);
     if (ret == MPI_SUCCESS) {
+        int eh_ret = install_errors_return(newcomm);
+        if (eh_ret != MPI_SUCCESS) {
+            MPI_Comm_free(&newcomm);
+            return eh_ret;
+        }
         *newcomm_handle = alloc_comm(newcomm);
         if (*newcomm_handle < 0) {
             MPI_Comm_free(&newcomm);
@@ -390,6 +415,11 @@ int ferrompi_comm_split(int32_t comm_handle, int32_t color, int32_t key, int32_t
         if (newcomm == MPI_COMM_NULL) {
             *newcomm_handle = -1;  // Process opted out
         } else {
+            int eh_ret = install_errors_return(newcomm);
+            if (eh_ret != MPI_SUCCESS) {
+                MPI_Comm_free(&newcomm);
+                return eh_ret;
+            }
             *newcomm_handle = alloc_comm(newcomm);
             if (*newcomm_handle < 0) {
                 MPI_Comm_free(&newcomm);
@@ -416,6 +446,11 @@ int ferrompi_comm_split_type(int32_t comm_handle, int32_t split_type, int32_t ke
         if (newcomm == MPI_COMM_NULL) {
             *newcomm_handle = -1;
         } else {
+            int eh_ret = install_errors_return(newcomm);
+            if (eh_ret != MPI_SUCCESS) {
+                MPI_Comm_free(&newcomm);
+                return eh_ret;
+            }
             *newcomm_handle = alloc_comm(newcomm);
             if (*newcomm_handle < 0) {
                 MPI_Comm_free(&newcomm);

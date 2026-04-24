@@ -169,6 +169,7 @@ run_test test_nonblocking_collectives
 run_test test_persistent
 run_test test_info 2
 run_test test_comm_split 4
+run_test test_errhandler_returns
 
 echo ""
 echo -e "${BOLD}────────────────────────────────────────${RESET}"

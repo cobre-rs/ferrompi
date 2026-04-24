@@ -112,6 +112,10 @@ path = "examples/reduce_op_maxloc.rs"
 name = "test_persistent"
 path = "examples/test_persistent.rs"
 
+[[example]]
+name = "test_errhandler_returns"
+path = "examples/test_errhandler_returns.rs"
+
 [dependencies]
 thiserror = "2.0"
 
