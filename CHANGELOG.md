@@ -7,6 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-18
+
+This release resolves all 11 findings from a 2026 architecture & performance
+assessment (soundness, FFI overhead, lock-free allocator, typed errors), plus
+dependency refreshes and documentation work.
+
+### Breaking Changes
+
+- **`Request::wait_all` now takes `&mut [Request]`** instead of consuming a
+  `Vec<Request>`, so one backing buffer can be reused across a drain loop
+  (mirroring `PersistentRequest::wait_all`). Migration: pass `&mut [r1, r2, r3]`
+  or `&mut my_vec` instead of `vec![r1, r2, r3]`. On success each request is
+  marked completed in place; on error they are left active so `Drop` re-waits.
+- **New `Error::ResourceExhausted { resource: ResourceKind }` variant.** The
+  `Error` enum is not `#[non_exhaustive]`, so consumers matching it without a
+  trailing `_` arm will fail to compile. Adds the public `ResourceKind` enum
+  (`Request`, `Communicator`, `Datatype`, `Operation`, `Window`, `Group`,
+  `Info`).
+
+### Added
+
+- **Typed handle-table-exhaustion errors (F2-004).** Each internal handle table
+  now returns a distinct sentinel on overflow, surfaced as
+  `Error::ResourceExhausted { resource }` instead of an opaque
+  `Error::Mpi { class: Other, .. }`, so a long-running job can distinguish an
+  internal cap from a genuine MPI fault and back off.
+- **`[profile.release]`** with `lto = "thin"` and `codegen-units = 1` (PERF-01),
+  letting wrapper bodies inline across codegen units; the `bench` profile
+  inherits it.
+
+### Changed
+
+- **Request handle table is now a lock-free 64-bit occupancy bitmap**
+  (F2-002 / F2-006), replacing the dense `atomic_int` slot array. Removes the
+  cache-line false sharing and O(N) scan that affected concurrent posting under
+  `MPI_THREAD_MULTIPLE`; allocation uses an `acq_rel` `fetch_or` claim with a
+  hardware find-first-zero. The six small fixed tables keep the simpler
+  CAS-scan design.
+- **Hot paths are now inlinable (F3-001 / F2-005):** `#[inline]` on
+  `Error::check`/`check_with_op` and the non-generic `Request` /
+  `PersistentRequest` completion methods; `#[cold]` + `#[inline(never)]` on the
+  cold error-construction helpers.
+- **Per-call allocations removed from completion paths (PERF-02 / PERF-03):**
+  `start_all` / `wait_all` / `wait_any` / `wait_some` / `test_any` / `test_some`
+  use stack scratch buffers (both the Rust and C sides) instead of allocating on
+  every call.
+- **`gather_topology` host de-duplication is now O(size)** (PERF-04), down from
+  O(size × distinct_hosts), allocating one `String` per distinct host.
+- **Dependencies refreshed:** `rand` dev-dependency 0.9 → 0.10 (uses the new
+  `RngExt` trait), `cargo update` to latest compatible (cc 1.2.64,
+  pkg-config 0.3.33, …), and CI actions bumped (codecov-action v6,
+  action-gh-release v3, size-label-action v0.5.7).
+- **README repositioned** around FerroMPI's own capabilities rather than a
+  scorecard against other crates; ADR-0002 amended for the bitmap design.
+
+### Fixed
+
+- **Use-after-free window on request-table exhaustion closed (F2-001).** When a
+  nonblocking/RMA initiator had already started a transfer but the request table
+  was full, the C shim called `MPI_Request_free` — which does not cancel an
+  active operation — and returned an error, letting the caller drop a buffer MPI
+  was still using. It now drives the orphaned request to completion with
+  `MPI_Wait` before returning. Persistent `*_init` shims, whose requests are
+  inactive, still use `MPI_Request_free`.
+- **ADR-0002 memory-ordering claim corrected (F2-003):** the alloc-path
+  rationale wrongly stated the `acq_rel` claim publishes the subsequent table
+  write; the real (external-happens-before) contract is now documented.
+- **Broken intra-doc link** in `Error::from_code` that failed the `-D warnings`
+  documentation build.
+- **CHANGELOG comparison links** repaired: the `[0.4.1]` link was missing and
+  `[Unreleased]` still compared from `v0.4.0`.
+
 ## [0.4.1] - 2026-05-18
 
 ### Added
@@ -479,7 +551,9 @@ Reference: plans/ferrompi-gap-closure/learnings/epic-08-summary.md
 - Comprehensive documentation
 - Initial CI/CD setup with GitHub Actions
 
-[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/cobre-rs/ferrompi/compare/v0.4.1...v0.5.0
+[0.4.1]: https://github.com/cobre-rs/ferrompi/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/cobre-rs/ferrompi/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cobre-rs/ferrompi/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/cobre-rs/ferrompi/compare/v0.2.1...v0.2.2

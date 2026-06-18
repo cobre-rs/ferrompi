@@ -71,7 +71,7 @@ Enable features in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ferrompi = { version = "0.2", features = ["rma"] }
+ferrompi = { version = "0.5", features = ["rma"] }
 ```
 
 ## Quick Start
@@ -384,7 +384,7 @@ The `numa` feature flag enables the `slurm` module with helpers for reading SLUR
 
 ```toml
 [dependencies]
-ferrompi = { version = "0.2", features = ["numa"] }
+ferrompi = { version = "0.5", features = ["numa"] }
 ```
 
 | Function          | SLURM Variable          | Description                     |
@@ -415,7 +415,7 @@ The `rma` feature flag enables `SharedWindow<T>`, a safe wrapper around `MPI_Win
 
 ```toml
 [dependencies]
-ferrompi = { version = "0.2", features = ["rma"] }
+ferrompi = { version = "0.5", features = ["rma"] }
 ```
 
 ```rust

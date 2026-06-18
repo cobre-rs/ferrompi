@@ -19,7 +19,7 @@ The table below extends the feature matrix in `README.md` with the dimensions th
 matter most during migration. See `docs/architecture.md` for the rationale behind
 each design choice.
 
-| Dimension              | rsmpi 0.8                                    | ferrompi 0.2                                               |
+| Dimension              | rsmpi 0.8                                    | ferrompi 0.5                                               |
 | ---------------------- | -------------------------------------------- | ---------------------------------------------------------- |
 | MPI standard           | 3.1                                          | 4.1                                                        |
 | Persistent collectives | No                                           | Yes (`_init` / `start` / `wait`)                           |
