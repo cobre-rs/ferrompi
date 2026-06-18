@@ -11,6 +11,7 @@
 #include <stdatomic.h>
 #include <limits.h>
 #include <stdio.h>
+#include <stdint.h>
 
 /* ============================================================
  * Internal State and Handle Management
@@ -21,6 +22,17 @@
 
 // Maximum number of concurrent requests
 #define MAX_REQUESTS 16384
+
+// The request table tracks occupancy with a bitmap of 64-bit words (one bit
+// per slot) rather than a dense array of one atomic_int per slot. This is the
+// hot, large table (the MPI_THREAD_MULTIPLE posting path); the bitmap shrinks
+// the occupancy metadata ~64x (2 KiB vs 64 KiB), so far fewer slots share a
+// cache line (less false sharing, F2-002), and lets allocation skip 64 slots
+// per scanned word via a hardware find-first-zero rather than probing each slot
+// (F2-006). MAX_REQUESTS must stay a multiple of 64 so every word is full.
+#define REQUEST_BITS_WORDS (MAX_REQUESTS / 64)
+_Static_assert(MAX_REQUESTS % 64 == 0,
+               "MAX_REQUESTS must be a multiple of 64 for the occupancy bitmap");
 
 // Element count at or below which the batch wait/test/start helpers
 // (ferrompi_waitall/startall/waitany/waitsome/testany/testsome) use an
@@ -70,18 +82,23 @@ static atomic_int comm_used[MAX_COMMS];  // 1 if slot is in use
 static atomic_int next_comm_hint;
 
 // Request table
-// request_used and next_request_hint use C11 atomics (stdatomic.h) to
-// eliminate the data race under MPI_THREAD_MULTIPLE: alloc_request uses a
-// CAS loop, free_request uses a release store, and get_request_ptr uses an
-// acquire load.  See docs/adr/0002-handle-tables.md for the full rationale.
+// Occupancy is a bitmap of 64-bit words (request_bits): bit b of word w marks
+// slot w*64+b as in use.  alloc_request claims a free bit with an acq_rel
+// fetch_or, free_request clears it with a release fetch_and, and
+// get_request_ptr tests it with an acquire load.  next_request_hint is an
+// advisory *word* index (0..REQUEST_BITS_WORDS-1) so scans start near the last
+// success.  See docs/adr/0002-handle-tables.md for the full rationale.
 static MPI_Request request_table[MAX_REQUESTS];
-static atomic_int request_used[MAX_REQUESTS];  // 1 if slot is in use
-static atomic_int next_request_hint;
+static _Atomic(uint64_t) request_bits[REQUEST_BITS_WORDS];  // bit set => slot in use
+static atomic_int next_request_hint;  // advisory start word for the next scan
 
 // Window table
 // win_used uses C11 atomics to eliminate data races under MPI_THREAD_MULTIPLE.
 // alloc_win uses a CAS loop; free_win uses atomic_store (release); readers use
-// atomic_load (acquire).  Mirrors the request_used/alloc_request pattern.
+// atomic_load (acquire).  Mirrors the comm_used/alloc_comm pattern.  (Unlike
+// the request table, the small fixed tables — windows, comms, datatypes, ops,
+// groups, infos — keep the dense per-slot used-flag scan: at <=256 slots the
+// scan cost and false sharing the request bitmap addresses are negligible.)
 static MPI_Win win_table[MAX_WINDOWS];
 static atomic_int win_used[MAX_WINDOWS];  // 1 if slot is in use
 static atomic_int next_win_hint;
@@ -168,7 +185,9 @@ static void init_tables(void) {
     atomic_init(&next_comm_hint, 1);  // Start scanning from slot 1 (slot 0 is COMM_WORLD)
     for (int i = 0; i < MAX_REQUESTS; i++) {
         request_table[i] = MPI_REQUEST_NULL;
-        atomic_init(&request_used[i], 0);
+    }
+    for (int w = 0; w < REQUEST_BITS_WORDS; w++) {
+        atomic_init(&request_bits[w], (uint64_t)0);
     }
     atomic_init(&next_request_hint, 0);
     for (int i = 0; i < MAX_WINDOWS; i++) {
@@ -259,55 +278,73 @@ static int32_t alloc_comm(MPI_Comm comm) {
     return -1;  // No space
 }
 
-// Allocate a request handle (thread-safe via C11 CAS).
-// The hint is advisory: an inaccurate hint only lengthens the scan, never
-// produces an incorrect result.  acq_rel on the CAS prevents reordering of
-// the slot-claim with later operations on the same thread, but the
-// subsequent request_table[idx] write is NOT covered by the CAS's release
-// fence (it is sequenced after, not before).  The handle returned by this
-// function is then used same-thread (caller writes it, then later reads it
-// via get_request_ptr); cross-thread handle transfers must establish their
-// own happens-before via the transfer mechanism (channel, Arc, etc.).
-// Within this same-thread/transfer-aware contract the implementation is
-// correct on x86, ARM64, and POWER.
+// Allocate a request handle (thread-safe, lock-free via the C11 occupancy
+// bitmap).  Scans words from the advisory hint; within a non-full word it
+// finds the lowest free slot with a hardware count-trailing-zeros and claims
+// it with an acq_rel fetch_or.  fetch_or is idempotent, so a lost race (the
+// returned word already had our chosen bit set) simply means another thread
+// took that slot — we pick the next free bit and retry, never corrupting
+// occupancy.  The hint is advisory: a stale hint only lengthens the scan.
+//
+// As in the prior CAS design, the subsequent request_table[idx] write is
+// sequenced AFTER the claiming fetch_or, not ordered before it by the acq_rel
+// release.  Handles are used same-thread (caller writes the handle, then later
+// reads it via get_request_ptr); a cross-thread handle transfer must establish
+// its own happens-before via the transfer mechanism (channel, Arc, etc.).
+// Within that same-thread/transfer-aware contract the implementation is
+// correct on x86, ARM64, and POWER.  See docs/adr/0002-handle-tables.md.
 static int64_t alloc_request(MPI_Request req) {
-    int hint = atomic_load_explicit(&next_request_hint, memory_order_relaxed);
-    for (int i = 0; i < MAX_REQUESTS; i++) {
-        int idx = (hint + i) % MAX_REQUESTS;
-        int expected = 0;
-        if (atomic_compare_exchange_strong_explicit(
-                &request_used[idx], &expected, 1,
-                memory_order_acq_rel, memory_order_relaxed)) {
-            request_table[idx] = req;
-            atomic_store_explicit(&next_request_hint,
-                (idx + 1) % MAX_REQUESTS, memory_order_relaxed);
-            return (int64_t)idx;
+    unsigned hint = (unsigned)atomic_load_explicit(&next_request_hint,
+                                                    memory_order_relaxed);
+    for (int w = 0; w < REQUEST_BITS_WORDS; w++) {
+        unsigned widx = (hint + (unsigned)w) % REQUEST_BITS_WORDS;
+        uint64_t cur = atomic_load_explicit(&request_bits[widx],
+                                            memory_order_relaxed);
+        while (cur != UINT64_MAX) {
+            int bit = __builtin_ctzll(~cur);  // lowest free slot in this word
+            uint64_t mask = (uint64_t)1 << bit;
+            uint64_t old = atomic_fetch_or_explicit(&request_bits[widx], mask,
+                                                    memory_order_acq_rel);
+            if ((old & mask) == 0) {
+                int64_t idx = (int64_t)widx * 64 + bit;
+                request_table[idx] = req;
+                atomic_store_explicit(&next_request_hint, (int)widx,
+                                      memory_order_relaxed);
+                return idx;
+            }
+            cur = old;  // lost the race for that bit; retry the next free one
         }
     }
     return -1;  /* No space */
 }
 
-// Get MPI_Request pointer from handle (thread-safe: acquire load pairs with
-// the release store in free_request, ensuring the request_table value written
-// by the allocating thread is visible here).
+// Get MPI_Request pointer from handle (thread-safe: the acquire load of the
+// occupancy bit pairs with the release fetch_and in free_request, ensuring the
+// request_table value written by the allocating thread is visible here).
 static MPI_Request* get_request_ptr(int64_t handle) {
     if (handle < 0 || handle >= MAX_REQUESTS) {
         return NULL;
     }
-    if (atomic_load_explicit(&request_used[handle],
-                             memory_order_acquire) == 0) {
+    unsigned widx = (unsigned)(handle / 64);
+    uint64_t mask = (uint64_t)1 << (handle % 64);
+    if ((atomic_load_explicit(&request_bits[widx], memory_order_acquire)
+            & mask) == 0) {
         return NULL;
     }
     return &request_table[handle];
 }
 
 // Free a request handle (thread-safe: the plain store to request_table
-// happens-before the release store to request_used, pairing with the acquire
-// load in get_request_ptr so any subsequent acquirer observes the null value).
+// happens-before the release fetch_and that clears the occupancy bit, pairing
+// with the acquire load in get_request_ptr so any subsequent acquirer observes
+// the null value).
 static void free_request(int64_t handle) {
     if (handle >= 0 && handle < MAX_REQUESTS) {
         request_table[handle] = MPI_REQUEST_NULL;
-        atomic_store_explicit(&request_used[handle], 0, memory_order_release);
+        unsigned widx = (unsigned)(handle / 64);
+        uint64_t mask = (uint64_t)1 << (handle % 64);
+        atomic_fetch_and_explicit(&request_bits[widx], ~mask,
+                                  memory_order_release);
     }
 }
 
@@ -676,11 +713,15 @@ int ferrompi_finalize(void) {
     // concurrent MPI operations are complete, but the consistent access
     // pattern avoids spurious TSan warnings in the finalizer check.
     for (int i = 0; i < MAX_REQUESTS; i++) {
-        if (atomic_load_explicit(&request_used[i], memory_order_acquire) &&
+        unsigned widx = (unsigned)(i / 64);
+        uint64_t mask = (uint64_t)1 << (i % 64);
+        if ((atomic_load_explicit(&request_bits[widx], memory_order_acquire) & mask) &&
                 request_table[i] != MPI_REQUEST_NULL) {
             MPI_Request_free(&request_table[i]);
         }
-        atomic_store_explicit(&request_used[i], 0, memory_order_release);
+    }
+    for (int w = 0; w < REQUEST_BITS_WORDS; w++) {
+        atomic_store_explicit(&request_bits[w], (uint64_t)0, memory_order_release);
     }
 
     // Clean up any remaining group objects (skip slot 0, which is MPI_GROUP_EMPTY)
