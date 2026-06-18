@@ -9,12 +9,12 @@
 [![codecov](https://codecov.io/gh/cobre-rs/ferrompi/branch/main/graph/badge.svg)](https://codecov.io/gh/cobre-rs/ferrompi)
 [![Security](https://github.com/cobre-rs/ferrompi/actions/workflows/security.yml/badge.svg)](https://github.com/cobre-rs/ferrompi/actions/workflows/security.yml)
 
-FerroMPI provides safe, generic Rust bindings to MPI through a thin C wrapper layer, enabling access to MPI 4.0+ features like **persistent collectives** that are not available in other Rust MPI bindings. All communication operations are generic over `MpiDatatype`, supporting `f32`, `f64`, `i32`, `i64`, `u8`, `u32`, and `u64`.
+FerroMPI provides safe, generic Rust bindings to MPI through a thin C wrapper layer, with first-class support for MPI 4.0+ features such as **persistent collectives** and **large-count operations**. All communication operations are generic over `MpiDatatype`, supporting `f32`, `f64`, `i32`, `i64`, `u8`, `u32`, and `u64`.
 
 ## Features
 
 - 🚀 **MPI 4.0+ support**: Persistent collectives, large-count operations
-- 🪶 **Lightweight**: Minimal C wrapper (~2400 lines), focused API
+- 🪶 **Thin**: A passthrough C shim with no business logic — hot paths validate, make one FFI call, and check the return code; no heap traffic on the common path
 - 🔒 **Safe**: Rust-idiomatic API with proper error handling and RAII
 - 🔧 **Flexible**: Works with MPICH, OpenMPI, Intel MPI, and Cray MPI
 - ⚡ **Fast**: Zero-cost abstractions, direct FFI calls
@@ -25,16 +25,18 @@ FerroMPI provides safe, generic Rust bindings to MPI through a thin C wrapper la
 
 ## Why FerroMPI?
 
-| Feature                | FerroMPI         | rsmpi                  |
-| ---------------------- | ---------------- | ---------------------- |
-| MPI Version            | 4.1              | 3.1                    |
-| Persistent Collectives | ✅               | ❌                     |
-| Large Count (>2³¹)     | ✅               | ❌                     |
-| Generic API            | ✅               | ✅                     |
-| Shared Memory Windows  | ✅               | ❌                     |
-| Thread Safety          | `Send + Sync`    | `!Send`                |
-| API Style              | Minimal, focused | Comprehensive          |
-| C Wrapper              | ~2400 lines      | None (direct bindings) |
+FerroMPI aims at a small, type-safe surface over modern MPI:
+
+| Capability             | What it gives you                                                      |
+| ---------------------- | ---------------------------------------------------------------------- |
+| MPI 4.x targeting      | Built and tested against the MPI 4.1 standard                          |
+| Persistent collectives | All 15 `_init` variants for tight, repeated start/wait loops           |
+| Large-count operations | `_c` variants handle counts beyond 2³¹ — transfers larger than 2 GB    |
+| Generic datatype API   | Every operation is generic over `MpiDatatype`; no per-type boilerplate |
+| Shared-memory windows  | RMA windows with RAII lock guards (`rma` feature)                      |
+| Hybrid MPI + threads   | `Communicator` is `Send + Sync` for OpenMP / Rayon / `std::thread`     |
+| Result-based errors    | Fallible operations return `Result` with structured MPI error context  |
+| Thin passthrough core  | A C shim with no business logic; near-zero-cost on the common path     |
 
 FerroMPI is ideal for:
 
@@ -528,7 +530,7 @@ export DYLD_LIBRARY_PATH=$(brew --prefix mpich)/lib:$DYLD_LIBRARY_PATH
 ├─────────────────────────┤
 │     ffi.rs (bindings)   │
 ├─────────────────────────┤
-│   ferrompi.c (C layer)  │  ← ~2400 lines
+│   ferrompi.c (C layer)  │  ← ~5000 lines, passthrough only
 ├─────────────────────────┤
 │   MPICH / OpenMPI       │
 └─────────────────────────┘
