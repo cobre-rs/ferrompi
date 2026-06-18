@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::{Communicator, Error, Mpi, Result, ThreadLevel};
@@ -121,29 +122,30 @@ pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<Topology
     let mut all_bufs = vec![0u8; HOSTNAME_BUF_LEN * size as usize];
     comm.allgather(&local_buf, &mut all_bufs)?;
 
-    // Build rank-to-host mapping, preserving insertion order (first rank seen per host).
-    let mut host_map: Vec<(String, Vec<i32>)> = Vec::new();
+    // Build rank-to-host mapping, preserving insertion order (first rank seen
+    // per host). Keying a HashMap on borrowed hostname slices makes this pass
+    // O(size) rather than O(size × distinct_hosts), and allocates one `String`
+    // per distinct host instead of one per rank.
+    let mut hosts: Vec<HostEntry> = Vec::new();
+    let mut index: HashMap<&str, usize> = HashMap::new();
     for r in 0..size {
         let start = r as usize * HOSTNAME_BUF_LEN;
-        let end = start + HOSTNAME_BUF_LEN;
-        let raw = &all_bufs[start..end];
+        let raw = &all_bufs[start..start + HOSTNAME_BUF_LEN];
         // Find the first null byte or take the whole buffer.
         let nul_pos = raw.iter().position(|&b| b == 0).unwrap_or(HOSTNAME_BUF_LEN);
         let hostname = std::str::from_utf8(&raw[..nul_pos])
-            .map_err(|_| Error::Internal("Invalid UTF-8 in gathered hostname".into()))?
-            .to_string();
+            .map_err(|_| Error::Internal("Invalid UTF-8 in gathered hostname".into()))?;
 
-        if let Some(entry) = host_map.iter_mut().find(|(h, _)| *h == hostname) {
-            entry.1.push(r);
+        if let Some(&i) = index.get(hostname) {
+            hosts[i].ranks.push(r);
         } else {
-            host_map.push((hostname, vec![r]));
+            index.insert(hostname, hosts.len());
+            hosts.push(HostEntry {
+                hostname: hostname.to_string(),
+                ranks: vec![r],
+            });
         }
     }
-
-    let hosts: Vec<HostEntry> = host_map
-        .into_iter()
-        .map(|(hostname, ranks)| HostEntry { hostname, ranks })
-        .collect();
 
     // Gather metadata — only rank 0 strictly needs these, but they're cheap
     // and having them on every rank avoids conditional logic for the caller.
