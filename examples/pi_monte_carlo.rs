@@ -8,7 +8,8 @@
 //! The more processes and samples, the more accurate the estimate.
 
 use ferrompi::{Mpi, ReduceOp, Result};
-use rand::Rng;
+// rand 0.10 moved `random()` from `Rng` to the `RngExt` extension trait.
+use rand::RngExt;
 
 fn main() -> Result<()> {
     let mpi = Mpi::init()?;
