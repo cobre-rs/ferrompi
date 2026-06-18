@@ -32,6 +32,18 @@
 // (64 * sizeof(MPI_Request) plus, for waitsome/testsome, 64 * sizeof(int)).
 #define FERROMPI_REQ_STACK 64
 
+// Internal resource-exhaustion sentinels, returned when a fixed-size handle
+// table is full. Negative so they never collide with MPI return codes (which
+// are non-negative); src/error.rs maps each to a typed Error::ResourceExhausted.
+// These MUST stay in sync with the mirrored consts in src/error.rs.
+#define FERROMPI_ERR_REQUESTS_FULL   (-7001)
+#define FERROMPI_ERR_COMMS_FULL      (-7002)
+#define FERROMPI_ERR_DATATYPES_FULL  (-7003)
+#define FERROMPI_ERR_OPS_FULL        (-7004)
+#define FERROMPI_ERR_WINDOWS_FULL    (-7005)
+#define FERROMPI_ERR_GROUPS_FULL     (-7006)
+#define FERROMPI_ERR_INFOS_FULL      (-7007)
+
 // Split type constants (must match Rust SplitType enum and header defines)
 #define FERROMPI_COMM_TYPE_SHARED 0
 
@@ -765,7 +777,7 @@ int ferrompi_comm_dup(int32_t comm_handle, int32_t* newcomm_handle) {
         *newcomm_handle = alloc_comm(newcomm);
         if (*newcomm_handle < 0) {
             MPI_Comm_free(&newcomm);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_COMMS_FULL;
         }
     }
     return ret;
@@ -805,7 +817,7 @@ int ferrompi_comm_split(int32_t comm_handle, int32_t color, int32_t key, int32_t
             *newcomm_handle = alloc_comm(newcomm);
             if (*newcomm_handle < 0) {
                 MPI_Comm_free(&newcomm);
-                return MPI_ERR_OTHER;
+                return FERROMPI_ERR_COMMS_FULL;
             }
         }
     }
@@ -836,7 +848,7 @@ int ferrompi_comm_split_type(int32_t comm_handle, int32_t split_type, int32_t ke
             *newcomm_handle = alloc_comm(newcomm);
             if (*newcomm_handle < 0) {
                 MPI_Comm_free(&newcomm);
-                return MPI_ERR_OTHER;
+                return FERROMPI_ERR_COMMS_FULL;
             }
         }
     }
@@ -859,7 +871,7 @@ int ferrompi_comm_create_from_group_parent(int32_t comm_h,
     int eh_ret = install_errors_return(new_comm);
     if (eh_ret != MPI_SUCCESS) { MPI_Comm_free(&new_comm); return eh_ret; }
     *out_h = alloc_comm(new_comm);
-    if (*out_h < 0) { MPI_Comm_free(&new_comm); return MPI_ERR_OTHER; }
+    if (*out_h < 0) { MPI_Comm_free(&new_comm); return FERROMPI_ERR_COMMS_FULL; }
     return MPI_SUCCESS;
 }
 
@@ -888,7 +900,7 @@ int ferrompi_comm_create_from_group(int32_t group_h,
     int eh_ret = install_errors_return(new_comm);
     if (eh_ret != MPI_SUCCESS) { MPI_Comm_free(&new_comm); return eh_ret; }
     *out_h = alloc_comm(new_comm);
-    if (*out_h < 0) { MPI_Comm_free(&new_comm); return MPI_ERR_OTHER; }
+    if (*out_h < 0) { MPI_Comm_free(&new_comm); return FERROMPI_ERR_COMMS_FULL; }
     return MPI_SUCCESS;
 #else
     (void)group_h; (void)stringtag; (void)out_h;
@@ -1002,7 +1014,7 @@ int ferrompi_isend(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -1040,7 +1052,7 @@ int ferrompi_irecv(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -1598,7 +1610,7 @@ int ferrompi_ibcast(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     
@@ -1634,7 +1646,7 @@ int ferrompi_iallreduce(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     
@@ -1671,7 +1683,7 @@ int ferrompi_ireduce(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -1711,7 +1723,7 @@ int ferrompi_igather(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -1750,7 +1762,7 @@ int ferrompi_iallgather(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -1790,7 +1802,7 @@ int ferrompi_iscatter(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -1809,7 +1821,7 @@ int ferrompi_ibarrier(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -1845,7 +1857,7 @@ int ferrompi_iscan(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -1881,7 +1893,7 @@ int ferrompi_iexscan(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -1918,7 +1930,7 @@ int ferrompi_ialltoall(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -1951,7 +1963,7 @@ int ferrompi_igather_inplace(void* recvbuf, int64_t recvcount,
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     return ret;
@@ -1981,7 +1993,7 @@ int ferrompi_iallgather_inplace(void* recvbuf, int64_t recvcount,
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     return ret;
@@ -2028,7 +2040,7 @@ int ferrompi_iscatter_inplace(const void* sendbuf, int64_t sendcount,
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     return ret;
@@ -2056,7 +2068,7 @@ int ferrompi_ialltoall_inplace(void* recvbuf, int64_t recvcount,
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     return ret;
@@ -2081,7 +2093,7 @@ int ferrompi_igatherv(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2107,7 +2119,7 @@ int ferrompi_iscatterv(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2133,7 +2145,7 @@ int ferrompi_iallgatherv(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2159,7 +2171,7 @@ int ferrompi_ialltoallv(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2195,7 +2207,7 @@ int ferrompi_ireduce_scatter_block(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2231,7 +2243,7 @@ int ferrompi_send_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2264,7 +2276,7 @@ int ferrompi_recv_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2294,7 +2306,7 @@ int ferrompi_rsend_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2324,7 +2336,7 @@ int ferrompi_ssend_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2436,7 +2448,7 @@ int ferrompi_bsend_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2494,7 +2506,7 @@ int ferrompi_bcast_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     
@@ -2526,7 +2538,7 @@ int ferrompi_allreduce_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     
@@ -2557,7 +2569,7 @@ int ferrompi_allreduce_init_inplace(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     
@@ -2590,7 +2602,7 @@ int ferrompi_gather_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     
@@ -2623,7 +2635,7 @@ int ferrompi_reduce_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2656,7 +2668,7 @@ int ferrompi_scatter_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2688,7 +2700,7 @@ int ferrompi_allgather_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2720,7 +2732,7 @@ int ferrompi_scan_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2752,7 +2764,7 @@ int ferrompi_exscan_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2784,7 +2796,7 @@ int ferrompi_alltoall_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2810,7 +2822,7 @@ int ferrompi_gather_init_inplace(void* recvbuf, int64_t recvcount,
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     return ret;
@@ -2833,7 +2845,7 @@ int ferrompi_allgather_init_inplace(void* recvbuf, int64_t recvcount,
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     return ret;
@@ -2865,7 +2877,7 @@ int ferrompi_scatter_init_inplace(const void* sendbuf, int64_t sendcount,
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     return ret;
@@ -2888,7 +2900,7 @@ int ferrompi_alltoall_init_inplace(void* recvbuf, int64_t recvcount,
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     return ret;
@@ -2921,7 +2933,7 @@ int ferrompi_gatherv_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2955,7 +2967,7 @@ int ferrompi_scatterv_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -2988,7 +3000,7 @@ int ferrompi_allgatherv_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -3019,7 +3031,7 @@ int ferrompi_alltoallv_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -3051,7 +3063,7 @@ int ferrompi_reduce_scatter_block_init(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -3216,7 +3228,7 @@ int ferrompi_info_create(int32_t* info_handle) {
         *info_handle = alloc_info(info);
         if (*info_handle < 0) {
             MPI_Info_free(&info);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_INFOS_FULL;
         }
     }
     return ret;
@@ -3280,7 +3292,7 @@ int ferrompi_comm_group(int32_t comm_handle, int32_t* group_handle) {
         *group_handle = alloc_group(g);
         if (*group_handle < 0) {
             MPI_Group_free(&g);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_GROUPS_FULL;
         }
     }
     return ret;
@@ -3297,7 +3309,7 @@ int ferrompi_group_incl(int32_t group_handle, int32_t n, const int32_t* ranks, i
         *newgroup_handle = alloc_group(newgroup);
         if (*newgroup_handle < 0) {
             MPI_Group_free(&newgroup);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_GROUPS_FULL;
         }
     }
     return ret;
@@ -3314,7 +3326,7 @@ int ferrompi_group_excl(int32_t group_handle, int32_t n, const int32_t* ranks, i
         *newgroup_handle = alloc_group(newgroup);
         if (*newgroup_handle < 0) {
             MPI_Group_free(&newgroup);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_GROUPS_FULL;
         }
     }
     return ret;
@@ -3364,7 +3376,7 @@ int ferrompi_group_union(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     int ret = MPI_Group_union(g1, g2, &new_grp);
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return MPI_ERR_OTHER; }
+        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
     }
     return ret;
 }
@@ -3377,7 +3389,7 @@ int ferrompi_group_intersection(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     int ret = MPI_Group_intersection(g1, g2, &new_grp);
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return MPI_ERR_OTHER; }
+        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
     }
     return ret;
 }
@@ -3390,7 +3402,7 @@ int ferrompi_group_difference(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     int ret = MPI_Group_difference(g1, g2, &new_grp);
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return MPI_ERR_OTHER; }
+        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
     }
     return ret;
 }
@@ -3421,7 +3433,7 @@ int ferrompi_group_range_incl(int32_t g_h, int32_t n,
     if (heap_alloc) free(triples);
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return MPI_ERR_OTHER; }
+        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
     }
     return ret;
 }
@@ -3452,7 +3464,7 @@ int ferrompi_group_range_excl(int32_t g_h, int32_t n,
     if (heap_alloc) free(triples);
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return MPI_ERR_OTHER; }
+        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
     }
     return ret;
 }
@@ -3832,7 +3844,7 @@ int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_h
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
             MPI_Win_free(&win);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_WINDOWS_FULL;
         }
     }
     return ret;
@@ -3857,7 +3869,7 @@ int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t inf
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
             MPI_Win_free(&win);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_WINDOWS_FULL;
         }
     }
     return ret;
@@ -3882,7 +3894,7 @@ int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info_handle,
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
             MPI_Win_free(&win);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_WINDOWS_FULL;
         }
     }
     return ret;
@@ -4054,7 +4066,7 @@ int ferrompi_rput(const void* origin, int64_t origin_count, int32_t origin_dt_ta
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     return ret;
@@ -4091,7 +4103,7 @@ int ferrompi_rget(void* origin, int64_t origin_count, int32_t origin_dt_tag,
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     return ret;
@@ -4133,7 +4145,7 @@ int ferrompi_raccumulate(const void* origin, int64_t origin_count, int32_t origi
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
     return ret;
@@ -4447,7 +4459,7 @@ int ferrompi_type_contiguous(int32_t count, int32_t basetype_tag,
     *newtype_handle = alloc_datatype(new_t);
     if (*newtype_handle < 0) {
         MPI_Type_free(&new_t);
-        return MPI_ERR_OTHER;
+        return FERROMPI_ERR_DATATYPES_FULL;
     }
     return MPI_SUCCESS;
 }
@@ -4468,7 +4480,7 @@ int ferrompi_type_vector(int32_t count, int32_t blocklength,
     *newtype_handle = alloc_datatype(new_t);
     if (*newtype_handle < 0) {
         MPI_Type_free(&new_t);
-        return MPI_ERR_OTHER;
+        return FERROMPI_ERR_DATATYPES_FULL;
     }
     return MPI_SUCCESS;
 }
@@ -4515,7 +4527,7 @@ int ferrompi_type_create_struct(int32_t count,
     *newtype_handle = alloc_datatype(new_t);
     if (*newtype_handle < 0) {
         MPI_Type_free(&new_t);
-        return MPI_ERR_OTHER;
+        return FERROMPI_ERR_DATATYPES_FULL;
     }
     return MPI_SUCCESS;
 }
@@ -4536,7 +4548,7 @@ int ferrompi_type_create_resized(int32_t old_h, int64_t lb,
     *newtype_handle = alloc_datatype(new_t);
     if (*newtype_handle < 0) {
         MPI_Type_free(&new_t);
-        return MPI_ERR_OTHER;
+        return FERROMPI_ERR_DATATYPES_FULL;
     }
     return MPI_SUCCESS;
 }
@@ -4647,7 +4659,7 @@ int ferrompi_isend_custom(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -4685,7 +4697,7 @@ int ferrompi_irecv_custom(
         *request_handle = alloc_request(req);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
-            return MPI_ERR_OTHER;
+            return FERROMPI_ERR_REQUESTS_FULL;
         }
     }
 
@@ -4831,10 +4843,10 @@ static MPI_User_function* const ferrompi_user_op_trampolines[MAX_OPS] = {
 /* ---- Public shims called from Rust ---- */
 
 /* Allocate a free slot; writes slot index to *out_slot.
- * Returns MPI_SUCCESS on success, MPI_ERR_OTHER if table is full. */
+ * Returns MPI_SUCCESS on success, FERROMPI_ERR_OPS_FULL if table is full. */
 int ferrompi_op_alloc_slot(int32_t* out_slot) {
     int32_t slot = alloc_op_slot();
-    if (slot < 0) return MPI_ERR_OTHER;
+    if (slot < 0) return FERROMPI_ERR_OPS_FULL;
     *out_slot = slot;
     return MPI_SUCCESS;
 }
