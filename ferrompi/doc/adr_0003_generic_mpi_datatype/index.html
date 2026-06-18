@@ -1,0 +1,331 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="ADR-0003: Sealed generic `MpiDatatype` trait family."><title>ferrompi::doc::adr_0003_generic_mpi_datatype - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module adr_0003_generic_mpi_datatype</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../ferrompi/index.html">ferrompi</a><span class="version">0.5.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module adr_<wbr>0003_<wbr>generic_<wbr>mpi_<wbr>datatype</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#adr-0003-sealed-generic-mpidatatype-trait-family" title="ADR-0003: Sealed Generic MpiDatatype Trait Family">ADR-0003: Sealed Generic MpiDatatype Trait Family</a><ul><li><a href="#context" title="Context">Context</a></li><li><a href="#decision-drivers" title="Decision Drivers">Decision Drivers</a></li><li><a href="#options-considered" title="Options Considered">Options Considered</a></li><li><a href="#decision" title="Decision">Decision</a></li><li><a href="#consequences" title="Consequences">Consequences</a></li><li><a href="#alternatives-considered" title="Alternatives Considered">Alternatives Considered</a></li><li><a href="#status" title="Status">Status</a></li></ul></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In ferrompi::<wbr>doc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">ferrompi</a>::<wbr><a href="../index.html">doc</a></div><h1>Module <span>adr_<wbr>0003_<wbr>generic_<wbr>mpi_<wbr>datatype</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/ferrompi/doc.rs.html#56">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>ADR-0003: Sealed generic <code>MpiDatatype</code> trait family.</p>
+<p>Documents the design of the sealed-trait type family (<code>MpiDatatype</code>,
+<code>MpiIndexedDatatype</code>, <code>BytePermutable</code>, <code>AtomicMpiDatatype</code>) and the
+<code>#[repr(i32)]</code> discriminant ABI contract for <code>DatatypeTag</code>.</p>
+<h2 id="adr-0003-sealed-generic-mpidatatype-trait-family"><a class="doc-anchor" href="#adr-0003-sealed-generic-mpidatatype-trait-family">§</a>ADR-0003: Sealed Generic MpiDatatype Trait Family</h2>
+<p><strong>Status:</strong> Accepted — 2026-05-17
+<strong>Date:</strong> 2026-05-17
+<strong>Deciders:</strong> Rogerio Alves</p>
+<hr />
+<h3 id="context"><a class="doc-anchor" href="#context">§</a>Context</h3>
+<p>Every MPI communication operation — broadcast, send, receive, reduce, scatter,
+gather, and their variants — requires three pieces of information about a buffer:
+a pointer to the first element, an element count, and an <code>MPI_Datatype</code> handle
+that tells the MPI library how to interpret each element (e.g., <code>MPI_FLOAT</code>,
+<code>MPI_INT32_T</code>). In a Rust API, this means that every generic function over a
+buffer type <code>T</code> must have a mechanism to map <code>T</code> to the corresponding
+<code>MPI_Datatype</code> handle before crossing the FFI boundary.</p>
+<p>ferrompi exposes every collective and point-to-point call in terms of Rust
+slices: <code>broadcast(&amp;mut [T], root)</code>, <code>send(&amp;[T], dest, tag)</code>, and so on. The
+generic parameter <code>T</code> appears in every public API signature. There must be a
+trait that bounds <code>T</code> and provides the <code>MPI_Datatype</code> mapping with no overhead
+per call.</p>
+<h4 id="why-this-is-non-trivial"><a class="doc-anchor" href="#why-this-is-non-trivial">§</a>Why this is non-trivial</h4>
+<p>The problem is not simply associating a constant with each type. The deeper
+constraint is that ferrompi’s C layer (<code>csrc/ferrompi.c</code> and <code>csrc/ferrompi.h</code>)
+resolves the <code>MPI_Datatype</code> handle through a <code>switch</code> statement on a
+<code>repr(i32)</code> tag integer passed from Rust. The C-side <code>FERROMPI_*</code> defines and
+the <code>switch</code> cases form a closed enumeration: they are written by hand, compiled
+into the shared library, and cannot be extended at runtime by an external crate.
+Any Rust design that allows external crates to add new buffer types to the
+generic API must therefore either (a) send the type information through a
+mechanism other than the tag switch — which adds a runtime dispatch cost or a
+vtable — or (b) break the C layer’s closed enumeration guarantee.</p>
+<p>A second complication is that not all operations are valid for all primitive
+types. The MPI standard distinguishes:</p>
+<ul>
+<li>General communication types: <code>f32</code>, <code>f64</code>, <code>i32</code>, <code>i64</code>, <code>u8</code>, <code>u32</code>, <code>u64</code>.</li>
+<li>MAXLOC/MINLOC paired types: six predefined struct types (<code>MPI_FLOAT_INT</code>,
+<code>MPI_DOUBLE_INT</code>, etc.) that carry both a value and a rank index.</li>
+<li>Byte-level bitwise reduction types: types whose entire memory representation
+consists of meaningful bytes with no padding, suitable for element-wise
+<code>BitwiseOr</code>/<code>BitwiseAnd</code>/<code>BitwiseXor</code> via <code>MPI_BYTE</code>.</li>
+<li>Atomic RMA types: the MPI specification does not require implementations to
+support floating-point <code>MPI_Compare_and_swap</code>; only integer and byte types are
+portable for atomic RMA operations.</li>
+</ul>
+<p>A single trait cannot express all four distinctions without subtyping. The
+design must support a family of traits with independent implementation sets and
+explicit exclusions.</p>
+<p>rsmpi, the most widely used prior Rust MPI binding, solves the datatype mapping
+problem with an <code>Equivalence</code> trait that external crates may implement for their
+own types. This makes the type set open and extensible. ferrompi’s constraints
+differ: the C layer’s <code>DatatypeTag</code> enumeration is closed by construction, and
+any type that implements <code>MpiDatatype</code> must have a corresponding <code>FERROMPI_*</code>
+constant in <code>csrc/ferrompi.h</code> and a matching <code>case</code> in every C-side switch.
+Adding an rsmpi-style open trait would either require rewriting the C dispatch
+layer or accepting a vtable lookup on every buffer element.</p>
+<hr />
+<h3 id="decision-drivers"><a class="doc-anchor" href="#decision-drivers">§</a>Decision Drivers</h3>
+<ol>
+<li>
+<p><strong>Zero-overhead dispatch.</strong> The <code>MPI_Datatype</code> handle lookup must cost nothing
+per element. Every collective call transfers potentially millions of elements;
+adding a function pointer dereference or a branch per element is unacceptable.
+The tag lookup must resolve to a compile-time constant so the compiler can
+inline it and the C-side switch reduces to a single indirect jump at the call
+site, not inside the element loop.</p>
+</li>
+<li>
+<p><strong>Closed type set.</strong> ferrompi supports exactly the primitive types documented
+in <code>README.md</code> plus the custom datatype mechanism from epic 6 for user-defined
+structures. The C-side <code>DatatypeTag</code> enumeration is not extensible at runtime:
+new variants require source changes in <code>csrc/ferrompi.h</code>, the <code>switch</code> bodies
+in <code>csrc/ferrompi.c</code>, and the Rust <code>DatatypeTag</code> enum in <code>src/datatype.rs</code>,
+followed by a recompile. External crates must not be able to add types to the
+set by implementing a trait, because such types would have no corresponding C
+<code>case</code> to dispatch to.</p>
+</li>
+<li>
+<p><strong>Compile-time rejection of misuse.</strong> Passing a <code>bool</code>, <code>String</code>, or
+<code>Vec&lt;f64&gt;</code> where an <code>&amp;[T: MpiDatatype]</code> is required must produce a compile
+error, not a runtime <code>MPI_ERR_TYPE</code>. The programmer must learn about the type
+restriction at the earliest possible moment — during compilation — rather than
+at the MPI call site during program execution, where a diagnostic would require
+cross-referencing an MPI error code with a ferrompi API.</p>
+</li>
+<li>
+<p><strong>Subtype constraints for restricted operations.</strong> Some MPI operations accept
+only a subset of the general communication types. RMA atomic operations
+(<code>MPI_Compare_and_swap</code>, <code>MPI_Fetch_and_op</code>) do not require MPI implementations
+to support floating-point types. MAXLOC/MINLOC reductions operate exclusively
+on predefined paired value+index structures, not on scalar primitives. The
+design must represent these distinctions as separate traits with their own
+implementation sets, so that a method like <code>Win::compare_and_swap</code> can carry a
+distinct bound (<code>T: AtomicMpiDatatype</code>) that excludes <code>f32</code> and <code>f64</code> at
+compile time.</p>
+</li>
+<li>
+<p><strong>No <code>Drop</code> cost for primitive types.</strong> <code>T: MpiDatatype</code> for primitive types
+must not introduce any <code>Drop</code> implementation. The primitives <code>f32</code>, <code>f64</code>,
+<code>i32</code>, <code>i64</code>, <code>u8</code>, <code>u32</code>, and <code>u64</code> are already <code>Copy</code>; the trait bound
+must not prevent the compiler from treating buffers as plain stack or heap
+data with no destructor overhead. The <code>MpiDatatype</code> supertrait bound includes
+<code>Copy</code>, which structurally prevents implementing <code>Drop</code>.</p>
+</li>
+</ol>
+<hr />
+<h3 id="options-considered"><a class="doc-anchor" href="#options-considered">§</a>Options Considered</h3><h4 id="option-a-chosen-sealed-trait-family-with-const-tag-datatypetag"><a class="doc-anchor" href="#option-a-chosen-sealed-trait-family-with-const-tag-datatypetag">§</a>Option A (chosen): Sealed trait family with <code>const TAG: DatatypeTag</code></h4>
+<p>Each trait in the family is sealed via a <code>pub(crate) mod sealed</code> pattern: a
+private <code>Sealed</code> marker trait is placed in a crate-internal module, and the
+public trait has <code>sealed::Sealed</code> as a supertrait. Because the marker trait is
+not publicly accessible, external crates cannot implement the supertrait bound
+and therefore cannot implement the public trait. The implementation in
+<code>src/datatype.rs</code> defines four independent sealed modules (<code>sealed</code>,
+<code>sealed_indexed</code>, <code>sealed_byte</code>, <code>sealed_atomic</code>) so that the four public traits
+remain disjoint — a type that implements <code>MpiDatatype</code> does not automatically
+satisfy <code>MpiIndexedDatatype</code>, and vice versa.</p>
+<p>The <code>MpiDatatype</code> trait carries a single associated constant:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">pub trait </span>MpiDatatype: sealed::Sealed + Copy + Send + <span class="lifetime">'static </span>{
+    <span class="kw">const </span>TAG: DatatypeTag;
+}</code></pre></div>
+<p><code>DatatypeTag</code> is a <code>#[repr(i32)]</code> enum whose discriminants match the
+<code>FERROMPI_*</code> defines in <code>csrc/ferrompi.h</code>. The constant <code>TAG</code> is resolved at
+compile time; the C layer receives it as an <code>i32</code> argument and dispatches
+through a <code>switch</code>. No allocation, no vtable, no branch per element.</p>
+<p>Subtype traits compose naturally via supertrait bounds. <code>AtomicMpiDatatype</code> does
+not redeclare <code>TAG</code>; it inherits the <code>MpiDatatype</code> bound implicitly through the
+requirement that any type satisfying <code>AtomicMpiDatatype</code> must also satisfy
+<code>MpiDatatype</code>. Each subtype trait has its own sealed module and its own
+<code>compile_fail</code> doctest verifying that disallowed types (e.g., <code>f64</code> for
+<code>AtomicMpiDatatype</code>) produce a compile error.</p>
+<p>Pros:</p>
+<ul>
+<li>The <code>TAG</code> constant is resolved at compile time; zero per-element cost in
+production builds and in debug builds.</li>
+<li>The closed type set is enforced structurally: the <code>sealed::Sealed</code> supertrait
+cannot be implemented outside <code>src/datatype.rs</code>. No runtime guard is needed.</li>
+<li>Subtype traits share the same dispatch mechanism without duplicating impls.
+<code>AtomicMpiDatatype</code> impls are five lines; they do not repeat the tag values.</li>
+<li>The <code>compile_fail</code> doctest pattern catches regressions in sealing immediately;
+if a future refactor accidentally exposes the sealed module, doctests fail.</li>
+<li><code>Copy + Send + 'static</code> supertrait bounds prevent <code>Drop</code> impls and restrict
+buffer element types to values safe to pass across threads and process
+boundaries.</li>
+</ul>
+<p>Cons:</p>
+<ul>
+<li>External crates cannot add new primitive types to the MPI dispatch table
+without modifying ferrompi’s source. This is intentional — the C layer
+cannot be extended at runtime — but it means ferrompi cannot be used as a
+generic MPI backend for arbitrary numeric tower types (e.g., <code>half::f16</code>,
+<code>num_complex::Complex&lt;f64&gt;</code>). User-defined types route through <code>CustomDatatype</code>
+builders instead (see Consequences).</li>
+</ul>
+<h4 id="option-b-rejected-open-mpidatatype-trait-rsmpi-style"><a class="doc-anchor" href="#option-b-rejected-open-mpidatatype-trait-rsmpi-style">§</a>Option B (rejected): Open <code>MpiDatatype</code> trait, rsmpi-style</h4>
+<p>Under this design, <code>MpiDatatype</code> carries no sealed supertrait. Any external
+crate can implement it:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="comment">// External crate
+</span><span class="kw">impl </span>ferrompi::MpiDatatype <span class="kw">for </span>MyMatrix { ... }</code></pre></div>
+<p>Pros: extensibility matches the Rust trait system’s intended use; symmetry with
+<code>Send</code>/<code>Sync</code>; compatible with numeric tower crates that define their own float
+or complex types.</p>
+<p>Cons:</p>
+<ul>
+<li>The C-side <code>DatatypeTag</code> enumeration is not extensible at runtime. A user type
+that implements <code>MpiDatatype</code> has no corresponding <code>FERROMPI_*</code> define and no
+matching <code>switch</code> case in <code>csrc/ferrompi.c</code>. The C layer would either have to
+use a fallback path (e.g., a dynamic lookup through a Rust-side registry) or
+crash with <code>MPI_ERR_TYPE</code>. Both outcomes violate decision driver 1 (zero
+overhead) and decision driver 3 (compile-time rejection).</li>
+<li>Implementing a sound open variant would require replacing the tag-switch
+dispatch in C with a vtable or a function-pointer callback into Rust for every
+datatype resolution. This is architecturally incompatible with the design
+established in ADR-0001 (hand-written C wrapper layer).</li>
+<li>rsmpi’s <code>Equivalence</code> trait is appropriate for rsmpi’s architecture, which
+uses <code>bindgen</code>-generated bindings and resolves <code>MPI_Datatype</code> handles through
+the MPI type system itself. ferrompi’s C layer does not use <code>MPI_Type_create_*</code>
+for primitives; it maps Rust types to predefined MPI constants directly.</li>
+</ul>
+<h4 id="option-c-rejected-runtime-tagged-enum"><a class="doc-anchor" href="#option-c-rejected-runtime-tagged-enum">§</a>Option C (rejected): Runtime tagged enum</h4>
+<p>Under this design, no trait carries type information. Callers pass a separate
+<code>DataKind { F32, F64, I32, ... }</code> parameter alongside the buffer:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code>world.broadcast(buf: <span class="kw-2">&amp;mut </span>[u8], kind: DataKind, root: i32) -&gt; <span class="prelude-ty">Result</span>&lt;()&gt;</code></pre></div>
+<p>Pros: no trait machinery; no const fields; simpler to explain to new
+contributors.</p>
+<p>Cons:</p>
+<ul>
+<li>Every call site must supply <code>DataKind</code> explicitly, and the compiler cannot
+verify that the buffer element type matches the declared kind. A call
+<code>broadcast(f32_buffer, DataKind::F64, 0)</code> compiles but produces incorrect
+MPI behavior at runtime — the <code>MPI_Datatype</code> handle does not match the buffer
+layout. This is the exact class of error that decision driver 3 requires to be
+caught at compile time.</li>
+<li>The API ergonomics are significantly worse than idiomatic Rust. Existing
+Rust MPI libraries and the broader numeric computing ecosystem in Rust use
+generic functions over type-parameterized buffers, not stringly or enum-typed
+kind tags.</li>
+<li>Type-erased APIs prevent the compiler from eliminating dead branches for
+unused types. The sealed-trait design allows monomorphization; each concrete
+<code>T</code> produces a distinct, optimized code path.</li>
+</ul>
+<hr />
+<h3 id="decision"><a class="doc-anchor" href="#decision">§</a>Decision</h3>
+<p><strong>Option A — sealed trait family with <code>const TAG: DatatypeTag</code> — is chosen.</strong></p>
+<p>The decision is grounded directly in the five decision drivers:</p>
+<ul>
+<li>
+<p><strong>Driver 1 (zero overhead):</strong> <code>T::TAG</code> is a compile-time constant. The C
+layer’s <code>switch</code> on the tag integer is evaluated once per call, not per
+element. Monomorphization of generic functions over <code>T: MpiDatatype</code> produces
+one code path per concrete type with no vtable and no dynamic dispatch.</p>
+</li>
+<li>
+<p><strong>Driver 2 (closed type set):</strong> The <code>pub(crate) mod sealed</code> pattern makes it
+structurally impossible for external crates to implement <code>MpiDatatype</code>. The
+invariant does not rely on documentation or convention; it is enforced by the
+Rust privacy system.</p>
+</li>
+<li>
+<p><strong>Driver 3 (compile-time rejection):</strong> A call site that passes a <code>bool</code> or
+<code>String</code> where <code>T: MpiDatatype</code> is required fails to compile because neither
+type is in <code>sealed::Sealed</code>. The compiler error appears at the generic bound,
+not at runtime.</p>
+</li>
+<li>
+<p><strong>Driver 4 (subtype constraints):</strong> <code>AtomicMpiDatatype</code>, <code>MpiIndexedDatatype</code>,
+and <code>BytePermutable</code> are independent sealed traits with their own
+implementation lists. Methods that require a stricter type set carry the
+narrower bound. The compiler enforces the restriction; no runtime check is
+needed.</p>
+</li>
+<li>
+<p><strong>Driver 5 (no <code>Drop</code> cost):</strong> The <code>Copy</code> supertrait bound on <code>MpiDatatype</code>
+prevents any type with a <code>Drop</code> impl from satisfying the bound. The seven
+primitive types are <code>Copy</code> by definition; no wrapper or destructor is
+introduced.</p>
+</li>
+</ul>
+<p>Option B is rejected because an open trait cannot be reconciled with the C
+layer’s closed <code>DatatypeTag</code> switch without adding runtime overhead or replacing
+the dispatch architecture entirely.</p>
+<p>Option C is rejected because runtime kind tags shift type mismatches from
+compile time to runtime, undermining the primary safety guarantee of a
+typed Rust MPI API.</p>
+<hr />
+<h3 id="consequences"><a class="doc-anchor" href="#consequences">§</a>Consequences</h3>
+<p><strong>Sealing is structural, not conventional.</strong> The four private modules
+(<code>sealed</code>, <code>sealed_indexed</code>, <code>sealed_byte</code>, <code>sealed_atomic</code>) in <code>src/datatype.rs</code>
+make each trait’s implementation set a crate-internal invariant. Adding a new
+implementation requires modifying <code>src/datatype.rs</code> directly; there is no
+mechanism by which a downstream crate could extend any of the four traits.
+Attempting to implement <code>MpiDatatype</code> in an external crate produces a compiler
+error on the <code>sealed::Sealed</code> supertrait, not a linker error or a runtime
+failure.</p>
+<p><strong>Subtype trait composition.</strong> <code>AtomicMpiDatatype</code>, <code>MpiIndexedDatatype</code>, and
+<code>BytePermutable</code> are each sealed by their own independent module. This means the
+four trait families are disjoint by construction: a type that satisfies
+<code>MpiDatatype</code> does not implicitly satisfy <code>MpiIndexedDatatype</code>. The disjoint
+sealing prevents accidental cross-use — for example, passing a <code>FloatInt</code>
+struct (which is <code>MpiIndexedDatatype</code>) where a plain <code>MpiDatatype</code> is required
+will fail at the call site because <code>FloatInt</code> is not in <code>sealed::Sealed</code>.</p>
+<p><strong><code>AtomicMpiDatatype</code> excludes <code>f32</code> and <code>f64</code>.</strong> Per the MPI specification,
+<code>MPI_Compare_and_swap</code> is defined only for integer and byte types. Floating-point
+CAS is not portable across MPI implementations. <code>AtomicMpiDatatype</code> is
+implemented for <code>i32</code>, <code>i64</code>, <code>u32</code>, <code>u64</code>, and <code>u8</code> only; <code>f32</code> and <code>f64</code> are
+excluded. This is encoded structurally: the macro that generates <code>AtomicMpiDatatype</code>
+impls in <code>src/datatype.rs</code> is invoked only for integer types. A method
+<code>Win::compare_and_swap</code> carrying a <code>T: AtomicMpiDatatype</code> bound rejects
+<code>Win&lt;f64&gt;</code> at compile time. The <code>compile_fail</code> doctest in <code>src/datatype.rs</code>
+verifies this rejection.</p>
+<p><strong><code>AtomicMpiDatatype</code> is gated on the <code>rma</code> feature.</strong> The trait and its impls
+are wrapped in <code>#[cfg(feature = "rma")]</code>. Projects that do not enable RMA
+operations do not pay the compile time for the trait or its impls, and the
+<code>AtomicMpiDatatype</code> name is not visible in their API surface.</p>
+<p><strong><code>compile_fail</code> doctests verify sealing.</strong> Each of the four traits has a
+<code>compile_fail</code> doctest in <code>src/datatype.rs</code> that attempts to implement the trait
+for a disallowed type and confirms the result does not compile. These doctests
+act as regression tests for the sealing invariant. A future refactor that
+accidentally exposes a sealed module will cause <code>cargo test --doc</code> to fail.</p>
+<p><strong>Adding a new primitive type requires three coordinated changes.</strong> The closed
+type set is a commitment: adding a type to <code>MpiDatatype</code> is not a local change.
+It requires (1) a new <code>DatatypeTag</code> variant in <code>src/datatype.rs</code> and a
+corresponding <code>FERROMPI_*</code> define in <code>csrc/ferrompi.h</code>, (2) a new <code>impl MpiDatatype</code>
+block in <code>src/datatype.rs</code> via the <code>impl_mpi_datatype!</code> macro, and (3) a new
+<code>case</code> in every C-side <code>switch</code> on the tag value in <code>csrc/ferrompi.c</code>. All
+three changes must land together; a partial update (new Rust impl without a new
+C case) produces <code>MPI_ERR_TYPE</code> at runtime for the new type. The coordination
+requirement is a deliberate friction point that discourages ad-hoc additions to
+the type set.</p>
+<p><strong>User-defined non-primitive types are supported through <code>CustomDatatype</code> builders.</strong>
+The sealed-trait design does not prevent ferrompi from operating on
+user-defined structs, padded layouts, or non-primitive numeric types. The
+<code>CustomDatatype</code> API (implemented in epic 6, <code>src/datatype_builder.rs</code>) provides
+constructors for contiguous blocks, strided vectors, and heterogeneous structs
+via <code>MPI_Type_contiguous</code>, <code>MPI_Type_vector</code>, and <code>MPI_Type_create_struct</code>. A
+<code>CustomDatatype</code> produces a committed <code>MPI_Datatype</code> handle at runtime and is
+passed to the <code>*_custom</code> family of collective methods. The two mechanisms are
+intentional and complementary: <code>MpiDatatype</code> gives zero-overhead dispatch for
+the seven well-known primitives; <code>CustomDatatype</code> gives full MPI derived-type
+power for everything else. They share the same C dispatch path through
+<code>get_datatype</code> (for <code>DatatypeTag</code> values) and <code>get_datatype_committed</code> (for
+<code>CustomDatatype</code> handles).</p>
+<hr />
+<h3 id="alternatives-considered"><a class="doc-anchor" href="#alternatives-considered">§</a>Alternatives Considered</h3>
+<p><strong>Macro-generated impls for all numeric primitives.</strong> A procedural macro could
+generate <code>MpiDatatype</code> impls for every type in a specified list, including types
+like <code>usize</code>, <code>isize</code>, <code>u128</code>, and <code>i128</code>. This was considered and rejected
+because the MPI standard does not define portable equivalents for these types.
+<code>usize</code> maps to <code>MPI_AINT</code> on 64-bit platforms but has no fixed-size MPI
+counterpart that works uniformly across 32-bit and 64-bit systems. <code>u128</code> has
+no predefined MPI equivalent at all. Generating impls for these types would
+require either runtime size detection (violating driver 1) or platform-conditional
+impls that produce different <code>DatatypeTag</code> values on different architectures,
+which breaks the ABI stability invariant of <code>DatatypeTag</code>.</p>
+<p><strong>Attribute-macro opt-in on user types.</strong> A <code>#[derive(MpiDatatype)]</code> or
+<code>#[ferrompi::mpi_type(f64)]</code> attribute macro could allow user types to opt in
+to the trait for a specific base MPI type. This is rejected for the same reason
+as Option B: a user-declared impl would require a corresponding C <code>case</code> that
+does not exist. The attribute could theoretically generate a C extension through
+a build script, but this would couple user crates to ferrompi’s build
+infrastructure and break the clean separation between the Rust trait layer and
+the C dispatch layer. <code>CustomDatatype</code> builders address the same need without
+modifying the closed <code>DatatypeTag</code> enumeration.</p>
+<hr />
+<h3 id="status"><a class="doc-anchor" href="#status">§</a>Status</h3>
+<p>Accepted — 2026-05-17. Implemented across epics 1-7; <code>AtomicMpiDatatype</code>
+introduced in epic 7 (<code>src/datatype.rs</code>).</p>
+</div></details></section></div></main></body></html>

@@ -1,0 +1,436 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="ADR-0001: Why ferrompi uses a hand-written C wrapper layer."><title>ferrompi::doc::adr_0001_why_c_wrapper - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module adr_0001_why_c_wrapper</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../ferrompi/index.html">ferrompi</a><span class="version">0.5.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module adr_<wbr>0001_<wbr>why_<wbr>c_<wbr>wrapper</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#adr-0001-hand-written-c-wrapper-layer" title="ADR-0001: Hand-written C Wrapper Layer">ADR-0001: Hand-written C Wrapper Layer</a><ul><li><a href="#context" title="Context">Context</a></li><li><a href="#decision-drivers" title="Decision Drivers">Decision Drivers</a></li><li><a href="#options-considered" title="Options Considered">Options Considered</a></li><li><a href="#decision" title="Decision">Decision</a></li><li><a href="#consequences" title="Consequences">Consequences</a></li><li><a href="#alternatives-considered" title="Alternatives Considered">Alternatives Considered</a></li><li><a href="#status" title="Status">Status</a></li></ul></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In ferrompi::<wbr>doc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">ferrompi</a>::<wbr><a href="../index.html">doc</a></div><h1>Module <span>adr_<wbr>0001_<wbr>why_<wbr>c_<wbr>wrapper</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/ferrompi/doc.rs.html#40">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>ADR-0001: Why ferrompi uses a hand-written C wrapper layer.</p>
+<p>Explains the ABI portability problem with <code>bindgen</code>, the handle-table
+pattern, large-count version gating, and the op-trampoline infrastructure.</p>
+<h2 id="adr-0001-hand-written-c-wrapper-layer"><a class="doc-anchor" href="#adr-0001-hand-written-c-wrapper-layer">§</a>ADR-0001: Hand-written C Wrapper Layer</h2>
+<p><strong>Status:</strong> Accepted — 2026-05-17
+<strong>Date:</strong> 2026-05-17
+<strong>Deciders:</strong> Rogerio Alves</p>
+<hr />
+<h3 id="context"><a class="doc-anchor" href="#context">§</a>Context</h3>
+<p>The most common question from new contributors is: <em>why does ferrompi
+maintain a hand-written C layer at <code>csrc/ferrompi.c</code> (4629 LOC) and
+<code>csrc/ferrompi.h</code> (2171 LOC) instead of generating Rust bindings directly
+from MPI headers via <code>bindgen</code>?</em> Most existing Rust MPI bindings — notably
+<code>rsmpi</code> — take exactly that approach: run <code>bindgen</code> over the system MPI
+headers, produce a <code>*-sys</code> crate with raw Rust types, and layer safe
+wrappers on top. ferrompi did not. This ADR is the authoritative answer.</p>
+<p>ADR-0001 is numbered to reflect logical precedence. The handle-table
+strategy (ADR-0002, <code>docs/adr/0002-handle-tables.md</code>) and the op-create
+trampoline design (ADR-0005, <code>docs/adr/0005-mpi-op-create.md</code>) both presuppose
+the existence and structure of this C wrapper. ADR-0001 documents the
+foundation that those later records build on.</p>
+<h4 id="what-the-c-layer-does-today"><a class="doc-anchor" href="#what-the-c-layer-does-today">§</a>What the C layer does today</h4>
+<p><code>csrc/ferrompi.c</code> is responsible for six categories of work:</p>
+<ol>
+<li>
+<p><strong>Handle tables.</strong> The C layer maintains seven fixed-size static tables
+mapping opaque MPI handle types to integer slot indices that Rust can
+store and compare safely:</p>
+<div><table><thead><tr><th>Table</th><th>Capacity</th><th>MPI handle type</th></tr></thead><tbody>
+<tr><td><code>comm_table</code></td><td>256</td><td><code>MPI_Comm</code></td></tr>
+<tr><td><code>request_table</code></td><td>16384</td><td><code>MPI_Request</code></td></tr>
+<tr><td><code>win_table</code></td><td>256</td><td><code>MPI_Win</code></td></tr>
+<tr><td><code>info_table</code></td><td>64</td><td><code>MPI_Info</code></td></tr>
+<tr><td><code>group_table</code></td><td>64</td><td><code>MPI_Group</code></td></tr>
+<tr><td><code>datatype_table</code></td><td>64</td><td><code>MPI_Datatype</code></td></tr>
+<tr><td><code>op_table</code></td><td>16</td><td><code>MPI_Op</code></td></tr>
+</tbody></table>
+</div>
+<p>Each table has a parallel occupancy array and an <code>alloc_*</code>/<code>free_*</code>/<code>get_*</code>
+function triple. The request table uses C11 atomics for thread safety under
+<code>MPI_THREAD_MULTIPLE</code>; see ADR-0002 (<code>docs/adr/0002-handle-tables.md</code>) for
+the full CAS strategy. Rust callers never hold a raw MPI handle; they hold
+an <code>int32_t</code> slot index.</p>
+</li>
+<li>
+<p><strong>Large-count <code>_c</code> variant selection.</strong> MPI 4.0 introduced <code>_c</code> variants
+of most communication functions (e.g., <code>MPI_Send_c</code>, <code>MPI_Bcast_c</code>) that
+accept <code>MPI_Count</code> instead of <code>int</code> for element counts, enabling messages
+larger than <code>INT_MAX</code> elements. Every shim in <code>csrc/ferrompi.c</code> that accepts
+a count selects the <code>_c</code> variant at compile time via <code>#if MPI_VERSION &gt;= 4</code>
+and falls back to the classic variant on MPI 3.x. Rust callers see a single
+stable signature in all cases; the version branch is invisible.</p>
+</li>
+<li>
+<p><strong><code>MPI_UNDEFINED</code> normalization.</strong> MPI uses <code>MPI_UNDEFINED</code> (an
+implementation-defined negative sentinel) to indicate that a rank is not
+a member of a group or that a communicator color was unspecified. The C
+shims normalize <code>MPI_UNDEFINED</code> to <code>-1</code> before returning, giving Rust a
+stable sentinel that does not vary across MPI implementations.</p>
+</li>
+<li>
+<p><strong><code>install_errors_return</code> on comm-creating shims.</strong> Every shim that
+produces a new communicator (<code>ferrompi_comm_dup</code>, <code>ferrompi_comm_split</code>,
+<code>ferrompi_comm_create</code>, <code>ferrompi_create_from_group</code>, etc.) calls the
+internal <code>install_errors_return(newcomm)</code> helper before returning. This
+sets <code>MPI_ERRORS_RETURN</code> as the error handler on the new communicator,
+ensuring that MPI errors surface as return codes rather than aborting the
+process. Centralizing this in C means Rust callers cannot forget it.</p>
+</li>
+<li>
+<p><strong>Op trampolines.</strong> <code>MPI_Op_create</code> requires a plain C function pointer;
+it provides no <code>void* user_data</code> argument. To route a call back into the
+correct Rust closure, the C layer provides <code>MAX_OPS</code> (16) distinct trampoline
+functions generated by a preprocessor macro, each with its slot index baked
+into its function body. This pattern is described fully in ADR-0005
+(<code>docs/adr/0005-mpi-op-create.md</code>).</p>
+</li>
+<li>
+<p><strong>Runtime-queried <code>MPI_MODE_*</code> constants.</strong> RMA window assertion flags
+(<code>MPI_MODE_NOSTORE</code>, <code>MPI_MODE_NOPUT</code>, <code>MPI_MODE_NOPRECEDE</code>,
+<code>MPI_MODE_NOSUCCEED</code>, <code>MPI_MODE_NOCHECK</code>) are integer constants whose
+values are defined by the MPI implementation header, not by the standard.
+The C layer exposes <code>ferrompi_win_fence_mode_values</code> and
+<code>ferrompi_win_pscw_mode_values</code> shims that return these constants at
+runtime. Rust caches them once per process in <code>OnceLock</code>-protected arrays.
+This prevents hardcoding implementation-specific integers in Rust source.</p>
+</li>
+</ol>
+<h4 id="why-bindgen-alone-is-insufficient"><a class="doc-anchor" href="#why-bindgen-alone-is-insufficient">§</a>Why bindgen alone is insufficient</h4>
+<p><code>bindgen</code> reads C headers and produces Rust <code>extern "C"</code> declarations with
+types derived from the C type system. For MPI, this means producing Rust
+types corresponding to <code>MPI_Comm</code>, <code>MPI_Request</code>, <code>MPI_Win</code>, and so on.</p>
+<p>The problem is that these types are not ABI-stable across MPI implementations:</p>
+<ul>
+<li>
+<p><strong>MPICH</strong> (including its derivatives: Cray MPICH, Intel MPI, MVAPICH2)
+defines <code>MPI_Comm</code> as <code>int</code>, <code>MPI_Request</code> as <code>int</code>, and all other handle
+types as integer typedefs. The MPI object is identified by an index into a
+process-global table inside the MPI library.</p>
+</li>
+<li>
+<p><strong>Open MPI</strong> defines <code>MPI_Comm</code> as <code>struct ompi_communicator_t*</code>,
+<code>MPI_Request</code> as <code>struct ompi_request_t*</code>, and similarly for other handles.
+The MPI handle is a pointer to an allocated C struct.</p>
+</li>
+</ul>
+<p>A single Rust binary compiled against MPICH-generated bindgen output will have
+<code>MPI_Comm = i32</code> throughout; the same source compiled against Open MPI headers
+will have <code>MPI_Comm = *mut ompi_communicator_t</code>. These are different types with
+different sizes, alignments, and calling conventions. Distributing a
+<code>*-sys</code> crate that encodes this type in its public API means the crate’s ABI
+changes depending on which MPI implementation the user’s system provides. A
+downstream crate that stores <code>MPI_Comm</code> values cannot be compiled once and
+linked against either implementation.</p>
+<p>Beyond the handle type problem, the <code>_c</code> large-count variants are absent from
+MPI 3.x headers entirely: bindgen would produce bindings for either the 3.x
+API or the 4.x API depending on what header it finds, with no mechanism to
+produce a single stable Rust API that works across both. And the op-trampoline
+problem — needing <code>MAX_OPS</code> distinct function pointers with no <code>user_data</code>
+argument — requires either C-level code generation or unsafe Rust macro
+gymnastics that are harder to audit.</p>
+<hr />
+<h3 id="decision-drivers"><a class="doc-anchor" href="#decision-drivers">§</a>Decision Drivers</h3>
+<ol>
+<li>
+<p><strong>ABI portability across MPI implementations.</strong> A single ferrompi build
+must link correctly against MPICH, Open MPI, and Cray MPICH without
+recompilation or conditional compilation in Rust source. The C wrapper
+normalizes all MPI handle types to <code>int32_t</code> or <code>int64_t</code> slot indices
+before they cross the FFI boundary, producing a stable type at the Rust
+level regardless of the underlying MPI handle representation.</p>
+</li>
+<li>
+<p><strong>Encapsulation of version-gated features.</strong> MPI 4.0 introduced large-count
+<code>_c</code> variants that cannot be referenced in Rust source if the build
+targets MPI 3.x — any attempt to name <code>MPI_Send_c</code> in Rust FFI declarations
+on a pre-4.0 system would fail to link. By placing the <code>#if MPI_VERSION &gt;= 4</code>
+conditional in C, the branch is resolved at the C compilation stage. Rust
+callers see a single stable entry point in all cases.</p>
+</li>
+<li>
+<p><strong>Centralized handle management.</strong> Exposing raw <code>MPI_Comm</code> or <code>MPI_Request</code>
+values to Rust would require Rust code to be written differently depending
+on whether handles are integers (MPICH) or pointers (Open MPI). The handle
+tables in the C layer absorb this variation: Rust always receives an
+<code>int32_t</code> slot index, manipulates it freely, and passes it back to the C
+layer to retrieve the underlying MPI handle.</p>
+</li>
+<li>
+<p><strong>Pre-flight FFI callback infrastructure.</strong> <code>MPI_Op_create</code> provides no
+mechanism for attaching user data to a function pointer. The only correct
+solution is multiple distinct function pointers, one per slot, each
+hard-coded to retrieve its associated closure by index. This is naturally
+expressed in C as a preprocessor macro that stamps out <code>MAX_OPS</code> functions.
+Producing equivalent code in Rust would require procedural macros and
+<code>unsafe</code> pointer arithmetic that is more complex to audit than the
+straightforward C macro expansion. See ADR-0005.</p>
+</li>
+<li>
+<p><strong>Minimum unsafe surface in Rust.</strong> Every call to a <code>bindgen</code>-generated
+MPI binding would be an <code>unsafe</code> call in Rust, because the raw MPI API
+manages memory and handle lifetimes in ways that Rust cannot verify
+statically. Concentrating the unsafe behavior in a single C translation unit
+that is reviewed once — with a stable, typed <code>int32_t</code>-based interface
+exposed to Rust — means the unsafe surface in Rust is a narrow FFI module
+(<code>src/ffi.rs</code>) rather than scattered <code>unsafe</code> blocks at every call site in
+safe wrapper code.</p>
+</li>
+</ol>
+<hr />
+<h3 id="options-considered"><a class="doc-anchor" href="#options-considered">§</a>Options Considered</h3><h4 id="option-a-chosen-hand-written-c-wrapper-with-handle-table-pattern"><a class="doc-anchor" href="#option-a-chosen-hand-written-c-wrapper-with-handle-table-pattern">§</a>Option A (chosen): Hand-written C wrapper with handle-table pattern</h4>
+<p>A hand-written C layer (<code>csrc/ferrompi.c</code> and <code>csrc/ferrompi.h</code>) that
+translates between the MPI implementation’s native handle types and
+fixed-width integer slot indices. The C layer owns the handle tables,
+encapsulates version-conditional code, and provides the op trampolines.
+Rust binds to this C layer via <code>src/ffi.rs</code>; safe Rust wrappers sit above
+the FFI declarations.</p>
+<p><strong>Pros:</strong></p>
+<ul>
+<li><em>ABI stability.</em> The Rust-visible API uses only <code>int32_t</code>, <code>int64_t</code>,
+<code>bool</code>, and <code>void*</code> types. These are the same size and alignment on every
+target and every MPI implementation. No conditional compilation is required
+in Rust source.</li>
+<li><em>Version transparency.</em> The <code>#if MPI_VERSION &gt;= 4</code> branches in C mean that
+the same Rust source file compiles and works correctly whether the build
+host provides MPI 3.x or MPI 4.x. The Rust API does not need to model MPI
+version differences.</li>
+<li><em>Low Rust unsafe surface.</em> The <code>unsafe</code> in Rust is confined to <code>src/ffi.rs</code>
+(the <code>extern "C"</code> block with raw function signatures) and the immediate
+safe wrappers that convert FFI results to <code>Result&lt;T, Error&gt;</code>. All Rust code
+above this layer is safe.</li>
+<li><em>Custom infrastructure.</em> The handle tables, the <code>install_errors_return</code>
+automation, the <code>MPI_UNDEFINED → -1</code> normalization, and the op trampolines
+are all straightforward in C and would be significantly more complex or
+less auditable if expressed purely in Rust.</li>
+<li><em>Single review unit.</em> A security audit of ferrompi’s FFI layer reads one C
+file and one C header. The invariants — correct slot bounds, null-sentinel
+checks, error-handler installation — are enforced in one place.</li>
+</ul>
+<p><strong>Cons:</strong></p>
+<ul>
+<li><em>Code volume.</em> The C layer is 4629 LOC in <code>csrc/ferrompi.c</code> and 2171 LOC
+in <code>csrc/ferrompi.h</code>. Every new MPI function requires additions to both
+files, to <code>src/ffi.rs</code>, and to the safe Rust wrapper, following the
+six-layer convention documented in <code>epic-07-summary.md</code>.</li>
+<li><em>Manual maintenance.</em> When the MPI standard adds new functions or when
+ferrompi adds support for new MPI versions, the C shims must be written by
+hand. There is no automated mechanism to detect that a new MPI function
+exists and has not yet been wrapped.</li>
+<li><em>Dual-language code review.</em> Any change that touches the FFI boundary
+requires reviewers to read both Rust and C. Contributors who are fluent in
+Rust but unfamiliar with C face a higher onboarding cost for FFI changes.</li>
+</ul>
+<h4 id="option-b-rejected-pure-bindgen--safe-rust-wrappers"><a class="doc-anchor" href="#option-b-rejected-pure-bindgen--safe-rust-wrappers">§</a>Option B (rejected): Pure bindgen + safe Rust wrappers</h4>
+<p>Use <code>bindgen</code> to generate a <code>ferrompi-sys</code> crate from the system MPI headers.
+Layer safe Rust wrappers on top, using Rust <code>cfg</code> attributes (<code>#[cfg(mpi_version = "4")]</code>)
+to gate large-count variants.</p>
+<p><strong>Pros:</strong></p>
+<ul>
+<li><em>Less hand-written code.</em> The <code>*-sys</code> crate is generated automatically; the
+surface area of manually maintained code shrinks to the safe wrapper layer.</li>
+<li><em>Automatic updates.</em> When MPI implementations add new functions, running
+<code>bindgen</code> regenerates the <code>*-sys</code> crate to expose them without any manual
+intervention.</li>
+<li><em>Community alignment.</em> The <code>bindgen</code> + <code>*-sys</code> pattern is the established
+Rust convention for C library bindings and is familiar to most Rust
+contributors.</li>
+</ul>
+<p><strong>Cons:</strong></p>
+<ul>
+<li>
+<p><em>ABI instability.</em> This is the fundamental rejection criterion. <code>bindgen</code>
+encodes the MPI implementation’s native handle types into the generated Rust
+types. A crate compiled against MPICH headers has <code>type MPI_Comm = i32</code>; the
+same crate compiled against Open MPI headers has <code>type MPI_Comm = *mut ompi_communicator_t</code>. The Rust ABI of the generated crate changes with the
+MPI implementation. Downstream crates that store <code>MPI_Comm</code> values in data
+structures, pass them across function boundaries, or serialize them cannot
+be written portably against the <code>*-sys</code> crate. ferrompi’s explicit goal is
+to provide a single Rust API that links against MPICH, Open MPI, and Cray
+MPICH without source changes.</p>
+</li>
+<li>
+<p><em>No solution to version gating.</em> <code>bindgen</code> generates bindings for the headers
+it is given. If the build host provides MPI 3.1 headers, the generated crate
+contains no <code>MPI_Send_c</code> declaration. If it provides MPI 4.0 headers, the
+crate contains <code>MPI_Send_c</code> but not the 3.x fallback. A <code>cfg</code>-attribute
+approach requires the build system to detect the MPI version, define a
+feature flag, and condition every call site in the safe wrapper on that flag.
+This scatters version-awareness throughout the Rust codebase. The C layer
+solves this with a single <code>#if MPI_VERSION &gt;= 4</code> at the point of the call,
+invisible to callers.</p>
+</li>
+<li>
+<p><em>FFI callbacks still require unsafe C.</em> The op-trampoline problem (see
+Decision Driver 4 and ADR-0005) cannot be solved without multiple distinct
+C-level function pointers. A pure-bindgen approach would still require a
+hand-written C file for the trampolines, negating much of the code-reduction
+argument.</p>
+</li>
+</ul>
+<h4 id="option-c-rejected-wrap-an-existing-c-or-c-mpi-abstraction-library"><a class="doc-anchor" href="#option-c-rejected-wrap-an-existing-c-or-c-mpi-abstraction-library">§</a>Option C (rejected): Wrap an existing C or C++ MPI abstraction library</h4>
+<p>Use an existing higher-level MPI C/C++ abstraction — for example, Boost.MPI,
+MPL (a header-only C++17 MPI wrapper), or OOMPH (Object-Oriented MPI for
+HPC) — as an intermediary. Rust would bind to the abstraction library rather
+than to MPI directly.</p>
+<p><strong>Pros:</strong></p>
+<ul>
+<li><em>Leverage existing abstractions.</em> These libraries already handle many of the
+same problems: type-safe message passing, communicator wrappers, reduction
+operator registration.</li>
+<li><em>Community validation.</em> Libraries like Boost.MPI are battle-tested across
+many HPC environments and MPI implementations.</li>
+</ul>
+<p><strong>Cons:</strong></p>
+<ul>
+<li>
+<p><em>Heavy dependency.</em> Boost.MPI requires Boost (a large C++ library) and a
+C++ compiler in the build graph. MPL is header-only but still requires C++17.
+ferrompi’s current build graph is Rust + C with no C++ toolchain requirement.
+Adding Boost or a C++ dependency for every downstream user of ferrompi is a
+significant ask.</p>
+</li>
+<li>
+<p><em>Opinionated API surface.</em> Abstraction libraries encode design choices about
+communicator ownership, buffer management, and collective patterns that may
+conflict with ferrompi’s API goals. Adapting ferrompi’s <code>Communicator</code> type
+to sit above Boost.MPI’s <code>communicator</code> would require either forgoing
+ferrompi’s API design or writing another translation layer on top of the
+abstraction — two C/C++ layers instead of one.</p>
+</li>
+<li>
+<p><em>Does not solve the core problem.</em> The handle-type ABI problem does not
+disappear when Boost.MPI is in the stack: Boost.MPI itself is compiled
+against a specific MPI implementation, and any raw MPI handle that crosses
+the Boost.MPI-to-Rust boundary still carries the implementation’s type.
+The only way to eliminate the problem is to convert to fixed-width integer
+indices at the MPI boundary, which is exactly what the ferrompi C layer does.</p>
+</li>
+<li>
+<p><em>Version gating moves, not disappears.</em> The <code>_c</code> large-count variants and
+MPI 4.0 features would need to be gated at the C++ abstraction level. Unless
+the chosen library already handles this, the version-gating work remains.</p>
+</li>
+</ul>
+<hr />
+<h3 id="decision"><a class="doc-anchor" href="#decision">§</a>Decision</h3>
+<p><strong>Option A (hand-written C wrapper) is chosen.</strong></p>
+<p>Rationale against each decision driver:</p>
+<ul>
+<li>
+<p><strong>Driver 1 — ABI portability.</strong> The handle-table pattern converts every MPI
+handle type to an <code>int32_t</code> slot index before it crosses the FFI boundary.
+The Rust API is <code>int32_t</code>-based throughout and is identical regardless of
+whether the underlying MPI implementation represents <code>MPI_Comm</code> as an integer
+or a pointer. No <code>cfg</code> attribute, no conditional type alias, no per-implementation
+build flag is required anywhere in Rust source.</p>
+</li>
+<li>
+<p><strong>Driver 2 — Version-gated features.</strong> Every communication shim in
+<code>csrc/ferrompi.c</code> has the form:</p>
+<div class="example-wrap"><pre class="language-c"><code>#if MPI_VERSION &gt;= 4
+    return MPI_Send_c(buf, (MPI_Count)count, dt, dest, tag, comm);
+#else
+    return MPI_Send(buf, (int)count, dt, dest, tag, comm);
+#endif</code></pre></div>
+<p>This branch is resolved once, at C compilation time. The Rust function
+signature for <code>ferrompi_send</code> does not change; neither does its body. Adding
+support for a new MPI version means editing one block of C, not auditing
+every call site in Rust.</p>
+</li>
+<li>
+<p><strong>Driver 3 — Centralized handle management.</strong> All seven handle tables are
+defined in one file (<code>csrc/ferrompi.c</code>), with a single <code>init_tables</code>
+function, consistent <code>alloc_*</code>/<code>free_*</code>/<code>get_*</code> naming, and uniform
+occupancy tracking. Adding a new handle type follows the same pattern.
+Rust code that calls <code>alloc_comm</code> receives a <code>int32_t</code>; it does not need
+to know whether that value will ultimately be used as an MPICH integer or
+an Open MPI pointer.</p>
+</li>
+<li>
+<p><strong>Driver 4 — FFI callback infrastructure.</strong> The 16 op trampolines are
+generated by a single C preprocessor macro and audited once. Adding a
+seventeenth (if <code>MAX_OPS</code> is increased) requires one integer change. The
+equivalent in Rust would require either a procedural macro (adding a build
+dependency and a non-trivial amount of unsafe pointer casting logic) or
+a repeated block of <code>unsafe extern "C" fn</code> definitions that is harder to
+keep consistent than a <code>#define</code> loop in C.</p>
+</li>
+<li>
+<p><strong>Driver 5 — Minimum unsafe surface.</strong> The <code>unsafe</code> in Rust is confined to
+<code>src/ffi.rs</code>. Safe wrapper functions in <code>src/comm/</code>, <code>src/window.rs</code>,
+<code>src/op.rs</code>, and <code>src/lib.rs</code> do not contain <code>unsafe</code> blocks beyond the
+necessary FFI call sites; they operate on <code>int32_t</code> handles and <code>Result</code>
+types. A contributor auditing ferrompi for memory safety reads <code>csrc/ferrompi.c</code>,
+<code>csrc/ferrompi.h</code>, and <code>src/ffi.rs</code> — a bounded, well-defined surface.</p>
+</li>
+</ul>
+<p>Option B is rejected because <code>bindgen</code> output is implementation-specific:
+the generated <code>MPI_Comm</code> type is not the same between MPICH and Open MPI, and
+no amount of safe Rust wrapping can reconcile two binaries with different
+type-level definitions of the same handle type. The version-gating and
+op-trampoline problems also remain unsolved.</p>
+<p>Option C is rejected because every candidate abstraction library either adds
+a heavy C++ dependency, encodes opinionated API choices incompatible with
+ferrompi’s design, or defers rather than eliminates the ABI portability problem.</p>
+<hr />
+<h3 id="consequences"><a class="doc-anchor" href="#consequences">§</a>Consequences</h3>
+<p><strong>The C wrapper grows with every new MPI feature.</strong> Each addition follows the
+six-layer convention: C declaration in <code>csrc/ferrompi.h</code>, C implementation in
+<code>csrc/ferrompi.c</code>, <code>extern "C"</code> declaration in <code>src/ffi.rs</code>, safe Rust wrapper,
+integration example, and a test entry in <code>tests/run_mpi_tests.sh</code>. This is a
+deliberate constraint, not an oversight: the six-layer structure ensures that
+every new MPI surface has a corresponding test and a documented interface.</p>
+<p><strong>Reviewers must read both Rust and C for FFI changes.</strong> A change that modifies
+a C shim signature must be reflected in <code>src/ffi.rs</code>; a change to handle-table
+capacity constants in C must be coordinated with any Rust code that assumes
+bounds on slot indices. This dual-language review requirement is the primary
+ongoing cost of the C wrapper approach.</p>
+<p><strong>The C layer is the security-audit surface.</strong> <code>csrc/ferrompi.c</code> and
+<code>csrc/ferrompi.h</code> are the only files where unchecked pointer arithmetic,
+raw <code>MPI_*</code> handle manipulation, and unsafe C operations occur. The size of
+this surface must be kept bounded; any refactoring that moves logic from Rust
+into C for convenience (rather than necessity) should be resisted.</p>
+<p><strong>Version gating happens in C; Rust does not need version-specific code paths.</strong>
+New MPI versions that add <code>_c</code> large-count variants or new API functions are
+accommodated by editing <code>#if MPI_VERSION</code> blocks in C. The consequence is that
+<code>csrc/ferrompi.c</code> will accumulate more version branches over time, but Rust
+source remains stable. Rust-side version detection (<code>Mpi::version()</code> and
+<code>OnceLock</code>-cached runtime probes) is reserved for behavioral differences that
+cannot be resolved at compile time — not for API-surface differences.</p>
+<p><strong>Handle tables are fixed-size; capacity constants are tuning parameters.</strong>
+<code>MAX_COMMS</code>, <code>MAX_REQUESTS</code>, <code>MAX_WINDOWS</code>, <code>MAX_INFOS</code>, <code>MAX_GROUPS</code>,
+<code>MAX_DATATYPES</code>, and <code>MAX_OPS</code> are defined at the top of <code>csrc/ferrompi.c</code>.
+Applications with unusual workloads (e.g., a program that creates thousands of
+communicators) may need to increase these values and recompile. This is an
+accepted trade-off against the complexity of a dynamic allocation strategy
+inside the C layer. The request table (<code>MAX_REQUESTS = 16384</code>) is sized for
+high in-flight non-blocking operation counts; the op table (<code>MAX_OPS = 16</code>) is
+sized for the realistic number of distinct user-defined reduction operations.</p>
+<p><strong>The slot-claim concurrency strategy for the request table is specified in
+ADR-0002</strong> (<code>docs/adr/0002-handle-tables.md</code>). The C11 atomic CAS pattern
+used there is the intended model for hardening the remaining plain-<code>int</code> tables
+(comm, win, info) in future work. ADR-0002 binds that future implementation.</p>
+<p><strong>The trampoline scheme for user-defined ops is specified in ADR-0005</strong>
+(<code>docs/adr/0005-mpi-op-create.md</code>). The <code>ferrompi_user_op_trampoline_N</code>
+functions in <code>csrc/ferrompi.c</code>, the <code>op_closure_data</code>/<code>op_closure_vtbl</code> arrays,
+and the drop ordering in <code>Drop for UserOp&lt;T&gt;</code> are all consequences of the
+decision made here to centralize FFI callback infrastructure in C.</p>
+<hr />
+<h3 id="alternatives-considered"><a class="doc-anchor" href="#alternatives-considered">§</a>Alternatives Considered</h3>
+<p>Two further alternatives were evaluated informally and not given full
+option treatment:</p>
+<p><strong>Directly generated FFI via the <code>cc</code> crate with a minimal bridge.</strong> The <code>cc</code>
+crate can compile C source during <code>cargo build</code>. An alternative to a
+hand-written wrapper would be a <code>build.rs</code> script that queries MPI flags
+(<code>mpicc --showme:compile</code>, <code>mpicc --showme:link</code>), generates a thin <code>.c</code> file
+from a template (parameterized by MPI version and implementation), and
+compiles it. This approach would automate some of the boilerplate but would
+require a code-generation step that is harder to read and audit than a static
+C file. The handle-table pattern, op trampolines, and version branches would
+still need to be expressed in the generated C — the reduction in human-written
+lines would be modest at best.</p>
+<p><strong>Single-implementation builds.</strong> ferrompi could accept that a given binary
+links against exactly one MPI implementation, distribute separate <code>ferrompi-mpich</code>
+and <code>ferrompi-openmpi</code> crates, and use Cargo feature flags to select the right
+one. This eliminates the ABI portability requirement and allows <code>bindgen</code> output
+to be used directly. It was rejected because HPC clusters frequently present
+multiple MPI implementations (system MPI, user-installed MPICH, Cray MPICH),
+and requiring users to recompile ferrompi when switching implementations is an
+unacceptable operational friction. The handle-table approach pays a modest code
+cost to eliminate this friction entirely.</p>
+<hr />
+<h3 id="status"><a class="doc-anchor" href="#status">§</a>Status</h3>
+<p>Accepted — 2026-05-17. Implementation predates this ADR; ADR retrospectively
+documents the chosen architecture as of commit 83f6ef7431b3ab8d3fbe8bc8782c10fc9615de4d.</p>
+</div></details></section></div></main></body></html>

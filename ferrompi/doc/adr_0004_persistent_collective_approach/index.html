@@ -1,0 +1,414 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="ADR-0004: `PersistentRequest` lifecycle and buffer-lifetime invariants."><title>ferrompi::doc::adr_0004_persistent_collective_approach - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module adr_0004_persistent_collective_approach</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../ferrompi/index.html">ferrompi</a><span class="version">0.5.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module adr_<wbr>0004_<wbr>persistent_<wbr>collective_<wbr>approach</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#adr-0004-persistentrequest-lifecycle-and-buffer-lifetime-invariants" title="ADR-0004: PersistentRequest Lifecycle and Buffer-Lifetime Invariants">ADR-0004: PersistentRequest Lifecycle and Buffer-Lifetime Invariants</a><ul><li><a href="#context" title="Context">Context</a></li><li><a href="#decision-drivers" title="Decision Drivers">Decision Drivers</a></li><li><a href="#options-considered" title="Options Considered">Options Considered</a></li><li><a href="#decision" title="Decision">Decision</a></li><li><a href="#consequences" title="Consequences">Consequences</a></li><li><a href="#alternatives-considered" title="Alternatives Considered">Alternatives Considered</a></li><li><a href="#status" title="Status">Status</a></li></ul></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In ferrompi::<wbr>doc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">ferrompi</a>::<wbr><a href="../index.html">doc</a></div><h1>Module <span>adr_<wbr>0004_<wbr>persistent_<wbr>collective_<wbr>approach</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/ferrompi/doc.rs.html#64">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>ADR-0004: <code>PersistentRequest</code> lifecycle and buffer-lifetime invariants.</p>
+<p>Covers the <code>*_init</code> / <code>start</code> / <code>wait</code> lifecycle, the decision to omit
+<code>_c</code> large-count variants from persistent shims, and the buffer-borrow
+safety model.</p>
+<h2 id="adr-0004-persistentrequest-lifecycle-and-buffer-lifetime-invariants"><a class="doc-anchor" href="#adr-0004-persistentrequest-lifecycle-and-buffer-lifetime-invariants">§</a>ADR-0004: PersistentRequest Lifecycle and Buffer-Lifetime Invariants</h2>
+<p><strong>Status:</strong> Accepted — 2026-05-17
+<strong>Date:</strong> 2026-05-17
+<strong>Deciders:</strong> Rogerio Alves</p>
+<hr />
+<h3 id="context"><a class="doc-anchor" href="#context">§</a>Context</h3><h4 id="what-persistent-operations-are"><a class="doc-anchor" href="#what-persistent-operations-are">§</a>What persistent operations are</h4>
+<p>MPI has supported persistent point-to-point operations since MPI 1.1: <code>MPI_Send_init</code>,
+<code>MPI_Recv_init</code>, and their mode variants (<code>MPI_Bsend_init</code>, <code>MPI_Rsend_init</code>,
+<code>MPI_Ssend_init</code>). MPI 4.0 extended the same concept to collectives: <code>MPI_Bcast_init</code>,
+<code>MPI_Allreduce_init</code>, <code>MPI_Gather_init</code>, and eleven more variants. All of these
+operations share the same abstraction: initialization is decoupled from execution. The
+caller invokes <code>*_init</code> once to register a communication pattern, then calls
+<code>MPI_Start</code> and <code>MPI_Wait</code> on successive iterations to execute it.</p>
+<p>The <code>MPI_Start</code> / <code>MPI_Wait</code> cycle may repeat without limit. Between two <code>MPI_Start</code>
+calls the request is “inactive”; between <code>MPI_Start</code> and <code>MPI_Wait</code> it is “active”.
+<code>MPI_Request_free</code> deallocates the request and must only be called when the request is
+inactive.</p>
+<h4 id="why-persistent-operations-matter-for-iterative-algorithms"><a class="doc-anchor" href="#why-persistent-operations-matter-for-iterative-algorithms">§</a>Why persistent operations matter for iterative algorithms</h4>
+<p>HPC iterative solvers — stochastic dynamic programming, conjugate gradient,
+domain-decomposition methods — execute the same collective communication pattern with
+identical buffer shapes on every iteration, often thousands of times. The overhead of a
+one-shot blocking collective is dominated by initialization work: argument validation,
+algorithm dispatch, routing topology computation, and MPI progress-engine setup. For an
+iterative algorithm these costs are paid identically on every call even though neither
+the buffer shape nor the participating ranks change.</p>
+<p>Persistent operations shift the initialization cost to a one-time <code>*_init</code> call.
+Subsequent iterations pay only the marginal data-movement cost. In practice this
+produces the 10–30% per-iteration speedup quoted in the ferrompi README for
+representative MPI 4.0–capable runtimes.</p>
+<h4 id="the-buffer-lifetime-problem"><a class="doc-anchor" href="#the-buffer-lifetime-problem">§</a>The buffer-lifetime problem</h4>
+<p><code>MPI_Send_init</code> and all <code>*_init</code> variants capture the buffer address at registration
+time. The MPI specification requires that the buffer remain valid (not deallocated, not
+moved) for the lifetime of the request — specifically, it must remain valid from
+<code>MPI_Start</code> through <code>MPI_Wait</code> on every iteration for as long as the request exists.
+Freeing or reallocating the buffer while the request is alive, even between two
+<code>MPI_Start</code> / <code>MPI_Wait</code> cycles, is a violation of the MPI specification and produces
+undefined behavior.</p>
+<p>This constraint is unlike typical MPI send/receive buffers, which only need to outlive a
+single <code>MPI_Wait</code>. A persistent request outlives many <code>MPI_Wait</code> calls; the buffer must
+outlive the entire <code>PersistentRequest</code> value, not just the current active window.</p>
+<p>In Rust, this invariant is either enforced at compile time via a lifetime parameter on
+the request type, or it must be enforced by documentation and programmer discipline.
+Deciding which mechanism to use is one of the two central questions this ADR answers.</p>
+<h4 id="the-active-state-problem"><a class="doc-anchor" href="#the-active-state-problem">§</a>The active-state problem</h4>
+<p>MPI 4.0 §10.2 specifies that calling <code>MPI_Start</code> on an already-active request, or
+calling <code>MPI_Request_free</code> on an active request, is erroneous and produces undefined
+behavior at the MPI level. Neither the C API nor the Rust API can recover from this
+condition through error codes alone, because by the time the error is detected, the MPI
+progress engine may already have been corrupted.</p>
+<p>The ferrompi Rust API must either prevent this condition at compile time (by making it
+unrepresentable via the type system) or detect it at runtime and respond with a clear
+failure before the MPI call is issued.</p>
+<h4 id="scope-persistent-collectives-and-persistent-p2p-share-one-design"><a class="doc-anchor" href="#scope-persistent-collectives-and-persistent-p2p-share-one-design">§</a>Scope: persistent collectives and persistent P2P share one design</h4>
+<p>The buffer-lifetime problem and the active-state problem are identical for all
+persistent operations regardless of whether the underlying MPI call is a collective or a
+point-to-point send or receive. The decision made here applies uniformly to:</p>
+<ul>
+<li>All 11 collective <code>_init</code> variants added in epics 3–4 (<code>bcast_init</code>,
+<code>allreduce_init</code>, <code>reduce_init</code>, <code>gather_init</code>, <code>scatter_init</code>, <code>allgather_init</code>,
+<code>alltoall_init</code>, <code>scan_init</code>, <code>exscan_init</code>, <code>reduce_scatter_block_init</code>,
+<code>barrier_init</code>).</li>
+<li>The four V-variants (<code>gatherv_init</code>, <code>scatterv_init</code>, <code>allgatherv_init</code>,
+<code>alltoallv_init</code>).</li>
+<li>In-place variants (<code>allreduce_init_inplace</code>, <code>gather_init_inplace</code>,
+<code>scatter_init_inplace</code>, <code>allgather_init_inplace</code>, <code>alltoall_init_inplace</code>).</li>
+<li>The five P2P <code>_init</code> variants added in epic 7 (<code>send_init</code>, <code>recv_init</code>,
+<code>bsend_init</code>, <code>rsend_init</code>, <code>ssend_init</code>).</li>
+</ul>
+<p>This ADR therefore covers both persistent collectives and persistent P2P. The
+<code>epic-07-summary.md</code> Persistent P2P Conventions section confirms that the P2P variants
+share the lifecycle design and use the same <code>PersistentRequest</code> type. Splitting into two
+ADRs would document the same design twice; one ADR covers both.</p>
+<hr />
+<h3 id="decision-drivers"><a class="doc-anchor" href="#decision-drivers">§</a>Decision Drivers</h3>
+<ol>
+<li>
+<p><strong>Buffer-lifetime safety.</strong> The buffer passed to any <code>*_init</code> constructor must
+remain valid for the entire lifetime of the <code>PersistentRequest</code>. The design must
+make it as hard as possible to violate this requirement, ideally preventing violations
+at compile time or, if that is not feasible, documenting the invariant prominently in
+SAFETY comments on every constructor.</p>
+</li>
+<li>
+<p><strong>Active-state enforcement.</strong> <code>start()</code> must not be callable when the request is
+already active. If the type system cannot prevent this, a runtime check that returns
+an error (or panics) before the invalid <code>MPI_Start</code> is issued is required. The check
+must fire before the MPI call, not after.</p>
+</li>
+<li>
+<p><strong>Drop safety.</strong> Dropping a <code>PersistentRequest</code> must not leak MPI resources and
+must not invoke undefined behavior. If the request happens to be active at drop time
+(for example, because the enclosing scope panicked), the <code>Drop</code> implementation must
+handle this case safely — either by calling <code>MPI_Wait</code> before <code>MPI_Request_free</code>, or
+by documenting why the active case cannot arise.</p>
+</li>
+<li>
+<p><strong>API symmetry with nonblocking collectives.</strong> The persistent API should be
+recognizable to callers who already use ferrompi’s nonblocking (<code>isend</code>, <code>irecv</code>,
+<code>iallreduce</code>) surface. In particular, <code>start()</code> and <code>wait()</code> should mirror the
+<code>Request::wait()</code> pattern so that callers moving between nonblocking and persistent
+forms can transfer their mental model with minimal friction.</p>
+</li>
+<li>
+<p><strong>No overhead per <code>start</code>/<code>wait</code> beyond the MPI call.</strong> The hot iteration loop
+runs <code>start()</code> and <code>wait()</code> thousands of times. Any bookkeeping added by the Rust
+wrapper must be bounded and fast — a single boolean read/write per call is acceptable;
+a heap allocation or a mutex acquisition is not.</p>
+</li>
+</ol>
+<hr />
+<h3 id="options-considered"><a class="doc-anchor" href="#options-considered">§</a>Options Considered</h3><h4 id="option-a-chosen-opaque-persistentrequest-with-handle-indirection-and-runtime-active-state-check"><a class="doc-anchor" href="#option-a-chosen-opaque-persistentrequest-with-handle-indirection-and-runtime-active-state-check">§</a>Option A (chosen): Opaque <code>PersistentRequest</code> with handle indirection and runtime active-state check</h4>
+<p><code>PersistentRequest</code> is a plain struct holding an <code>i64</code> slot index into the C-side
+<code>request_table</code> and an <code>active: bool</code> flag:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">pub struct </span>PersistentRequest {
+    handle: i64,
+    active: bool,
+}</code></pre></div>
+<p>Every <code>*_init</code> constructor allocates a request slot, stores the <code>MPI_Request</code> in
+<code>request_table[handle]</code>, and returns a <code>PersistentRequest { handle, active: false }</code>.
+The buffer pointer captured by MPI lives in the C side of the <code>request_table</code>; Rust
+holds only the opaque integer index.</p>
+<p><code>start()</code> checks <code>self.active</code>, returns <code>Err(Error::Internal(...))</code> if already active,
+then calls <code>ferrompi_start(self.handle)</code> and sets <code>self.active = true</code>. <code>wait()</code> calls
+<code>ferrompi_wait(self.handle)</code> and sets <code>self.active = false</code>. <code>Drop</code> checks <code>self.active</code>
+and calls <code>ferrompi_wait(self.handle)</code> if the request is active before calling
+<code>ferrompi_request_free(self.handle)</code>.</p>
+<p>The buffer-lifetime invariant is enforced by documentation: each constructor carries a
+<code>// SAFETY:</code> comment stating that the buffer must remain valid for the lifetime of the
+returned <code>PersistentRequest</code>. There is no Rust lifetime parameter tying the buffer to
+the request.</p>
+<p><strong>Pros:</strong></p>
+<ul>
+<li>Simple, self-contained type with no generics. Callers store <code>PersistentRequest</code> in any
+context without wrestling with lifetime propagation.</li>
+<li>The boolean active-state check is a single register read followed by a conditional
+branch — negligible overhead on the hot path.</li>
+<li><code>Drop</code> handling of the active case (wait-then-free) is safe, deterministic, and matches
+the behavior of <code>Request</code> drop elsewhere in ferrompi.</li>
+<li>All 20+ constructor variants (collectives, V-variants, in-place, P2P) return the
+same unparameterized type, keeping the API surface uniform.</li>
+<li>The handle-indirection design reuses the existing <code>request_table</code> infrastructure
+established in ADR-0002 and already exercised by the nonblocking collective layer.</li>
+</ul>
+<p><strong>Cons:</strong></p>
+<ul>
+<li>The buffer-lifetime invariant is not enforced by the Rust type system; a caller who
+frees the buffer while the request is alive will compile without error and produce
+undefined behavior at the MPI level at runtime.</li>
+<li>The active-state check is a runtime <code>Err</code> return rather than a compile-time
+prevention. Correct iterative code never triggers it, but it remains a runtime
+failure path.</li>
+</ul>
+<h4 id="option-b-rejected-type-state-persistentrequest--activepersistentrequest"><a class="doc-anchor" href="#option-b-rejected-type-state-persistentrequest--activepersistentrequest">§</a>Option B (rejected): Type-state <code>PersistentRequest</code> / <code>ActivePersistentRequest</code></h4>
+<p>Under the type-state pattern, <code>start</code> consumes the inactive variant and produces an
+active variant; <code>wait</code> consumes the active variant and produces the inactive one:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">impl </span>PersistentRequest {
+    <span class="kw">pub fn </span>start(<span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;ActivePersistentRequest&gt; { ... }
+}
+
+<span class="kw">impl </span>ActivePersistentRequest {
+    <span class="kw">pub fn </span>wait(<span class="self">self</span>) -&gt; <span class="prelude-ty">Result</span>&lt;PersistentRequest&gt; { ... }
+}</code></pre></div>
+<p>This is a defensible design used in other Rust APIs (the <code>typestate</code> crate, session
+types, builder patterns). It provides compile-time proof that <code>start</code> is never called on
+an already-active request, and that <code>wait</code> is always called before the next <code>start</code>.</p>
+<p><strong>Why it was rejected:</strong></p>
+<p>The ergonomic cost in iterative loops is substantial. Every iteration requires rebinding
+two variables:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">let </span>req = req.start()<span class="question-mark">?</span>;
+<span class="kw">let </span>req = req.wait()<span class="question-mark">?</span>;</code></pre></div>
+<p>This pattern forces the request to move out of any collection (<code>Vec&lt;PersistentRequest&gt;</code>)
+on each iteration and back in after <code>wait</code>, which is incompatible with storing requests
+alongside other per-rank state. It is also incompatible with <code>start_all</code> and <code>wait_all</code>
+on a slice of requests — a slice cannot move its elements out one at a time and replace
+them with a different type.</p>
+<p>More importantly, the type-state pattern does not help with the buffer-lifetime problem,
+which is the more dangerous invariant. A caller who stores a <code>PersistentRequest</code> longer
+than the buffer does not benefit from type-state tracking of the start/wait cycle. The
+key safety property that type-state would buy — preventing double-start — is also caught
+by the runtime check in Option A before the MPI call is issued. In practice the runtime
+check fires only on programming errors that would also be caught immediately in
+development or in tests; the probability that it fires silently in production without a
+prior failure during testing is low.</p>
+<p>Given the ergonomic cost, the incompatibility with batch operations (<code>start_all</code>,
+<code>wait_all</code>), and the limited safety advantage over the runtime check, the type-state
+approach is not the right trade-off here.</p>
+<h4 id="option-c-rejected-lifetime-parameterized-persistentrequesta-t"><a class="doc-anchor" href="#option-c-rejected-lifetime-parameterized-persistentrequesta-t">§</a>Option C (rejected): Lifetime-parameterized <code>PersistentRequest&lt;'a, T&gt;</code></h4>
+<p>Under this option, <code>PersistentRequest&lt;'a, T&gt;</code> holds a <code>PhantomData&lt;(&amp;'a [T], &amp;'a mut [T])&gt;</code>
+to tie the request lifetime to the buffer:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">pub struct </span>PersistentRequest&lt;<span class="lifetime">'a</span>, T: MpiDatatype&gt; {
+    handle: i64,
+    active: bool,
+    _marker: std::marker::PhantomData&lt;(<span class="kw-2">&amp;</span><span class="lifetime">'a </span>[T], <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>[T])&gt;,
+}</code></pre></div>
+<p>Each constructor’s signature would carry the lifetime:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">pub fn </span>allreduce_init&lt;<span class="lifetime">'a</span>, T: MpiDatatype&gt;(
+    <span class="kw-2">&amp;</span><span class="self">self</span>,
+    send: <span class="kw-2">&amp;</span><span class="lifetime">'a </span>[T],
+    recv: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><span class="kw-2">mut </span>[T],
+    op: ReduceOp,
+) -&gt; <span class="prelude-ty">Result</span>&lt;PersistentRequest&lt;<span class="lifetime">'a</span>, T&gt;&gt; { ... }</code></pre></div>
+<p>The compiler would then refuse to compile code where the buffer is freed while a
+<code>PersistentRequest&lt;'a, T&gt;</code> that borrows it is still in scope. This is the strongest
+possible enforcement of the buffer-lifetime invariant.</p>
+<p><strong>Why it was rejected:</strong></p>
+<p>The type parameters proliferate across the entire call stack. Any struct that holds a
+<code>PersistentRequest&lt;'a, T&gt;</code> must itself become generic over <code>'a</code> and <code>T</code>. In a solver
+that manages 20 persistent operations across different communicators and element types,
+this produces deep lifetime nesting that the borrow checker cannot simplify, requiring
+explicit lifetime annotations at every level.</p>
+<p>More fundamentally, the buffer-ownership picture is more complex than a single <code>'a</code>
+parameter captures. For in-place variants the send and receive buffers alias the same
+memory, which requires <code>&amp;'a mut [T]</code> for both, but the MPI call internally treats the
+single buffer as both send and receive source. For collective variants like
+<code>allreduce_init</code> there are two disjoint buffers with potentially different call-site
+owners. A single <code>'a</code> parameter cannot capture this without either overly restricting the
+caller or introducing multiple lifetime parameters per constructor. The resulting
+signatures become harder to use than the invariant they protect is dangerous.</p>
+<p>The practical safety improvement over well-documented SAFETY comments on every
+constructor is also limited: callers who read and follow the SAFETY documentation write
+correct code; callers who do not will violate either the lifetime-parameterized or the
+documented variant. The SAFETY-comment approach imposes zero ergonomic cost on callers
+who never make the mistake.</p>
+<p>Finally, <code>PersistentRequest</code> is the return type of 20+ constructor functions. Introducing
+a generic lifetime parameter into the return type would require updating all call sites
+across the codebase and would complicate the handle-table design that already exists for
+nonblocking requests.</p>
+<hr />
+<h3 id="decision"><a class="doc-anchor" href="#decision">§</a>Decision</h3>
+<p><strong>Option A is chosen.</strong> <code>PersistentRequest</code> is an opaque handle type with no lifetime
+or type parameters. The active-state invariant is enforced at runtime: <code>start()</code> returns
+<code>Err(Error::Internal("Request is already active"))</code> if called on a request for which
+<code>start()</code> has already been called without an intervening <code>wait()</code>. The buffer-lifetime
+invariant is enforced by SAFETY documentation on each constructor.</p>
+<p>Rationale against the decision drivers:</p>
+<ul>
+<li>
+<p><strong>Driver 1 (buffer-lifetime safety)</strong>: The invariant is documented in a <code>// SAFETY:</code>
+comment on every <code>*_init</code> constructor. While this does not prevent a violation at
+compile time, it makes the requirement explicit and auditable. Callers who follow the
+SAFETY contract write correct code. The type-parameterized alternative (Option C) was
+rejected because its ergonomic cost outweighs the marginal safety benefit in this
+codebase’s use patterns.</p>
+</li>
+<li>
+<p><strong>Driver 2 (active-state enforcement)</strong>: <code>start()</code> reads <code>self.active</code> before issuing
+any MPI call and returns <code>Err</code> immediately if the request is active. The MPI call is
+never issued on an invalid state. The runtime check satisfies the requirement that the
+error fires before <code>MPI_Start</code>, not after.</p>
+</li>
+<li>
+<p><strong>Driver 3 (Drop safety)</strong>: <code>Drop</code> calls <code>ferrompi_wait(self.handle)</code> if
+<code>self.active</code> is true before calling <code>ferrompi_request_free(self.handle)</code>. This is the
+safe behavior: it waits for the in-flight operation to complete before freeing the
+request, which is the only behavior permitted by the MPI specification. The wait-then-
+free sequence matches the established drop behavior for <code>Request</code> in the nonblocking
+collective layer.</p>
+</li>
+<li>
+<p><strong>Driver 4 (API symmetry)</strong>: <code>PersistentRequest::start()</code> and
+<code>PersistentRequest::wait()</code> mirror the <code>Request::wait()</code> call pattern from the
+nonblocking collective layer. Callers already familiar with <code>iallreduce(...).wait()</code> can
+directly map to <code>allreduce_init(...)?</code> / <code>req.start()?</code> / <code>req.wait()?</code>. The single-
+type design (no state-machine variants) means that callers do not need to track two
+different request types.</p>
+</li>
+<li>
+<p><strong>Driver 5 (no overhead per start/wait)</strong>: Each <code>start()</code> call performs one boolean
+read, one <code>Err</code> check, one FFI call, and one boolean write. Each <code>wait()</code> call performs
+one boolean read, one FFI call, and one boolean write. There are no heap allocations,
+no locks, and no virtual dispatch on the hot path.</p>
+</li>
+</ul>
+<hr />
+<h3 id="consequences"><a class="doc-anchor" href="#consequences">§</a>Consequences</h3><h4 id="the-single-persistentrequest-type-covers-all-20-persistent-operations"><a class="doc-anchor" href="#the-single-persistentrequest-type-covers-all-20-persistent-operations">§</a>The single <code>PersistentRequest</code> type covers all 20+ persistent operations</h4>
+<p><code>PersistentRequest</code> is the return type of every constructor variant across the entire
+persistent operation surface: the 11 collective <code>_init</code> functions, the 4 V-variants, the
+5 in-place variants, and the 5 P2P <code>_init</code> functions added in epic 7 (<code>send_init</code>,
+<code>recv_init</code>, <code>bsend_init</code>, <code>rsend_init</code>, <code>ssend_init</code>). Because the type carries no
+buffer type parameter, the same type is used uniformly regardless of whether the
+underlying operation is a broadcast over <code>f64</code> or a synchronous-mode send of <code>i32</code>.</p>
+<h4 id="persistent-p2p-shares-persistentrequest-with-no-special-casing"><a class="doc-anchor" href="#persistent-p2p-shares-persistentrequest-with-no-special-casing">§</a>Persistent P2P shares <code>PersistentRequest</code> with no special casing</h4>
+<p>The five P2P variants (<code>send_init</code>, <code>recv_init</code>, <code>bsend_init</code>, <code>rsend_init</code>,
+<code>ssend_init</code>) return <code>PersistentRequest</code> with the same lifecycle semantics as any
+collective <code>_init</code> variant. The only difference between P2P and collective constructors
+is the MPI version requirement: persistent P2P is available since MPI 1.1 (gated via
+<code>#if MPI_VERSION &gt;= 3</code> in the C shims), whereas persistent collectives require MPI 4.0
+(gated via <code>#if MPI_VERSION &gt;= 4</code>). At the Rust level both families look identical.</p>
+<h4 id="runtime-active-state-check-start-returns-err-not-panic"><a class="doc-anchor" href="#runtime-active-state-check-start-returns-err-not-panic">§</a>Runtime active-state check: <code>start()</code> returns <code>Err</code>, not <code>panic!</code></h4>
+<p>Calling <code>start()</code> on a <code>PersistentRequest</code> that is already active returns
+<code>Err(Error::Internal("Request is already active"))</code>. The implementation returns an error
+value rather than panicking. The distinction matters: returning <code>Err</code> is recoverable in
+principle and is composable with <code>?</code>-based error propagation. In correct iterative code
+this error is never triggered; the check exists as a safety net. The rustdoc for
+<code>start()</code> documents this explicitly.</p>
+<p><code>start_all()</code> performs the same check across a slice of requests: if any request in the
+slice is already active it returns <code>Err</code> before issuing <code>MPI_Startall</code> for any of them.</p>
+<h4 id="drop-behavior-wait-before-free"><a class="doc-anchor" href="#drop-behavior-wait-before-free">§</a>Drop behavior: wait before free</h4>
+<p><code>Drop for PersistentRequest</code> calls <code>ferrompi_wait(self.handle)</code> when <code>self.active</code> is
+<code>true</code>, and then calls <code>ferrompi_request_free(self.handle)</code> unconditionally. This
+two-step sequence ensures that:</p>
+<ol>
+<li>If the owning scope panics while a request is active, the drop glue calls <code>MPI_Wait</code>
+before freeing the request handle, avoiding an <code>MPI_Request_free</code>-on-active-request
+undefined-behavior violation.</li>
+<li>The <code>MPI_Request</code> slot in the C-side <code>request_table</code> is always returned by
+<code>MPI_Request_free</code> before the slot is freed, preventing a slot leak.</li>
+</ol>
+<p>The <code>ferrompi_wait</code> call in <code>Drop</code> ignores its return value (errors during drop are
+not propagatable). This is an accepted trade-off: if <code>MPI_Wait</code> fails inside <code>Drop</code>, the
+<code>MPI_Request_free</code> still runs, ensuring the slot is released. The failure is effectively
+swallowed, which is consistent with Rust’s convention that <code>Drop</code> must not panic.</p>
+<h4 id="drop-behavior-for-nonblocking-request"><a class="doc-anchor" href="#drop-behavior-for-nonblocking-request">§</a>Drop behavior for nonblocking <code>Request</code></h4>
+<p><code>Drop for Request</code> calls <code>ferrompi_wait(self.handle)</code> (which invokes <code>MPI_Wait</code>) when
+<code>self.completed == false</code>. The call blocks until the peer posts the matching send or
+receive operation.</p>
+<p><strong>If the peer is unreachable — for example, because an error path returned early and the
+peer is waiting on a different message — <code>MPI_Wait</code> will block indefinitely, deadlocking
+the calling process.</strong> This is not a bug in ferrompi; it is the expected MPI behavior
+when a request is not matched.</p>
+<p>The rationale for blocking over alternatives:</p>
+<ul>
+<li><strong>Blocking is preferred to leaking the handle.</strong> Returning from <code>Drop</code> without calling
+<code>MPI_Wait</code> would leave the request slot occupied in the C-side request table, exhausting
+the table capacity after enough leaked drops.</li>
+<li><strong>Blocking is preferred to <code>MPI_Cancel</code>.</strong> <code>MPI_Cancel</code> is unreliable for send
+operations: the MPI standard permits an implementation to complete the send anyway,
+ignoring the cancel request. A cancel-then-wait sequence would not reliably prevent the
+peer from receiving unexpected data, and the error path handling becomes more complex
+(see <code>src/request.rs</code> for the cancel comment).</li>
+</ul>
+<p>The future evolution path: a <code>MPI_Cancel</code>-then-<code>MPI_Wait</code>-with-timeout approach is being
+considered to make <code>Drop</code> non-blocking on error paths. This is out of scope for v0.4.1
+and planned for v0.5.</p>
+<h4 id="buffer-lifetime-invariant-documented-in-safety-comments"><a class="doc-anchor" href="#buffer-lifetime-invariant-documented-in-safety-comments">§</a>Buffer-lifetime invariant: documented in SAFETY comments</h4>
+<p>Each <code>*_init</code> constructor carries a <code>// SAFETY:</code> comment documenting that the caller
+must not modify the buffer while the request is active and that the buffer must remain
+valid for the entire lifetime of the returned <code>PersistentRequest</code>. For send-style
+operations (<code>send_init</code>, <code>bsend_init</code>, <code>rsend_init</code>, <code>ssend_init</code>, collective senders)
+the buffer is <code>&amp;[T]</code> — the borrow prevents concurrent mutation on the calling thread but
+does not prevent the buffer’s backing allocation from being freed if the slice is derived
+from a <code>Vec</code> whose owner drops it while the <code>PersistentRequest</code> is still alive. For
+receive-style operations (<code>recv_init</code>) and collective operations that write into a
+separate receive buffer, the buffer is <code>&amp;mut [T]</code> — the exclusive borrow prevents any
+other code from observing the buffer while the reference is live, but the same lifetime
+escape concern applies.</p>
+<p>The invariant is: <strong>the allocation backing the buffer slice must outlive the
+<code>PersistentRequest</code></strong>. This is a rule that applies across the entire duration of the
+persistent request’s lifetime, including inactive periods between <code>start()</code>/<code>wait()</code>
+cycles.</p>
+<h4 id="v-variant-buffers-counts-and-displacements-arrays-are-also-captured"><a class="doc-anchor" href="#v-variant-buffers-counts-and-displacements-arrays-are-also-captured">§</a>V-variant buffers: counts and displacements arrays are also captured</h4>
+<p>For <code>gatherv_init</code>, <code>scatterv_init</code>, <code>allgatherv_init</code>, and <code>alltoallv_init</code>, MPI
+captures pointers to both the data buffer and the <code>counts</code> and <code>displacements</code> integer
+arrays at <code>MPI_Gatherv_init</code> time. The same buffer-lifetime invariant applies to all
+three arrays: they must all remain valid for the lifetime of the <code>PersistentRequest</code>.
+This is documented in the SAFETY comments of those constructors.</p>
+<h4 id="in-place-variants-single-mutable-borrow-covers-both-roles"><a class="doc-anchor" href="#in-place-variants-single-mutable-borrow-covers-both-roles">§</a>In-place variants: single mutable borrow covers both roles</h4>
+<p>For in-place collective variants (<code>allreduce_init_inplace</code>, <code>gather_init_inplace</code>,
+<code>scatter_init_inplace</code>, <code>allgather_init_inplace</code>, <code>alltoall_init_inplace</code>), a single
+<code>&amp;mut [T]</code> buffer serves as both send and receive. The exclusive mutable borrow prevents
+any other code from reading or writing the buffer while the reference is in scope, which
+is the strongest local protection possible. The constructor passes <code>MPI_IN_PLACE</code> as the
+send buffer in the underlying C shim; the data buffer pointer is captured once. The
+same lifetime rules apply.</p>
+<h4 id="persistent-collectives-require-mpi-40-persistent-p2p-requires-mpi-11"><a class="doc-anchor" href="#persistent-collectives-require-mpi-40-persistent-p2p-requires-mpi-11">§</a>Persistent collectives require MPI 4.0; persistent P2P requires MPI 1.1</h4>
+<p>Collective <code>_init</code> constructors are conditionally compiled with <code>#if MPI_VERSION &gt;= 4</code>
+in the C shims. On a pre-4.0 MPI installation the shims return <code>MPI_ERR_UNSUPPORTED_OPERATION</code>
+and ferrompi surfaces this as <code>Error::Mpi { class: MpiErrorClass::UnsupportedOperation, ... }</code>.
+The persistent P2P variants are gated at <code>#if MPI_VERSION &gt;= 3</code> — available on all
+current MPICH, Open MPI, and Cray MPT installations. No runtime version probe is
+required for P2P; the compile-time gate is sufficient.</p>
+<hr />
+<h3 id="alternatives-considered"><a class="doc-anchor" href="#alternatives-considered">§</a>Alternatives Considered</h3><h4 id="closure-based-api"><a class="doc-anchor" href="#closure-based-api">§</a>Closure-based API</h4>
+<p>A session-style API of the form:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code>world.persistent(|s| {
+    <span class="kw">let </span>req = s.bcast_init(<span class="kw-2">&amp;mut </span>data, <span class="number">0</span>)<span class="question-mark">?</span>;
+    req.start()<span class="question-mark">?</span>;
+    req.wait()<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div>
+<p>would scope the request lifetime to the closure, making it structurally impossible to
+hold a <code>PersistentRequest</code> longer than the closure’s <code>&amp;mut data</code> borrow. This is
+appealing in principle but does not capture buffer lifetime correctly: the closure
+receives <code>&amp;mut data</code> by value capture, so <code>data</code> must already be borrowed for the
+closure’s duration by the outer scope — the scoping enforcement is pushed to the closure
+boundary rather than to the request type. It also prevents the caller from interleaving
+other work between <code>start()</code> and <code>wait()</code>, which is the primary use case for persistent
+operations in iterative solvers (post-start computation while communication is in flight).</p>
+<h4 id="macro-generated-typed-constructors-per-variant"><a class="doc-anchor" href="#macro-generated-typed-constructors-per-variant">§</a>Macro-generated typed constructors per variant</h4>
+<p>Generating a distinct newtype wrapper for each <code>*_init</code> variant
+(<code>BcastRequest</code>, <code>AllreduceRequest&lt;T&gt;</code>, <code>GatherRequest&lt;T&gt;</code>, etc.) would allow each
+type to carry the precise borrow signature of its buffer arguments. The cost is an
+explosion in API surface: 20+ types, each with its own <code>start</code>, <code>wait</code>, <code>Drop</code>, and
+<code>start_all</code> / <code>wait_all</code> integration. The implementation complexity scales linearly with
+the number of collective variants, and any future addition to the persistent operation
+surface (e.g., <code>reduce_scatter_init</code> in a future MPI version) requires a new type.
+A single <code>PersistentRequest</code> that serves all variants is strictly preferable.</p>
+<hr />
+<h3 id="status"><a class="doc-anchor" href="#status">§</a>Status</h3>
+<p>Accepted — 2026-05-17. Implemented across epics 3–4 (persistent collectives) and epic 7
+(persistent P2P). The implementation lives in <code>src/persistent.rs</code> (the <code>PersistentRequest</code>
+type and its <code>Drop</code> impl) and <code>src/comm/persistent.rs</code> (all <code>*_init</code> constructor methods
+on <code>Communicator</code>).</p>
+</div></details></section></div></main></body></html>

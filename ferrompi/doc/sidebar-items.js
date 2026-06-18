@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["adr_0001_why_c_wrapper","adr_0002_handle_tables","adr_0003_generic_mpi_datatype","adr_0004_persistent_collective_approach","adr_0005_mpi_op_create","architecture","migrating_from_rsmpi","mpi_compatibility"]};

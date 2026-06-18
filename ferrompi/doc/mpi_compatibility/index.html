@@ -1,0 +1,398 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="MPI implementation compatibility matrix."><title>ferrompi::doc::mpi_compatibility - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module mpi_compatibility</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../ferrompi/index.html">ferrompi</a><span class="version">0.5.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module mpi_<wbr>compatibility</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#mpi-implementation-compatibility" title="MPI Implementation Compatibility">MPI Implementation Compatibility</a><ul><li><a href="#ci-vs-user-reported-status" title="CI vs User-Reported Status">CI vs User-Reported Status</a></li><li><a href="#implementation-matrix" title="Implementation Matrix">Implementation Matrix</a></li><li><a href="#implementation-specific-notes" title="Implementation-Specific Notes">Implementation-Specific Notes</a></li><li><a href="#required-environment-variables-and-build-flags" title="Required Environment Variables and Build Flags">Required Environment Variables and Build Flags</a></li><li><a href="#how-to-report-compatibility" title="How to Report Compatibility">How to Report Compatibility</a></li></ul></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In ferrompi::<wbr>doc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">ferrompi</a>::<wbr><a href="../index.html">doc</a></div><h1>Module <span>mpi_<wbr>compatibility</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/ferrompi/doc.rs.html#33">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>MPI implementation compatibility matrix.</p>
+<p>Documents which features are available on MPICH 3.x/4.x, Open MPI 4/5,
+Intel MPI, and Cray MPI, including known issues and how to report new
+compatibility data.</p>
+<h2 id="mpi-implementation-compatibility"><a class="doc-anchor" href="#mpi-implementation-compatibility">§</a>MPI Implementation Compatibility</h2>
+<blockquote>
+<p><strong>Audience:</strong> Users selecting an MPI implementation to deploy ferrompi, and
+contributors interpreting test failures against a non-CI-tested runtime.</p>
+<p><strong>Testing disclaimer:</strong> Only two implementations are part of CI: MPICH
+(using the Ubuntu Noble package, hotfixed to 4.2.1) and Open MPI (from
+<code>libopenmpi-dev</code> on Ubuntu Noble, which ships Open MPI 4.x). All other
+implementations — Open MPI 5.x, Intel MPI, and Cray MPI — are <strong>not CI-tested</strong>.
+Their entries in the matrix below are based on known MPI standard version
+support and user reports. Do not assume that an unmarked cell indicates a
+problem; it indicates an absence of evidence. Where CI evidence exists, cells
+are marked ✓ or ⚠. Where no evidence exists, cells are marked ?.</p>
+</blockquote>
+<hr />
+<h3 id="ci-vs-user-reported-status"><a class="doc-anchor" href="#ci-vs-user-reported-status">§</a>CI vs User-Reported Status</h3>
+<p>ferrompi’s CI pipeline (<code>.github/workflows/test.yml</code>) runs on Ubuntu Noble
+(<code>ubuntu-latest</code>) and installs MPI via <code>apt-get</code>. The matrix covers two
+implementations:</p>
+<div><table><thead><tr><th>Implementation</th><th>CI status</th><th>Version tested</th><th>Install package</th></tr></thead><tbody>
+<tr><td>MPICH</td><td>CI-tested</td><td>4.2.1 (hotfixed)</td><td><code>mpich libmpich-dev</code></td></tr>
+<tr><td>Open MPI</td><td>CI-tested</td><td>4.x (Noble default)</td><td><code>libopenmpi-dev openmpi-bin</code></td></tr>
+<tr><td>Open MPI 5.x</td><td>user-reported</td><td>5.0.0+</td><td>—</td></tr>
+<tr><td>Intel MPI</td><td>user-reported</td><td>2021.x / 2024.x</td><td>—</td></tr>
+<tr><td>Cray MPI / MPT</td><td>untested</td><td>8.x (MPICH-derived)</td><td>via <code>CRAY_MPICH_DIR</code></td></tr>
+</tbody></table>
+</div>
+<p>The CI workflow installs MPICH, applies a hotfix for the Ubuntu Noble
+<code>libmpich12</code> package (see the
+<a href="https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338">upstream bug report</a>),
+and runs all integration tests under both the default feature set and the <code>rma</code>
+feature set. Open MPI is also installed from the Noble archive but requires
+environment overrides (<code>OMPI_MCA_rmaps_base_oversubscribe=1</code>,
+<code>OMPI_ALLOW_RUN_AS_ROOT=1</code>) to run correctly in the GitHub Actions sandbox.</p>
+<p>MPICH 3.x is <strong>not tested in CI</strong>. The Ubuntu Noble default provides MPICH
+4.2.x; there is no matrix entry for an older MPICH. User reports from MPICH 3.x
+deployments are the only signal. The same applies to Open MPI 5.x, Intel MPI,
+and Cray MPI.</p>
+<p>User-reported compatibility evidence is collected via GitHub Issues. When a
+report is verified (a reproducible test run with version output attached), the
+relevant cells in this document are updated and the issue is linked from the
+corresponding footnote. See <a href="#how-to-report-compatibility">How to Report Compatibility</a>
+for what to include.</p>
+<hr />
+<h3 id="implementation-matrix"><a class="doc-anchor" href="#implementation-matrix">§</a>Implementation Matrix</h3>
+<p>Column ordering is consistent across all sub-tables:
+<strong>MPICH 3.x | MPICH 4.x | Open MPI 4 | Open MPI 5 | Cray MPI</strong></p>
+<p>Legend:</p>
+<ul>
+<li>✓ — works; confirmed by CI pass or a verified user report</li>
+<li>⚠ — works with a caveat; see the numbered footnote below the table</li>
+<li>✗ — does not work; feature is absent or known to fail</li>
+<li>? — untested; no CI evidence and no verified user report</li>
+</ul>
+<h4 id="blocking-collectives"><a class="doc-anchor" href="#blocking-collectives">§</a>Blocking Collectives</h4>
+<p>These functions map to the <code>Communicator::barrier</code>, <code>broadcast</code>, <code>reduce</code>,
+<code>allreduce</code>, <code>gather</code>, <code>allgather</code>, <code>scatter</code>, <code>alltoall</code>, <code>scan</code>, <code>exscan</code>,
+and <code>reduce_scatter_block</code> methods in ferrompi’s public API. All are MPI 1.0+
+features and have been available in every MPI implementation for decades. The
+MPICH 4.x ✓ cells reflect CI passes on MPICH 4.2.1.</p>
+<div><table><thead><tr><th>Feature</th><th style="text-align: center">MPICH 3.x</th><th style="text-align: center">MPICH 4.x</th><th style="text-align: center">Open MPI 4</th><th style="text-align: center">Open MPI 5</th><th style="text-align: center">Cray MPI</th></tr></thead><tbody>
+<tr><td><code>barrier</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>broadcast</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>reduce</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>allreduce</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>gather</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>allgather</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>scatter</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>alltoall</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>scan</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>exscan</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>reduce_scatter_block</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+</tbody></table>
+</div>
+<p>Open MPI 4 ✓ reflects CI passes on the Ubuntu Noble <code>libopenmpi-dev</code> package.</p>
+<h4 id="nonblocking-collectives"><a class="doc-anchor" href="#nonblocking-collectives">§</a>Nonblocking Collectives</h4>
+<p>These are the <code>i*</code> variants (<code>ibarrier</code>, <code>ibcast</code>, <code>ireduce</code>, etc.). They are
+MPI 3.0+ features. MPICH 3.x supports MPI 3.1 and provides these; Open MPI 3+
+does as well. The ✓ entries for MPICH 3.x are based on MPI standard conformance
+(MPICH 3.x implements MPI 3.1); CI evidence exists only for MPICH 4.x and Open
+MPI 4.</p>
+<div><table><thead><tr><th>Feature</th><th style="text-align: center">MPICH 3.x</th><th style="text-align: center">MPICH 4.x</th><th style="text-align: center">Open MPI 4</th><th style="text-align: center">Open MPI 5</th><th style="text-align: center">Cray MPI</th></tr></thead><tbody>
+<tr><td><code>ibarrier</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>ibcast</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>ireduce</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>iallreduce</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>igather</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>iallgather</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>iscatter</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>ialltoall</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>iscan</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>iexscan</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>ireduce_scatter_block</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+</tbody></table>
+</div><h4 id="persistent-collectives"><a class="doc-anchor" href="#persistent-collectives">§</a>Persistent Collectives</h4>
+<p>Persistent collectives (<code>*_init</code> / <code>start</code> / <code>wait</code> pattern) require <strong>MPI
+4.0+</strong>. MPICH 4.0 was the first MPICH release to support MPI 4.0. Open MPI
+4.x implements MPI 3.1 only; Open MPI 5.0 is the first Open MPI release to
+implement MPI 4.0. Consequently:</p>
+<ul>
+<li>MPICH 3.x: ✗ — the <code>#if MPI_VERSION &gt;= 4</code> stub in <code>csrc/ferrompi.c</code> returns
+<code>MPI_ERR_UNSUPPORTED_OPERATION</code>; the Rust layer maps this to
+<code>Error::NotSupported</code>.</li>
+<li>Open MPI 4: ✗ — Open MPI 4.x implements MPI 3.1, not MPI 4.0. The MPI
+version number of the <em>implementation</em> (4.x) does not equal the MPI
+<em>standard</em> version (3.1). See note on version number confusion in
+<a href="#open-mpi-4">Open MPI 4 notes</a>.</li>
+</ul>
+<div><table><thead><tr><th>Feature</th><th style="text-align: center">MPICH 3.x</th><th style="text-align: center">MPICH 4.x</th><th style="text-align: center">Open MPI 4</th><th style="text-align: center">Open MPI 5</th><th style="text-align: center">Cray MPI</th></tr></thead><tbody>
+<tr><td><code>barrier_init</code></td><td style="text-align: center">✗</td><td style="text-align: center">✓</td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>bcast_init</code></td><td style="text-align: center">✗</td><td style="text-align: center">✓</td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>reduce_init</code></td><td style="text-align: center">✗</td><td style="text-align: center">✓</td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>allreduce_init</code></td><td style="text-align: center">✗</td><td style="text-align: center">✓</td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>gather_init</code></td><td style="text-align: center">✗</td><td style="text-align: center">✓</td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>allgather_init</code></td><td style="text-align: center">✗</td><td style="text-align: center">✓</td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>scatter_init</code></td><td style="text-align: center">✗</td><td style="text-align: center">⚠ <sup id="fnref1"><a href="#fn1">1</a></sup></td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>alltoall_init</code></td><td style="text-align: center">✗</td><td style="text-align: center">✓</td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>scan_init</code></td><td style="text-align: center">✗</td><td style="text-align: center">✓</td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>exscan_init</code></td><td style="text-align: center">✗</td><td style="text-align: center">✓</td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>reduce_scatter_block_init</code></td><td style="text-align: center">✗</td><td style="text-align: center">✓</td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+</tbody></table>
+</div><h4 id="persistent-point-to-point"><a class="doc-anchor" href="#persistent-point-to-point">§</a>Persistent Point-to-Point</h4>
+<p>Persistent P2P functions (<code>send_init</code>, <code>recv_init</code>, <code>bsend_init</code>, <code>rsend_init</code>,
+<code>ssend_init</code>) were introduced in MPI 1.1 but ferrompi gates them at
+<code>#if MPI_VERSION &gt;= 3</code> per project policy. No runtime version probe is needed;
+the gate is compile-time only. All five are available on every MPI 3.x and 4.x
+implementation.</p>
+<div><table><thead><tr><th>Feature</th><th style="text-align: center">MPICH 3.x</th><th style="text-align: center">MPICH 4.x</th><th style="text-align: center">Open MPI 4</th><th style="text-align: center">Open MPI 5</th><th style="text-align: center">Cray MPI</th></tr></thead><tbody>
+<tr><td><code>send_init</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>recv_init</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>bsend_init</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>rsend_init</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓ <sup id="fnref2"><a href="#fn2">2</a></sup></td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>ssend_init</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+</tbody></table>
+</div><h4 id="rma--shared-memory-windows"><a class="doc-anchor" href="#rma--shared-memory-windows">§</a>RMA / Shared Memory Windows</h4>
+<p>RMA operations require the <code>rma</code> feature flag (<code>cargo build --features rma</code>).
+<code>Win_allocate_shared</code> requires MPI 3.0+. All other RMA functions below are MPI
+2.0+ (<code>MPI_Put</code>, <code>MPI_Get</code>, <code>MPI_Accumulate</code>) or MPI 3.0+ (<code>MPI_Rput</code>,
+<code>MPI_Rget</code>, <code>MPI_Raccumulate</code>, <code>MPI_Get_accumulate</code>, <code>MPI_Fetch_and_op</code>,
+<code>MPI_Compare_and_swap</code>, <code>MPI_Win_flush*</code>, <code>MPI_Win_sync</code>, <code>MPI_Win_lock_all</code>).
+All are available on MPICH 3.x/4.x and Open MPI 4+.</p>
+<div><table><thead><tr><th>Feature</th><th style="text-align: center">MPICH 3.x</th><th style="text-align: center">MPICH 4.x</th><th style="text-align: center">Open MPI 4</th><th style="text-align: center">Open MPI 5</th><th style="text-align: center">Cray MPI</th></tr></thead><tbody>
+<tr><td><code>win_fence</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>win_lock</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>win_lock_all</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>win_unlock</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>win_unlock_all</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>win_flush</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>win_flush_all</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>win_flush_local</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>win_flush_local_all</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>win_sync</code></td><td style="text-align: center">✓</td><td style="text-align: center">⚠ <sup id="fnref3"><a href="#fn3">3</a></sup></td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>put</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>get</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>accumulate</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>get_accumulate</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>fetch_and_op</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>compare_and_swap</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>rput</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>rget</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>raccumulate</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+</tbody></table>
+</div><h4 id="groups-and-communicators"><a class="doc-anchor" href="#groups-and-communicators">§</a>Groups and Communicators</h4><div><table><thead><tr><th>Feature</th><th style="text-align: center">MPICH 3.x</th><th style="text-align: center">MPICH 4.x</th><th style="text-align: center">Open MPI 4</th><th style="text-align: center">Open MPI 5</th><th style="text-align: center">Cray MPI</th></tr></thead><tbody>
+<tr><td><code>Group::union</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>Group::intersection</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>Group::difference</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>Communicator::split</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>Communicator::duplicate</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>create_from_group</code></td><td style="text-align: center">✗ <sup id="fnref4"><a href="#fn4">4</a></sup></td><td style="text-align: center">✓</td><td style="text-align: center">✗ <sup id="fnref4-2"><a href="#fn4">4</a></sup></td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+</tbody></table>
+</div><h4 id="user-defined-reduction-operations"><a class="doc-anchor" href="#user-defined-reduction-operations">§</a>User-Defined Reduction Operations</h4>
+<p><code>UserOp</code> uses the <code>MPI_Op_create</code> trampoline mechanism, which is MPI 1.0+
+and available everywhere. The <code>_noncommutative</code> variant uses <code>commute=0</code> in
+<code>MPI_Op_create</code>; this is standard MPI and supported by all implementations.
+Only <code>allreduce_with_op</code> is currently exposed; the full <code>_with_op</code> sweep
+(reduce, scan, exscan) is deferred to a follow-up.</p>
+<div><table><thead><tr><th>Feature</th><th style="text-align: center">MPICH 3.x</th><th style="text-align: center">MPICH 4.x</th><th style="text-align: center">Open MPI 4</th><th style="text-align: center">Open MPI 5</th><th style="text-align: center">Cray MPI</th></tr></thead><tbody>
+<tr><td><code>UserOp::new</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+<tr><td><code>UserOp::new_noncommutative</code></td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">✓</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+</tbody></table>
+</div><h4 id="large-count-_c-variants"><a class="doc-anchor" href="#large-count-_c-variants">§</a>Large-Count <code>_c</code> Variants</h4>
+<p>All collective <code>_c</code> variants (e.g., <code>MPI_Allreduce_c</code>, <code>MPI_Bcast_c</code>) require
+<strong>MPI 4.0+</strong>. The <code>#if MPI_VERSION &gt;= 4</code> gate in <code>csrc/ferrompi.c</code> covers
+every nonblocking collective shim. Persistent shims deliberately omit the <code>_c</code>
+branch (standing epic-04 convention: persistent shims are MPI 4.0+ themselves,
+and large-count interaction with persistent initialisers is deferred to MPI 5.x
+clarification).</p>
+<div><table><thead><tr><th>Feature</th><th style="text-align: center">MPICH 3.x</th><th style="text-align: center">MPICH 4.x</th><th style="text-align: center">Open MPI 4</th><th style="text-align: center">Open MPI 5</th><th style="text-align: center">Cray MPI</th></tr></thead><tbody>
+<tr><td>All collective <code>_c</code> variants (&gt;2³¹ elems)</td><td style="text-align: center">✗</td><td style="text-align: center">✓</td><td style="text-align: center">✗</td><td style="text-align: center">?</td><td style="text-align: center">?</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h3 id="implementation-specific-notes"><a class="doc-anchor" href="#implementation-specific-notes">§</a>Implementation-Specific Notes</h3><h4 id="mpich-4x"><a class="doc-anchor" href="#mpich-4x">§</a>MPICH 4.x</h4>
+<p>MPICH 4.x is the primary CI-tested implementation. ferrompi is developed and
+tested against MPICH 4.2.1 (the Ubuntu Noble hotfix package).</p>
+<p><strong>Known issues on MPICH 4.2.x:</strong></p>
+<ul>
+<li>
+<p><strong><code>scatter_init_inplace</code> deadlock.</strong> <code>MPI_Scatter_init</code> with <code>MPI_IN_PLACE</code>
+on the root rank produces a deterministic deadlock on all MPICH 4.2.x
+releases (4.2.0, 4.2.1, 4.2.3). The fix is present in MPICH 4.3+. ferrompi’s
+<code>test_scatter_init_inplace</code> example detects the affected versions at runtime
+and prints <code>SKIP: MPICH 4.2.x has a known MPI_Scatter_init+MPI_IN_PLACE deadlock</code>. The non-inplace <code>scatter_init</code> (separate send and receive buffers)
+is unaffected.</p>
+</li>
+<li>
+<p><strong><code>MPI_Win_sync</code> passive-epoch requirement.</strong> MPICH 4.2.x enforces that
+<code>MPI_Win_sync</code> must be called within a passive-target epoch (inside a lock
+pair), even though the MPI standard does not impose this restriction in all
+contexts. Always call <code>Win::sync</code> via a lock guard. This is documented in the
+<code>src/window.rs</code> rustdoc and captured in footnote <sup id="fnref3-2"><a href="#fn3">3</a></sup> above.</p>
+</li>
+<li>
+<p><strong>Ubuntu Noble MPICH package.</strong> The <code>mpich</code> and <code>libmpich12</code> packages in
+Ubuntu 24.04 LTS (Noble) ship a broken MPICH 4.2.0. CI applies a hotfix that
+replaces the shared library with MPICH 4.2.1 from the Ubuntu archive. See the
+<code>Hotfix MPICH on Ubuntu Noble</code> step in <code>.github/workflows/test.yml</code> and the
+<a href="https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338">upstream Launchpad bug</a>.</p>
+</li>
+</ul>
+<p><strong><code>MPI_UNDEFINED</code> value.</strong> MPICH uses <code>MPI_UNDEFINED = -32766</code>; ferrompi
+normalises this to <code>-1</code> in the C shim layer (<code>csrc/ferrompi.c</code>) so callers
+always see <code>-1</code>. Do not hardcode either value in application code; use
+<code>Group::undefined()</code> (which calls <code>ferrompi_mpi_undefined()</code>) to obtain the
+sentinel.</p>
+<p><strong><code>MPI_MODE_*</code> constants.</strong> Window fence and PSCW assert constants
+(<code>MPI_MODE_NOSTORE</code>, <code>MPI_MODE_NOPUT</code>, etc.) are implementation-defined
+integers. ferrompi queries them at runtime via <code>OnceLock</code>-cached C shims and
+exposes them through the <code>WinFenceAssert</code> and <code>WinPscwAssert</code> bitflag types.
+Never hardcode mode constant values.</p>
+<h4 id="mpich-3x"><a class="doc-anchor" href="#mpich-3x">§</a>MPICH 3.x</h4>
+<p>MPICH 3.x implements MPI 3.1. It is <strong>not tested in CI</strong>; support is based on
+known MPI standard conformance. The following MPI 4.0+ features are absent:</p>
+<ul>
+<li>All persistent collectives (<code>barrier_init</code>, <code>bcast_init</code>, etc.)</li>
+<li><code>create_from_group</code> (<code>MPI_Comm_create_from_group</code>)</li>
+<li>All large-count <code>_c</code> variants (<code>MPI_Allreduce_c</code>, etc.)</li>
+</ul>
+<p>The C shim layer in <code>csrc/ferrompi.c</code> provides <code>#if MPI_VERSION &gt;= 4</code> stubs
+for every MPI 4.0+ entry point. These stubs return
+<code>MPI_ERR_UNSUPPORTED_OPERATION</code> unconditionally when compiled against
+MPICH 3.x headers. Rust code maps this to <code>Error::NotSupported</code> and integration
+tests use the <code>SKIP</code> pattern: check <code>Mpi::version()</code> at runtime, print
+<code>"SKIP: ..."</code>, and return <code>0</code>.</p>
+<p>All blocking collectives, nonblocking collectives, persistent P2P, and
+group/communicator operations (excluding <code>create_from_group</code>) are expected to
+work on MPICH 3.4.x.</p>
+<h4 id="open-mpi-4"><a class="doc-anchor" href="#open-mpi-4">§</a>Open MPI 4</h4>
+<blockquote>
+<p><strong>Important version number note.</strong> “Open MPI 4” refers to the <em>implementation</em>
+version (the release number on the Open MPI website). Open MPI 4.x implements
+the MPI <strong>3.1</strong> standard, not MPI 4.0. Do not confuse the Open MPI release
+version with the MPI standard version.</p>
+</blockquote>
+<p>Open MPI 4.x is CI-tested via the Ubuntu Noble <code>libopenmpi-dev</code> package. All
+blocking collectives, nonblocking collectives, persistent P2P, RMA operations,
+group operations, and user-defined ops are expected to work.</p>
+<p><strong>Absent features (MPI 3.1 only):</strong></p>
+<ul>
+<li>Persistent collectives (require MPI 4.0+)</li>
+<li><code>create_from_group</code> (requires MPI 4.0+)</li>
+<li>Large-count <code>_c</code> variants (require MPI 4.0+)</li>
+</ul>
+<p><strong>Known CI caveats.</strong> Open MPI requires oversubscription and root-permission
+flags when running in GitHub Actions:
+<code>OMPI_MCA_rmaps_base_oversubscribe=1</code>, <code>OMPI_ALLOW_RUN_AS_ROOT=1</code>,
+<code>OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1</code>. These are set in <code>.github/workflows/test.yml</code>
+and are not required outside the CI sandbox.</p>
+<p><strong><code>MPI_UNDEFINED</code> value.</strong> Open MPI uses <code>-1</code> for <code>MPI_UNDEFINED</code>, matching
+ferrompi’s normalised value. The normalisation in the C shim layer is still
+applied for defensive correctness.</p>
+<p><strong><code>Request::cancel</code> portability.</strong> <code>MPI_Cancel</code> on a send request is silently
+ignored by Open MPI (the cancel is accepted but the send completes normally).
+This is standard-conformant. The <code>cancel</code> method in ferrompi rustdoc documents
+this explicitly.</p>
+<h4 id="open-mpi-5"><a class="doc-anchor" href="#open-mpi-5">§</a>Open MPI 5</h4>
+<p>Open MPI 5.0 is the first Open MPI release to implement MPI 4.0. It is
+<strong>not CI-tested</strong> in ferrompi; support is based on user reports.</p>
+<p>With Open MPI 5.x, the following features expected to be available (in addition
+to everything in Open MPI 4):</p>
+<ul>
+<li>Persistent collectives (<code>bcast_init</code>, <code>allreduce_init</code>, etc.)</li>
+<li><code>create_from_group</code></li>
+<li>Large-count <code>_c</code> variants</li>
+</ul>
+<p>The <code>scatter_init_inplace</code> MPICH 4.2.x deadlock is absent on Open MPI 5.x (the
+<code>test_scatter_init_inplace</code> integration test documents this explicitly).</p>
+<p>If you run ferrompi on Open MPI 5.x, please report your experience via a GitHub
+Issue. See <a href="#how-to-report-compatibility">How to Report Compatibility</a>.</p>
+<h4 id="intel-mpi"><a class="doc-anchor" href="#intel-mpi">§</a>Intel MPI</h4>
+<p>Intel MPI is <strong>not CI-tested</strong>. Intel MPI is based on MPICH and tracks MPICH
+releases closely. Intel MPI 2021.x is built on MPICH 3.4; Intel MPI 2024.x is
+built on MPICH 4.x.</p>
+<p><strong>Expected compatibility:</strong></p>
+<ul>
+<li>Intel MPI 2021.x: equivalent to MPICH 3.4. MPI 4.0 features unavailable.</li>
+<li>Intel MPI 2024.x: equivalent to MPICH 4.x. All MPI 4.0 features expected to
+work. The MPICH 4.2.x <code>scatter_init_inplace</code> deadlock may also affect Intel
+MPI 2024 releases that incorporate MPICH 4.2.x; check <code>mpiexec --version</code>
+for the embedded MPICH version string.</li>
+</ul>
+<p>To build against Intel MPI, set <code>MPICC=/opt/intel/oneapi/mpi/latest/bin/mpicc</code>
+and either set <code>MPI_PKG_CONFIG</code> or ensure that Intel MPI’s <code>pkg-config</code> path
+is on <code>PKG_CONFIG_PATH</code>.</p>
+<h4 id="cray-mpi--mpt"><a class="doc-anchor" href="#cray-mpi--mpt">§</a>Cray MPI / MPT</h4>
+<p>Cray MPI (also referred to as Cray MPT or MPICH for Cray) is <strong>untested</strong>.
+It is a custom MPICH derivative maintained by HPE/Cray for Cray XC, XE, and EX
+systems. Compatibility with ferrompi is expected to be similar to the
+underlying MPICH release, but Cray-specific compiler and linker requirements
+create additional configuration complexity:</p>
+<ul>
+<li>The <code>CRAY_MPICH_DIR</code> environment variable must be set to the Cray MPI
+installation directory (e.g., <code>/opt/cray/pe/mpich/8.1.25</code>). ferrompi’s
+<code>build.rs</code> checks this variable before falling back to pkg-config.</li>
+<li>Cray systems typically use the Cray compiler wrapper (<code>cc</code>) rather than
+<code>mpicc</code>. Set <code>MPICC=$(which cc)</code> or the appropriate Cray wrapper.</li>
+<li>pthread linkage may differ from upstream MPICH. The handle-table ADR
+(<code>docs/adr/0002-handle-tables.md</code>, Decision Driver 5) notes Cray-specific
+pthread linkage as a known concern.</li>
+<li>The Cray ICC backend may emit warnings that ferrompi’s CI does not test
+(<code>-D warnings</code> is enforced in CI under GCC/Clang only).</li>
+</ul>
+<p>If you successfully build and test ferrompi on a Cray system, please report
+your experience including the <code>CRAY_MPICH_DIR</code> path and the embedded MPICH
+version number.</p>
+<hr />
+<h3 id="required-environment-variables-and-build-flags"><a class="doc-anchor" href="#required-environment-variables-and-build-flags">§</a>Required Environment Variables and Build Flags</h3>
+<p>ferrompi’s <code>build.rs</code> detects the MPI installation through a probe chain.
+The table below summarises the three environment variables that override the
+auto-detection, plus the feature flags that gate optional functionality.</p>
+<div><table><thead><tr><th>Variable / Flag</th><th>Type</th><th>Effect</th><th>When Required</th></tr></thead><tbody>
+<tr><td><code>MPI_PKG_CONFIG</code></td><td>env var</td><td>Sets the <code>pkg-config</code> service name to query</td><td>When pkg-config returns the wrong MPI (e.g., multiple installed)</td></tr>
+<tr><td><code>MPICC</code></td><td>env var</td><td>Sets the MPI compiler wrapper path</td><td>When <code>mpicc</code> is not on <code>$PATH</code> or the wrong wrapper is found</td></tr>
+<tr><td><code>CRAY_MPICH_DIR</code></td><td>env var</td><td>Points <code>build.rs</code> to the Cray MPI installation root</td><td>Required on all Cray PE systems</td></tr>
+<tr><td><code>--features rma</code></td><td>Cargo feature</td><td>Enables RMA and shared-memory window API</td><td>Optional; adds <code>Win</code>, <code>WinLockGuard</code>, and all RMA methods</td></tr>
+<tr><td><code>--features numa</code></td><td>Cargo feature</td><td>Enables NUMA-aware allocation (implies <code>rma</code>)</td><td>Optional; requires <code>libhwloc-dev</code> at build time</td></tr>
+</tbody></table>
+</div>
+<p><strong>Which implementations need explicit overrides:</strong></p>
+<ul>
+<li><strong>MPICH</strong> (non-system install): set <code>MPICC=/path/to/mpicc</code> and
+<code>MPI_PKG_CONFIG=mpich</code>.</li>
+<li><strong>Open MPI</strong>: if both MPICH and Open MPI are installed, set
+<code>MPI_PKG_CONFIG=ompi</code> to select Open MPI.</li>
+<li><strong>Intel MPI</strong>: set <code>MPICC=/opt/intel/oneapi/mpi/latest/bin/mpicc</code>. The
+<code>intel-mpi</code> pkg-config name is not universally available; using <code>MPICC</code> is
+more reliable.</li>
+<li><strong>Cray MPI</strong>: set <code>CRAY_MPICH_DIR</code>. All other detection is skipped when this
+variable is present.</li>
+<li><strong>Ubuntu system MPICH</strong>: auto-detected via <code>pkg-config mpich</code>. No override
+needed if <code>mpich libmpich-dev</code> are the only MPI packages installed.</li>
+</ul>
+<hr />
+<h3 id="how-to-report-compatibility"><a class="doc-anchor" href="#how-to-report-compatibility">§</a>How to Report Compatibility</h3>
+<p>Compatibility reports from non-CI implementations are the primary mechanism for
+improving this document. When filing a GitHub Issue, include the following
+checklist so the report can be verified and the matrix updated:</p>
+<div class="example-wrap"><pre class="language-text"><code>## Compatibility Report
+
+- ferrompi version: (output of `grep &#39;^version&#39; Cargo.toml`)
+- MPI implementation and version: (output of `mpiexec --version`)
+- OS and distribution: (e.g., Ubuntu 22.04, RHEL 9.3, macOS 14.4)
+- Compiler: (output of `$(MPICC) --version` or `mpicc --version`)
+- Cargo features tested: (e.g., `default`, `rma`, `numa`)
+- Test command: (e.g., `MPI_NP=4 ./tests/run_mpi_tests.sh rma`)
+- Test results: (pass/fail counts; paste the summary line)
+- Failing examples (if any): (names of failing `run_test` entries)
+- Any environment variable overrides used: (MPI_PKG_CONFIG, MPICC, etc.)</code></pre></div>
+<p>Once a report is verified (reproducible by a maintainer or confirmed by a
+second independent report), the relevant cells in the matrix above are updated
+from ? to ✓ or ⚠, and the issue number is linked from the corresponding
+footnote. Reports that do not include the <code>mpiexec --version</code> output cannot be
+verified and will not be used to update the matrix.</p>
+<div class="footnotes"><hr><ol><li id="fn1"><p><code>scatter_init</code> with <code>MPI_IN_PLACE</code> (<code>scatter_init_inplace</code>) triggers a
+deterministic deadlock in MPICH 4.2.x when called on the root rank.
+Reproduced on MPICH 4.2.0, 4.2.1 (Ubuntu Noble hotfix), and 4.2.3 (Fedora).
+Fixed in MPICH 4.3+. The <code>test_scatter_init_inplace</code> integration test is
+conditionally skipped on any MPICH version string containing <code>"4.2."</code>. The
+non-inplace <code>scatter_init</code> (distinct buffer send and receive) is unaffected.&nbsp;<a href="#fnref1">↩</a></p></li><li id="fn2"><p><code>rsend_init</code> requires strict ordering: the receiving rank must post and
+start its <code>recv_init</code>/<code>start</code> before a barrier, and only after that barrier
+may the sending rank start the ready-send request. Omitting the barrier
+produces undefined behavior on strict implementations (including MPICH 4.x).
+The <code>test_rsend_init</code> integration test enforces this ordering explicitly.&nbsp;<a href="#fnref2">↩</a></p></li><li id="fn3"><p><code>MPI_Win_sync</code> is documented by the MPI standard as valid at any point
+within an epoch, but MPICH 4.2.x enforces a stricter interpretation and
+requires that <code>MPI_Win_sync</code> be called only within a passive-target epoch
+(inside a <code>lock</code>/<code>unlock</code> or <code>lock_all</code>/<code>unlock_all</code> pair). ferrompi
+documents this in the <code>src/window.rs</code> rustdoc for <code>Win::sync</code>. For
+portability across all MPICH 4.x releases, always call <code>sync</code> via a
+<code>WinLockGuard</code> or <code>WinLockAllGuard</code> rather than as a bare inherent method.&nbsp;<a href="#fnref3">↩&nbsp;<sup>1</sup></a>&nbsp;<sup><a href="#fnref3-2">2</a></sup></p></li><li id="fn4"><p><code>Mpi::create_from_group</code> calls <code>MPI_Comm_create_from_group</code>, which is
+a MPI 4.0+ function. On implementations that provide only MPI 3.x
+(<code>MPI_VERSION &lt; 4</code>), the C shim at <code>csrc/ferrompi.c:651-668</code> returns
+<code>MPI_ERR_UNSUPPORTED_OPERATION</code> via a compile-time <code>#if MPI_VERSION &gt;= 4</code>
+stub. The Rust layer maps this to <code>Error::NotSupported</code>. A runtime version
+probe via <code>OnceLock&lt;bool&gt;</code> in <code>src/lib.rs</code> prevents the call from reaching
+the C layer at all on older runtimes.&nbsp;<a href="#fnref4">↩&nbsp;<sup>1</sup></a>&nbsp;<sup><a href="#fnref4-2">2</a></sup></p></li></ol></div></div></details></section></div></main></body></html>

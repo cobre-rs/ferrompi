@@ -1,0 +1,2 @@
+createSrcSidebar('[["ferrompi",["",[["comm",[],["blocking.rs","mgmt.rs","mod.rs","nonblocking.rs","p2p.rs","persistent.rs","v_collective.rs"]]],["datatype.rs","datatype_builder.rs","doc.rs","error.rs","ffi.rs","group.rs","info.rs","lib.rs","op.rs","persistent.rs","request.rs","slurm.rs","status.rs","topology.rs","window.rs"]]]]');
+//{"start":19,"fragment_lengths":[309]}

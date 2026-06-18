@@ -1,0 +1,513 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Migration guide from rsmpi to ferrompi."><title>ferrompi::doc::migrating_from_rsmpi - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module migrating_from_rsmpi</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../ferrompi/index.html">ferrompi</a><span class="version">0.5.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module migrating_<wbr>from_<wbr>rsmpi</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#migrating-from-rsmpi-to-ferrompi" title="Migrating from rsmpi to ferrompi">Migrating from rsmpi to ferrompi</a><ul><li><a href="#overview" title="Overview">Overview</a></li><li><a href="#1-quick-comparison" title="1. Quick Comparison">1. Quick Comparison</a></li><li><a href="#2-function-for-function-mapping" title="2. Function-for-Function Mapping">2. Function-for-Function Mapping</a></li><li><a href="#3-migration-cookbook" title="3. Migration Cookbook">3. Migration Cookbook</a></li><li><a href="#4-features-not-supported-in-ferrompi" title="4. Features Not Supported in ferrompi">4. Features Not Supported in ferrompi</a></li><li><a href="#5-api-ergonomic-differences" title="5. API Ergonomic Differences">5. API Ergonomic Differences</a></li><li><a href="#6-migration-checklist" title="6. Migration Checklist">6. Migration Checklist</a></li></ul></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In ferrompi::<wbr>doc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">ferrompi</a>::<wbr><a href="../index.html">doc</a></div><h1>Module <span>migrating_<wbr>from_<wbr>rsmpi</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/ferrompi/doc.rs.html#25">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Migration guide from rsmpi to ferrompi.</p>
+<p>Covers the quick-comparison table, a function-for-function API mapping,
+migration cookbook examples, unsupported features, and API ergonomic
+differences.</p>
+<h2 id="migrating-from-rsmpi-to-ferrompi"><a class="doc-anchor" href="#migrating-from-rsmpi-to-ferrompi">§</a>Migrating from rsmpi to ferrompi</h2><h3 id="overview"><a class="doc-anchor" href="#overview">§</a>Overview</h3>
+<p>This guide is for developers who already know rsmpi and want to move a project to
+ferrompi. It is not a tutorial: it assumes familiarity with rsmpi’s trait-based API
+and MPI concepts in general. The document maps rsmpi expressions to ferrompi
+equivalents, highlights the three categories of difference that affect every
+migration (naming, type ergonomics, and feature scope), and lists features that
+rsmpi supports but ferrompi deliberately does not provide. Read the summary table
+first to decide whether the trade-offs are right for your project, then use the
+function-for-function mapping as a conversion reference.</p>
+<hr />
+<h3 id="1-quick-comparison"><a class="doc-anchor" href="#1-quick-comparison">§</a>1. Quick Comparison</h3>
+<p>The table below extends the feature matrix in <code>README.md</code> with the dimensions that
+matter most during migration. See <code>docs/architecture.md</code> for the rationale behind
+each design choice.</p>
+<div><table><thead><tr><th>Dimension</th><th>rsmpi 0.8</th><th>ferrompi 0.5</th></tr></thead><tbody>
+<tr><td>MPI standard</td><td>3.1</td><td>4.1</td></tr>
+<tr><td>Persistent collectives</td><td>No</td><td>Yes (<code>_init</code> / <code>start</code> / <code>wait</code>)</td></tr>
+<tr><td>Large-count (&gt;2³¹)</td><td>No</td><td>Yes</td></tr>
+<tr><td>Thread safety</td><td><code>!Send</code> — communicators cannot cross threads</td><td><code>Send + Sync</code> — hybrid MPI+threads</td></tr>
+<tr><td>Generic API style</td><td>Trait objects (<code>Buffer</code>, <code>BufferMut</code>)</td><td>Sealed trait (<code>MpiDatatype</code>)</td></tr>
+<tr><td>Buffer wrapping</td><td><code>.buffer()</code> / <code>.buffer_mut()</code> required</td><td><code>&amp;[T]</code> / <code>&amp;mut [T]</code> directly</td></tr>
+<tr><td>Custom datatypes</td><td><code>Equivalence</code> derive macro</td><td><code>CustomDatatype</code> builder + <code>BytePermutable</code></td></tr>
+<tr><td>Custom reductions</td><td><code>UserOperation</code> trait</td><td><code>UserOp&lt;T: MpiDatatype&gt;</code> (16-slot registry)</td></tr>
+<tr><td>Error handling</td><td>Panics on MPI errors by default</td><td><code>Result&lt;T, Error&gt;</code> on every call</td></tr>
+<tr><td>RAII cleanup</td><td>Manual or partial</td><td>Full — <code>Drop</code> frees groups, comms, windows, datatypes, ops</td></tr>
+<tr><td>Shared memory windows</td><td>No</td><td>Yes (<code>Win&lt;T&gt;</code> with <code>rma</code> feature)</td></tr>
+<tr><td>Intercommunicators</td><td>Yes</td><td>No</td></tr>
+<tr><td>Dynamic processes</td><td>Yes (<code>spawn</code>, <code>accept</code>, <code>open_port</code>)</td><td>No</td></tr>
+<tr><td>MPI I/O</td><td>Yes (<code>MPI_File_*</code>)</td><td>No</td></tr>
+</tbody></table>
+</div>
+<p>ferrompi is deliberately narrower than rsmpi. The trade-off is a smaller, more
+consistent API in exchange for dropping features that few HPC applications use.</p>
+<hr />
+<h3 id="2-function-for-function-mapping"><a class="doc-anchor" href="#2-function-for-function-mapping">§</a>2. Function-for-Function Mapping</h3><h4 id="2a-collectives"><a class="doc-anchor" href="#2a-collectives">§</a>2a. Collectives</h4>
+<p>In rsmpi, collectives are split across two traits: <code>Root</code> (operations where one
+rank is special — broadcast, gather, scatter, reduce) and <code>CommunicatorCollectives</code>
+(symmetric operations — allreduce, allgather, alltoall, scan, barrier). The caller
+must first obtain a <code>Process</code> handle via <code>comm.process_at_rank(root)</code> and call the
+method on that handle. In ferrompi all collectives are inherent methods on
+<code>Communicator</code> with an explicit <code>root: i32</code> parameter where needed.</p>
+<p>Nonblocking rsmpi methods are prefixed <code>immediate_</code>; ferrompi uses <code>i</code> prefix.
+Persistent collectives do not exist in rsmpi; the right column shows <code>_init</code> methods
+(MPI 4.0+).</p>
+<div><table><thead><tr><th>rsmpi expression</th><th>ferrompi expression</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>comm.process_at_rank(r).broadcast_into(&amp;mut buf)</code></td><td><code>comm.broadcast(&amp;mut buf, r)?</code></td><td>Root and non-root use the same call</td></tr>
+<tr><td><code>comm.process_at_rank(r).immediate_broadcast_into(scope, &amp;mut buf)</code></td><td><code>comm.ibroadcast(&amp;mut buf, r)?</code></td><td>Returns <code>Request</code>; no scope needed</td></tr>
+<tr><td><code>(none — not available in rsmpi)</code></td><td><code>comm.bcast_init(&amp;mut buf, r)?</code></td><td>Persistent; call <code>.start()</code> + <code>.wait()</code> each iteration</td></tr>
+<tr><td><code>comm.process_at_rank(r).reduce_into(&amp;send, op)</code></td><td><code>comm.reduce(&amp;send, &amp;mut recv, op, r)?</code></td><td>Non-root <code>recv</code> may be empty slice</td></tr>
+<tr><td><code>comm.process_at_rank(r).reduce_into_root(&amp;send, &amp;mut recv, op)</code></td><td><code>comm.reduce(&amp;send, &amp;mut recv, op, r)?</code></td><td>Same call for root and non-root</td></tr>
+<tr><td><code>comm.process_at_rank(r).immediate_reduce_into(&amp;send, op)</code></td><td><code>comm.ireduce(&amp;send, &amp;mut recv, op, r)?</code></td><td>Returns <code>Request</code></td></tr>
+<tr><td><code>(none — not available in rsmpi)</code></td><td><code>comm.reduce_init(&amp;send, &amp;mut recv, op, r)?</code></td><td>Persistent</td></tr>
+<tr><td><code>comm.all_reduce_into(&amp;send, &amp;mut recv, op)</code></td><td><code>comm.allreduce(&amp;send, &amp;mut recv, op)?</code></td><td></td></tr>
+<tr><td><code>comm.all_reduce_into(&amp;send, &amp;mut recv, op)</code> (scalar)</td><td><code>comm.allreduce_scalar(value, op)?</code></td><td>Convenience: no buffers; returns <code>T</code></td></tr>
+<tr><td><code>comm.immediate_all_reduce_into(&amp;send, &amp;mut recv, op)</code></td><td><code>comm.iallreduce(&amp;send, &amp;mut recv, op)?</code></td><td>Returns <code>Request</code></td></tr>
+<tr><td><code>(none — not available in rsmpi)</code></td><td><code>comm.allreduce_init(&amp;send, &amp;mut recv, op)?</code></td><td>Persistent</td></tr>
+<tr><td><code>comm.process_at_rank(r).gather_into(&amp;send)</code></td><td><code>comm.gather(&amp;send, &amp;mut recv, r)?</code></td><td><code>recv</code> ignored on non-root</td></tr>
+<tr><td><code>comm.process_at_rank(r).gather_into_root(&amp;send, &amp;mut recv)</code></td><td><code>comm.gather(&amp;send, &amp;mut recv, r)?</code></td><td>Same call for root and non-root</td></tr>
+<tr><td><code>comm.process_at_rank(r).immediate_gather_into(&amp;send)</code></td><td><code>comm.igather(&amp;send, &amp;mut recv, r)?</code></td><td>Returns <code>Request</code></td></tr>
+<tr><td><code>(none — not available in rsmpi)</code></td><td><code>comm.gather_init(&amp;send, &amp;mut recv, r)?</code></td><td>Persistent</td></tr>
+<tr><td><code>comm.all_gather_into(&amp;send, &amp;mut recv)</code></td><td><code>comm.allgather(&amp;send, &amp;mut recv)?</code></td><td></td></tr>
+<tr><td><code>comm.immediate_all_gather_into(&amp;send, &amp;mut recv)</code></td><td><code>comm.iallgather(&amp;send, &amp;mut recv)?</code></td><td>Returns <code>Request</code></td></tr>
+<tr><td><code>(none — not available in rsmpi)</code></td><td><code>comm.allgather_init(&amp;send, &amp;mut recv)?</code></td><td>Persistent</td></tr>
+<tr><td><code>comm.process_at_rank(r).scatter_into(&amp;mut recv)</code></td><td><code>comm.scatter(&amp;send, &amp;mut recv, r)?</code></td><td><code>send</code> ignored on non-root</td></tr>
+<tr><td><code>comm.process_at_rank(r).scatter_into_root(&amp;send, &amp;mut recv)</code></td><td><code>comm.scatter(&amp;send, &amp;mut recv, r)?</code></td><td>Same call for root and non-root</td></tr>
+<tr><td><code>comm.process_at_rank(r).immediate_scatter_into(&amp;mut recv)</code></td><td><code>comm.iscatter(&amp;send, &amp;mut recv, r)?</code></td><td>Returns <code>Request</code></td></tr>
+<tr><td><code>(none — not available in rsmpi)</code></td><td><code>comm.scatter_init(&amp;send, &amp;mut recv, r)?</code></td><td>Persistent</td></tr>
+<tr><td><code>comm.all_to_all_into(&amp;send, &amp;mut recv)</code></td><td><code>comm.alltoall(&amp;send, &amp;mut recv)?</code></td><td></td></tr>
+<tr><td><code>comm.immediate_all_to_all_into(&amp;send, &amp;mut recv)</code></td><td><code>comm.ialltoall(&amp;send, &amp;mut recv)?</code></td><td>Returns <code>Request</code></td></tr>
+<tr><td><code>(none — not available in rsmpi)</code></td><td><code>comm.alltoall_init(&amp;send, &amp;mut recv)?</code></td><td>Persistent</td></tr>
+<tr><td><code>comm.scan_into(&amp;send, &amp;mut recv, op)</code></td><td><code>comm.scan(&amp;send, &amp;mut recv, op)?</code></td><td>Inclusive prefix scan</td></tr>
+<tr><td><code>comm.immediate_scan_into(&amp;send, &amp;mut recv, op)</code></td><td><code>comm.iscan(&amp;send, &amp;mut recv, op)?</code></td><td>Returns <code>Request</code></td></tr>
+<tr><td><code>(none — not available in rsmpi)</code></td><td><code>comm.scan_init(&amp;send, &amp;mut recv, op)?</code></td><td>Persistent</td></tr>
+<tr><td><code>comm.exclusive_scan_into(&amp;send, &amp;mut recv, op)</code></td><td><code>comm.exscan(&amp;send, &amp;mut recv, op)?</code></td><td>Exclusive prefix scan</td></tr>
+<tr><td><code>comm.immediate_exclusive_scan_into(&amp;send, &amp;mut recv, op)</code></td><td><code>comm.iexscan(&amp;send, &amp;mut recv, op)?</code></td><td>Returns <code>Request</code></td></tr>
+<tr><td><code>(none — not available in rsmpi)</code></td><td><code>comm.exscan_init(&amp;send, &amp;mut recv, op)?</code></td><td>Persistent</td></tr>
+<tr><td><code>comm.reduce_scatter_block_into(&amp;send, &amp;mut recv, op)</code></td><td><code>comm.reduce_scatter_block(&amp;send, &amp;mut recv, op)?</code></td><td>Equal-block variant</td></tr>
+<tr><td><code>comm.immediate_reduce_scatter_block_into(&amp;send, &amp;mut recv, op)</code></td><td><code>comm.ireduce_scatter_block(&amp;send, &amp;mut recv, op)?</code></td><td>Returns <code>Request</code></td></tr>
+<tr><td><code>(none — not available in rsmpi)</code></td><td><code>comm.reduce_scatter_block_init(&amp;send, &amp;mut recv, op)?</code></td><td>Persistent</td></tr>
+<tr><td><code>comm.barrier()</code></td><td><code>comm.barrier()?</code></td><td>Returns <code>Result&lt;()&gt;</code> in ferrompi</td></tr>
+<tr><td><code>comm.immediate_barrier()</code></td><td><code>comm.ibarrier()?</code></td><td>Returns <code>Request</code></td></tr>
+</tbody></table>
+</div><h4 id="2b-point-to-point"><a class="doc-anchor" href="#2b-point-to-point">§</a>2b. Point-to-Point</h4>
+<p>In rsmpi, send and receive are called on <code>Process</code> handles obtained from
+<code>comm.process_at_rank(dest)</code> or <code>comm.any_process()</code>. In ferrompi, <code>dest</code>,
+<code>source</code>, and <code>tag</code> are plain <code>i32</code> parameters on <code>Communicator</code>. Use
+<code>MPI_ANY_SOURCE</code> (<code>-1</code>) and <code>MPI_ANY_TAG</code> (<code>-1</code>) as constants.</p>
+<div><table><thead><tr><th>rsmpi expression</th><th>ferrompi expression</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>comm.process_at_rank(dest).send(&amp;buf)</code></td><td><code>comm.send(&amp;buf, dest, tag)?</code></td><td>Tag is explicit in ferrompi</td></tr>
+<tr><td><code>comm.process_at_rank(dest).send_with_tag(&amp;buf, tag)</code></td><td><code>comm.send(&amp;buf, dest, tag)?</code></td><td></td></tr>
+<tr><td><code>comm.process_at_rank(dest).synchronous_send(&amp;buf)</code></td><td><code>comm.ssend(&amp;buf, dest, tag)?</code></td><td>Synchronous mode</td></tr>
+<tr><td><code>comm.process_at_rank(dest).buffered_send(&amp;buf)</code></td><td><code>comm.bsend(&amp;buf, dest, tag)?</code></td><td>Requires buffer attached via <code>Mpi::buffer_attach</code></td></tr>
+<tr><td><code>comm.process_at_rank(dest).ready_send(&amp;buf)</code></td><td><code>comm.rsend(&amp;buf, dest, tag)?</code></td><td>Receiver must have posted recv first</td></tr>
+<tr><td><code>comm.any_process().receive_into(&amp;mut buf)</code></td><td><code>comm.recv(&amp;mut buf, -1, -1)?</code></td><td>Returns <code>(source, tag, count)</code> tuple</td></tr>
+<tr><td><code>comm.process_at_rank(src).receive_into_with_tag(&amp;mut buf, tag)</code></td><td><code>comm.recv(&amp;mut buf, src, tag)?</code></td><td></td></tr>
+<tr><td><code>comm.process_at_rank(dest).immediate_send(&amp;buf)</code></td><td><code>comm.isend(&amp;buf, dest, tag)?</code></td><td>Returns <code>Request</code></td></tr>
+<tr><td><code>comm.process_at_rank(src).immediate_receive_into(&amp;mut buf)</code></td><td><code>comm.irecv(&amp;mut buf, src, tag)?</code></td><td>Returns <code>Request</code></td></tr>
+<tr><td><code>comm.send_receive(sendbuf, dest, recvbuf, src)</code></td><td><code>comm.sendrecv(&amp;send, dest, stag, &amp;mut recv, src, rtag)?</code></td><td></td></tr>
+<tr><td><code>comm.process_at_rank(src).probe()</code></td><td><code>comm.probe::&lt;T&gt;(src, tag)?</code></td><td>Returns <code>Status</code>; blocks</td></tr>
+<tr><td><code>comm.process_at_rank(src).immediate_probe()</code></td><td><code>comm.iprobe::&lt;T&gt;(src, tag)?</code></td><td>Returns <code>Option&lt;Status&gt;</code></td></tr>
+</tbody></table>
+</div><h4 id="2c-groups-and-communicators"><a class="doc-anchor" href="#2c-groups-and-communicators">§</a>2c. Groups and Communicators</h4>
+<p>In rsmpi, groups are obtained via <code>comm.group()</code> and set operations are free
+functions or methods on the <code>Group</code> type. ferrompi uses the same structure but
+exposes everything as inherent methods on <code>Group</code> and <code>Communicator</code>. All
+group-creating calls return owned <code>Group</code> values that free their handle on drop.</p>
+<div><table><thead><tr><th>rsmpi expression</th><th>ferrompi expression</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>comm.rank()</code></td><td><code>comm.rank()</code></td><td>ferrompi returns <code>i32</code> directly (not <code>Rank</code>)</td></tr>
+<tr><td><code>comm.size()</code></td><td><code>comm.size()</code></td><td>Returns <code>i32</code></td></tr>
+<tr><td><code>comm.group()</code></td><td><code>comm.group()?</code></td><td>Returns <code>Result&lt;Group&gt;</code></td></tr>
+<tr><td><code>group.size()</code></td><td><code>group.size()?</code></td><td>Returns <code>Result&lt;i32&gt;</code></td></tr>
+<tr><td><code>group.rank()</code></td><td><code>group.rank()?</code></td><td>Returns <code>Result&lt;i32&gt;</code></td></tr>
+<tr><td><code>mpi::topology::Group::union(&amp;a, &amp;b)</code></td><td><code>a.union(&amp;b)?</code></td><td>Returns new <code>Group</code></td></tr>
+<tr><td><code>mpi::topology::Group::intersection(&amp;a, &amp;b)</code></td><td><code>a.intersection(&amp;b)?</code></td><td>Returns new <code>Group</code></td></tr>
+<tr><td><code>mpi::topology::Group::difference(&amp;a, &amp;b)</code></td><td><code>a.difference(&amp;b)?</code></td><td>Returns new <code>Group</code></td></tr>
+<tr><td><code>group.include(&amp;ranks)</code></td><td><code>group.include(&amp;ranks)?</code></td><td>Subgroup from rank list</td></tr>
+<tr><td><code>group.exclude(&amp;ranks)</code></td><td><code>group.exclude(&amp;ranks)?</code></td><td>Subgroup excluding ranks</td></tr>
+<tr><td><code>group.translate_rank(rank, &amp;other)</code></td><td><code>group.translate_ranks(&amp;[rank], &amp;other)?</code></td><td>Returns <code>Vec&lt;Option&lt;i32&gt;&gt;</code></td></tr>
+<tr><td><code>comm.duplicate()</code></td><td><code>comm.duplicate()?</code></td><td>Returns <code>Result&lt;Communicator&gt;</code></td></tr>
+<tr><td><code>comm.split_by_color(color)</code></td><td><code>comm.split(color, key)?</code></td><td>Returns <code>Result&lt;Option&lt;Communicator&gt;&gt;</code></td></tr>
+<tr><td><code>comm.split_by_color_with_key(color, key)</code></td><td><code>comm.split(color, key)?</code></td><td>Same call</td></tr>
+<tr><td><code>comm.split_shared(key)</code></td><td><code>comm.split_shared()?</code></td><td>Shared-memory subcommunicator</td></tr>
+<tr><td><code>comm.split_by_subgroup_collective(&amp;group)</code></td><td><code>comm.create_from_group(&amp;group)?</code></td><td>Returns <code>Option&lt;Communicator&gt;</code></td></tr>
+<tr><td><code>Mpi::create_from_group(group, tag)</code></td><td><code>mpi.create_from_group(&amp;group, tag)?</code></td><td>Called on <code>Mpi</code> handle in ferrompi</td></tr>
+</tbody></table>
+</div>
+<hr />
+<h3 id="3-migration-cookbook"><a class="doc-anchor" href="#3-migration-cookbook">§</a>3. Migration Cookbook</h3>
+<p>The three examples below show the most common migration patterns. Each pair shows
+the rsmpi version on the left and the ferrompi equivalent on the right.</p>
+<h4 id="3a-hello-world-with-allreduce"><a class="doc-anchor" href="#3a-hello-world-with-allreduce">§</a>3a. Hello World with Allreduce</h4>
+<p>The classic rsmpi README example: initialise, get the world communicator, do an
+all-reduce.</p>
+<table>
+<tr>
+<td><strong>rsmpi</strong></td>
+<td><strong>ferrompi</strong></td>
+</tr>
+<tr>
+<td>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">use </span>mpi::traits::<span class="kw-2">*</span>;
+
+<span class="kw">fn </span>main() {
+    <span class="kw">let </span>universe = mpi::initialize().unwrap();
+    <span class="kw">let </span>world = universe.world();
+
+    <span class="kw">let </span>rank = world.rank();
+
+    <span class="comment">// all_reduce_into requires Buffer impls
+    // and a process-derived operation object
+    </span><span class="kw">let </span>local = rank <span class="kw">as </span>f64;
+    <span class="kw">let </span><span class="kw-2">mut </span>global = <span class="number">0.0f64</span>;
+    world.all_reduce_into(
+        <span class="kw-2">&amp;</span>local,
+        <span class="kw-2">&amp;mut </span>global,
+        <span class="kw-2">&amp;</span>mpi::collective::SystemOperation::sum(),
+    );
+
+    <span class="kw">if </span>rank == <span class="number">0 </span>{
+        <span class="macro">println!</span>(<span class="string">"sum = {}"</span>, global);
+    }
+    <span class="comment">// universe dropped → MPI_Finalize
+</span>}</code></pre></div></td>
+<td>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::{Mpi, ReduceOp};
+
+<span class="kw">fn </span>main() -&gt; ferrompi::Result&lt;()&gt; {
+    <span class="kw">let </span>mpi = Mpi::init()<span class="question-mark">?</span>;
+    <span class="kw">let </span>world = mpi.world();
+
+    <span class="kw">let </span>rank = world.rank();
+
+    <span class="comment">// allreduce_scalar takes a plain value,
+    // no buffer wrapper needed
+    </span><span class="kw">let </span>local = rank <span class="kw">as </span>f64;
+    <span class="kw">let </span>global = world.allreduce_scalar(
+        local,
+        ReduceOp::Sum,
+    )<span class="question-mark">?</span>;
+
+    <span class="kw">if </span>rank == <span class="number">0 </span>{
+        <span class="macro">println!</span>(<span class="string">"sum = {}"</span>, global);
+    }
+    <span class="comment">// mpi dropped → MPI_Finalize
+    </span><span class="prelude-val">Ok</span>(())
+}</code></pre></div></td>
+</tr>
+</table>
+<p>Key differences: ferrompi propagates errors via <code>?</code> instead of panicking; the
+<code>allreduce_scalar</code> convenience method eliminates the send/receive buffer pair for
+scalar reductions; <code>ReduceOp::Sum</code> is a simple enum variant rather than a trait
+object.</p>
+<h4 id="3b-nonblocking-send-and-receive-with-wait"><a class="doc-anchor" href="#3b-nonblocking-send-and-receive-with-wait">§</a>3b. Nonblocking Send and Receive with Wait</h4>
+<p>rsmpi’s <code>WaitGuard</code> wraps a <code>Request</code> and calls <code>MPI_Wait</code> on drop, making wait
+implicit. ferrompi’s <code>Request::wait</code> is explicit and consumes the request by value,
+giving the compiler a clear lifetime for the in-flight buffer.</p>
+<table>
+<tr>
+<td><strong>rsmpi</strong></td>
+<td><strong>ferrompi</strong></td>
+</tr>
+<tr>
+<td>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">use </span>mpi::traits::<span class="kw-2">*</span>;
+<span class="kw">use </span>mpi::request::WaitGuard;
+
+<span class="kw">fn </span>main() {
+    <span class="kw">let </span>universe = mpi::initialize().unwrap();
+    <span class="kw">let </span>world = universe.world();
+    <span class="kw">let </span>rank = world.rank();
+
+    <span class="kw">if </span>rank == <span class="number">0 </span>{
+        <span class="kw">let </span>data = <span class="macro">vec!</span>[<span class="number">1.0f64</span>, <span class="number">2.0</span>, <span class="number">3.0</span>];
+        <span class="comment">// WaitGuard forces MPI_Wait on drop
+        </span><span class="kw">let </span>_guard = WaitGuard::from(
+            world.process_at_rank(<span class="number">1</span>)
+                 .immediate_send(<span class="kw-2">&amp;</span>data[..]),
+        );
+        <span class="comment">// _guard dropped here → implicit wait
+    </span>} <span class="kw">else </span>{
+        <span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0.0f64</span>; <span class="number">3</span>];
+        <span class="comment">// Scope-based lifetime on the request
+        </span>mpi::request::scope(|scope| {
+            <span class="kw">let </span>req = world
+                .any_process()
+                .immediate_receive_into(scope, <span class="kw-2">&amp;mut </span>buf[..]);
+            req.wait_without_status();
+        });
+        <span class="macro">println!</span>(<span class="string">"rank 1 received {:?}"</span>, buf);
+    }
+}</code></pre></div></td>
+<td>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::Mpi;
+
+<span class="kw">fn </span>main() -&gt; ferrompi::Result&lt;()&gt; {
+    <span class="kw">let </span>mpi = Mpi::init()<span class="question-mark">?</span>;
+    <span class="kw">let </span>world = mpi.world();
+    <span class="kw">let </span>rank = world.rank();
+
+    <span class="kw">if </span>rank == <span class="number">0 </span>{
+        <span class="kw">let </span>data = <span class="macro">vec!</span>[<span class="number">1.0f64</span>, <span class="number">2.0</span>, <span class="number">3.0</span>];
+        <span class="comment">// isend returns a Request; wait is explicit
+        </span><span class="kw">let </span>req = world.isend(<span class="kw-2">&amp;</span>data, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+        <span class="comment">// Do other work here if desired ...
+        </span>req.wait()<span class="question-mark">?</span>; <span class="comment">// consumes the Request
+    </span>} <span class="kw">else </span>{
+        <span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0.0f64</span>; <span class="number">3</span>];
+        <span class="comment">// No scope wrapper needed
+        </span><span class="kw">let </span>req = world.irecv(<span class="kw-2">&amp;mut </span>buf, <span class="number">0</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+        req.wait()<span class="question-mark">?</span>;
+        <span class="macro">println!</span>(<span class="string">"rank 1 received {:?}"</span>, buf);
+    }
+    <span class="prelude-val">Ok</span>(())
+}</code></pre></div></td>
+</tr>
+</table>
+<p>Key differences: ferrompi does not use lifetime scopes or guard wrappers for
+nonblocking operations — <code>Request::wait()</code> takes ownership and the buffer is safe
+to read afterwards. A <code>Request</code> dropped without calling <code>wait()</code> will <strong>block in Drop</strong>
+until the operation completes — the handle is not leaked, but the
+implicit wait may be surprising in latency-sensitive code, and can
+deadlock if the peer never matches the send/recv. For control flow
+that bypasses <code>wait()</code> (e.g., an early-return <code>?</code> on an error path,
+or a panic unwind), prefer explicit <code>wait()</code> or <code>test()</code> to keep
+failure modes observable. A future ferrompi version is expected to
+attempt <code>MPI_Cancel</code> from <code>Drop</code> to make this safer; until then,
+assume <code>Drop</code> blocks.</p>
+<h4 id="3c-persistent-broadcast-loop"><a class="doc-anchor" href="#3c-persistent-broadcast-loop">§</a>3c. Persistent Broadcast Loop</h4>
+<p>rsmpi has no persistent collectives. The closest equivalent is a nonblocking
+<code>immediate_broadcast_into</code> inside a loop. ferrompi’s <code>bcast_init</code> initialises the
+operation once and reuses it across thousands of iterations, amortising the setup
+overhead. This is the primary use case that motivates ferrompi’s existence.</p>
+<table>
+<tr>
+<td><strong>rsmpi (no persistent — uses nonblocking loop)</strong></td>
+<td><strong>ferrompi (persistent collective)</strong></td>
+</tr>
+<tr>
+<td>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">use </span>mpi::traits::<span class="kw-2">*</span>;
+
+<span class="kw">fn </span>main() {
+    <span class="kw">let </span>universe = mpi::initialize().unwrap();
+    <span class="kw">let </span>world = universe.world();
+    <span class="kw">let </span>rank = world.rank();
+    <span class="kw">let </span><span class="kw-2">mut </span>data = <span class="macro">vec!</span>[<span class="number">0.0f64</span>; <span class="number">1000</span>];
+
+    <span class="kw">for </span>iter <span class="kw">in </span><span class="number">0</span>..<span class="number">10_000 </span>{
+        <span class="kw">if </span>rank == <span class="number">0 </span>{
+            data.fill(iter <span class="kw">as </span>f64);
+        }
+        <span class="comment">// Re-enters MPI scheduler every iteration;
+        // no amortisation of setup cost
+        </span>mpi::request::scope(|scope| {
+            <span class="kw">let </span>req = world
+                .process_at_rank(<span class="number">0</span>)
+                .immediate_broadcast_into(scope, <span class="kw-2">&amp;mut </span>data[..]);
+            req.wait_without_status();
+        });
+        <span class="comment">// use data ...
+    </span>}
+}</code></pre></div></td>
+<td>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::Mpi;
+
+<span class="kw">fn </span>main() -&gt; ferrompi::Result&lt;()&gt; {
+    <span class="kw">let </span>mpi = Mpi::init()<span class="question-mark">?</span>;
+    <span class="kw">let </span>world = mpi.world();
+    <span class="kw">let </span>rank = world.rank();
+    <span class="kw">let </span><span class="kw-2">mut </span>data = <span class="macro">vec!</span>[<span class="number">0.0f64</span>; <span class="number">1000</span>];
+
+    <span class="comment">// Initialise ONCE — MPI_Bcast_init called here
+    </span><span class="kw">let </span><span class="kw-2">mut </span>bcast = world.bcast_init(<span class="kw-2">&amp;mut </span>data, <span class="number">0</span>)<span class="question-mark">?</span>;
+
+    <span class="kw">for </span>iter <span class="kw">in </span><span class="number">0</span>..<span class="number">10_000 </span>{
+        <span class="kw">if </span>rank == <span class="number">0 </span>{
+            data.fill(iter <span class="kw">as </span>f64);
+        }
+        <span class="comment">// start/wait reuse the initialised request
+        </span>bcast.start()<span class="question-mark">?</span>;
+        bcast.wait()<span class="question-mark">?</span>;
+        <span class="comment">// use data ...
+    </span>}
+    <span class="comment">// bcast dropped → MPI_Request_free
+    </span><span class="prelude-val">Ok</span>(())
+}</code></pre></div></td>
+</tr>
+</table>
+<p>Key differences: <code>bcast_init</code> calls <code>MPI_Bcast_init</code> once; each <code>start</code>/<code>wait</code> pair
+calls <code>MPI_Start</code>/<code>MPI_Wait</code> without reinitialising the request. On MPICH 4.2 and
+OpenMPI 5.0 this reduces per-iteration latency by 10–30% for small messages. The
+<code>PersistentRequest</code> is freed automatically when it goes out of scope.</p>
+<hr />
+<h3 id="4-features-not-supported-in-ferrompi"><a class="doc-anchor" href="#4-features-not-supported-in-ferrompi">§</a>4. Features Not Supported in ferrompi</h3>
+<p>The following rsmpi features are absent from ferrompi. For each, a brief reason is
+given. Features marked “out of scope for v0.x” may be added in a future epic if user
+demand materialises and a corresponding ticket is opened on the issue tracker.</p>
+<h4 id="dynamic-process-management"><a class="doc-anchor" href="#dynamic-process-management">§</a>Dynamic Process Management</h4>
+<p><code>MPI_Comm_spawn</code>, <code>MPI_Comm_spawn_multiple</code>, <code>MPI_Comm_accept</code>,
+<code>MPI_Comm_connect</code>, <code>MPI_Open_port</code>, and <code>MPI_Close_port</code> are not exposed in
+ferrompi. The C wrapper (<code>csrc/ferrompi.c</code>) does not include shims for these
+functions. Reason: dynamic process management requires intercommunicators (see
+below), which are also absent. The two features are co-dependent. Out of scope for
+v0.x.</p>
+<h4 id="mpi-io-file-operations"><a class="doc-anchor" href="#mpi-io-file-operations">§</a>MPI I/O (File Operations)</h4>
+<p>The <code>MPI_File_*</code> family — <code>MPI_File_open</code>, <code>MPI_File_read</code>, <code>MPI_File_write</code>,
+<code>MPI_File_seek</code>, <code>MPI_File_close</code>, and all collective I/O variants — is not exposed.
+Reason: parallel file I/O is a large, self-contained feature area that overlaps with
+HDF5 and NetCDF tooling. Most ferrompi users target in-memory computation. Out of
+scope for v0.x.</p>
+<h4 id="intercommunicators"><a class="doc-anchor" href="#intercommunicators">§</a>Intercommunicators</h4>
+<p><code>MPI_Intercomm_create</code> and <code>MPI_Intercomm_merge</code> are not exposed. ferrompi only
+supports intracommunicators — communicators where all processes are members of a
+single group. Reason: intercommunicators are required for dynamic process
+management and are rarely used in tightly-coupled scientific computations. The
+ferrompi type system does not have an <code>InterCommunicator</code> type. Out of scope for
+v0.x.</p>
+<h4 id="topology-communicators--partial-support"><a class="doc-anchor" href="#topology-communicators--partial-support">§</a>Topology Communicators — Partial Support</h4>
+<p>rsmpi exposes <code>MPI_Cart_create</code>, <code>MPI_Graph_create</code>, and their associated query
+functions through the <code>CartesianCommunicator</code> and related types. ferrompi exposes
+<code>Communicator::topology</code> and <code>Communicator::split_type</code> but does NOT expose
+Cartesian or graph topology constructors (<code>MPI_Cart_create</code>, <code>MPI_Cart_coords</code>,
+<code>MPI_Cart_shift</code>, <code>MPI_Graph_create</code>, <code>MPI_Dist_graph_create</code>). What ferrompi does
+provide via <code>src/topology.rs</code> is:</p>
+<ul>
+<li><code>Communicator::topology</code> — collective query returning <code>TopologyInfo</code> (rank-to-host
+mapping, MPI library version, SLURM metadata)</li>
+<li><code>Communicator::split_type</code> — wraps <code>MPI_Comm_split_type</code> (e.g. <code>MPI_COMM_TYPE_SHARED</code>)</li>
+<li><code>Communicator::split_shared</code> — convenience wrapper for shared-memory subcommunicators</li>
+</ul>
+<p>Cartesian and graph topology constructors are out of scope for v0.x.</p>
+<h4 id="non-blocking-io"><a class="doc-anchor" href="#non-blocking-io">§</a>Non-Blocking I/O</h4>
+<p>Non-blocking file operations (<code>MPI_File_iread</code>, <code>MPI_File_iwrite</code>) are not exposed,
+as MPI I/O itself is absent. This category is listed for completeness.</p>
+<hr />
+<h3 id="5-api-ergonomic-differences"><a class="doc-anchor" href="#5-api-ergonomic-differences">§</a>5. API Ergonomic Differences</h3>
+<p>These are the non-obvious differences a migrant will encounter, beyond the function
+renaming captured in the mapping tables.</p>
+<h4 id="no-equivalence-trait--use-mpidatatype-or-customdatatype"><a class="doc-anchor" href="#no-equivalence-trait--use-mpidatatype-or-customdatatype">§</a>No <code>Equivalence</code> Trait — Use <code>MpiDatatype</code> or <code>CustomDatatype</code></h4>
+<p>rsmpi’s <code>Equivalence</code> derive macro allows arbitrary structs to be used in MPI
+operations:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="comment">// rsmpi
+</span><span class="attr">#[derive(Equivalence)]
+</span><span class="kw">struct </span>Particle { x: f64, y: f64, mass: f32 }</code></pre></div>
+<p>ferrompi uses the sealed <code>MpiDatatype</code> trait, which is implemented only for
+primitive types: <code>f32</code>, <code>f64</code>, <code>i32</code>, <code>i64</code>, <code>u8</code>, <code>u32</code>, and <code>u64</code>. Custom
+compound types have two routes:</p>
+<ul>
+<li><strong><code>CustomDatatype</code></strong>: Use the <code>DatatypeBuilder</code> API (epic 6) to describe the
+layout of a struct and commit it to a <code>CustomDatatype</code>. Pass it to <code>send_custom</code>,
+<code>recv_custom</code>, <code>isend_custom</code>, <code>irecv_custom</code>.</li>
+<li><strong><code>BytePermutable</code></strong>: For types that are safe to transmit as raw bytes with no
+padding. Implement this sealed trait (gated by an <code>unsafe impl</code>) and use
+<code>allreduce_bytes</code>.</li>
+</ul>
+<p>Neither path is as ergonomic as a derive macro. The limitation is intentional: the
+sealed trait guarantees that every type used in a generic MPI call has a known,
+stable ABI without runtime inspection.</p>
+<h4 id="no-buffer-wrappers"><a class="doc-anchor" href="#no-buffer-wrappers">§</a>No Buffer Wrappers</h4>
+<p>rsmpi requires callers to call <code>.buffer()</code> on slices before passing them to most
+collective and point-to-point methods:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="comment">// rsmpi — .buffer() and .buffer_mut() are required
+</span>world.all_reduce_into(<span class="kw-2">&amp;</span>send.buffer(), <span class="kw-2">&amp;mut </span>recv.buffer_mut(), <span class="kw-2">&amp;</span>op);</code></pre></div>
+<p>ferrompi takes <code>&amp;[T]</code> and <code>&amp;mut [T]</code> directly. No wrapping is needed:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="comment">// ferrompi — plain slice references
+</span>world.allreduce(<span class="kw-2">&amp;</span>send, <span class="kw-2">&amp;mut </span>recv, op)<span class="question-mark">?</span>;</code></pre></div><h4 id="thread-safety--send--sync-vs-send"><a class="doc-anchor" href="#thread-safety--send--sync-vs-send">§</a>Thread Safety — <code>Send + Sync</code> vs <code>!Send</code></h4>
+<p>rsmpi communicators are <code>!Send</code> and <code>!Sync</code>. They cannot be moved across thread
+boundaries, making hybrid MPI+threads programs awkward. ferrompi’s <code>Communicator</code>
+is <code>Send + Sync</code>, enabling patterns such as:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::{Mpi, ReduceOp};
+<span class="kw">use </span>std::thread;
+
+<span class="kw">let </span>mpi = Mpi::init_thread(ferrompi::ThreadLevel::Multiple)<span class="question-mark">?</span>;
+<span class="kw">let </span>world = mpi.world();
+
+<span class="comment">// Communicator can be cloned and sent to a thread
+</span><span class="kw">let </span>world2 = world.clone();
+thread::spawn(<span class="kw">move </span>|| {
+    <span class="kw">let _ </span>= world2.allreduce_scalar(<span class="number">1.0f64</span>, ReduceOp::Sum);
+});</code></pre></div>
+<p>The thread-safety guarantee is conditional on the MPI runtime supporting the
+requested thread level. Use <code>Mpi::init_thread(ThreadLevel::Multiple)</code> for full
+concurrent access. See <code>README.md</code> and <code>docs/architecture.md</code> for the thread-level
+matrix.</p>
+<h4 id="error-handling--result-vs-panic"><a class="doc-anchor" href="#error-handling--result-vs-panic">§</a>Error Handling — <code>Result</code> vs Panic</h4>
+<p>rsmpi panics on MPI errors by default. ferrompi returns <code>Result&lt;T, ferrompi::Error&gt;</code>
+on every fallible call. <code>ferrompi::Error::Mpi</code> carries four fields:</p>
+
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code>Error::Mpi { class, code, message, operation }</code></pre></div>
+<p>where <code>class</code> is a <code>MpiErrorClass</code> enum, <code>code</code> is the raw MPI error integer,
+<code>message</code> is the string from <code>MPI_Error_string</code>, and <code>operation</code> is the ferrompi
+function name that failed (e.g., <code>"allreduce"</code>). This means that migrated code must
+handle errors explicitly — typically with <code>?</code> in <code>fn main() -&gt; ferrompi::Result&lt;()&gt;</code>
+— instead of relying on process termination.</p>
+<h4 id="raii-drop--no-manual-cleanup-needed"><a class="doc-anchor" href="#raii-drop--no-manual-cleanup-needed">§</a>RAII Drop — No Manual Cleanup Needed</h4>
+<p>rsmpi requires explicit calls to free some objects. ferrompi implements <code>Drop</code> on
+all handle-owning types:</p>
+<div><table><thead><tr><th>Type</th><th>What <code>Drop</code> calls</th></tr></thead><tbody>
+<tr><td><code>Communicator</code></td><td><code>MPI_Comm_free</code></td></tr>
+<tr><td><code>Group</code></td><td><code>MPI_Group_free</code></td></tr>
+<tr><td><code>Request</code></td><td><code>MPI_Request_free</code> (if not consumed by <code>wait</code>)</td></tr>
+<tr><td><code>PersistentRequest</code></td><td><code>MPI_Request_free</code></td></tr>
+<tr><td><code>Win&lt;T&gt;</code></td><td><code>MPI_Win_free</code></td></tr>
+<tr><td><code>CustomDatatype</code></td><td><code>MPI_Type_free</code></td></tr>
+<tr><td><code>UserOp&lt;T&gt;</code></td><td><code>MPI_Op_free</code></td></tr>
+</tbody></table>
+</div>
+<p>Migrated code should remove any manual teardown calls — they will double-free if
+left in place.</p>
+<hr />
+<h3 id="6-migration-checklist"><a class="doc-anchor" href="#6-migration-checklist">§</a>6. Migration Checklist</h3>
+<p>Use this checklist when porting a crate from rsmpi to ferrompi. The function
+mapping in <a href="#2-function-for-function-mapping">Section 2</a> is the authoritative
+conversion reference.</p>
+<ul>
+<li><input disabled="" type="checkbox"/>
+Add <code>ferrompi = "0.2"</code> to <code>Cargo.toml</code>; remove <code>mpi</code> dependency.</li>
+<li><input disabled="" type="checkbox"/>
+Add <code>features = ["rma"]</code> if using shared memory windows; add <code>features = ["numa"]</code> for SLURM helpers.</li>
+<li><input disabled="" type="checkbox"/>
+Replace <code>use mpi::traits::*</code> with <code>use ferrompi::{Mpi, ReduceOp}</code> (and
+other types as needed).</li>
+<li><input disabled="" type="checkbox"/>
+Replace <code>mpi::initialize()</code> with <code>Mpi::init()?</code>; change <code>fn main()</code> to
+return <code>ferrompi::Result&lt;()&gt;</code>.</li>
+<li><input disabled="" type="checkbox"/>
+Replace <code>universe.world()</code> with <code>mpi.world()</code>. The <code>universe</code>/<code>Mpi</code> binding
+must remain in scope for the lifetime of the program (dropping it calls
+<code>MPI_Finalize</code>).</li>
+<li><input disabled="" type="checkbox"/>
+Replace <code>comm.process_at_rank(r).broadcast_into(...)</code> and similar
+root-taking calls using the Collectives table in
+<a href="#2a-collectives">Section 2a</a>.</li>
+<li><input disabled="" type="checkbox"/>
+Replace <code>comm.all_reduce_into(...)</code> and symmetric collectives using the same
+table.</li>
+<li><input disabled="" type="checkbox"/>
+Replace <code>comm.process_at_rank(dest).send(...)</code> and point-to-point calls
+using the P2P table in <a href="#2b-point-to-point">Section 2b</a>.</li>
+<li><input disabled="" type="checkbox"/>
+Note: <code>world.barrier()</code> now returns <code>Result&lt;()&gt;</code> — add <code>?</code>.</li>
+<li><input disabled="" type="checkbox"/>
+Replace <code>WaitGuard</code> wrapping with explicit <code>request.wait()?</code>. Verify that
+the buffer is not accessed between the <code>isend</code>/<code>irecv</code> call and the
+<code>wait()</code> call.</li>
+<li><input disabled="" type="checkbox"/>
+Replace <code>Equivalence</code>-derived types with <code>CustomDatatype</code> or
+<code>BytePermutable</code> (see <a href="#5-api-ergonomic-differences">Section 5</a>).</li>
+<li><input disabled="" type="checkbox"/>
+Remove manual <code>MPI_*_free</code> calls — ferrompi <code>Drop</code> handles cleanup.</li>
+<li><input disabled="" type="checkbox"/>
+If the project used <code>spawn</code>, <code>Intercomm</code>, or <code>MPI_File_*</code>, check the
+<a href="#4-features-not-supported-in-ferrompi">Section 4</a> list before starting the
+migration.</li>
+<li><input disabled="" type="checkbox"/>
+Run <code>cargo clippy</code> and address any type errors; the sealed <code>MpiDatatype</code>
+constraint will surface incompatible types at compile time.</li>
+</ul>
+</div></details></section></div></main></body></html>

@@ -1,0 +1,189 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="ferrompi"><title>ferrompi - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="../crates.js"></script><script defer src="../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc mod crate"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Crate ferrompi</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../ferrompi/index.html">ferrompi</a><span class="version">0.5.0</span></h2></div><div class="sidebar-elems"><ul class="block"><li><a id="all-types" href="all.html">All Items</a></li></ul><section id="rustdoc-toc"><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#ferrompi" title="ferrompi">ferrompi</a><ul><li><a href="#supported-types" title="Supported Types">Supported Types</a></li><li><a href="#quick-start" title="Quick Start">Quick Start</a></li><li><a href="#feature-flags" title="Feature Flags">Feature Flags</a></li><li><a href="#capabilities" title="Capabilities">Capabilities</a></li><li><a href="#thread-safety" title="Thread Safety">Thread Safety</a></li><li><a href="#hybrid-mpiopenmp" title="Hybrid MPI+OpenMP">Hybrid MPI+OpenMP</a></li><li><a href="#extended-documentation" title="Extended documentation">Extended documentation</a></li></ul></li></ul><h3><a href="#modules">Crate Items</a></h3><ul class="block"><li><a href="#modules" title="Modules">Modules</a></li><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#traits" title="Traits">Traits</a></li><li><a href="#types" title="Type Aliases">Type Aliases</a></li></ul></section><div id="rustdoc-modnav"></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><h1>Crate <span>ferrompi</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/ferrompi/lib.rs.html#1-989">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="ferrompi"><a class="doc-anchor" href="#ferrompi">§</a>ferrompi</h2>
+<p>Safe, generic Rust bindings for MPI (Message Passing Interface).</p>
+<p>This crate wraps MPI functionality through a thin C layer, providing:</p>
+<ul>
+<li>Type-safe generic API for all MPI datatypes</li>
+<li>Blocking, nonblocking, and persistent (MPI 4.0+) collectives</li>
+<li>Communicator management (split, duplicate)</li>
+<li>RMA shared memory windows (with <code>rma</code> feature)</li>
+<li>SLURM environment helpers (with <code>numa</code> feature)</li>
+<li>Large count support (MPI 4.0+ <code>_c</code> variants for blocking/nonblocking
+collectives; persistent collectives currently reject <code>count &gt; INT_MAX</code>
+with <code>MPI_ERR_COUNT</code> — full <code>_c</code> dispatch for persistent ops is deferred)</li>
+</ul>
+<h3 id="supported-types"><a class="doc-anchor" href="#supported-types">§</a>Supported Types</h3>
+<p>All communication operations are generic over <a href="trait.MpiDatatype.html" title="trait ferrompi::MpiDatatype"><code>MpiDatatype</code></a>:
+<code>f32</code>, <code>f64</code>, <code>i32</code>, <code>i64</code>, <code>u8</code>, <code>u32</code>, <code>u64</code></p>
+<h3 id="quick-start"><a class="doc-anchor" href="#quick-start">§</a>Quick Start</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::{Mpi, ReduceOp};
+
+<span class="kw">fn </span>main() -&gt; <span class="prelude-ty">Result</span>&lt;(), ferrompi::Error&gt; {
+    <span class="kw">let </span>mpi = Mpi::init()<span class="question-mark">?</span>;
+    <span class="kw">let </span>world = mpi.world();
+
+    <span class="kw">let </span>rank = world.rank();
+    <span class="kw">let </span>size = world.size();
+    <span class="macro">println!</span>(<span class="string">"Hello from rank {} of {}"</span>, rank, size);
+
+    <span class="comment">// Generic broadcast — works with any MpiDatatype
+    </span><span class="kw">let </span><span class="kw-2">mut </span>data = <span class="macro">vec!</span>[<span class="number">0.0f64</span>; <span class="number">100</span>];
+    <span class="kw">if </span>rank == <span class="number">0 </span>{
+        data.fill(<span class="number">42.0</span>);
+    }
+    world.broadcast(<span class="kw-2">&amp;mut </span>data, <span class="number">0</span>)<span class="question-mark">?</span>;
+
+    <span class="comment">// Generic all-reduce
+    </span><span class="kw">let </span>sum = world.allreduce_scalar(rank <span class="kw">as </span>f64, ReduceOp::Sum)<span class="question-mark">?</span>;
+    <span class="macro">println!</span>(<span class="string">"Rank {rank}: sum of all ranks = {sum}"</span>);
+
+    <span class="prelude-val">Ok</span>(())
+}</code></pre></div><h3 id="feature-flags"><a class="doc-anchor" href="#feature-flags">§</a>Feature Flags</h3><div><table><thead><tr><th>Feature</th><th>Description</th><th>Dependencies</th></tr></thead><tbody>
+<tr><td><code>rma</code></td><td>RMA shared memory window operations</td><td>—</td></tr>
+<tr><td><code>numa</code></td><td>NUMA-aware windows and SLURM helpers</td><td><code>rma</code></td></tr>
+</tbody></table>
+</div><h3 id="capabilities"><a class="doc-anchor" href="#capabilities">§</a>Capabilities</h3>
+<ul>
+<li>
+<p><strong>Generic API</strong>: All operations work with any <a href="trait.MpiDatatype.html" title="trait ferrompi::MpiDatatype"><code>MpiDatatype</code></a> (<code>f32</code>, <code>f64</code>, <code>i32</code>, <code>i64</code>, <code>u8</code>, <code>u32</code>, <code>u64</code>)</p>
+</li>
+<li>
+<p><strong>Blocking collectives</strong>: barrier, broadcast, reduce, allreduce, gather, scatter, allgather,
+alltoall, scan, exscan, reduce_scatter_block, plus V-variants (gatherv, scatterv, allgatherv, alltoallv)</p>
+</li>
+<li>
+<p><strong>Nonblocking collectives</strong>: All 15 <code>i</code>-prefixed variants with <a href="struct.Request.html" title="struct ferrompi::Request"><code>Request</code></a> handles</p>
+</li>
+<li>
+<p><strong>Persistent collectives</strong> (MPI 4.0+): All 15 <code>_init</code> variants with <a href="struct.PersistentRequest.html" title="struct ferrompi::PersistentRequest"><code>PersistentRequest</code></a> handles</p>
+</li>
+<li>
+<p><strong>Scalar and in-place variants</strong>: <code>reduce_scalar</code>, <code>allreduce_scalar</code>, <code>reduce_inplace</code>,
+<code>allreduce_inplace</code>, <code>scan_scalar</code>, <code>exscan_scalar</code></p>
+</li>
+<li>
+<p><strong>Point-to-point</strong>: <code>send</code>, <code>recv</code>, <code>isend</code>, <code>irecv</code>, <code>sendrecv</code>, <code>probe</code>, <code>iprobe</code></p>
+</li>
+<li>
+<p><strong>Communicator management</strong>: <code>split</code>, <code>split_type</code>, <code>split_shared</code>, <code>duplicate</code></p>
+</li>
+<li>
+<p><strong>Group operations</strong>: <a href="struct.Group.html" title="struct ferrompi::Group"><code>Group</code></a> with incl/excl/union/intersection/difference,
+<a href="struct.RankRange.html" title="struct ferrompi::RankRange"><code>RankRange</code></a> for range constructors, <a href="enum.GroupComparison.html" title="enum ferrompi::GroupComparison"><code>GroupComparison</code></a>.</p>
+<p>Note: <a href="struct.Mpi.html#method.create_from_group" title="method ferrompi::Mpi::create_from_group"><code>Mpi::create_from_group</code></a> requires MPI 4.0+.
+Support is probed once and cached; see the function rustdoc for the cache invariant.</p>
+</li>
+<li>
+<p><strong>Custom datatypes</strong>: <a href="struct.CustomDatatype.html" title="struct ferrompi::CustomDatatype"><code>CustomDatatype</code></a>
+(contiguous/vector/struct/resized) and <a href="struct.StructField.html" title="struct ferrompi::StructField"><code>StructField</code></a>
+for struct-type builders.</p>
+</li>
+<li>
+<p><strong>User-defined reduction operations</strong>: <a href="struct.UserOp.html" title="struct ferrompi::UserOp"><code>UserOp</code></a> wraps <code>MPI_Op_create</code>
+with safe closure storage and trampoline.</p>
+</li>
+<li>
+<p><strong>Distributed RMA windows</strong> (feature <code>rma</code>): <a href="struct.Win.html" title="struct ferrompi::Win"><code>Win&lt;T&gt;</code></a> with
+<a href="struct.WinFenceAssert.html" title="struct ferrompi::WinFenceAssert"><code>WinFenceAssert</code></a>, <a href="struct.WinPscwAssert.html" title="struct ferrompi::WinPscwAssert"><code>WinPscwAssert</code></a>,
+<a href="struct.WinLockGuard.html" title="struct ferrompi::WinLockGuard"><code>WinLockGuard</code></a>, and <a href="struct.WinLockAllGuard.html" title="struct ferrompi::WinLockAllGuard"><code>WinLockAllGuard</code></a>
+RAII guards.</p>
+</li>
+<li>
+<p><strong>Info objects</strong>: <a href="struct.Info.html" title="struct ferrompi::Info"><code>Info</code></a> for runtime hint passing to communicator,
+window, and operation constructors.</p>
+</li>
+<li>
+<p><strong>Persistent point-to-point</strong>: <code>send_init</code>, <code>bsend_init</code>, <code>rsend_init</code>, <code>ssend_init</code>,
+<code>recv_init</code> methods on <a href="struct.Communicator.html" title="struct ferrompi::Communicator"><code>Communicator</code></a>, each returning a
+<a href="struct.PersistentRequest.html" title="struct ferrompi::PersistentRequest"><code>PersistentRequest</code></a>.</p>
+</li>
+<li>
+<p><strong>Shared memory windows</strong> (feature <code>rma</code>): <a href="struct.SharedWindow.html" title="struct ferrompi::SharedWindow"><code>SharedWindow&lt;T&gt;</code></a>
+with RAII lock guards for NUMA-aware intra-node shared memory (distinct from the
+distributed <a href="struct.Win.html" title="struct ferrompi::Win"><code>Win&lt;T&gt;</code></a> windows above).</p>
+</li>
+<li>
+<p><strong>SLURM helpers</strong> (feature <code>numa</code>): Job topology queries via <code>slurm</code> module</p>
+</li>
+<li>
+<p><strong>Rich error handling</strong>: <a href="enum.MpiErrorClass.html" title="enum ferrompi::MpiErrorClass"><code>MpiErrorClass</code></a> categorization with messages from the MPI runtime</p>
+</li>
+</ul>
+<h3 id="thread-safety"><a class="doc-anchor" href="#thread-safety">§</a>Thread Safety</h3>
+<p><a href="struct.Communicator.html" title="struct ferrompi::Communicator"><code>Communicator</code></a> is <code>Send + Sync</code> to support hybrid MPI + threads programs
+(e.g., MPI between nodes, <code>std::thread::scope</code> within a node).</p>
+<p>The actual thread-safety guarantees depend on the thread level requested
+at initialization:</p>
+<div><table><thead><tr><th>Thread Level</th><th>Who can call MPI</th><th>Synchronization</th></tr></thead><tbody>
+<tr><td><a href="enum.ThreadLevel.html#variant.Single" title="variant ferrompi::ThreadLevel::Single"><code>ThreadLevel::Single</code></a></td><td>Main thread only</td><td>N/A</td></tr>
+<tr><td><a href="enum.ThreadLevel.html#variant.Funneled" title="variant ferrompi::ThreadLevel::Funneled"><code>ThreadLevel::Funneled</code></a></td><td>Main thread only</td><td>N/A</td></tr>
+<tr><td><a href="enum.ThreadLevel.html#variant.Serialized" title="variant ferrompi::ThreadLevel::Serialized"><code>ThreadLevel::Serialized</code></a></td><td>Any thread</td><td>User must serialize</td></tr>
+<tr><td><a href="enum.ThreadLevel.html#variant.Multiple" title="variant ferrompi::ThreadLevel::Multiple"><code>ThreadLevel::Multiple</code></a></td><td>Any thread</td><td>None needed</td></tr>
+</tbody></table>
+</div>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::{Mpi, ThreadLevel};
+
+<span class="comment">// Request serialized thread support for hybrid MPI + threads
+</span><span class="kw">let </span>mpi = Mpi::init_thread(ThreadLevel::Funneled).unwrap();
+<span class="macro">assert!</span>(mpi.thread_level() &gt;= ThreadLevel::Funneled);</code></pre></div>
+<p><a href="struct.Mpi.html" title="struct ferrompi::Mpi"><code>Mpi</code></a> itself is <code>!Send + !Sync</code> — MPI initialization and finalization
+must occur on the same thread. Only <a href="struct.Communicator.html" title="struct ferrompi::Communicator"><code>Communicator</code></a> handles (and the
+operations on them) may cross thread boundaries.</p>
+<h4 id="sendsync-status-of-public-types"><a class="doc-anchor" href="#sendsync-status-of-public-types">§</a>Send/Sync Status of Public Types</h4><div><table><thead><tr><th>Type</th><th>Send/Sync</th><th>Notes</th></tr></thead><tbody>
+<tr><td><a href="struct.Communicator.html" title="struct ferrompi::Communicator"><code>Communicator</code></a></td><td><code>Send + Sync</code></td><td>Explicit <code>unsafe impl</code> in <code>src/comm/mod.rs</code>; cross-thread use is the primary hybrid MPI use case.</td></tr>
+<tr><td><a href="struct.Mpi.html" title="struct ferrompi::Mpi"><code>Mpi</code></a></td><td><code>!Send + !Sync</code></td><td><code>PhantomData&lt;*const ()&gt;</code> field; init and finalize must occur on the same thread.</td></tr>
+<tr><td><a href="struct.Group.html" title="struct ferrompi::Group"><code>Group</code></a></td><td><code>Send + Sync</code></td><td>Explicit <code>unsafe impl</code> in <code>src/group.rs</code>; handles are opaque integers, MPI-thread-safe under <code>MPI_THREAD_MULTIPLE</code>.</td></tr>
+<tr><td><a href="struct.Request.html" title="struct ferrompi::Request"><code>Request</code></a></td><td><code>Send + Sync</code></td><td>Auto-derived; <code>i64</code> + <code>bool</code> fields. Cross-thread use requires <code>MPI_THREAD_MULTIPLE</code>. Buffer-lifetime invariant still applies.</td></tr>
+<tr><td><a href="struct.PersistentRequest.html" title="struct ferrompi::PersistentRequest"><code>PersistentRequest</code></a></td><td><code>Send + Sync</code></td><td>Auto-derived; same shape as <code>Request</code>. ADR-0004 §“Drop behavior” applies across thread boundaries.</td></tr>
+<tr><td><a href="struct.Status.html" title="struct ferrompi::Status"><code>Status</code></a></td><td><code>Send + Sync</code></td><td>POD wrapper; all fields are <code>Copy</code>.</td></tr>
+<tr><td><a href="struct.CustomDatatype.html" title="struct ferrompi::CustomDatatype"><code>CustomDatatype</code></a></td><td><code>Send + Sync</code></td><td>Explicit <code>unsafe impl</code> in <code>src/datatype_builder.rs</code>; handle is an opaque integer.</td></tr>
+<tr><td><a href="struct.Info.html" title="struct ferrompi::Info"><code>Info</code></a></td><td><code>Send + Sync</code></td><td>Auto-derived from <code>i32</code> + <code>bool</code> fields; MPI info objects are thread-safe under <code>MPI_THREAD_MULTIPLE</code>.</td></tr>
+<tr><td><a href="struct.UserOp.html" title="struct ferrompi::UserOp"><code>UserOp&lt;T&gt;</code></a></td><td><code>Send + Sync</code> (for <code>T: MpiDatatype</code>)</td><td>Auto-derived: fields are <code>i32</code> + <code>PhantomData&lt;T&gt;</code>. The trait bound <code>MpiDatatype: Copy + Send + 'static</code> and the fact that all concrete <code>MpiDatatype</code> impls are also <code>Sync</code> give <code>Send + Sync</code> for <code>UserOp&lt;T&gt;</code>. The global closure registry uses internal <code>unsafe impl Send/Sync</code> on its slots; that is a separate object from <code>UserOp&lt;T&gt;</code> itself.</td></tr>
+<tr><td><a href="struct.Win.html" title="struct ferrompi::Win"><code>Win&lt;T&gt;</code></a> (feature <code>rma</code>)</td><td><code>!Send + !Sync</code></td><td><code>NonNull&lt;T&gt;</code> field suppresses auto-traits; RMA window’s local memory pointer is not safe to share across threads.</td></tr>
+<tr><td><a href="struct.SharedWindow.html" title="struct ferrompi::SharedWindow"><code>SharedWindow&lt;T&gt;</code></a> (feature <code>rma</code>)</td><td><code>!Send + !Sync</code></td><td><code>NonNull&lt;T&gt;</code> field; same rationale as <code>Win&lt;T&gt;</code>.</td></tr>
+<tr><td><a href="struct.LockGuard.html" title="struct ferrompi::LockGuard"><code>LockGuard&lt;'a, T&gt;</code></a> (feature <code>rma</code>)</td><td><code>!Send + !Sync</code></td><td>Borrows <code>SharedWindow&lt;T&gt;</code>; inherits non-Send/Sync.</td></tr>
+<tr><td><a href="struct.LockAllGuard.html" title="struct ferrompi::LockAllGuard"><code>LockAllGuard&lt;'a, T&gt;</code></a> (feature <code>rma</code>)</td><td><code>!Send + !Sync</code></td><td>Borrows <code>SharedWindow&lt;T&gt;</code>; inherits non-Send/Sync.</td></tr>
+<tr><td><a href="struct.WinLockGuard.html" title="struct ferrompi::WinLockGuard"><code>WinLockGuard&lt;'g, 'a, T&gt;</code></a> (feature <code>rma</code>)</td><td><code>!Send + !Sync</code></td><td>Borrows <code>Win&lt;T&gt;</code>; inherits non-Send/Sync.</td></tr>
+<tr><td><a href="struct.WinLockAllGuard.html" title="struct ferrompi::WinLockAllGuard"><code>WinLockAllGuard&lt;'g, 'a, T&gt;</code></a> (feature <code>rma</code>)</td><td><code>!Send + !Sync</code></td><td>Borrows <code>Win&lt;T&gt;</code>; inherits non-Send/Sync.</td></tr>
+</tbody></table>
+</div><h3 id="hybrid-mpiopenmp"><a class="doc-anchor" href="#hybrid-mpiopenmp">§</a>Hybrid MPI+OpenMP</h3>
+<p>For hybrid parallelism, use <a href="struct.Mpi.html#method.init_thread" title="associated function ferrompi::Mpi::init_thread"><code>Mpi::init_thread()</code></a> with the appropriate level:</p>
+<ul>
+<li><strong><a href="enum.ThreadLevel.html#variant.Funneled" title="variant ferrompi::ThreadLevel::Funneled"><code>Funneled</code></a></strong> (recommended): Only the main thread makes MPI calls.
+OpenMP threads handle computation between MPI calls.</li>
+<li><strong><a href="enum.ThreadLevel.html#variant.Serialized" title="variant ferrompi::ThreadLevel::Serialized"><code>Serialized</code></a></strong>: Any thread can make MPI calls, but only one at a time.</li>
+<li><strong><a href="enum.ThreadLevel.html#variant.Multiple" title="variant ferrompi::ThreadLevel::Multiple"><code>Multiple</code></a></strong>: Full concurrent MPI from any thread (highest overhead).</li>
+</ul>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::{Mpi, ThreadLevel, ReduceOp};
+
+<span class="kw">let </span>mpi = Mpi::init_thread(ThreadLevel::Funneled).unwrap();
+<span class="macro">assert!</span>(mpi.thread_level() &gt;= ThreadLevel::Funneled);
+
+<span class="kw">let </span>world = mpi.world();
+<span class="comment">// Worker threads compute locally, main thread calls MPI
+</span><span class="kw">let </span>local = <span class="number">42.0_f64</span>;
+<span class="kw">let </span>global = world.allreduce_scalar(local, ReduceOp::Sum).unwrap();</code></pre></div><h4 id="slurm-configuration"><a class="doc-anchor" href="#slurm-configuration">§</a>SLURM Configuration</h4><div class="example-wrap"><pre class="language-bash"><code>#SBATCH --ntasks-per-node=4        # MPI ranks per node
+#SBATCH --cpus-per-task=8          # OpenMP threads per rank
+#SBATCH --bind-to core             # Pin MPI ranks
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+srun ./my_program</code></pre></div>
+<p>Use the <code>slurm</code> module (with <code>numa</code> feature) to read these values at runtime.
+See <code>examples/hybrid_openmp.rs</code> for the full pattern.</p>
+<h3 id="extended-documentation"><a class="doc-anchor" href="#extended-documentation">§</a>Extended documentation</h3>
+<p>Long-form documentation artifacts are embedded in the <a href="doc/index.html" title="mod ferrompi::doc"><code>doc</code></a> module and
+render as individual pages in this rustdoc. The same content is available
+as plain Markdown in the <code>docs/</code> directory.</p>
+<div><table><thead><tr><th>Module</th><th>Description</th></tr></thead><tbody>
+<tr><td><a href="doc/architecture/index.html" title="mod ferrompi::doc::architecture"><code>doc::architecture</code></a></td><td>Six-layer stack, handle tables, thread-safety model, FFI/ABI invariants, and generic <code>MpiDatatype</code> design</td></tr>
+<tr><td><a href="doc/migrating_from_rsmpi/index.html" title="mod ferrompi::doc::migrating_from_rsmpi"><code>doc::migrating_from_rsmpi</code></a></td><td>Function-for-function API mapping and migration cookbook from rsmpi</td></tr>
+<tr><td><a href="doc/mpi_compatibility/index.html" title="mod ferrompi::doc::mpi_compatibility"><code>doc::mpi_compatibility</code></a></td><td>Compatibility matrix for MPICH, Open MPI, Intel MPI, and Cray MPI</td></tr>
+<tr><td><a href="doc/adr_0001_why_c_wrapper/index.html" title="mod ferrompi::doc::adr_0001_why_c_wrapper"><code>doc::adr_0001_why_c_wrapper</code></a></td><td>ADR-0001: why a hand-written C wrapper is used instead of <code>bindgen</code></td></tr>
+<tr><td><a href="doc/adr_0002_handle_tables/index.html" title="mod ferrompi::doc::adr_0002_handle_tables"><code>doc::adr_0002_handle_tables</code></a></td><td>ADR-0002: C11 atomic CAS strategy for the request-table under <code>MPI_THREAD_MULTIPLE</code></td></tr>
+<tr><td><a href="doc/adr_0003_generic_mpi_datatype/index.html" title="mod ferrompi::doc::adr_0003_generic_mpi_datatype"><code>doc::adr_0003_generic_mpi_datatype</code></a></td><td>ADR-0003: sealed <code>MpiDatatype</code> trait family and <code>DatatypeTag</code> ABI contract</td></tr>
+<tr><td><a href="doc/adr_0004_persistent_collective_approach/index.html" title="mod ferrompi::doc::adr_0004_persistent_collective_approach"><code>doc::adr_0004_persistent_collective_approach</code></a></td><td>ADR-0004: <code>PersistentRequest</code> lifecycle and buffer-lifetime invariants</td></tr>
+<tr><td><a href="doc/adr_0005_mpi_op_create/index.html" title="mod ferrompi::doc::adr_0005_mpi_op_create"><code>doc::adr_0005_mpi_op_create</code></a></td><td>ADR-0005: <code>MPI_Op_create</code> closure storage, trampoline safety, and drop ordering</td></tr>
+</tbody></table>
+</div></div></details><h2 id="modules" class="section-header">Modules<a href="#modules" class="anchor">§</a></h2><dl class="item-table"><dt><a class="mod" href="doc/index.html" title="mod ferrompi::doc">doc</a></dt><dd>Long-form documentation for ferrompi.</dd><dt><a class="mod" href="slurm/index.html" title="mod ferrompi::slurm">slurm</a></dt><dd>SLURM scheduler environment helpers.</dd></dl><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.Communicator.html" title="struct ferrompi::Communicator">Communicator</a></dt><dd>An MPI communicator.</dd><dt><a class="struct" href="struct.CustomDatatype.html" title="struct ferrompi::CustomDatatype">Custom<wbr>Datatype</a></dt><dd>A committed derived MPI datatype backed by the C-side <code>datatype_table</code>.</dd><dt><a class="struct" href="struct.DoubleInt.html" title="struct ferrompi::DoubleInt">Double<wbr>Int</a></dt><dd>Paired <code>{ f64 value; i32 index }</code> — maps to <code>MPI_DOUBLE_INT</code>.</dd><dt><a class="struct" href="struct.FloatInt.html" title="struct ferrompi::FloatInt">Float<wbr>Int</a></dt><dd>Paired <code>{ f32 value; i32 index }</code> — maps to <code>MPI_FLOAT_INT</code>.</dd><dt><a class="struct" href="struct.Group.html" title="struct ferrompi::Group">Group</a></dt><dd>An MPI group handle.</dd><dt><a class="struct" href="struct.HostEntry.html" title="struct ferrompi::HostEntry">Host<wbr>Entry</a></dt><dd>A single host and its assigned MPI ranks.</dd><dt><a class="struct" href="struct.Info.html" title="struct ferrompi::Info">Info</a></dt><dd>An MPI info object for passing hints to MPI operations.</dd><dt><a class="struct" href="struct.Int2.html" title="struct ferrompi::Int2">Int2</a></dt><dd>Paired <code>{ i32 value; i32 index }</code> — maps to <code>MPI_2INT</code>.</dd><dt><a class="struct" href="struct.LockAllGuard.html" title="struct ferrompi::LockAllGuard">Lock<wbr>AllGuard</a></dt><dd>RAII guard for a lock-all window lock.</dd><dt><a class="struct" href="struct.LockGuard.html" title="struct ferrompi::LockGuard">Lock<wbr>Guard</a></dt><dd>RAII guard for a single-rank window lock.</dd><dt><a class="struct" href="struct.LongDoubleInt.html" title="struct ferrompi::LongDoubleInt">Long<wbr>Double<wbr>Int</a></dt><dd>Paired <code>{ long double value; i32 index }</code> — maps to <code>MPI_LONG_DOUBLE_INT</code>.</dd><dt><a class="struct" href="struct.LongInt.html" title="struct ferrompi::LongInt">LongInt</a></dt><dd>Paired <code>{ i64 value; i32 index }</code> — maps to <code>MPI_LONG_INT</code>.</dd><dt><a class="struct" href="struct.Mpi.html" title="struct ferrompi::Mpi">Mpi</a></dt><dd>MPI environment handle.</dd><dt><a class="struct" href="struct.PendingFetchResult.html" title="struct ferrompi::PendingFetchResult">Pending<wbr>Fetch<wbr>Result</a></dt><dd>Opaque holder for the buffers of a pending RMA fetch operation.</dd><dt><a class="struct" href="struct.PersistentRequest.html" title="struct ferrompi::PersistentRequest">Persistent<wbr>Request</a></dt><dd>A persistent MPI request handle.</dd><dt><a class="struct" href="struct.RankRange.html" title="struct ferrompi::RankRange">Rank<wbr>Range</a></dt><dd>Inclusive rank range <code>[first, last]</code> with positive stride.</dd><dt><a class="struct" href="struct.Request.html" title="struct ferrompi::Request">Request</a></dt><dd>A handle to a nonblocking MPI operation.</dd><dt><a class="struct" href="struct.SharedWindow.html" title="struct ferrompi::SharedWindow">Shared<wbr>Window</a></dt><dd>A shared memory window allocated across processes on the same node.</dd><dt><a class="struct" href="struct.ShortInt.html" title="struct ferrompi::ShortInt">Short<wbr>Int</a></dt><dd>Paired <code>{ i16 value; i32 index }</code> — maps to <code>MPI_SHORT_INT</code>.</dd><dt><a class="struct" href="struct.SlurmInfo.html" title="struct ferrompi::SlurmInfo">Slurm<wbr>Info</a></dt><dd>SLURM job metadata.</dd><dt><a class="struct" href="struct.Status.html" title="struct ferrompi::Status">Status</a></dt><dd>Information about a probed or received MPI message.</dd><dt><a class="struct" href="struct.StructField.html" title="struct ferrompi::StructField">Struct<wbr>Field</a></dt><dd>One field of a struct-type passed to <a href="struct.CustomDatatype.html#method.create_struct" title="associated function ferrompi::CustomDatatype::create_struct"><code>CustomDatatype::create_struct</code></a>.</dd><dt><a class="struct" href="struct.TopologyInfo.html" title="struct ferrompi::TopologyInfo">Topology<wbr>Info</a></dt><dd>MPI topology information gathered across all ranks in a communicator.</dd><dt><a class="struct" href="struct.UserOp.html" title="struct ferrompi::UserOp">UserOp</a></dt><dd>A user-defined MPI reduction operation backed by a Rust closure.</dd><dt><a class="struct" href="struct.Win.html" title="struct ferrompi::Win">Win</a></dt><dd>A general-purpose distributed RMA window.</dd><dt><a class="struct" href="struct.WinFenceAssert.html" title="struct ferrompi::WinFenceAssert">WinFence<wbr>Assert</a></dt><dd>Assertion bitmask for <a href="struct.Win.html#method.fence" title="method ferrompi::Win::fence"><code>Win::fence</code></a> (active-target synchronization).</dd><dt><a class="struct" href="struct.WinLockAllGuard.html" title="struct ferrompi::WinLockAllGuard">WinLock<wbr>AllGuard</a></dt><dd>RAII guard for a lock-all passive-target epoch on a <a href="struct.Win.html" title="struct ferrompi::Win"><code>Win</code></a>.</dd><dt><a class="struct" href="struct.WinLockGuard.html" title="struct ferrompi::WinLockGuard">WinLock<wbr>Guard</a></dt><dd>RAII guard for a single-rank passive-target lock on a <a href="struct.Win.html" title="struct ferrompi::Win"><code>Win</code></a>.</dd><dt><a class="struct" href="struct.WinPscwAssert.html" title="struct ferrompi::WinPscwAssert">WinPscw<wbr>Assert</a></dt><dd>Assertion bitmask for <a href="struct.Win.html#method.post" title="method ferrompi::Win::post"><code>Win::post</code></a> and <a href="struct.Win.html#method.start" title="method ferrompi::Win::start"><code>Win::start</code></a> (PSCW active-target
+synchronization).</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.DatatypeTag.html" title="enum ferrompi::DatatypeTag">Datatype<wbr>Tag</a></dt><dd>Tag values matching C-side <code>FERROMPI_*</code> defines.</dd><dt><a class="enum" href="enum.Error.html" title="enum ferrompi::Error">Error</a></dt><dd>Error types for MPI operations.</dd><dt><a class="enum" href="enum.GroupComparison.html" title="enum ferrompi::GroupComparison">Group<wbr>Comparison</a></dt><dd>Outcome of <a href="struct.Group.html#method.compare" title="method ferrompi::Group::compare"><code>Group::compare</code></a>.</dd><dt><a class="enum" href="enum.LockType.html" title="enum ferrompi::LockType">Lock<wbr>Type</a></dt><dd>Lock type for window synchronization.</dd><dt><a class="enum" href="enum.MpiErrorClass.html" title="enum ferrompi::MpiErrorClass">MpiError<wbr>Class</a></dt><dd>MPI error class, categorizing the type of MPI error.</dd><dt><a class="enum" href="enum.ReduceOp.html" title="enum ferrompi::ReduceOp">Reduce<wbr>Op</a></dt><dd>Reduction operations</dd><dt><a class="enum" href="enum.ResourceKind.html" title="enum ferrompi::ResourceKind">Resource<wbr>Kind</a></dt><dd>Identifies which internal ferrompi handle table was exhausted in an
+<a href="enum.Error.html#variant.ResourceExhausted" title="variant ferrompi::Error::ResourceExhausted"><code>Error::ResourceExhausted</code></a>.</dd><dt><a class="enum" href="enum.SplitType.html" title="enum ferrompi::SplitType">Split<wbr>Type</a></dt><dd>Split types for <a href="struct.Communicator.html#method.split_type" title="method ferrompi::Communicator::split_type"><code>Communicator::split_type</code></a>.</dd><dt><a class="enum" href="enum.ThreadLevel.html" title="enum ferrompi::ThreadLevel">Thread<wbr>Level</a></dt><dd>MPI thread support levels</dd><dt><a class="enum" href="enum.WinKind.html" title="enum ferrompi::WinKind">WinKind</a></dt><dd>Tracks whether the local buffer is caller-supplied or MPI-managed.</dd></dl><h2 id="traits" class="section-header">Traits<a href="#traits" class="anchor">§</a></h2><dl class="item-table"><dt><a class="trait" href="trait.AtomicMpiDatatype.html" title="trait ferrompi::AtomicMpiDatatype">Atomic<wbr>MpiDatatype</a></dt><dd>Trait for types eligible for use with <code>MPI_Compare_and_swap</code>.</dd><dt><a class="trait" href="trait.BytePermutable.html" title="trait ferrompi::BytePermutable">Byte<wbr>Permutable</a></dt><dd>Trait for types whose byte representation is valid for use with
+<code>MPI_BYTE</code>-typed bitwise reductions.</dd><dt><a class="trait" href="trait.MpiDatatype.html" title="trait ferrompi::MpiDatatype">MpiDatatype</a></dt><dd>Trait for types that can be used in MPI communication operations.</dd><dt><a class="trait" href="trait.MpiIndexedDatatype.html" title="trait ferrompi::MpiIndexedDatatype">MpiIndexed<wbr>Datatype</a></dt><dd>Trait for types that can be used with <code>MPI_MAXLOC</code> / <code>MPI_MINLOC</code>.</dd></dl><h2 id="types" class="section-header">Type Aliases<a href="#types" class="anchor">§</a></h2><dl class="item-table"><dt><a class="type" href="type.Result.html" title="type ferrompi::Result">Result</a></dt><dd>Result type for MPI operations.</dd></dl></section></div></main></body></html>

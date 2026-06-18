@@ -1,0 +1,483 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="ADR-0005: `MPI_Op_create` safety model."><title>ferrompi::doc::adr_0005_mpi_op_create - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module adr_0005_mpi_op_create</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../ferrompi/index.html">ferrompi</a><span class="version">0.5.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module adr_<wbr>0005_<wbr>mpi_<wbr>op_<wbr>create</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#adr-0005-mpi_op_create-safety-model--closure-storage-c-trampoline-and-thread-safety-contract" title="ADR-0005: MPI_Op_create Safety Model — Closure Storage, C Trampoline, and Thread-Safety Contract">ADR-0005: MPI_Op_create Safety Model — Closure Storage, C Trampoline, and Thread-Safety Contract</a><ul><li><a href="#context" title="Context">Context</a></li><li><a href="#decision" title="Decision">Decision</a></li><li><a href="#consequences" title="Consequences">Consequences</a></li><li><a href="#alternatives-considered" title="Alternatives Considered">Alternatives Considered</a></li><li><a href="#open-questions-deferred-to-implementation" title="Open Questions Deferred to Implementation">Open Questions Deferred to Implementation</a></li><li><a href="#status" title="Status">Status</a></li></ul></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In ferrompi::<wbr>doc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">ferrompi</a>::<wbr><a href="../index.html">doc</a></div><h1>Module <span>adr_<wbr>0005_<wbr>mpi_<wbr>op_<wbr>create</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/ferrompi/doc.rs.html#73">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>ADR-0005: <code>MPI_Op_create</code> safety model.</p>
+<p>Seven decisions covering closure storage (per-op static slot table),
+<code>Send + Sync + 'static</code> bounds, <code>MPI_Op_free</code>-before-slot-release drop
+ordering, default commutativity, per-slot baked-index C trampolines, and
+<code>catch_unwind + abort</code> panic handling.</p>
+<h2 id="adr-0005-mpi_op_create-safety-model--closure-storage-c-trampoline-and-thread-safety-contract"><a class="doc-anchor" href="#adr-0005-mpi_op_create-safety-model--closure-storage-c-trampoline-and-thread-safety-contract">§</a>ADR-0005: MPI_Op_create Safety Model — Closure Storage, C Trampoline, and Thread-Safety Contract</h2>
+<p><strong>Status:</strong> Accepted — 2026-05-17
+<strong>Date:</strong> 2026-05-17
+<strong>Deciders:</strong> Rogerio Alves</p>
+<hr />
+<h3 id="context"><a class="doc-anchor" href="#context">§</a>Context</h3>
+<p>Epic 7 adds user-defined reduction operations via <code>MPI_Op_create</code>. This is the
+only ferrompi API surface where the MPI library calls back into Rust: the C
+function pointer registered with <code>MPI_Op_create</code> has signature
+<code>void (*)(void*, void*, int*, MPI_Datatype*)</code> and is invoked by MPI on
+potentially any thread under <code>MPI_THREAD_MULTIPLE</code>.</p>
+<p>Every existing FFI call in ferrompi flows Rust → C. <code>MPI_Op_create</code> inverts
+that flow: C → Rust. This inversion creates three constraints with no
+precedent in prior epics:</p>
+<ol>
+<li>
+<p><strong>Closure lifetime.</strong> The Rust closure passed by the caller has an opaque
+type and may hold borrowed or owned state. MPI holds the <code>MPI_Op</code> handle —
+and therefore may invoke the function pointer — until <code>MPI_Op_free</code> is
+called. The closure storage must outlive the C-side handle with no
+possibility of a dangling pointer.</p>
+</li>
+<li>
+<p><strong>Thread-safety.</strong> Under <code>MPI_THREAD_MULTIPLE</code> (the thread level exposed by
+<code>Mpi::init_thread(ThreadLevel::Multiple)</code>), multiple threads within the
+same MPI process may invoke the same reduction operation concurrently (e.g.,
+concurrent <code>MPI_Allreduce</code> calls on different communicators can both
+dispatch user-defined ops). The closure must be callable from multiple
+threads simultaneously; it cannot hold non-<code>Sync</code> state.</p>
+</li>
+<li>
+<p><strong>Panic barrier.</strong> A Rust <code>panic!</code> unwinds through Rust stack frames using
+the Rust unwinding ABI. Crossing an FFI boundary while unwinding is
+undefined behaviour; the C/MPI layer has no mechanism to propagate or
+observe a Rust panic. The trampoline must intercept any panic before it
+reaches the C frame.</p>
+</li>
+</ol>
+<p>None of these problems arise in any existing ferrompi code path. This ADR
+resolves all three, plus four related design questions (commutativity flag,
+trampoline dispatch, datatype contract, and the drop ordering that avoids
+use-after-free), before implementation begins. Its decisions bind
+<code>ticket-037-implement-user-op.md</code> with no remaining design choices for that
+ticket.</p>
+<h4 id="related-existing-patterns"><a class="doc-anchor" href="#related-existing-patterns">§</a>Related existing patterns</h4>
+<ul>
+<li><code>csrc/ferrompi.c</code> lines 41-71: fixed-size static slot tables for
+<code>request_table</code>, <code>win_table</code>, <code>info_table</code>, <code>group_table</code>, and
+<code>datatype_table</code>. Each table has a parallel <code>int *_used[]</code> occupancy array
+and an <code>alloc_*</code>/<code>free_*</code>/<code>get_*</code> function triple.</li>
+<li><code>docs/adr/0002-handle-tables.md</code>: C11-atomic slot-claim strategy for the
+request table under <code>MPI_THREAD_MULTIPLE</code>. The same pattern is referenced
+here for the op table.</li>
+<li><code>src/datatype.rs</code> lines 126-136: <code>MpiDatatype</code> sealed trait with <code>const TAG: DatatypeTag</code> that maps Rust types to C-side <code>FERROMPI_*</code> tag integers. The
+same <code>MpiDatatype</code> bound is used in the closure type constraint.</li>
+</ul>
+<hr />
+<h3 id="decision"><a class="doc-anchor" href="#decision">§</a>Decision</h3>
+<p>Seven decisions are recorded below. Each section names the chosen mechanism
+and explicitly rejects the alternatives. No decision is left open for
+ticket-037.</p>
+<hr />
+<h4 id="decision-1-closure-storage--per-op-static-slot-table-in-csrcferrompic"><a class="doc-anchor" href="#decision-1-closure-storage--per-op-static-slot-table-in-csrcferrompic">§</a>Decision 1: Closure Storage — Per-op static slot table in <code>csrc/ferrompi.c</code></h4>
+<p><strong>Decision.</strong> Closure pointers are stored in a fixed-size static array
+<code>op_closure_table</code> in <code>csrc/ferrompi.c</code>, parallel to the existing <code>win_table</code>
+and <code>info_table</code> arrays. The table holds <code>void*</code> fat-pointer pairs (data
+pointer + vtable pointer) cast from <code>*mut dyn Fn(...)</code>. Slot allocation and
+release follow the existing <code>alloc_*</code>/<code>free_*</code> pattern; occupancy is tracked
+by a parallel <code>atomic_int op_used[MAX_OPS]</code> array using the C11 CAS strategy
+established in ADR-0002.</p>
+<p><strong>Rationale.</strong> The slot table is the only closure-storage mechanism that
+satisfies both lifetime safety and clean deterministic reclamation. The Rust
+side boxes the closure into a <code>Box&lt;dyn Fn(&amp;[T], &amp;mut [T])&gt;</code> and stores the raw
+pointer in the table; the box is reconstructed from the raw pointer in <code>Drop</code>
+and dropped there — no memory is leaked. The C trampoline for slot <code>N</code>
+reconstructs the fat pointer from <code>op_closure_table[N]</code> and calls it. The
+table is entirely within the C static segment, which lives for the process
+lifetime, so the slot pointer cannot dangle before the Rust <code>UserOp</code> drops it.
+Using <code>atomic_int</code> for occupancy (as in the request table) makes
+<code>alloc_op</code>/<code>free_op</code> safe under <code>MPI_THREAD_MULTIPLE</code> concurrent creation of
+distinct user ops.</p>
+<p><strong>Rejected: <code>Box::leak</code> into <code>'static</code>.</strong> <code>Box::leak</code> converts a <code>Box&lt;T&gt;</code> to
+a <code>&amp;'static mut T</code>, which is syntactically <code>'static</code> but is never reclaimed.
+Leaking is acceptable for true singletons (e.g., a global registry), but
+<code>UserOp</code> is an owned, droppable value. A user-facing API that leaks memory on
+every <code>UserOp::new()</code> call, with no reclamation path short of process exit, is
+not acceptable. There is no mechanism by which <code>Drop for UserOp</code> could
+de-leak a <code>Box::leak</code>’d allocation.</p>
+<p><strong>Rejected: Thread-local registry.</strong> A <code>thread_local!</code> registry would store
+the closure on the creating thread’s local storage and expose it only on that
+thread. Under <code>MPI_THREAD_MULTIPLE</code>, MPI may invoke the reduction function on
+any thread — not necessarily the thread that called <code>MPI_Op_create</code>. Accessing
+a thread-local from a different thread is unsound; the closure pointer would
+point into TLS storage that is inaccessible (or destroyed) on the calling
+thread.</p>
+<hr />
+<h4 id="decision-2-send--sync--static-bound-on-the-closure"><a class="doc-anchor" href="#decision-2-send--sync--static-bound-on-the-closure">§</a>Decision 2: <code>Send + Sync + 'static</code> Bound on the Closure</h4>
+<p><strong>Decision.</strong> The closure type parameter <code>F</code> on <code>UserOp&lt;T&gt;</code> must satisfy
+<code>F: Fn(&amp;[T], &amp;mut [T]) + Send + Sync + 'static</code>. All three bounds are
+mandatory.</p>
+<p><strong>Rationale.</strong> <code>Send</code> is required because the closure is moved into a slot in
+global static storage (<code>op_closure_table</code>), which is shared across all threads.
+Moving a non-<code>Send</code> type into shared storage would allow it to be accessed from
+a thread other than the one that created it, violating the <code>Send</code> contract.
+<code>Sync</code> is required because, under <code>MPI_THREAD_MULTIPLE</code>, the MPI runtime may
+call the trampoline concurrently from multiple threads for the same <code>MPI_Op</code>
+(e.g., two threads calling <code>MPI_Allreduce</code> on different communicators with the
+same user-defined op). A non-<code>Sync</code> closure type would allow data races on
+the closure’s captured state. <code>'static</code> is required because the closure is
+stored in a raw pointer in the C static table; any borrow shorter than <code>'static</code>
+in the captured state could be invalidated while the C handle is still live,
+producing a dangling reference. Together, these three bounds are the minimum
+necessary and sufficient set: they are the same constraints imposed by
+<code>std::thread::spawn</code>.</p>
+<p><strong>Ruled-out captures.</strong> The combined bound rules out several capture patterns
+that would otherwise be syntactically valid:</p>
+<div><table><thead><tr><th>Capture type</th><th>Violates</th><th>Reason</th></tr></thead><tbody>
+<tr><td><code>Rc&lt;T&gt;</code></td><td><code>Send</code></td><td><code>Rc</code> is not thread-safe (non-atomic reference count)</td></tr>
+<tr><td><code>Cell&lt;T&gt;</code></td><td><code>Sync</code></td><td><code>Cell</code> allows unsynchronized interior mutation</td></tr>
+<tr><td><code>RefCell&lt;T&gt;</code></td><td><code>Sync</code></td><td><code>RefCell</code> borrow checks are not thread-safe</td></tr>
+<tr><td><code>*const T</code></td><td><code>Send</code></td><td>Raw pointers are not <code>Send</code> by default</td></tr>
+<tr><td><code>&amp;'a T</code> (non-static)</td><td><code>'static</code></td><td>Borrowed data may not outlive the <code>MPI_Op</code> handle</td></tr>
+</tbody></table>
+</div>
+<p>Callers who need shared mutable state inside the closure must use
+<code>Arc&lt;Mutex&lt;T&gt;&gt;</code> or <code>Arc&lt;RwLock&lt;T&gt;&gt;</code>, which are <code>Send + Sync + 'static</code>.</p>
+<hr />
+<h4 id="decision-3-lifetime-relationship-and-drop-ordering"><a class="doc-anchor" href="#decision-3-lifetime-relationship-and-drop-ordering">§</a>Decision 3: Lifetime Relationship and Drop Ordering</h4>
+<p><strong>Decision.</strong> The closure storage always outlives the C-side <code>MPI_Op</code>.
+<code>Drop for UserOp&lt;T&gt;</code> calls <code>MPI_Op_free</code> first and then releases the slot.
+The ordering is: (1) <code>MPI_Op_free</code>, (2) <code>free_op_slot</code> (which reconstructs
+the <code>Box</code> from the raw pointer and drops it).</p>
+<p><strong>Rationale.</strong> The invariant “MPI_Op is freed before the closure slot is
+released” is the key safety property. After <code>MPI_Op_free</code> returns, the MPI
+library guarantees it will not invoke the user function pointer again. Only
+after that guarantee is established may the closure storage be freed. If the
+slot were released first — reconstructing and dropping the <code>Box</code> — a
+concurrent MPI operation that still holds a reference to the <code>MPI_Op</code> could
+invoke the trampoline against a freed function pointer, which is a
+use-after-free.</p>
+<p><strong>MPI_Op_free first</strong> also means the trampoline can never be called with a
+dangling closure pointer: the window between “MPI_Op_free returns” and “Box
+is dropped” is a period during which neither the MPI library nor any Rust code
+holds a live reference to the closure. The drop then runs in the conventional
+Rust sense — no raw pointers are read after the <code>Box</code> is reconstructed.</p>
+<p>The invariant is encoded structurally: <code>Drop for UserOp&lt;T&gt;</code> is the only code
+that calls either <code>ferrompi_op_free</code> (the C wrapper for <code>MPI_Op_free</code>) or
+<code>ferrompi_op_free_slot</code>. There is no public <code>UserOp::free()</code> method, and the
+handle integer is not exposed to callers, so the ordering cannot be violated
+from outside the module.</p>
+<p><strong>Rejected: Drop the Box first.</strong> Dropping the closure storage before calling
+<code>MPI_Op_free</code> is a use-after-free if any in-flight collective operation is
+still dispatching the user function. MPI provides no mechanism to query whether
+an op is currently executing; the only safe signal is the return of
+<code>MPI_Op_free</code>.</p>
+<hr />
+<h4 id="decision-4-commutativity-flag--default-commute--true"><a class="doc-anchor" href="#decision-4-commutativity-flag--default-commute--true">§</a>Decision 4: Commutativity Flag — Default <code>commute = true</code></h4>
+<p><strong>Decision.</strong> <code>UserOp::new</code> does not expose a <code>commute</code> parameter. The
+<code>commute</code> argument to <code>MPI_Op_create</code> is always set to <code>1</code> (true). Users who
+require a non-commutative reduction must explicitly use a different
+constructor: <code>UserOp::new_noncommutative</code>.</p>
+<p><strong>Rationale.</strong> The <code>commute</code> parameter is an optimizer hint: an <code>MPI_Op</code> marked
+commutative allows MPI implementations to reorder operands for better
+performance (e.g., binary tree reductions on hardware with non-uniform topology
+can shuffle partial results for better load balance). Most user-defined
+reductions encountered in scientific computing — sums, maxima, custom norms,
+element-wise functions — are commutative. Defaulting to <code>true</code> produces the
+correct result for the common case and allows MPI to apply its full set of
+reordering optimizations. Operators that are genuinely non-commutative (e.g.,
+matrix multiplication, string concatenation) are uncommon and require explicit
+opt-out rather than a pervasive <code>commute: bool</code> parameter cluttering the common
+call site.</p>
+<p>Providing <code>UserOp::new_noncommutative</code> makes the non-commutative path
+discoverable without making it the default. The Rust type system cannot express
+commutativity statically, so the runtime flag must exist; it is better to push
+it to a separate constructor name where its presence is self-documenting.</p>
+<p><strong>Rejected: Expose as a parameter on <code>UserOp::new</code>.</strong> A <code>UserOp::new(f, commute)</code>
+signature forces every caller to supply a commutativity flag even when the
+semantics of their operation are obviously commutative. API surface complexity
+increases for no benefit in the common case. The flag is also easy to get wrong
+silently: passing <code>false</code> for a commutative operation is always correct but
+foregoes the optimization hint; passing <code>true</code> for a non-commutative operation
+produces incorrect results. Defaulting to <code>true</code> via the common constructor
+fails safe.</p>
+<hr />
+<h4 id="decision-5-trampoline-dispatch--slot-index-baked-into-per-slot-c-functions"><a class="doc-anchor" href="#decision-5-trampoline-dispatch--slot-index-baked-into-per-slot-c-functions">§</a>Decision 5: Trampoline Dispatch — Slot Index Baked into Per-Slot C Functions</h4>
+<p><strong>Decision.</strong> The C layer provides <code>MAX_OPS</code> distinct trampoline functions with
+the naming pattern <code>ferrompi_user_op_trampoline_N</code> where <code>N</code> is the decimal
+slot index (0 through <code>MAX_OPS - 1</code>). Each trampoline loads the closure pointer
+from <code>op_closure_table[N]</code> using the slot index baked into its own function
+body, then invokes the closure. The array of function pointers
+<code>ferrompi_user_op_trampolines[MAX_OPS]</code> is exposed to Rust so that
+<code>alloc_op_slot(N)</code> can pass <code>ferrompi_user_op_trampolines[N]</code> to
+<code>MPI_Op_create</code> as the user function pointer.</p>
+<p><strong>Rationale.</strong> <code>MPI_Op_create</code> accepts a plain C function pointer; it provides
+no <code>void* user_data</code> argument alongside the function pointer. The only way for
+a single trampoline to locate its associated closure without a side channel is
+to encode the slot index into the function itself — either by having <code>N</code>
+distinct functions each hard-coded to their slot, or by writing self-modifying
+code (unacceptable). A compile-time loop using a C macro (<code>FERROMPI_DEFINE_OP_TRAMPOLINE(N)</code>)
+generates all <code>N</code> functions from a single template body, keeping the
+implementation DRY while producing distinct function pointers. Each trampoline
+body is four statements: load the fat pointer from <code>op_closure_table[N]</code>,
+wrap the invocation in a <code>catch_unwind</code> (see Decision 6 via the <code>abort_on_panic</code>
+C callback), reconstruct the <code>&amp;[T]</code> and <code>&amp;mut [T]</code> slices from <code>invec</code>,
+<code>inoutvec</code>, and <code>*len</code>, and call the Rust closure through the fat pointer.</p>
+<p><strong>Rejected: Single trampoline with thread-local slot lookup.</strong> If a single
+<code>ferrompi_user_op_trampoline(void*, void*, int*, MPI_Datatype*)</code> function were
+used, it would need to locate which slot’s closure to invoke. The only
+candidate for this side channel is thread-local storage: the calling thread
+stores the slot index in TLS before MPI dispatches the function pointer. This
+is fundamentally unsafe under <code>MPI_THREAD_MULTIPLE</code>: MPI is free to call the
+user function on a thread-pool thread that is entirely under MPI’s control, not
+the application’s. TLS set by the application thread before the <code>MPI_Allreduce</code>
+call is not observable on the MPI-internal thread that executes the reduction.
+The slot lookup would read uninitialized TLS, producing arbitrary behaviour.</p>
+<p><strong>Rejected: Per-slot generated function pointers (JIT/mmap).</strong> Generating
+function code at runtime (writing machine code to an <code>mmap(PROT_EXEC)</code> region)
+would allow a single template to be instantiated with any slot index. This
+approach introduces JIT complexity, requires platform-specific code generation,
+and raises significant security concerns (W^X policy violations on hardened
+systems). It is entirely disproportionate to the problem; compile-time macro
+generation of <code>MAX_OPS</code> static functions has zero runtime overhead, zero
+platform dependencies, and is trivially auditable.</p>
+<hr />
+<h4 id="decision-6-panic-handling--abort-the-process"><a class="doc-anchor" href="#decision-6-panic-handling--abort-the-process">§</a>Decision 6: Panic Handling — Abort the Process</h4>
+<p><strong>Decision.</strong> The trampoline wraps the Rust closure invocation in
+<code>std::panic::catch_unwind</code>. If <code>catch_unwind</code> returns <code>Err(_)</code> (a panic was
+caught), the trampoline calls <code>std::process::abort()</code> immediately. It does not
+log, does not set a sticky flag, and does not leave <code>inoutvec</code> in the partially
+modified state produced by the panicking closure.</p>
+<p><strong>Rationale.</strong> The MPI user-function signature has no error return path: it is
+<code>void (*)(void*, void*, int*, MPI_Datatype*)</code>. A panic that is not caught
+before the trampoline returns to the C/MPI caller would unwind through C stack
+frames using the Rust unwinding ABI — this is undefined behaviour. The three
+possible recovery strategies — abort, continue with unmodified <code>inoutvec</code>, or
+set a sticky error flag — have the following properties:</p>
+<ul>
+<li><strong>Abort</strong>: Immediate, deterministic, no possibility of corrupted collective
+state. Collective operations involve all ranks; a panicking rank that returns
+a garbage <code>inoutvec</code> to MPI would allow the collective to silently complete
+with incorrect results on all ranks. Abort prevents this by ensuring that the
+failure mode is loud and traceable.</li>
+<li><strong>Continue with unmodified <code>inoutvec</code></strong>: The partial reduction (closure
+executed through some range, then panicked) leaves <code>inoutvec</code> in a state that
+may be partially correct, completely incorrect, or internally inconsistent
+depending on where the panic occurred. Returning this to MPI and allowing the
+collective to continue produces a collective result that is wrong in a way
+that is invisible to all participants. Silent data corruption in a reduction
+result is strictly worse than a process abort for HPC use cases.</li>
+<li><strong>Sticky error flag</strong>: There is no MPI mechanism by which the user function
+can signal an error that causes <code>MPI_Allreduce</code> to return a non-<code>MPI_SUCCESS</code>
+code to the caller. The sticky flag would be observed only on the next
+ferrompi call on the same thread — at that point the collective has already
+completed on all other ranks with a corrupted partial result, and the error
+signal is too late to be actionable.</li>
+</ul>
+<p>Process abort is therefore the only choice that prevents silent data corruption.
+Panicking inside a reduction closure is an application-level programming error;
+the right response is to fail loudly.</p>
+<p><code>catch_unwind</code> is required even when the intent is to abort, because without it
+the panic unwinds through C frames before the process terminates, which is
+undefined behaviour. <code>catch_unwind</code> ensures Rust’s unwinding is contained
+within Rust frames; the <code>abort</code> call inside the catch block terminates the
+process cleanly.</p>
+<hr />
+<h4 id="decision-7-datatype-contract--generic-useropt-mpidatatype-with-debug-mode-tag-assertion"><a class="doc-anchor" href="#decision-7-datatype-contract--generic-useropt-mpidatatype-with-debug-mode-tag-assertion">§</a>Decision 7: Datatype Contract — Generic <code>UserOp&lt;T: MpiDatatype&gt;</code> with Debug-Mode Tag Assertion</h4>
+<p><strong>Decision.</strong> <code>UserOp&lt;T&gt;</code> is generic over <code>T: MpiDatatype</code>. The closure type
+is <code>F: Fn(&amp;[T], &amp;mut [T]) + Send + Sync + 'static</code>. The trampoline reconstructs
+the <code>invec</code> and <code>inoutvec</code> pointers as <code>*const T</code> and <code>*mut T</code> respectively,
+using <code>*len</code> as the element count to construct <code>&amp;[T]</code> and <code>&amp;mut [T]</code> slices.
+A <code>debug_assert_eq!</code> inside the trampoline verifies that <code>T::TAG as i32</code> equals
+the <code>MPI_Datatype</code> argument passed by MPI; in release builds the assert is
+elided. Mismatches between the declared type <code>T</code> and the actual MPI datatype
+passed at runtime are programming errors detectable in debug mode.</p>
+<p><strong>Rationale.</strong> Genericity over <code>T: MpiDatatype</code> is the correct level of
+abstraction: it lets the compiler enforce type consistency at <code>UserOp::new</code> time
+(the caller declares what element type the op works on), carries the type
+information through to the trampoline (the trampoline knows how to compute
+<code>std::mem::size_of::&lt;T&gt;()</code> for any slice arithmetic), and reuses the existing
+<code>MpiDatatype</code> sealed-trait infrastructure from <code>src/datatype.rs</code>. The <code>const TAG: DatatypeTag</code> associated constant provides a compile-time integer that the
+trampoline can compare against the runtime <code>MPI_Datatype</code> argument for sanity
+checking.</p>
+<p>The tag check is debug-only because: (a) in a correct program, the MPI
+datatype passed at reduction time always matches the <code>UserOp&lt;T&gt;</code> type
+parameter — MPI dispatches the op with the same datatype that was used when
+registering it; (b) the check requires converting an opaque <code>MPI_Datatype</code>
+handle to a <code>FERROMPI_*</code> tag integer, which involves a runtime table lookup in
+the C layer; and (c) in release builds the tag check would add a branch on
+every element-wise call inside a reduction, which may execute many millions of
+times. Debug mode is the appropriate place for a correctness assertion with
+a measurable hot-path cost.</p>
+<p><strong>Rejected: Untyped <code>UserOp</code> with raw <code>*mut c_void</code> closure.</strong> An untyped API
+that passes <code>(invec: *mut c_void, inoutvec: *mut c_void, len: i32)</code> to the
+closure shifts the burden of safe slice reconstruction onto the caller. Every
+caller must cast to the correct type, compute the byte length, and handle
+misalignment — the same operations that <code>UserOp&lt;T&gt;</code> handles correctly and once
+internally. An untyped API also makes it impossible to statically enforce that
+the <code>MPI_Op</code> is registered with a matching MPI datatype.</p>
+<p><strong>Rejected: Type-erased <code>Box&lt;dyn Fn(...)&gt;</code> with no static type parameter.</strong>
+A type-erased trait object for the closure would prevent the trampoline from
+knowing <code>T</code> at the call site and would require the caller to transmit the
+element type through a separate runtime parameter. This loses the static
+guarantee that the slice type matches the registered datatype and forces all
+alignment and size computations to be done dynamically.</p>
+<hr />
+<h3 id="consequences"><a class="doc-anchor" href="#consequences">§</a>Consequences</h3>
+<p>Ticket-037 will implement exactly the following API and internals. No design
+decision is left for that ticket to make.</p>
+<h4 id="public-api-surface"><a class="doc-anchor" href="#public-api-surface">§</a>Public API surface</h4>
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="doccomment">/// A user-defined MPI reduction operation backed by a Rust closure.
+///
+/// `T` must implement [`MpiDatatype`] — i.e., it must be one of the primitive
+/// types recognised by ferrompi (`f32`, `f64`, `i32`, `i64`, `u8`, `u32`, `u64`).
+///
+/// The closure receives `invec` as a shared slice and `inoutvec` as a mutable
+/// slice of the same length.  It must accumulate `invec[i]` into `inoutvec[i]`
+/// for each index `i` — the MPI reduction semantics for user functions.
+///
+/// # Thread-safety
+///
+/// The closure is called from whichever thread MPI uses internally for the
+/// reduction.  Under `MPI_THREAD_MULTIPLE` the same op may be invoked
+/// concurrently from multiple threads; the closure must be safe for concurrent
+/// invocation, which is enforced by the `Sync` bound.
+</span><span class="kw">pub struct </span>UserOp&lt;T: MpiDatatype&gt; {
+    <span class="comment">// handle into the C-side op slot table
+    </span>handle: i32,
+    <span class="comment">// PhantomData to carry T
+    </span>_marker: std::marker::PhantomData&lt;T&gt;,
+}
+
+<span class="kw">impl</span>&lt;T: MpiDatatype&gt; UserOp&lt;T&gt; {
+    <span class="doccomment">/// Create a commutative user-defined reduction op.
+    ///
+    /// MPI is permitted to reorder operands for optimisation purposes.  Use
+    /// this constructor for operations that satisfy `f(a, b) == f(b, a)` —
+    /// element-wise sums, maxima, minima, etc.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the op-slot table is full or if `MPI_Op_create` fails.
+    </span><span class="kw">pub fn </span>new&lt;F&gt;(f: F) -&gt; <span class="kw">crate</span>::Result&lt;<span class="self">Self</span>&gt;
+    <span class="kw">where
+        </span>F: Fn(<span class="kw-2">&amp;</span>[T], <span class="kw-2">&amp;mut </span>[T]) + Send + Sync + <span class="lifetime">'static</span>;
+
+    <span class="doccomment">/// Create a non-commutative user-defined reduction op.
+    ///
+    /// MPI will not reorder operands.  Use this constructor for operations
+    /// where order matters — matrix multiplication, string concatenation, etc.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the op-slot table is full or if `MPI_Op_create` fails.
+    </span><span class="kw">pub fn </span>new_noncommutative&lt;F&gt;(f: F) -&gt; <span class="kw">crate</span>::Result&lt;<span class="self">Self</span>&gt;
+    <span class="kw">where
+        </span>F: Fn(<span class="kw-2">&amp;</span>[T], <span class="kw-2">&amp;mut </span>[T]) + Send + Sync + <span class="lifetime">'static</span>;
+}
+
+<span class="kw">impl</span>&lt;T: MpiDatatype&gt; Drop <span class="kw">for </span>UserOp&lt;T&gt; {
+    <span class="kw">fn </span>drop(<span class="kw-2">&amp;mut </span><span class="self">self</span>) {
+        <span class="comment">// Step 1: MPI_Op_free — MPI will not invoke the trampoline after this.
+        // Step 2: ferrompi_op_free_slot — reconstructs the Box from the raw
+        //         pointer in the slot table and drops it.
+        // The ordering is mandatory: see ADR-0005 Decision 3.
+        </span><span class="kw">unsafe </span>{
+            <span class="comment">// SAFETY: handle is valid for the lifetime of UserOp; it was
+            // allocated by UserOp::new and is freed exactly once here.
+            </span>ferrompi_op_free(<span class="self">self</span>.handle);
+        }
+    }
+}</code></pre></div><h4 id="c-side-additions-to-csrcferrompic"><a class="doc-anchor" href="#c-side-additions-to-csrcferrompic">§</a>C-side additions to <code>csrc/ferrompi.c</code></h4>
+<ol>
+<li>A <code>MAX_OPS</code> constant (exact value is an implementation detail; 64 is
+recommended as the initial capacity, consistent with <code>MAX_INFOS</code>).</li>
+<li>A static <code>op_table[MAX_OPS]</code> of type <code>MPI_Op</code>, a parallel
+<code>atomic_int op_used[MAX_OPS]</code>, a <code>void* op_closure_table[MAX_OPS][2]</code>
+(data pointer and vtable pointer of the fat trait object), and a
+<code>atomic_int next_op_hint</code>.</li>
+<li><code>alloc_op</code> / <code>free_op</code> / <code>get_op_handle</code> functions following the
+C11-atomic CAS pattern from ADR-0002.</li>
+<li><code>MAX_OPS</code> trampoline functions generated by a preprocessor macro:<div class="example-wrap"><pre class="language-c"><code>#define FERROMPI_DEFINE_OP_TRAMPOLINE(N)                        \
+void ferrompi_user_op_trampoline_##N(                           \
+    void* invec, void* inoutvec, int* len, MPI_Datatype* dt) {  \
+    ferrompi_invoke_user_op(N, invec, inoutvec, len, dt);       \
+}</code></pre></div>where <code>ferrompi_invoke_user_op</code> is a non-trampoline C function that
+retrieves the fat pointer from <code>op_closure_table[slot]</code> and calls
+<code>rust_user_op_invoke</code> — the Rust <code>extern "C"</code> function that
+runs <code>catch_unwind</code> and the actual closure body.</li>
+<li>A static array <code>ferrompi_user_op_trampolines[MAX_OPS]</code> holding the
+function pointers for all <code>MAX_OPS</code> trampolines, exposed to Rust via
+<code>csrc/ferrompi.h</code> so <code>UserOp::new</code> can select <code>trampolines[slot]</code> to
+pass to <code>MPI_Op_create</code>.</li>
+<li>A <code>ferrompi_op_free(int32_t handle)</code> function that calls <code>MPI_Op_free</code>,
+then calls the Rust-side <code>ferrompi_op_drop_closure(handle)</code> callback
+(which reconstructs and drops the <code>Box</code>), then calls <code>free_op(handle)</code>.</li>
+</ol>
+<h4 id="rust-side-additions-to-src"><a class="doc-anchor" href="#rust-side-additions-to-src">§</a>Rust-side additions to <code>src/</code></h4>
+<ul>
+<li>A new module <code>src/op.rs</code> (or <code>src/op/mod.rs</code>) containing <code>UserOp&lt;T&gt;</code>,
+the <code>Drop</code> implementation, and the <code>extern "C"</code> <code>rust_user_op_invoke</code>
+function.</li>
+<li>The <code>rust_user_op_invoke</code> entry point reconstructs the <code>&amp;[T]</code> and
+<code>&amp;mut [T]</code> slices, calls <code>std::panic::catch_unwind</code>, and calls
+<code>std::process::abort()</code> on <code>Err</code>.</li>
+<li>FFI declarations for <code>ferrompi_op_create</code>, <code>ferrompi_op_free</code>, and
+<code>ferrompi_user_op_trampolines</code> added to <code>src/ffi.rs</code>.</li>
+</ul>
+<h4 id="invariants-enforced-structurally"><a class="doc-anchor" href="#invariants-enforced-structurally">§</a>Invariants enforced structurally</h4><div><table><thead><tr><th>Invariant</th><th>Enforcement mechanism</th></tr></thead><tbody>
+<tr><td>Closure outlives <code>MPI_Op</code></td><td><code>Drop</code> calls <code>MPI_Op_free</code> before <code>free_op_slot</code></td></tr>
+<tr><td>No concurrent mutation in closure state</td><td><code>F: Sync</code> bound at compile time</td></tr>
+<tr><td>Closure accessible from any thread</td><td><code>F: Send</code> bound at compile time</td></tr>
+<tr><td>No borrow shorter than <code>MPI_Op</code> lifetime</td><td><code>F: 'static</code> bound at compile time</td></tr>
+<tr><td>No panic across FFI boundary</td><td><code>catch_unwind</code> + <code>process::abort</code> in <code>rust_user_op_invoke</code></td></tr>
+<tr><td>Correct slice type in trampoline</td><td><code>debug_assert_eq!(T::TAG as i32, mapped_tag(*dt))</code></td></tr>
+</tbody></table>
+</div>
+<hr />
+<h3 id="alternatives-considered"><a class="doc-anchor" href="#alternatives-considered">§</a>Alternatives Considered</h3><h4 id="a-boxleak-into-static-for-closure-storage"><a class="doc-anchor" href="#a-boxleak-into-static-for-closure-storage">§</a>A: <code>Box::leak</code> into <code>'static</code> for closure storage</h4>
+<p>Under this approach, <code>UserOp::new</code> would call <code>Box::leak(Box::new(f))</code> to
+produce a <code>&amp;'static F</code> and store the raw pointer as the trampoline’s user data.
+Because <code>Box::leak</code> is not a standard <code>MPI_Op_create</code> parameter, the pointer
+would still need to be encoded via one of the trampoline dispatch mechanisms
+(see Decision 5). The critical failure is in <code>Drop</code>: <code>Box::leak</code> does not
+provide a mechanism to reclaim the allocation. The pointer stored in the C
+table could be cast back to <code>Box&lt;F&gt;</code> and dropped by transmuting the <code>&amp;'static</code>
+reference, but this is unsound — it violates the uniqueness contract of <code>&amp;mut T</code>
+and requires additional unsafe with no advantage over the slot table approach.
+In practice, every <code>UserOp</code> allocation would permanently leak the closure
+memory. For long-running MPI programs that create many user-defined ops (e.g.,
+a solver that registers new operations each iteration), this leak is
+operationally unacceptable. Rejected because it leaks memory with no
+reclamation path.</p>
+<h4 id="b-thread-local-registry-for-closure-storage"><a class="doc-anchor" href="#b-thread-local-registry-for-closure-storage">§</a>B: Thread-local registry for closure storage</h4>
+<p>Under this approach, a <code>thread_local!</code> <code>HashMap&lt;i32, Box&lt;dyn Fn(...)&gt;&gt;</code> would
+store closures keyed by slot index. <code>UserOp::new</code> would insert into the TLS map
+on the creating thread; the trampoline would look up the closure in the TLS map
+on the executing thread. This approach fails under <code>MPI_THREAD_MULTIPLE</code> because
+MPI may invoke the reduction function on an MPI-internal thread-pool thread that
+has no TLS entry for the registered op. The lookup would return <code>None</code>, and
+the trampoline would have no closure to call. There is no portable, standard way
+to propagate Rust TLS entries to threads not created by the application. Even if
+TLS sharing were possible via raw pointer casts across thread boundaries, doing
+so would require <code>unsafe</code> that violates TLS lifetime guarantees. Rejected because
+TLS is per-thread and MPI user functions are called on arbitrary threads.</p>
+<h4 id="c-single-dispatch-trampoline-via-mpi-attribute-key"><a class="doc-anchor" href="#c-single-dispatch-trampoline-via-mpi-attribute-key">§</a>C: Single dispatch trampoline via MPI attribute key</h4>
+<p>MPI provides <code>MPI_Op_set_attr</code> and <code>MPI_Op_get_attr</code> for attaching opaque
+<code>void*</code> attributes to an <code>MPI_Op</code> handle. A single trampoline could retrieve
+its closure pointer via <code>MPI_Op_get_attr</code>. This approach is clean in principle
+but fails for two reasons: (a) <code>MPI_Op_get_attr</code> is not part of MPI 3.1 or MPI
+4.x — the attribute interface for ops is not standardised in the same way as
+communicator or window attributes; and (b) even if implemented by a specific
+MPI library, it would not be portable across MPICH, Open MPI, and Cray MPT.
+Rejected due to non-standard MPI interface dependency.</p>
+<hr />
+<h3 id="open-questions-deferred-to-implementation"><a class="doc-anchor" href="#open-questions-deferred-to-implementation">§</a>Open Questions Deferred to Implementation</h3>
+<p>The following are strictly mechanical decisions that do not affect correctness
+or the safety model. They are left for ticket-037.</p>
+<ol>
+<li><strong><code>MAX_OPS</code> value.</strong> Whether the initial capacity is 16, 32, or 64 slots.
+The tradeoff is binary size (more trampolines = larger <code>.text</code> section) vs.
+the number of concurrently registered user ops. A value of 64 is recommended
+as consistent with <code>MAX_INFOS</code>, but the choice does not affect the design.</li>
+<li><strong>Module layout.</strong> Whether <code>UserOp&lt;T&gt;</code> lives in <code>src/op.rs</code> as a flat
+module or in <code>src/op/mod.rs</code> with submodules for the registry and the FFI
+glue. Both are valid; the choice is a code organization preference.</li>
+<li><strong>Exact trampoline macro name and expansion style.</strong> Whether the <code>MAX_OPS</code>
+trampolines are generated with a single recursive macro, an <code>include!</code>-driven
+repetition file, or a <code>build.rs</code> code-generation step. All produce equivalent
+object code; the choice is a build-system preference.</li>
+<li><strong><code>rust_user_op_invoke</code> calling convention details.</strong> The exact
+function signature and <code>extern "C"</code> attribute placement in Rust are
+implementation choices constrained by the ABI but not by this design.</li>
+</ol>
+<hr />
+<h3 id="status"><a class="doc-anchor" href="#status">§</a>Status</h3>
+<p>Accepted — 2026-05-17. Implemented by ticket-037.</p>
+</div></details></section></div></main></body></html>
