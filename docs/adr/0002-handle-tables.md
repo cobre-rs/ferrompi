@@ -280,9 +280,16 @@ static int64_t alloc_request(MPI_Request req) {
 
 Key memory-ordering decisions:
 
-- The CAS uses `memory_order_acq_rel` on success so that the subsequent
-  `request_table[idx] = req` store is visible to any thread that later
-  acquires the slot through `get_request_ptr`.
+- The CAS uses `memory_order_acq_rel` on success to atomically claim the slot.
+  **Correction (F2-003):** the original wording here claimed this release
+  "publishes" the _subsequent_ `request_table[idx] = req` store. That is
+  incorrect under C11 — a release orders stores sequenced _before_ it, not
+  after — and the code never actually relied on it. The slot write is
+  sequenced after the CAS and becomes visible to another thread only through
+  program order (same-thread use) or the caller-established happens-before of
+  whatever transfers the handle across threads (channel, `Arc`, join). The one
+  publish/consume edge this layer owns itself is `free_request`'s release store
+  paired with `get_request_ptr`'s acquire load. See the Update section below.
 - The hint load and store are `memory_order_relaxed` because the hint is
   advisory: an inaccurate hint never produces an incorrect result, only
   a slightly longer scan.
@@ -382,6 +389,53 @@ in this ADR. Slot 0 of `comm_table` is permanently reserved for `MPI_COMM_WORLD`
 and is marked used via `atomic_store_explicit(&comm_used[0], 1, ...)` in both
 `ferrompi_init` and `ferrompi_init_thread`; `alloc_comm` skips slot 0 explicitly.
 
+## Update (v0.4.x assessment hardening — F2-002, F2-003, F2-006)
+
+A 2026 architecture/performance assessment raised three follow-ups against the
+Option A design above.
+
+**F2-003 — memory-ordering documentation.** The Step 5 rationale incorrectly
+stated that the `acq_rel` CAS publishes the subsequent `request_table[idx]`
+write; a release orders stores sequenced _before_ it, not after. The in-code
+comments were already correct; the bullet under Step 5 is now corrected. The
+real contract: the allocating thread's slot write reaches another thread by
+program order (same-thread use) or by the caller-established happens-before of
+whatever transfers the handle across threads. The only publish/consume edge
+this layer owns is `free_request`'s release store paired with
+`get_request_ptr`'s acquire load (so a re-acquirer observes the nulled slot).
+This contract is unchanged by the bitmap rewrite below.
+
+**F2-002 / F2-006 — request-table occupancy bitmap.** The dense
+`atomic_int request_used[16384]` array (Steps 2-8) packed ~16 slots per 64-byte
+cache line, so concurrent `alloc_request` calls false-shared the line (F2-002),
+and allocation scanned the array one slot at a time from a single shared hint,
+degrading toward O(N) at high occupancy (F2-006). The request table now tracks
+occupancy with a bitmap of 64-bit words —
+`_Atomic(uint64_t) request_bits[MAX_REQUESTS / 64]` (256 words, 2 KiB vs 64 KiB):
+
+- `alloc_request` scans words from an advisory _word_ hint; within a non-full
+  word it selects the lowest free slot with `__builtin_ctzll(~word)` (hardware
+  find-first-zero, skipping 64 slots per probe) and claims it with an `acq_rel`
+  `atomic_fetch_or`. `fetch_or` is idempotent, so a lost race (the returned word
+  already had the chosen bit set) just means another thread took that slot — it
+  retries the next free bit, never corrupting occupancy. Because slots are
+  indexed bits rather than pointer-linked nodes, this is ABA-free, so it gains
+  near-O(1) allocation and ~64× less metadata to false-share **without** Option
+  C's generational-counter complexity (driver 2) or wide-atomic needs (driver 5).
+- `free_request` clears the bit with a `release` `atomic_fetch_and`;
+  `get_request_ptr` tests it with an `acquire` load — the same publish/consume
+  edge as before.
+
+The six small fixed tables (comm 256, win 256, datatype/info/group 64, op 16)
+**keep** the dense `atomic_int used[]` + CAS-scan design from Steps 2-8: at ≤256
+slots the scan cost and false sharing the bitmap addresses are negligible, and
+the simpler code stays auditable by inspection (driver 2).
+
+**TSan.** `examples/test_request_table_concurrency.rs` (4 threads/rank × 100
+iterations of isend+irecv+wait) exercises the bitmap under `MPI_THREAD_MULTIPLE`
+and documents the `-Zsanitizer=thread` invocation for data-race verification.
+
 ## Status
 
-Accepted — 2026-04-24. Implemented by ticket-023.
+Accepted — 2026-04-24. Implemented by ticket-023. Amended 2026-06-18 for the
+v0.4.x assessment hardening (request-table bitmap; F2-002 / F2-003 / F2-006).

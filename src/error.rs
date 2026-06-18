@@ -23,6 +23,67 @@ fn impl_error_classes() -> (i32, i32, i32) {
 /// Result type for MPI operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+// Internal resource-exhaustion sentinels returned by the C layer when a
+// fixed-size handle table is full. Negative so they never collide with MPI
+// return codes (which are non-negative); intercepted in [`Error::from_code`]
+// and mapped to [`Error::ResourceExhausted`]. These MUST match the
+// `FERROMPI_ERR_*_FULL` defines in `csrc/ferrompi.c`.
+const FERROMPI_ERR_REQUESTS_FULL: i32 = -7001;
+const FERROMPI_ERR_COMMS_FULL: i32 = -7002;
+const FERROMPI_ERR_DATATYPES_FULL: i32 = -7003;
+const FERROMPI_ERR_OPS_FULL: i32 = -7004;
+const FERROMPI_ERR_WINDOWS_FULL: i32 = -7005;
+const FERROMPI_ERR_GROUPS_FULL: i32 = -7006;
+const FERROMPI_ERR_INFOS_FULL: i32 = -7007;
+
+/// Identifies which internal ferrompi handle table was exhausted in an
+/// [`Error::ResourceExhausted`].
+///
+/// Each variant corresponds to a fixed-size table in the C layer (e.g.
+/// `MAX_COMMS`, `MAX_DATATYPES`, `MAX_OPS`, `MAX_REQUESTS`). The `Display`
+/// form is the lowercase resource noun used in the error message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+pub enum ResourceKind {
+    /// Nonblocking / persistent request table (`MAX_REQUESTS`).
+    #[error("request")]
+    Request,
+    /// Communicator table (`MAX_COMMS`).
+    #[error("communicator")]
+    Communicator,
+    /// Custom datatype table (`MAX_DATATYPES`).
+    #[error("datatype")]
+    Datatype,
+    /// Custom reduction-operation table (`MAX_OPS`).
+    #[error("operation")]
+    Operation,
+    /// RMA window table.
+    #[error("window")]
+    Window,
+    /// Group table.
+    #[error("group")]
+    Group,
+    /// Info-object table.
+    #[error("info")]
+    Info,
+}
+
+impl ResourceKind {
+    /// Map a C-layer resource-exhaustion sentinel to its `ResourceKind`, or
+    /// `None` if `code` is not one of the `FERROMPI_ERR_*_FULL` sentinels.
+    fn from_sentinel(code: i32) -> Option<Self> {
+        match code {
+            FERROMPI_ERR_REQUESTS_FULL => Some(ResourceKind::Request),
+            FERROMPI_ERR_COMMS_FULL => Some(ResourceKind::Communicator),
+            FERROMPI_ERR_DATATYPES_FULL => Some(ResourceKind::Datatype),
+            FERROMPI_ERR_OPS_FULL => Some(ResourceKind::Operation),
+            FERROMPI_ERR_WINDOWS_FULL => Some(ResourceKind::Window),
+            FERROMPI_ERR_GROUPS_FULL => Some(ResourceKind::Group),
+            FERROMPI_ERR_INFOS_FULL => Some(ResourceKind::Info),
+            _ => None,
+        }
+    }
+}
+
 /// MPI error class, categorizing the type of MPI error.
 ///
 /// These correspond to the standard MPI error classes defined by the MPI specification.
@@ -199,6 +260,18 @@ pub enum Error {
     #[error("Operation not supported: {0}")]
     NotSupported(String),
 
+    /// An internal ferrompi handle table is full (too many concurrently live
+    /// requests / communicators / datatypes / etc.).
+    ///
+    /// Distinct from a genuine MPI fault ([`Error::Mpi`] with class
+    /// `ERR_OTHER`) so a long-running caller can recognize an internal cap,
+    /// release handles, back off, or retry rather than treating it as fatal.
+    #[error("ferrompi {resource} table is full")]
+    ResourceExhausted {
+        /// Which internal handle table overflowed.
+        resource: ResourceKind,
+    },
+
     /// Internal ferrompi error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -216,9 +289,24 @@ impl Error {
     /// `Error::Internal("from_code called with success code 0")`.
     /// Callers should use [`Error::check`] or [`Error::check_with_op`]
     /// for the standard "Ok on success, Err on failure" idiom.
+    ///
+    /// Marked `#[cold]` + `#[inline(never)]`: this is only reached on the error
+    /// path of [`Error::check`]/[`Error::check_with_op`], and its body (a 512-byte
+    /// stack buffer, an FFI call to `ferrompi_error_info`, and a `format!`
+    /// fallback) must stay out of line so the inlined success-path check folds
+    /// to a single return-code branch in the caller.
+    #[cold]
+    #[inline(never)]
     pub fn from_code(code: i32) -> Self {
         if code == 0 {
             return Error::Internal("from_code called with success code 0".into());
+        }
+
+        // Resource-exhaustion sentinels from the C layer are negative; MPI
+        // codes are non-negative. Map them before touching the MPI runtime —
+        // MPI_Error_class on a synthetic negative code is undefined behavior.
+        if let Some(resource) = ResourceKind::from_sentinel(code) {
+            return Error::ResourceExhausted { resource };
         }
 
         let mut class: i32 = 0;
@@ -277,6 +365,12 @@ impl Error {
     /// - `Error::Internal` if called with `code = 0` (delegated from
     ///   [`Error::from_code`]; treat this as a programming error in the
     ///   caller, not a runtime MPI failure).
+    ///
+    /// Marked `#[cold]` + `#[inline(never)]` for the same reason as
+    /// [`Error::from_code`]: it is only invoked on the error path, so keeping
+    /// it out of line lets [`Error::check_with_op`] inline to a bare branch.
+    #[cold]
+    #[inline(never)]
     pub fn from_code_with_op(code: i32, operation: &'static str) -> Self {
         match Error::from_code(code) {
             Error::Mpi {
@@ -299,6 +393,11 @@ impl Error {
     /// Check an MPI return code, returning `Ok(())` for success.
     ///
     /// Returns `Err(Error::Mpi { .. })` for non-zero codes.
+    ///
+    /// `#[inline]` so the success-path check (`code == 0`) folds into the
+    /// caller across codegen-unit/crate boundaries; the cold error
+    /// construction is delegated to the `#[cold]` [`Error::from_code`].
+    #[inline]
     pub fn check(code: i32) -> Result<()> {
         if code == 0 {
             Ok(())
@@ -312,6 +411,11 @@ impl Error {
     ///
     /// Returns `Err(Error::Mpi { operation: Some(operation), .. })` for
     /// non-zero codes.
+    ///
+    /// `#[inline]` so the success-path check folds into each of the ~150 call
+    /// sites; the cold error construction stays out of line in the `#[cold]`
+    /// [`Error::from_code_with_op`].
+    #[inline]
     pub fn check_with_op(code: i32, operation: &'static str) -> Result<()> {
         if code == 0 {
             Ok(())
@@ -604,5 +708,50 @@ mod tests {
             display,
             "MPI error in broadcast: invalid communicator (class=ERR_COMM, code=5)"
         );
+    }
+
+    #[test]
+    fn from_code_maps_resource_exhaustion_sentinels() {
+        // Sentinels are intercepted before any MPI FFI call, so this is safe
+        // to run without an initialized MPI runtime.
+        let cases = [
+            (-7001, ResourceKind::Request),
+            (-7002, ResourceKind::Communicator),
+            (-7003, ResourceKind::Datatype),
+            (-7004, ResourceKind::Operation),
+            (-7005, ResourceKind::Window),
+            (-7006, ResourceKind::Group),
+            (-7007, ResourceKind::Info),
+        ];
+        for (code, expected) in cases {
+            match Error::from_code(code) {
+                Error::ResourceExhausted { resource } => assert_eq!(resource, expected),
+                other => panic!("expected ResourceExhausted for code {code}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn from_code_with_op_preserves_resource_exhaustion() {
+        // The operation name is dropped (ResourceExhausted carries no operation
+        // field) but the resource must survive the with_op delegation.
+        match Error::from_code_with_op(-7002, "comm_split") {
+            Error::ResourceExhausted { resource } => {
+                assert_eq!(resource, ResourceKind::Communicator);
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resource_exhausted_display() {
+        let err = Error::ResourceExhausted {
+            resource: ResourceKind::Request,
+        };
+        assert_eq!(format!("{err}"), "ferrompi request table is full");
+        let err = Error::ResourceExhausted {
+            resource: ResourceKind::Window,
+        };
+        assert_eq!(format!("{err}"), "ferrompi window table is full");
     }
 }

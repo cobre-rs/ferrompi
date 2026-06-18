@@ -44,6 +44,29 @@
 use crate::error::{Error, Result};
 use crate::ffi;
 
+/// Element count at or below which persistent-request handle scratch buffers
+/// live on the stack, so the canonical `start_all`/`wait_all` hot loop incurs
+/// no allocator traffic per iteration (PERF-02). Mirrors `FERROMPI_REQ_STACK`
+/// in `csrc/ferrompi.c`.
+const HANDLE_STACK_CAP: usize = 64;
+
+/// Run `f` with the persistent-request handles copied into a stack buffer when
+/// the batch is small, falling back to a heap `Vec` only for large batches.
+#[inline]
+fn with_handles<R>(requests: &[PersistentRequest], f: impl FnOnce(&mut [i64]) -> R) -> R {
+    let len = requests.len();
+    if len <= HANDLE_STACK_CAP {
+        let mut buf = [0i64; HANDLE_STACK_CAP];
+        for (slot, req) in buf[..len].iter_mut().zip(requests) {
+            *slot = req.handle;
+        }
+        f(&mut buf[..len])
+    } else {
+        let mut buf: Vec<i64> = requests.iter().map(|r| r.handle).collect();
+        f(&mut buf)
+    }
+}
+
 /// A persistent MPI request handle.
 ///
 /// This type represents a persistent collective operation that has been
@@ -89,6 +112,7 @@ impl PersistentRequest {
     /// # Errors
     ///
     /// Returns an error if the operation is already active or if the start fails.
+    #[inline]
     pub fn start(&mut self) -> Result<()> {
         if self.active {
             return Err(Error::Internal("Request is already active".into()));
@@ -108,6 +132,7 @@ impl PersistentRequest {
     /// # Errors
     ///
     /// Returns an error if the operation is not active or if the wait fails.
+    #[inline]
     pub fn wait(&mut self) -> Result<()> {
         if !self.active {
             // Not started, nothing to wait for
@@ -125,6 +150,7 @@ impl PersistentRequest {
     /// Test if the operation has completed without blocking.
     ///
     /// Returns `true` if complete, `false` if still in progress.
+    #[inline]
     pub fn test(&mut self) -> Result<bool> {
         if !self.active {
             return Ok(true);
@@ -155,8 +181,11 @@ impl PersistentRequest {
             }
         }
 
-        let mut handles: Vec<i64> = requests.iter().map(|r| r.handle).collect();
-        let ret = unsafe { ffi::ferrompi_startall(handles.len() as i64, handles.as_mut_ptr()) };
+        // SAFETY: with_handles provides a valid, contiguous [i64] of the
+        // persistent-request handles whose length we pass as count.
+        let ret = with_handles(requests, |handles| unsafe {
+            ffi::ferrompi_startall(handles.len() as i64, handles.as_mut_ptr())
+        });
         Error::check_with_op(ret, "startall")?;
 
         // Mark all as active
@@ -173,14 +202,18 @@ impl PersistentRequest {
             return Ok(());
         }
 
-        let mut handles: Vec<i64> = requests.iter().map(|r| r.handle).collect();
         // Mark all inactive BEFORE the FFI call: MPI_Waitall consumes every
         // request handle regardless of whether it reports an error, so Drop
-        // must not attempt a second MPI_Wait on any of them.
+        // must not attempt a second MPI_Wait on any of them. (Marking inactive
+        // first does not change the handle values read below.)
         for req in requests.iter_mut() {
             req.active = false;
         }
-        let ret = unsafe { ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr()) };
+        // SAFETY: with_handles provides a valid, contiguous [i64] of the
+        // persistent-request handles whose length we pass as count.
+        let ret = with_handles(requests, |handles| unsafe {
+            ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr())
+        });
         Error::check_with_op(ret, "waitall")
     }
 }

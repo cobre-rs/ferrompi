@@ -219,7 +219,7 @@ pub use datatype::{
     MpiIndexedDatatype, ShortInt,
 };
 pub use datatype_builder::{CustomDatatype, StructField};
-pub use error::{Error, MpiErrorClass, Result};
+pub use error::{Error, MpiErrorClass, ResourceKind, Result};
 pub use group::{Group, GroupComparison, RankRange};
 pub use info::Info;
 pub use op::UserOp;

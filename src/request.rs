@@ -3,6 +3,44 @@
 use crate::error::{Error, Result};
 use crate::ffi;
 
+/// Element count at or below which request-handle scratch buffers live on the
+/// stack. Draining a handful-to-few-dozen in-flight requests on the completion
+/// path (halo exchange, ping-pong, progress loops) then incurs no allocator
+/// traffic; larger batches fall back to the heap. Mirrors `FERROMPI_REQ_STACK`
+/// in `csrc/ferrompi.c`.
+const HANDLE_STACK_CAP: usize = 64;
+
+/// Run `f` with the request handles copied into a stack buffer when the batch is
+/// small, falling back to a heap `Vec` only for large batches. Removes the
+/// per-call `Vec<i64>` allocation on the completion path (PERF-03).
+#[inline]
+fn with_handles<R>(requests: &[Request], f: impl FnOnce(&mut [i64]) -> R) -> R {
+    let len = requests.len();
+    if len <= HANDLE_STACK_CAP {
+        let mut buf = [0i64; HANDLE_STACK_CAP];
+        for (slot, req) in buf[..len].iter_mut().zip(requests) {
+            *slot = req.handle;
+        }
+        f(&mut buf[..len])
+    } else {
+        let mut buf: Vec<i64> = requests.iter().map(|r| r.handle).collect();
+        f(&mut buf)
+    }
+}
+
+/// Run `f` with a zeroed `i32` index scratch buffer of length `len`,
+/// stack-allocated when small (PERF-03). Used for the `*some` output indices.
+#[inline]
+fn with_index_buf<R>(len: usize, f: impl FnOnce(&mut [i32]) -> R) -> R {
+    if len <= HANDLE_STACK_CAP {
+        let mut buf = [0i32; HANDLE_STACK_CAP];
+        f(&mut buf[..len])
+    } else {
+        let mut buf = vec![0i32; len];
+        f(&mut buf)
+    }
+}
+
 /// A handle to a nonblocking MPI operation.
 ///
 /// This type represents an in-flight MPI operation. You must call `wait()` or
@@ -89,6 +127,7 @@ impl Request {
     ///
     /// Blocks until the operation is finished. After this returns successfully,
     /// the associated buffers can be safely accessed.
+    #[inline]
     pub fn wait(mut self) -> Result<()> {
         if self.completed {
             return Ok(());
@@ -110,6 +149,7 @@ impl Request {
     ///
     /// If this returns `true`, the request is consumed and you should not call
     /// `wait()` or `test()` again.
+    #[inline]
     pub fn test(&mut self) -> Result<bool> {
         if self.completed {
             return Ok(true);
@@ -134,13 +174,13 @@ impl Request {
         if requests.is_empty() {
             return Ok(None);
         }
-        let mut handles: Vec<i64> = requests.iter().map(|r| r.handle).collect();
         let mut index: i32 = 0;
-        // SAFETY: handles is a valid, mutable Vec<i64> whose length we pass as count.
-        // index is a valid stack-allocated i32 output parameter.
-        let ret = unsafe {
+        // SAFETY: with_handles provides a valid, contiguous [i64] of the request
+        // handles whose length we pass as count; index is a valid stack-allocated
+        // i32 output parameter.
+        let ret = with_handles(requests, |handles| unsafe {
             ffi::ferrompi_waitany(handles.len() as i64, handles.as_mut_ptr(), &mut index)
-        };
+        });
         Error::check_with_op(ret, "waitany")?;
         if index < 0 {
             return Ok(None);
@@ -161,29 +201,36 @@ impl Request {
         if requests.is_empty() {
             return Ok(vec![]);
         }
-        let mut handles: Vec<i64> = requests.iter().map(|r| r.handle).collect();
+        let len = requests.len();
         let mut outcount: i64 = 0;
-        let mut indices: Vec<i32> = vec![0; requests.len()];
-        // SAFETY: handles, outcount, and indices are valid, appropriately-sized
-        // output buffers. handles.len() is passed as count.
-        let ret = unsafe {
-            ffi::ferrompi_waitsome(
-                handles.len() as i64,
-                handles.as_mut_ptr(),
-                &mut outcount,
-                indices.as_mut_ptr(),
-            )
-        };
+        // SAFETY: with_handles / with_index_buf supply valid, appropriately-sized
+        // [i64] handle and [i32] index buffers whose lengths match `count`;
+        // outcount is a valid stack-allocated output parameter.
+        let (ret, completed) = with_handles(requests, |handles| {
+            with_index_buf(len, |indices| {
+                let ret = unsafe {
+                    ffi::ferrompi_waitsome(
+                        handles.len() as i64,
+                        handles.as_mut_ptr(),
+                        &mut outcount,
+                        indices.as_mut_ptr(),
+                    )
+                };
+                // outcount == -1 means all null; 0 means none completed (should
+                // not happen for waitsome, but guard defensively). Only collect
+                // the completed indices while the index buffer is in scope.
+                let completed: Vec<usize> = if ret == 0 && outcount > 0 {
+                    indices[..outcount as usize]
+                        .iter()
+                        .map(|&i| i as usize)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                (ret, completed)
+            })
+        });
         Error::check_with_op(ret, "waitsome")?;
-        if outcount <= 0 {
-            // outcount == -1 means all null; 0 means none completed (shouldn't
-            // happen for waitsome, but guard defensively).
-            return Ok(vec![]);
-        }
-        let completed: Vec<usize> = indices[..outcount as usize]
-            .iter()
-            .map(|&i| i as usize)
-            .collect();
         for &idx in &completed {
             requests[idx].completed = true;
         }
@@ -201,19 +248,19 @@ impl Request {
         if requests.is_empty() {
             return Ok(None);
         }
-        let mut handles: Vec<i64> = requests.iter().map(|r| r.handle).collect();
         let mut index: i32 = 0;
         let mut flag: i32 = 0;
-        // SAFETY: handles is a valid, mutable Vec<i64> whose length we pass as count.
-        // index and flag are valid stack-allocated i32 output parameters.
-        let ret = unsafe {
+        // SAFETY: with_handles provides a valid, contiguous [i64] of the request
+        // handles whose length we pass as count; index and flag are valid
+        // stack-allocated i32 output parameters.
+        let ret = with_handles(requests, |handles| unsafe {
             ffi::ferrompi_testany(
                 handles.len() as i64,
                 handles.as_mut_ptr(),
                 &mut index,
                 &mut flag,
             )
-        };
+        });
         Error::check_with_op(ret, "testany")?;
         if flag == 0 {
             return Ok(None);
@@ -238,28 +285,35 @@ impl Request {
         if requests.is_empty() {
             return Ok(vec![]);
         }
-        let mut handles: Vec<i64> = requests.iter().map(|r| r.handle).collect();
+        let len = requests.len();
         let mut outcount: i64 = 0;
-        let mut indices: Vec<i32> = vec![0; requests.len()];
-        // SAFETY: handles, outcount, and indices are valid, appropriately-sized
-        // output buffers. handles.len() is passed as count.
-        let ret = unsafe {
-            ffi::ferrompi_testsome(
-                handles.len() as i64,
-                handles.as_mut_ptr(),
-                &mut outcount,
-                indices.as_mut_ptr(),
-            )
-        };
+        // SAFETY: with_handles / with_index_buf supply valid, appropriately-sized
+        // [i64] handle and [i32] index buffers whose lengths match `count`;
+        // outcount is a valid stack-allocated output parameter.
+        let (ret, completed) = with_handles(requests, |handles| {
+            with_index_buf(len, |indices| {
+                let ret = unsafe {
+                    ffi::ferrompi_testsome(
+                        handles.len() as i64,
+                        handles.as_mut_ptr(),
+                        &mut outcount,
+                        indices.as_mut_ptr(),
+                    )
+                };
+                // outcount == -1 means all null; 0 means none completed yet.
+                // Collect completed indices only while the index buffer is alive.
+                let completed: Vec<usize> = if ret == 0 && outcount > 0 {
+                    indices[..outcount as usize]
+                        .iter()
+                        .map(|&i| i as usize)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                (ret, completed)
+            })
+        });
         Error::check_with_op(ret, "testsome")?;
-        if outcount <= 0 {
-            // outcount == -1 means all null; 0 means none completed yet.
-            return Ok(vec![]);
-        }
-        let completed: Vec<usize> = indices[..outcount as usize]
-            .iter()
-            .map(|&i| i as usize)
-            .collect();
         for &idx in &completed {
             requests[idx].completed = true;
         }
@@ -319,26 +373,39 @@ impl Request {
         Error::check_with_op(ret, "cancel")
     }
 
-    /// Wait for all requests in a collection to complete.
+    /// Wait for all requests in a slice to complete.
     ///
     /// This is more efficient than waiting for each request individually.
-    pub fn wait_all(requests: Vec<Request>) -> Result<()> {
+    ///
+    /// Takes the requests by `&mut [Request]` (rather than consuming a
+    /// `Vec<Request>`) so a caller can reuse one backing buffer across a drain
+    /// loop, mirroring
+    /// [`PersistentRequest::wait_all`](crate::PersistentRequest::wait_all). On
+    /// success every request is marked completed in place, so the caller's later
+    /// `Drop` of each is a no-op; on error the requests are left active so their
+    /// `Drop` re-waits each one (preserving the prior cleanup semantics).
+    pub fn wait_all(requests: &mut [Request]) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
         }
 
-        let mut handles: Vec<i64> = requests.iter().map(|r| r.handle).collect();
-        let ret = unsafe { ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr()) };
+        // SAFETY: with_handles provides a valid, contiguous [i64] of the request
+        // handles whose length we pass as count.
+        let ret = with_handles(requests, |handles| unsafe {
+            ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr())
+        });
 
         if ret == 0 {
-            // Success: all requests completed, skip Drop (handles already freed by MPI)
-            for mut req in requests {
+            // Success: MPI consumed and freed every handle. Mark each completed
+            // so the caller's eventual Drop does not re-wait it (which would be a
+            // use-after-free of an already-freed request handle).
+            for req in requests.iter_mut() {
                 req.completed = true;
-                std::mem::forget(req);
             }
             Ok(())
         } else {
-            // Error: let Drop handle cleanup (will re-wait each active request)
+            // Error: leave requests active so each one's Drop re-waits it,
+            // matching the prior by-value behavior's cleanup path.
             Err(Error::from_code_with_op(ret, "waitall"))
         }
     }
@@ -416,8 +483,8 @@ mod tests {
     }
 
     #[test]
-    fn wait_all_empty_vec_returns_ok() {
-        let result = Request::wait_all(vec![]);
+    fn wait_all_empty_slice_returns_ok() {
+        let result = Request::wait_all(&mut []);
         assert!(result.is_ok());
     }
 
