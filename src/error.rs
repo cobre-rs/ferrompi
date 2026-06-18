@@ -291,7 +291,7 @@ impl Error {
     /// for the standard "Ok on success, Err on failure" idiom.
     ///
     /// Marked `#[cold]` + `#[inline(never)]`: this is only reached on the error
-    /// path of [`Error::check`]/[`check_with_op`], and its body (a 512-byte
+    /// path of [`Error::check`]/[`Error::check_with_op`], and its body (a 512-byte
     /// stack buffer, an FFI call to `ferrompi_error_info`, and a `format!`
     /// fallback) must stay out of line so the inlined success-path check folds
     /// to a single return-code branch in the caller.
