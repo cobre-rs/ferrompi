@@ -216,6 +216,14 @@ impl Error {
     /// `Error::Internal("from_code called with success code 0")`.
     /// Callers should use [`Error::check`] or [`Error::check_with_op`]
     /// for the standard "Ok on success, Err on failure" idiom.
+    ///
+    /// Marked `#[cold]` + `#[inline(never)]`: this is only reached on the error
+    /// path of [`Error::check`]/[`check_with_op`], and its body (a 512-byte
+    /// stack buffer, an FFI call to `ferrompi_error_info`, and a `format!`
+    /// fallback) must stay out of line so the inlined success-path check folds
+    /// to a single return-code branch in the caller.
+    #[cold]
+    #[inline(never)]
     pub fn from_code(code: i32) -> Self {
         if code == 0 {
             return Error::Internal("from_code called with success code 0".into());
@@ -277,6 +285,12 @@ impl Error {
     /// - `Error::Internal` if called with `code = 0` (delegated from
     ///   [`Error::from_code`]; treat this as a programming error in the
     ///   caller, not a runtime MPI failure).
+    ///
+    /// Marked `#[cold]` + `#[inline(never)]` for the same reason as
+    /// [`Error::from_code`]: it is only invoked on the error path, so keeping
+    /// it out of line lets [`Error::check_with_op`] inline to a bare branch.
+    #[cold]
+    #[inline(never)]
     pub fn from_code_with_op(code: i32, operation: &'static str) -> Self {
         match Error::from_code(code) {
             Error::Mpi {
@@ -299,6 +313,11 @@ impl Error {
     /// Check an MPI return code, returning `Ok(())` for success.
     ///
     /// Returns `Err(Error::Mpi { .. })` for non-zero codes.
+    ///
+    /// `#[inline]` so the success-path check (`code == 0`) folds into the
+    /// caller across codegen-unit/crate boundaries; the cold error
+    /// construction is delegated to the `#[cold]` [`Error::from_code`].
+    #[inline]
     pub fn check(code: i32) -> Result<()> {
         if code == 0 {
             Ok(())
@@ -312,6 +331,11 @@ impl Error {
     ///
     /// Returns `Err(Error::Mpi { operation: Some(operation), .. })` for
     /// non-zero codes.
+    ///
+    /// `#[inline]` so the success-path check folds into each of the ~150 call
+    /// sites; the cold error construction stays out of line in the `#[cold]`
+    /// [`Error::from_code_with_op`].
+    #[inline]
     pub fn check_with_op(code: i32, operation: &'static str) -> Result<()> {
         if code == 0 {
             Ok(())

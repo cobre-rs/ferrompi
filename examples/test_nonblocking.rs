@@ -65,7 +65,7 @@ fn main() {
         let mut recv_bufs: Vec<Vec<f64>> = (0..3).map(|_| vec![0.0f64; 4]).collect();
 
         // Post all receives first
-        let recv_reqs: Vec<_> = recv_bufs
+        let mut recv_reqs: Vec<_> = recv_bufs
             .iter_mut()
             .enumerate()
             .map(|(i, buf)| {
@@ -76,7 +76,7 @@ fn main() {
             .collect();
 
         // Post all sends
-        let send_reqs: Vec<_> = send_bufs
+        let mut send_reqs: Vec<_> = send_bufs
             .iter()
             .enumerate()
             .map(|(i, buf)| {
@@ -87,8 +87,8 @@ fn main() {
             .collect();
 
         // Wait for all using wait_all
-        ferrompi::Request::wait_all(send_reqs).expect("send wait_all failed");
-        ferrompi::Request::wait_all(recv_reqs).expect("recv wait_all failed");
+        ferrompi::Request::wait_all(&mut send_reqs).expect("send wait_all failed");
+        ferrompi::Request::wait_all(&mut recv_reqs).expect("recv wait_all failed");
 
         // Verify each received buffer
         for (i, buf) in recv_bufs.iter().enumerate() {

@@ -127,7 +127,7 @@ fn main() -> Result<()> {
         let req3 = world.ibroadcast(&mut data3, 0)?;
 
         // Wait for all at once
-        Request::wait_all(vec![req1, req2, req3])?;
+        Request::wait_all(&mut [req1, req2, req3])?;
 
         // Verify
         assert!(data1.iter().all(|&x| (x - 1.0).abs() < 1e-10));

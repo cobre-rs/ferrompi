@@ -299,3 +299,20 @@ default = []
 rma = []
 # Enable NUMA-aware shared memory windows and SLURM helpers (implies rma)
 numa = ["rma"]
+
+# Release profile tuned for a thin, latency-sensitive MPI wrapper.
+#
+# `codegen-units = 1` + `lto = "thin"` let the optimizer inline the wrapper
+# bodies (the `validate -> single FFI call -> Error::check` shims) across
+# codegen-unit boundaries within this crate, so the hot success path of every
+# collective/p2p/RMA call folds to a return-code branch rather than an
+# out-of-line call. This is the portable, Rust-only half of the FFI-overhead
+# work; cross-LANGUAGE LTO (inlining the C trampolines into Rust) additionally
+# requires a clang C toolchain whose LLVM matches rustc's plus
+# `-C linker-plugin-lto`, which is not portable across the MPICH/Open MPI/Cray
+# GCC toolchains ferrompi targets and is therefore intentionally not enabled
+# here. The `bench` profile inherits these settings, so `benches/ffi_overhead.rs`
+# measures the same configuration downstream users get from `--release`.
+[profile.release]
+lto = "thin"
+codegen-units = 1
