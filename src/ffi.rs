@@ -886,11 +886,6 @@ extern "C" {
     /// Returns MPI_SUCCESS on success, MPI_ERR_OTHER if the table is full.
     pub fn ferrompi_op_alloc_slot(out_slot: *mut int32_t) -> c_int;
 
-    /// Store the Rust fat-pointer halves (data + vtable) for the given slot.
-    /// Must be called after `ferrompi_op_alloc_slot` and before
-    /// `ferrompi_op_create_user`.
-    pub fn ferrompi_op_set_closure(slot: int32_t, data: *mut c_void, vtbl: *mut c_void);
-
     /// Create an MPI_Op for the given slot.
     /// `commute = 1` → commutative; `commute = 0` → non-commutative.
     /// Writes the handle (same value as `slot`) to `*out_handle`.
@@ -907,9 +902,9 @@ extern "C" {
     /// Release the op slot WITHOUT calling MPI_Op_free.
     ///
     /// Use this in rollback paths where `MPI_Op_create` failed and the slot
-    /// therefore holds `MPI_OP_NULL`.  Clears the closure pointers and marks
-    /// the slot as unused.  Does not invoke `ferrompi_op_drop_closure` — the
-    /// caller must have already dropped the closure before calling this.
+    /// therefore holds `MPI_OP_NULL`.  Marks the slot as unused.  Does not
+    /// invoke `ferrompi_op_drop_closure` — the caller must have already
+    /// dropped the closure before calling this.
     pub fn ferrompi_op_free_slot_only(handle: int32_t) -> c_int;
 
     /// MPI_Allreduce using a user-defined reduction op.

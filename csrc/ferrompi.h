@@ -685,10 +685,8 @@ int ferrompi_irecv_custom(
  * User-Defined Reduction Op (MPI_Op_create)
  * ============================================================ */
 
-/** ferrompi_op_alloc_slot and ferrompi_op_set_closure must both be called before ferrompi_op_create_user. */
+/** Call ferrompi_op_alloc_slot and publish the Rust closure for that slot before ferrompi_op_create_user. */
 int ferrompi_op_alloc_slot(int32_t* out_slot);
-
-void ferrompi_op_set_closure(int32_t slot, void* data, void* vtbl);
 
 int ferrompi_op_create_user(int32_t slot, int32_t commute, int32_t* out_handle);
 

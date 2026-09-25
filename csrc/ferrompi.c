@@ -143,15 +143,6 @@ static _Atomic(MPI_Op) op_table[MAX_OPS];
 static atomic_int op_used[MAX_OPS];  // 1 if slot is in use
 static atomic_int next_op_hint;
 
-// Fat-pointer pairs for each registered Rust closure
-// (data pointer + vtable pointer of Box<dyn Fn(...)>)
-// Both arrays use C11 _Atomic(void*) to eliminate the data race under
-// MPI_THREAD_MULTIPLE: a reduction trampoline running on any MPI thread reads
-// these atomically (acquire), while ferrompi_op_set_closure writes them
-// atomically (release), establishing a happens-before relationship.
-static _Atomic(void*) op_closure_data[MAX_OPS];
-static _Atomic(void*) op_closure_vtbl[MAX_OPS];
-
 // Initialization guard.  CAS-based: exactly one thread performs the
 // atomic_init loops below; concurrent callers see the CAS fail and return
 // immediately.  Memory-ordering rationale: C11 §6.7.4 guarantees static
@@ -213,8 +204,6 @@ static void init_tables(void) {
     for (int i = 0; i < MAX_OPS; i++) {
         atomic_init(&op_table[i], MPI_OP_NULL);
         atomic_init(&op_used[i], 0);
-        atomic_init(&op_closure_data[i], NULL);
-        atomic_init(&op_closure_vtbl[i], NULL);
     }
     atomic_init(&next_op_hint, 0);
     /* No trailing tables_initialized = 1; — the CAS above already set it. */
@@ -3994,14 +3983,15 @@ int ferrompi_irecv_custom(
  * This guarantees the Rust closure is alive for the full lifetime of
  * the MPI_Op handle.
  *
- * The static tables (op_table, op_used, op_closure_data, op_closure_vtbl)
- * are declared at the top of this file, alongside the other slot tables.
+ * The static tables (op_table, op_used) are declared at the top of this
+ * file, alongside the other slot tables.  The Rust closure for each slot
+ * lives entirely in Rust's own registry (src/op.rs); C only carries the
+ * slot number.
  * ============================================================ */
 
 /* Forward declarations of C-invoked Rust callback and helper. */
-extern void rust_user_op_invoke(void* closure_data, void* closure_vtbl,
-                                void* invec, void* inoutvec,
-                                int len, int dt_tag);
+extern void rust_user_op_invoke(int32_t slot, void* invec, void* inoutvec,
+                                int len);
 /* Called from ferrompi_op_free to drop the boxed Rust closure. */
 extern void ferrompi_op_drop_closure(int32_t slot);
 
@@ -4025,49 +4015,11 @@ static int32_t alloc_op_slot(void) {
 
 static void free_op_slot(int32_t slot) {
     if (slot >= 0 && slot < MAX_OPS) {
-        /* Release stores: any thread that later acquires op_used == 0 will also
-         * observe the NULL op and closure pointers (no dangling pointer visible). */
+        /* Release store: any thread that later acquires op_used == 0 will also
+         * observe the NULL op (no dangling handle visible). */
         atomic_store_explicit(&op_table[slot], MPI_OP_NULL, memory_order_release);
-        atomic_store_explicit(&op_closure_data[slot], NULL, memory_order_release);
-        atomic_store_explicit(&op_closure_vtbl[slot], NULL, memory_order_release);
         atomic_store_explicit(&op_used[slot], 0, memory_order_release);
     }
-}
-
-/* Reverse-map an MPI_Datatype to a FERROMPI_* tag integer.
- * Returns -1 if the datatype is not a known primitive. */
-static int ferrompi_tag_from_mpi_dt(MPI_Datatype dt) {
-    if (dt == MPI_FLOAT)           return FERROMPI_F32;
-    if (dt == MPI_DOUBLE)          return FERROMPI_F64;
-    if (dt == MPI_INT32_T)         return FERROMPI_I32;
-    if (dt == MPI_INT64_T)         return FERROMPI_I64;
-    if (dt == MPI_UINT8_T)         return FERROMPI_U8;
-    if (dt == MPI_UINT32_T)        return FERROMPI_U32;
-    if (dt == MPI_UINT64_T)        return FERROMPI_U64;
-    if (dt == MPI_FLOAT_INT)       return FERROMPI_FLOAT_INT;
-    if (dt == MPI_DOUBLE_INT)      return FERROMPI_DOUBLE_INT;
-    if (dt == MPI_LONG_INT)        return FERROMPI_LONG_INT;
-    if (dt == MPI_2INT)            return FERROMPI_2INT;
-    if (dt == MPI_SHORT_INT)       return FERROMPI_SHORT_INT;
-    if (dt == MPI_LONG_DOUBLE_INT) return FERROMPI_LONG_DOUBLE_INT;
-    if (dt == MPI_BYTE)            return FERROMPI_BYTE;
-    return -1;
-}
-
-/* Central dispatch — called by every trampoline.
- *
- * Under MPI_THREAD_MULTIPLE, MPI can invoke this from any thread while another
- * thread is registering a new UserOp via ferrompi_op_set_closure.  Reading
- * op_closure_data/vtbl with acquire semantics pairs with the release writes in
- * ferrompi_op_set_closure, ensuring we never observe a stale (NULL) pointer
- * after the closure has been registered. */
-static void ferrompi_invoke_user_op(int slot,
-                                     void* invec, void* inoutvec,
-                                     int* len, MPI_Datatype* dt) {
-    int dt_tag = ferrompi_tag_from_mpi_dt(*dt);
-    void* data = atomic_load_explicit(&op_closure_data[slot], memory_order_acquire);
-    void* vtbl = atomic_load_explicit(&op_closure_vtbl[slot], memory_order_acquire);
-    rust_user_op_invoke(data, vtbl, invec, inoutvec, *len, dt_tag);
 }
 
 /* ---- 16 distinct trampoline functions (ADR-0005 Decision 5) ---- */
@@ -4075,7 +4027,8 @@ static void ferrompi_invoke_user_op(int slot,
 #define FERROMPI_DEFINE_OP_TRAMPOLINE(N)                              \
 static void ferrompi_user_op_trampoline_##N(                          \
     void* invec, void* inoutvec, int* len, MPI_Datatype* dt) {        \
-    ferrompi_invoke_user_op(N, invec, inoutvec, len, dt);             \
+    (void)dt;                                                         \
+    rust_user_op_invoke(N, invec, inoutvec, *len);                    \
 }
 
 FERROMPI_DEFINE_OP_TRAMPOLINE(0)
@@ -4126,23 +4079,12 @@ int ferrompi_op_alloc_slot(int32_t* out_slot) {
     return MPI_SUCCESS;
 }
 
-/* Register a Rust fat pointer (data+vtable) for the given slot.
- * Must be called after ferrompi_op_alloc_slot and before
- * ferrompi_op_create_user.
- *
- * Release stores pair with the acquire loads in ferrompi_invoke_user_op,
- * ensuring that any thread that observes the closure via the trampoline also
- * observes all writes made before this call. */
-void ferrompi_op_set_closure(int32_t slot, void* data, void* vtbl) {
-    atomic_store_explicit(&op_closure_data[slot], data, memory_order_release);
-    atomic_store_explicit(&op_closure_vtbl[slot], vtbl, memory_order_release);
-}
-
 /* Create an MPI_Op for the given slot; commute=1 → commutative.
  * Stores the MPI_Op in op_table[slot] and writes the slot back to
  * *out_handle (callers use the slot as the handle). */
 int ferrompi_op_create_user(int32_t slot, int32_t commute, int32_t* out_handle) {
     if (slot < 0 || slot >= MAX_OPS) return MPI_ERR_ARG;
+    if (atomic_load_explicit(&op_used[slot], memory_order_acquire) != 1) return MPI_ERR_ARG;
     MPI_Op op;
     int ret = MPI_Op_create(ferrompi_user_op_trampolines[slot],
                             (int)commute, &op);

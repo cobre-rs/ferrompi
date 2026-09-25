@@ -6,7 +6,7 @@
 //!   3. Drop-after-use: verifies no MPI corruption after the UserOp is dropped.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_user_op
-// mpi-test: np=4
+// mpi-test: np=4 valgrind
 
 use ferrompi::{Mpi, ReduceOp, UserOp};
 

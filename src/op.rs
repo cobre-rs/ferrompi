@@ -43,6 +43,7 @@
 
 use std::marker::PhantomData;
 use std::os::raw::c_void;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::datatype::MpiDatatype;
 use crate::error::{Error, MpiErrorClass, Result};
@@ -58,86 +59,19 @@ const MAX_OPS: usize = 16;
 /// Using an alias avoids the `clippy::type_complexity` lint at every use site.
 type ByteClosure = Box<dyn Fn(&[u8], &mut [u8]) + Send + Sync + 'static>;
 
-// ============================================================================
-// Static closure registry
-//
-// Each slot holds a byte-level closure adapter.  The adapter is a
-// `Box<dyn Fn(&[u8], &mut [u8]) + Send + Sync + 'static>` constructed in
-// `UserOp::new_impl` from the caller's typed `Fn(&[T], &mut [T])` by wrapping
-// it in a byte-reinterpreting adapter closure.
-//
-// OnceLock is used so that each slot can be written exactly once and read many
-// times concurrently, without requiring a Mutex.  Dropping the UserOp must
-// reconstruct the Box from the raw pointer rather than going through OnceLock
-// again (OnceLock does not expose a reset path); see `ferrompi_op_drop_closure`.
-// ============================================================================
-
-/// Per-slot registry of raw fat-pointer halves.
+/// Per-slot registry of thin pointers to boxed closures.
 ///
-/// We cannot store `Box<dyn Fn(...)>` in a static array of `OnceLock` because
-/// statics require `const`-initializable values and `OnceLock::new()` is
-/// `const`-stable only from Rust 1.70+, but more importantly we need to be
-/// able to reconstruct and drop the `Box` from `ferrompi_op_drop_closure`,
-/// which is called from C and cannot go through the OnceLock API.
-///
-/// The chosen approach: store the two halves of the fat pointer (`*mut ()` data
-/// and `*mut ()` vtable) as atomic raw pointers.  We encode "unset" as null and
-/// "set" as non-null.  The fat pointer is stored atomically so that concurrent
-/// reads from MPI threads are data-race-free (Relaxed load is sufficient since
-/// the store in `new_impl` happens-before any MPI invocation of the trampoline —
-/// MPI_Op_create establishes that ordering).
-///
-/// In practice the registry data and vtable are written once (in `new_impl`)
-/// and then only read (in `rust_user_op_invoke`) or reset to null (in
-/// `ferrompi_op_drop_closure`). We use `AtomicPtr` with `Relaxed` ordering
-/// because:
-///   * The store in `new_impl` is sequenced before `MPI_Op_create` which is the
-///     happens-before anchor for all subsequent MPI trampoline calls.
-///   * `ferrompi_op_drop_closure` is called from `ferrompi_op_free` which is
-///     called only after `MPI_Op_free` returns — MPI guarantees no further
-///     trampoline calls after that point.
-use std::sync::atomic::{AtomicPtr, Ordering};
-
-struct RegistrySlot {
-    data: AtomicPtr<()>,
-    vtbl: AtomicPtr<()>,
-}
-
-impl RegistrySlot {
-    const fn new() -> Self {
-        Self {
-            data: AtomicPtr::new(std::ptr::null_mut()),
-            vtbl: AtomicPtr::new(std::ptr::null_mut()),
-        }
-    }
-}
-
-// SAFETY: AtomicPtr<()> is Send + Sync by design; raw pointers are wrapped in
-// atomics which provide the necessary synchronisation.
-unsafe impl Send for RegistrySlot {}
-// SAFETY: &RegistrySlot exposes only atomic loads/stores of the two pointer
-// fields; every access goes through AtomicPtr's own synchronisation, so
-// concurrent shared access from multiple threads has no data race.
-unsafe impl Sync for RegistrySlot {}
-
-static REGISTRY: [RegistrySlot; MAX_OPS] = [
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-    RegistrySlot::new(),
-];
+/// Each slot holds `Box::into_raw(Box::new(byte_closure))` — a thin
+/// `*mut ByteClosure` — or null.  Protocol:
+/// - `UserOp::new_impl` publishes a slot with `Ordering::Release` before
+///   calling `MPI_Op_create`.
+/// - `rust_user_op_invoke` (the trampoline) loads a slot with
+///   `Ordering::Acquire`.
+/// - `ferrompi_op_drop_closure` swaps a slot to null only after
+///   `MPI_Op_free` returns, so no trampoline call can observe a freed
+///   closure.
+static REGISTRY: [AtomicPtr<ByteClosure>; MAX_OPS] =
+    [const { AtomicPtr::new(std::ptr::null_mut()) }; MAX_OPS];
 
 // ============================================================================
 // Extern "C" callbacks exposed to the C layer
@@ -145,47 +79,39 @@ static REGISTRY: [RegistrySlot; MAX_OPS] = [
 
 /// Called by each C trampoline `ferrompi_user_op_trampoline_N`.
 ///
-/// The C trampoline passes the slot's fat-pointer halves and the raw buffer
-/// pointers it received from MPI.  This function reconstructs the byte-level
-/// closure and invokes it, wrapped in `catch_unwind`.
+/// The C trampoline passes only its slot number and the raw buffer pointers
+/// it received from MPI.  This function loads the slot's closure and invokes
+/// it, wrapped in `catch_unwind`.
 ///
 /// # Safety
 ///
-/// * `closure_data` and `closure_vtbl` are the two halves of a valid
-///   `*mut dyn Fn(&[u8], &mut [u8]) + Send + Sync + 'static` fat pointer
-///   previously stored by `UserOp::new_impl`.
+/// * `slot` is in range `0..MAX_OPS` and was published by `UserOp::new_impl`
+///   before `MPI_Op_create` was called for it.
 /// * `invec` is a valid read-only pointer to `len * byte_size` bytes.
 /// * `inoutvec` is a valid read-write pointer to `len * byte_size` bytes.
-/// * `dt_tag` is the `FERROMPI_*` tag that matches the type `T` the `UserOp`
-///   was parameterised with.
 ///
 /// Called from C, so the ABI must be exactly `extern "C"`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_user_op_invoke(
-    closure_data: *mut c_void,
-    closure_vtbl: *mut c_void,
+    slot: std::ffi::c_int,
     invec: *const c_void,
     inoutvec: *mut c_void,
     len: std::ffi::c_int,
-    _dt_tag: std::ffi::c_int,
 ) {
-    // Reconstruct the fat pointer from its two halves.
-    // The fat pointer layout is [data_ptr, vtable_ptr] on all Rust targets;
-    // we encode it as a 2-element array of *mut () and transmute.
-    let fat_ptr_halves: [*mut (); 2] = [closure_data.cast(), closure_vtbl.cast()];
-    // SAFETY: fat_ptr_halves holds a valid fat pointer for
-    // `*const dyn Fn(&[u8], &mut [u8]) + Send + Sync`.  The memory it points
-    // to is alive for the duration of this call: ferrompi_op_free (which frees
-    // the closure) calls MPI_Op_free first and only drops the closure after
-    // MPI_Op_free returns, so no concurrent drop can occur here.
-    // SAFETY: fat_ptr_halves encodes a valid &dyn for the ByteClosure stored
-    // at slot registration time.  We borrow it as a shared reference; the
-    // Box is still owned (it is dropped only in ferrompi_op_drop_closure, after
-    // MPI_Op_free returns).
-    let closure: &(dyn Fn(&[u8], &mut [u8]) + Send + Sync) =
-        // Transmute [*mut (); 2] → fat-pointer reference.  This is the standard
-        // pattern for reconstructing a dyn reference from a stored fat pointer.
-        unsafe { std::mem::transmute(fat_ptr_halves) };
+    let ptr = REGISTRY[slot as usize].load(Ordering::Acquire);
+    if ptr.is_null() {
+        // A null slot here is an invariant violation: the publish-before-
+        // create / drop-after-free protocol on REGISTRY guarantees a live
+        // closure for every slot MPI can still invoke.  Treat it the same as
+        // the panic path below — abort rather than deref a null pointer.
+        std::process::abort();
+    }
+    // SAFETY: ptr is non-null, published by `new_impl` with `Ordering::Release`
+    // before `MPI_Op_create`, and this `Ordering::Acquire` load of the same
+    // atomic synchronizes-with that store.  `ferrompi_op_drop_closure` nulls
+    // the slot only after `MPI_Op_free` returns, so no drop can race with
+    // this borrow.
+    let closure: &ByteClosure = unsafe { &*ptr };
 
     // Build byte slices from the raw MPI buffers.
     // len is the number of *elements* (MPI's *len parameter).  The byte-level
@@ -223,42 +149,36 @@ pub unsafe extern "C" fn rust_user_op_invoke(
     }
 }
 
-/// Called by `ferrompi_op_free` (in C) after `MPI_Op_free` returns.
+/// Called by `ferrompi_op_free` (in C) after `MPI_Op_free` returns, and by
+/// `UserOp::new_impl`'s rollback path when `MPI_Op_create` fails.
 ///
-/// Reconstructs the `Box<dyn Fn(...)>` from the raw fat pointer halves stored
-/// in the slot and drops it.  After this function returns, the slot is cleared
-/// by `free_op_slot` in C.
+/// Swaps the slot to null and, if it held a pointer, drops the boxed
+/// closure.  Idempotent: a second call on the same slot is a no-op — this is
+/// the one drop routine both the C free path and the Rust rollback path
+/// share.
 ///
 /// # Safety
 ///
 /// * `slot` must be in range `0..MAX_OPS`.
-/// * The fat pointer stored in `REGISTRY[slot]` must point to a valid
-///   `Box<dyn Fn(&[u8], &mut [u8]) + Send + Sync + 'static>` that was
-///   previously stored by `UserOp::new_impl` and has not yet been dropped.
-/// * This function is called exactly once per `UserOp`, from C, after
-///   `MPI_Op_free` has returned.
+/// * If `REGISTRY[slot]` is non-null, it must point to a `ByteClosure`
+///   produced by `Box::into_raw` in `UserOp::new_impl` that has not yet been
+///   dropped, and no trampoline call for this slot may be in flight (i.e.
+///   `MPI_Op_create` for this slot never succeeded, or `MPI_Op_free` for it
+///   has already returned).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ferrompi_op_drop_closure(slot: i32) {
     if slot < 0 || slot as usize >= MAX_OPS {
         return;
     }
-    let idx = slot as usize;
-    let data = REGISTRY[idx]
-        .data
-        .swap(std::ptr::null_mut(), Ordering::Relaxed);
-    let vtbl = REGISTRY[idx]
-        .vtbl
-        .swap(std::ptr::null_mut(), Ordering::Relaxed);
-    if data.is_null() || vtbl.is_null() {
+    let ptr = REGISTRY[slot as usize].swap(std::ptr::null_mut(), Ordering::Acquire);
+    if ptr.is_null() {
         return;
     }
-    // Reconstruct the fat pointer and drop the Box.
-    let fat_ptr_halves: [*mut (); 2] = [data, vtbl];
-    // SAFETY: fat_ptr_halves is the valid fat pointer stored by new_impl.
-    // We are reconstructing ownership of the Box; it has not been dropped.
-    // MPI_Op_free has returned so no trampoline call can race with this drop.
-    let closure: ByteClosure = unsafe { std::mem::transmute(fat_ptr_halves) };
-    drop(closure);
+    // SAFETY: ptr was produced by Box::into_raw in new_impl and has not been
+    // dropped; the swap above claimed sole ownership by nulling the slot,
+    // and the caller guarantees no trampoline call for this slot is in
+    // flight.
+    drop(unsafe { Box::from_raw(ptr) });
 }
 
 // ============================================================================
@@ -412,73 +332,35 @@ impl<T: MpiDatatype> UserOp<T> {
                 f(invec, inoutvec);
             });
 
-        // Step 3: store the fat pointer in the static registry.
-        //
-        // We decompose the Box into its two fat-pointer halves and store them
-        // as raw pointers so that the C layer can pass them back via
-        // rust_user_op_invoke, and so that ferrompi_op_drop_closure can
-        // reconstruct and drop the Box.
-        let raw_fat: [*mut (); 2] = unsafe {
-            // SAFETY: transmuting Box<dyn Fn(...)> into [*mut (); 2] extracts
-            // the fat pointer halves without running the destructor.  We
-            // reconstruct the Box in ferrompi_op_drop_closure.
-            std::mem::transmute(Box::into_raw(byte_closure))
-        };
-        // Release store: subsequent loads in the trampoline (Relaxed) are
-        // guaranteed to observe these values because the call to
-        // ferrompi_op_create_user (MPI_Op_create) establishes the
-        // happens-before edge between this store and any trampoline invocation.
-        REGISTRY[idx].data.store(raw_fat[0], Ordering::Release);
-        REGISTRY[idx].vtbl.store(raw_fat[1], Ordering::Release);
+        // Step 3: publish the boxed closure to the registry.  A thin
+        // `*mut ByteClosure` — no fat-pointer decomposition needed.  This
+        // Release store, paired with the trampoline's Acquire load of the
+        // same atomic, synchronizes-with that load directly (no external
+        // happens-before edge required).
+        let ptr: *mut ByteClosure = Box::into_raw(Box::new(byte_closure));
+        REGISTRY[idx].store(ptr, Ordering::Release);
 
         // Step 4: call MPI_Op_create via the C shim.
-        //
-        // ferrompi_op_set_closure stores the fat-pointer halves into the C-side
-        // op_closure_data/op_closure_vtbl arrays so the C trampolines can pass
-        // them to rust_user_op_invoke.
-        // SAFETY: slot is in range (checked by ferrompi_op_alloc_slot above);
-        // raw_fat[0]/raw_fat[1] are the two halves of a fat pointer this
-        // function just published into REGISTRY[idx], stored with Release
-        // ordering above so the trampoline observes a consistent pair.
-        unsafe {
-            ffi::ferrompi_op_set_closure(slot, raw_fat[0].cast(), raw_fat[1].cast());
-        }
-
         let mut handle: i32 = -1;
         // SAFETY: handle is a local out-parameter written by
         // ferrompi_op_create_user before this function reads it below; slot is
         // the value ferrompi_op_alloc_slot returned above.
         let ret = unsafe { ffi::ferrompi_op_create_user(slot, commute, &mut handle) };
         if ret != 0 {
-            // Rollback: MPI_Op_create failed so no MPI_Op was registered.
-            // We must NOT call ferrompi_op_free here — that would call
-            // MPI_Op_free on MPI_OP_NULL (the slot was never populated),
-            // which is implementation-defined behaviour.
-            //
-            // Instead:
-            //   1. Reconstruct and drop the Box<dyn Fn(...)> directly from
-            //      the registry fat-pointer halves we stored above.
-            //   2. Call ferrompi_op_free_slot_only to clear the closure
-            //      pointers and release the op_used slot without touching
-            //      MPI_Op_free.
-            let data = REGISTRY[idx]
-                .data
-                .swap(std::ptr::null_mut(), Ordering::Relaxed);
-            let vtbl = REGISTRY[idx]
-                .vtbl
-                .swap(std::ptr::null_mut(), Ordering::Relaxed);
-            if !data.is_null() && !vtbl.is_null() {
-                let fat: [*mut (); 2] = [data, vtbl];
-                // SAFETY: we just stored this value above; it has not been
-                // dropped yet and this is the only owner.
-                let closure: ByteClosure = unsafe { std::mem::transmute(fat) };
-                drop(closure);
-            }
-            // Release the C-side slot without calling MPI_Op_free.
+            // Rollback: MPI_Op_create failed so no MPI_Op was registered and
+            // no trampoline call for this slot can be in flight.  Use the
+            // same drop routine the C free path uses (ferrompi_op_drop_closure
+            // is idempotent and bounds-checked), then release the slot
+            // without calling MPI_Op_free — the slot never held a live
+            // MPI_Op, and MPI_Op_free on MPI_OP_NULL is implementation-defined.
+            // SAFETY: slot is in range (checked by ferrompi_op_alloc_slot
+            // above); the closure at REGISTRY[idx] was published above and no
+            // trampoline call for this slot has occurred, since
+            // ferrompi_op_create_user just returned failure.
+            unsafe { ferrompi_op_drop_closure(slot) };
             // SAFETY: slot is the value ferrompi_op_alloc_slot returned above;
-            // the closure fat pointer stored in it has just been reconstructed
-            // and dropped (or was already null), so no dangling pointer remains
-            // for a later trampoline call to observe.
+            // the closure stored in it has just been dropped, so no dangling
+            // pointer remains for a later trampoline call to observe.
             unsafe { ffi::ferrompi_op_free_slot_only(slot) };
             return Err(Error::from_code_with_op(ret, "op_create"));
         }
@@ -526,12 +408,21 @@ impl<T: MpiDatatype> Drop for UserOp<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::datatype::MpiDatatype;
+    use crate::ffi;
 
-    /// Verify that UserOp<T> compiles for any MpiDatatype T.
+    /// `ferrompi_op_create_user` must reject a slot that was never allocated
+    /// via `ferrompi_op_alloc_slot`, before it touches MPI.  Needs no MPI
+    /// runtime: slot 0's `op_used` entry is zero-initialised static storage,
+    /// and this test never calls `ferrompi_op_alloc_slot`.
     #[test]
-    fn user_op_struct_compiles() {
-        fn _check<T: MpiDatatype>(_: &UserOp<T>) {}
+    fn create_user_rejects_unallocated_slot() {
+        let mut handle: i32 = -1;
+        // SAFETY: slot 0 has not been allocated in this process, so the
+        // op_used check must reject it before any MPI call; handle is a
+        // valid i32 out-parameter that ferrompi_op_create_user only writes
+        // on success.
+        let ret = unsafe { ffi::ferrompi_op_create_user(0, 1, &mut handle) };
+        assert_ne!(ret, 0, "must reject a slot that was never allocated");
+        assert_eq!(handle, -1, "handle must be untouched on rejection");
     }
 }
