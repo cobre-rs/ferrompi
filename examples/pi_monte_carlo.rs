@@ -6,6 +6,7 @@
 //! Run with: mpiexec -n 4 cargo run --release --example pi_monte_carlo
 //!
 //! The more processes and samples, the more accurate the estimate.
+// mpi-test: np=2.. timeout=300
 
 use ferrompi::{Mpi, ReduceOp, Result};
 // rand 0.10 moved `random()` from `Rng` to the `RngExt` extension trait.
