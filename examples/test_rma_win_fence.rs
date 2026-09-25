@@ -8,6 +8,8 @@
 
 use ferrompi::{Mpi, Win, WinFenceAssert};
 
+mod common;
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -18,6 +20,8 @@ fn main() {
         size >= 2,
         "test_rma_win_fence requires at least 2 processes, got {size}"
     );
+
+    let mut local_ok = true;
 
     // ========================================================================
     // Test 1: Win::fence with WinFenceAssert::default() (no assertion)
@@ -92,10 +96,67 @@ fn main() {
         println!("PASS: WinFenceAssert bitflag composition");
     }
 
+    // ========================================================================
+    // Test 4: Win::fence with no_precede()/no_succeed() and an actual put.
+    //
+    // Uses a fresh window — MPI_MODE_NOPRECEDE is valid only when no RMA
+    // epoch was previously open on the window.
+    // ========================================================================
+    {
+        let no_precede = WinFenceAssert::no_precede();
+        let no_succeed = WinFenceAssert::no_succeed();
+        if no_precede.bits() == 0
+            || no_succeed.bits() == 0
+            || no_precede.bits() == no_succeed.bits()
+        {
+            eprintln!(
+                "rank {rank}: FAIL: no_precede/no_succeed bits invalid \
+                 (no_precede={}, no_succeed={})",
+                no_precede.bits(),
+                no_succeed.bits()
+            );
+            local_ok = false;
+        }
+
+        let win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 4) failed");
+
+        win.fence(no_precede)
+            .expect("Win::fence(no_precede) open failed");
+
+        if rank == 0 {
+            let buf = [1.0f64, 2.0, 3.0, 4.0];
+            if let Err(e) = win.put(&buf, 1, 0, buf.len() as i64) {
+                eprintln!("rank {rank}: FAIL: Win::put failed: {e}");
+                local_ok = false;
+            }
+        }
+
+        win.fence(no_succeed)
+            .expect("Win::fence(no_succeed) close failed");
+
+        if rank == 1 {
+            let expected = [1.0f64, 2.0, 3.0, 4.0];
+            if win.local_slice() != expected {
+                eprintln!(
+                    "rank {rank}: FAIL: expected {expected:?}, got {:?}",
+                    win.local_slice()
+                );
+                local_ok = false;
+            }
+        }
+    }
+
+    world.barrier().expect("barrier after test 4 failed");
+    if rank == 0 && local_ok {
+        println!("PASS: Win::fence with no_precede/no_succeed and put");
+    }
+
+    common::check(&world, local_ok, "test_rma_win_fence");
+
     world.barrier().expect("final barrier failed");
     if rank == 0 {
         println!("\n========================================");
-        println!("All Win::fence tests passed! (3 tests)");
+        println!("All Win::fence tests passed! (4 tests)");
         println!("========================================");
     }
 }

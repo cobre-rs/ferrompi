@@ -185,5 +185,95 @@ fn main() {
         println!("PASS: Win::test_exposure (nonblocking poll)");
     }
 
+    // ========================================================================
+    // Test 3: WinPscwAssert::no_check() with an actual put.
+    //
+    // MPI_MODE_NOCHECK requires the matching post to have already completed
+    // before the paired start, hence the barrier between post and start.
+    //
+    // Rank 0 (target): post(no_check) -> barrier -> wait_exposure -> check data
+    // Rank 1 (origin):  barrier -> start(no_check) -> put -> complete
+    // ========================================================================
+    if rank == 0 {
+        let world_group = match world.group() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL: world.group() [test 3] failed: {e}");
+                world.abort(1);
+            }
+        };
+        let access_group = match world_group.include(&[1]) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL: group.include([1]) [test 3] failed: {e}");
+                world.abort(1);
+            }
+        };
+
+        if let Err(e) = win.post(&access_group, WinPscwAssert::no_check()) {
+            eprintln!("rank {rank}: FAIL: Win::post(no_check) failed: {e}");
+            local_ok = false;
+        }
+
+        world
+            .barrier()
+            .expect("barrier between post and start [test 3] failed");
+
+        if let Err(e) = win.wait_exposure() {
+            eprintln!("rank {rank}: FAIL: Win::wait_exposure [test 3] failed: {e}");
+            local_ok = false;
+        }
+
+        let expected = [1.0f64, 2.0, 3.0, 4.0];
+        if win.local_slice()[0..4] != expected {
+            eprintln!(
+                "rank {rank}: FAIL: expected {expected:?}, got {:?}",
+                &win.local_slice()[0..4]
+            );
+            local_ok = false;
+        }
+    } else {
+        // rank == 1
+        let world_group = match world.group() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL: world.group() [test 3] failed: {e}");
+                world.abort(1);
+            }
+        };
+        let exposure_group = match world_group.include(&[0]) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL: group.include([0]) [test 3] failed: {e}");
+                world.abort(1);
+            }
+        };
+
+        world
+            .barrier()
+            .expect("barrier between post and start [test 3] failed");
+
+        if let Err(e) = win.start(&exposure_group, WinPscwAssert::no_check()) {
+            eprintln!("rank {rank}: FAIL: Win::start(no_check) failed: {e}");
+            local_ok = false;
+        }
+
+        let buf = [1.0f64, 2.0, 3.0, 4.0];
+        if let Err(e) = win.put(&buf, 0, 0, buf.len() as i64) {
+            eprintln!("rank {rank}: FAIL: Win::put [test 3] failed: {e}");
+            local_ok = false;
+        }
+
+        if let Err(e) = win.complete() {
+            eprintln!("rank {rank}: FAIL: Win::complete [test 3] failed: {e}");
+            local_ok = false;
+        }
+    }
+
+    world.barrier().expect("barrier after test 3 failed");
+    if rank == 0 && local_ok {
+        println!("PASS: PSCW epoch with WinPscwAssert::no_check() and put");
+    }
+
     common::check(&world, local_ok, "test_rma_win_pscw");
 }
