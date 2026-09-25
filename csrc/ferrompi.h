@@ -206,10 +206,12 @@ int ferrompi_iprobe(
 int ferrompi_bcast(void* buf, int64_t count, int32_t datatype_tag, int32_t root, int32_t comm);
 
 /**
- * In-place blocking, nonblocking and persistent collectives (generic): reduce,
- * allreduce, gather, allgather, alltoall (and their nonblocking/persistent
- * siblings) substitute MPI_IN_PLACE for sendbuf when sendbuf == NULL; scatter
- * (and its siblings) substitute MPI_IN_PLACE for recvbuf when recvbuf == NULL.
+ * In-place collectives (generic): reduce, allreduce, gather, allgather,
+ * alltoall, igather, iallgather, ialltoall, allreduce_init, gather_init,
+ * allgather_init and alltoall_init substitute MPI_IN_PLACE for sendbuf when
+ * sendbuf == NULL; scatter, iscatter and scatter_init substitute MPI_IN_PLACE
+ * for recvbuf when recvbuf == NULL. ireduce, iallreduce and reduce_init pass
+ * sendbuf through unchanged.
  * Rust slices never produce a NULL pointer, so NULL is an unambiguous in-place
  * marker here.
  */
@@ -457,7 +459,7 @@ int ferrompi_startall(int64_t count, int64_t* requests);
  * RMA Window Operations (MPI 3.0+)
  * ============================================================ */
 
-/* Lock type constants for MPI_Win_lock / MPI_Win_lock_all. Must match the Rust LockType enum discriminants. */
+/* Lock type constants for MPI_Win_lock / MPI_Win_lock_all. Must match the LockType -> FERROMPI_LOCK_* mapping in src/window.rs. */
 #define FERROMPI_LOCK_EXCLUSIVE 0
 #define FERROMPI_LOCK_SHARED    1
 

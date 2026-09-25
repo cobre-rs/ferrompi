@@ -2777,7 +2777,6 @@ int ferrompi_info_get(int32_t info_handle, const char* key, char* value, int32_t
  * ============================================================ */
 
 int ferrompi_comm_group(int32_t comm_handle, int32_t* group_handle) {
-    if (comm_handle < 0) return MPI_ERR_COMM;
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
     MPI_Group g;
@@ -3340,7 +3339,6 @@ int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_h
 
 int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t info_handle,
                          int32_t comm_handle, int32_t* win_handle) {
-    if (comm_handle < 0) return MPI_ERR_COMM;
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
     MPI_Info info = (info_handle < 0) ? MPI_INFO_NULL : get_info(info_handle);
@@ -3361,7 +3359,6 @@ int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t inf
 
 int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info_handle,
                            int32_t comm_handle, void** baseptr, int32_t* win_handle) {
-    if (comm_handle < 0) return MPI_ERR_COMM;
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
     MPI_Info info = (info_handle < 0) ? MPI_INFO_NULL : get_info(info_handle);

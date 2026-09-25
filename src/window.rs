@@ -879,7 +879,7 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// let mut buf = vec![0f64; 64];
     /// let win = Win::create(&world, &mut buf).unwrap();
     /// ```
-    pub fn create(comm: &Communicator, buf: &'a mut [T]) -> crate::error::Result<Self> {
+    pub fn create(comm: &Communicator, buf: &'a mut [T]) -> Result<Self> {
         let byte_size = buf
             .len()
             .checked_mul(std::mem::size_of::<T>())
@@ -959,7 +959,7 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// let world = mpi.world();
     /// let win = Win::<f64>::allocate(&world, 32).unwrap();
     /// ```
-    pub fn allocate(comm: &Communicator, local_count: usize) -> crate::error::Result<Self> {
+    pub fn allocate(comm: &Communicator, local_count: usize) -> Result<Self> {
         let byte_size = local_count
             .checked_mul(std::mem::size_of::<T>())
             .ok_or(Error::InvalidBuffer)?;
@@ -2458,7 +2458,7 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
         compare: T,
         target_rank: i32,
         target_disp: i64,
-    ) -> crate::error::Result<PendingFetchResult<T>> {
+    ) -> Result<PendingFetchResult<T>> {
         use std::mem::MaybeUninit;
         // Box origin, compare, and result for heap-stable addresses that
         // survive across the epoch.  MPI_Compare_and_swap is non-blocking
