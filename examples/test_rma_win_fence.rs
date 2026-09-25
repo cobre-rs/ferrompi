@@ -19,24 +19,6 @@ fn main() {
     );
 
     // ========================================================================
-    // Probe: Win::fence requires MPI >= 3. Skip gracefully on older builds.
-    // ========================================================================
-    let version_str = Mpi::version().unwrap_or_default();
-    let major: u32 = version_str
-        .split_whitespace()
-        .nth(1)
-        .and_then(|v| v.split('.').next())
-        .and_then(|m| m.parse().ok())
-        .unwrap_or(0);
-
-    if major < 3 {
-        if rank == 0 {
-            println!("SKIP: Win::fence requires MPI >= 3 (got {version_str})");
-        }
-        return;
-    }
-
-    // ========================================================================
     // Test 1: Win::fence with WinFenceAssert::default() (no assertion)
     //
     // Allocate a window, call fence twice (open epoch, close epoch).

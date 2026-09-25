@@ -26,25 +26,6 @@ fn main() {
         "test_rma_compare_and_swap requires at least 2 processes, got {size}"
     );
 
-    // ========================================================================
-    // Probe: Win::compare_and_swap requires MPI >= 3. Skip gracefully on older
-    // builds.
-    // ========================================================================
-    let version_str = Mpi::version().unwrap_or_default();
-    let major: u32 = version_str
-        .split_whitespace()
-        .nth(1)
-        .and_then(|v| v.split('.').next())
-        .and_then(|m| m.parse().ok())
-        .unwrap_or(0);
-
-    if major < 3 {
-        if rank == 0 {
-            println!("SKIP: Win::compare_and_swap requires MPI >= 3 (got {version_str})");
-        }
-        return;
-    }
-
     let mut local_ok = true;
 
     // ========================================================================

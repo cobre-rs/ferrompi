@@ -20,26 +20,6 @@ fn main() {
     );
 
     // ========================================================================
-    // Probe: Win::create and Win::allocate require MPI >= 3.
-    // Check the MPI version and skip gracefully on older implementations.
-    // ========================================================================
-    let version_str = Mpi::version().unwrap_or_default();
-    // version_str is like "MPI 3.1" or "MPI 4.0"
-    let major: u32 = version_str
-        .split_whitespace()
-        .nth(1)
-        .and_then(|v| v.split('.').next())
-        .and_then(|m| m.parse().ok())
-        .unwrap_or(0);
-
-    if major < 3 {
-        if rank == 0 {
-            println!("SKIP: Win::create and Win::allocate require MPI >= 3 (got {version_str})");
-        }
-        return;
-    }
-
-    // ========================================================================
     // Test 1: Win::create with a caller-supplied i32 buffer
     //
     // OpenMPI 4.x with `--btl=self,tcp` (the configuration used in CI when
