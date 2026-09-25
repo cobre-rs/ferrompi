@@ -262,7 +262,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | INF-17 | `security.yml` hygiene | nit | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | INF-18 | Package ships repo internals (incl. `audits/`) | minor | `cargo package` | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | INF-19 | ADR-0002 mandated TSan step missing | minor | reading | 0.5.x / moot after ARC-01 | planned (ferrompi-0.5.x-hardening) |
-| INF-20 | CI covers MPICH 4.2 + Open MPI 4.x only (no Open MPI 5) | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| INF-20 | CI covers MPICH 4.2 + Open MPI 4.x only (no Open MPI 5) | minor | reading | 0.5.x | fixed (3f8ec50) |
 | INF-21 | Unit tests mutate a global static (latent) | nit | stress test | — | open |
 | INF-22 | Third-party GitHub Actions pinned by tag, not commit SHA | minor | reading | later | open |
 | INF-23 | Publishing uses a long-lived crates.io token (no Trusted Publishing) | minor | reading | later | open |
