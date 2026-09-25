@@ -52,6 +52,7 @@ use std::ops::{BitOr, BitOrAssign};
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
+use crate::datatype::{buf, buf_mut};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::group::Group;
@@ -691,9 +692,9 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 /// The Rust language's stack-frame and move semantics make naïve
 /// `&origin` / `&result` arguments unsound: the function returns before
 /// the epoch closes, and the stack locations are reused. To guarantee
-/// stable addresses, this type owns heap-allocated `Box`es for every
-/// input/output buffer, and only releases or drops them when [`resolve`]
-/// consumes the struct.
+/// stable addresses, this type owns heap allocations for the origin (and
+/// compare) operands and the result destination; each is freed exactly
+/// once when the struct is dropped, whether directly or via [`resolve`].
 ///
 /// The type also carries an `Option<Box<T>>` for `compare_and_swap`'s
 /// extra `compare` argument; it is `None` for `fetch_and_op`.
@@ -728,11 +729,24 @@ pub struct PendingFetchResult<T> {
     /// Optional `compare` operand for `MPI_Compare_and_swap`.  `None` for
     /// `MPI_Fetch_and_op`.  Same lifetime invariant as `_origin`.
     _compare: Option<Box<T>>,
-    /// Result buffer — kept alive so MPI's pending RMA write reaches a
-    /// stable destination.  resolve() reads from this box once the epoch
+    /// Result destination — kept alive so MPI's pending RMA write reaches a
+    /// stable destination.  Owns its allocation via a raw pointer obtained
+    /// from `Box::into_raw` (never a cast from a shared borrow), freed
+    /// exactly once by `Drop`.  resolve() reads the value once the epoch
     /// has closed.
-    result: Box<std::mem::MaybeUninit<T>>,
+    result: NonNull<std::mem::MaybeUninit<T>>,
 }
+
+// SAFETY: `result` is a `NonNull` pointer to a heap allocation exclusively owned by
+// this struct (freed exactly once, by `Drop`), functionally equivalent to
+// `Box<MaybeUninit<T>>`'s ownership semantics. No other code holds a copy of this
+// pointer, so sending the struct across threads is sound whenever T: Send.
+unsafe impl<T: Send> Send for PendingFetchResult<T> {}
+// SAFETY: `result` is a `NonNull` pointer to a heap allocation exclusively owned by
+// this struct, reachable only through `self`-consuming methods (`resolve`, `Drop`); no
+// interior mutability is exposed through `&PendingFetchResult<T>`, so sharing a shared
+// reference across threads is sound whenever T: Sync.
+unsafe impl<T: Sync> Sync for PendingFetchResult<T> {}
 
 impl<T: Copy> PendingFetchResult<T> {
     /// Consume the pending result and return the fetched value.
@@ -753,16 +767,25 @@ impl<T: Copy> PendingFetchResult<T> {
     /// possibly uninitialised value (UB in Rust).
     #[inline]
     pub unsafe fn resolve(self) -> T {
-        // SAFETY: Caller guarantees the epoch has closed, at which point MPI
-        // has initialised the heap-allocated buffer with the pre-update
-        // remote value per MPI-3 §11.6.  All T: Copy types (enforced by the
-        // MpiDatatype + AtomicMpiDatatype bounds at the call site) are valid
-        // for any bit pattern, so assuming init is sound.  Dereferencing the
-        // Box moves the MaybeUninit<T> out of the heap allocation (allowed
-        // because MaybeUninit<T>: Copy when T: Copy), the Box itself is then
-        // freed when `self` is dropped.  The _origin and _compare boxes are
-        // dropped at the same time.
-        (*self.result).assume_init()
+        // SAFETY: Caller guarantees the epoch has closed, at which point MPI has
+        // initialised the allocation at `self.result` with the pre-update remote value
+        // per MPI-3 §11.6.  All T: Copy types (enforced by the MpiDatatype +
+        // AtomicMpiDatatype bounds at the call site) are valid for any bit pattern, so
+        // assuming init is sound.  `read()` copies the `MaybeUninit<T>` out of the
+        // allocation without freeing it; `self`'s `Drop` impl frees it exactly once,
+        // along with the `_origin` and `_compare` boxes, when this function returns.
+        unsafe { self.result.as_ptr().read().assume_init() }
+    }
+}
+
+impl<T> Drop for PendingFetchResult<T> {
+    fn drop(&mut self) {
+        // SAFETY: `result` was obtained from `Box::into_raw` in `fetch_and_op` or
+        // `compare_and_swap` and has not been freed since (the only other free site, the
+        // FFI error path in those constructors, returns before a `PendingFetchResult` is
+        // ever built). `Drop::drop` runs at most once per value, so reconstructing the
+        // `Box` here and letting it drop frees the allocation exactly once.
+        unsafe { drop(Box::from_raw(self.result.as_ptr())) };
     }
 }
 
@@ -1572,22 +1595,23 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<()> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
-        // SAFETY: `origin.as_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid and unmodified until the epoch
-        // closes (see the Safety Contract in the method docs).
+        let (p, n, dt) = buf(origin);
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is read by MPI until the epoch closes; the signature does not
+        // tie the buffer to the epoch, so keeping it alive and unmodified until then is
+        // the caller's documented obligation. `target_rank`, `target_disp`, and
+        // `target_count` are passed through unchecked; a value outside the target window
+        // is an MPI-level error or an out-of-bounds remote access, and this function does
+        // not check it.
         let ret = unsafe {
             ffi::ferrompi_put(
-                origin.as_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 self.win_handle,
             )
         };
@@ -1669,23 +1693,24 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<Request> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
+        let (p, n, dt) = buf(origin);
         let mut request_handle: i64 = 0;
-        // SAFETY: `origin.as_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid and unmodified until the returned
-        // Request is waited on (see the epoch requirement in the method docs).
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is read by MPI until the returned `Request` completes; the
+        // signature does not tie the buffer to the `Request`, so keeping it alive and
+        // unmodified until then is the caller's documented obligation. `target_rank`,
+        // `target_disp`, and `target_count` are passed through unchecked; a value outside
+        // the target window is an MPI-level error or an out-of-bounds remote access, and
+        // this function does not check it.
         let ret = unsafe {
             ffi::ferrompi_rput(
-                origin.as_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 self.win_handle,
                 &mut request_handle,
             )
@@ -1762,22 +1787,23 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<()> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
-        // SAFETY: `origin.as_mut_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid and unused until the epoch
-        // closes (see the Safety Contract in the method docs).
+        let (p, n, dt) = buf_mut(origin);
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is written by MPI until the epoch closes; the signature does
+        // not tie the buffer to the epoch, so keeping it alive and untouched until then is
+        // the caller's documented obligation. `target_rank`, `target_disp`, and
+        // `target_count` are passed through unchecked; a value outside the target window
+        // is an MPI-level error or an out-of-bounds remote access, and this function does
+        // not check it.
         let ret = unsafe {
             ffi::ferrompi_get(
-                origin.as_mut_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 self.win_handle,
             )
         };
@@ -1857,23 +1883,24 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<Request> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
+        let (p, n, dt) = buf_mut(origin);
         let mut request_handle: i64 = 0;
-        // SAFETY: `origin.as_mut_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid until the returned Request is
-        // waited on (see the epoch requirement in the method docs).
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is written by MPI until the returned `Request` completes; the
+        // signature does not tie the buffer to the `Request`, so keeping it alive and
+        // untouched until then is the caller's documented obligation. `target_rank`,
+        // `target_disp`, and `target_count` are passed through unchecked; a value outside
+        // the target window is an MPI-level error or an out-of-bounds remote access, and
+        // this function does not check it.
         let ret = unsafe {
             ffi::ferrompi_rget(
-                origin.as_mut_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 self.win_handle,
                 &mut request_handle,
             )
@@ -1961,24 +1988,24 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_count: i64,
         op: ReduceOp,
     ) -> Result<()> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
-        // SAFETY: `origin.as_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `op as i32` is the discriminant of a valid `ReduceOp` variant, which the
-        // C shim maps to the corresponding `MPI_Op` via `get_op()`.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid and unmodified until the epoch
-        // closes (see the Safety Contract in the method docs).
+        let (p, n, dt) = buf(origin);
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is read by MPI until the epoch closes; the signature does not
+        // tie the buffer to the epoch, so keeping it alive and unmodified until then is
+        // the caller's documented obligation. `target_rank`, `target_disp`, and
+        // `target_count` are passed through unchecked; a value outside the target window
+        // is an MPI-level error or an out-of-bounds remote access, and this function does
+        // not check it. `op as i32` is a valid `ReduceOp` discriminant that the shim maps
+        // to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_accumulate(
-                origin.as_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 op as i32,
                 self.win_handle,
             )
@@ -2068,25 +2095,25 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_count: i64,
         op: ReduceOp,
     ) -> Result<Request> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
+        let (p, n, dt) = buf(origin);
         let mut request_handle: i64 = 0;
-        // SAFETY: `origin.as_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `op as i32` is the discriminant of a valid `ReduceOp` variant, which the
-        // C shim maps to the corresponding `MPI_Op` via `get_op()`.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid and unmodified until the returned
-        // Request is waited on (see the epoch requirement in the method docs).
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is read by MPI until the returned `Request` completes; the
+        // signature does not tie the buffer to the `Request`, so keeping it alive and
+        // unmodified until then is the caller's documented obligation. `target_rank`,
+        // `target_disp`, and `target_count` are passed through unchecked; a value outside
+        // the target window is an MPI-level error or an out-of-bounds remote access, and
+        // this function does not check it. `op as i32` is a valid `ReduceOp` discriminant
+        // that the shim maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_raccumulate(
-                origin.as_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 op as i32,
                 self.win_handle,
                 &mut request_handle,
@@ -2189,32 +2216,30 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_count: i64,
         op: ReduceOp,
     ) -> Result<()> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
-        let result_count = i64::try_from(result.len()).map_err(|_| Error::InvalidBuffer)?;
-        // SAFETY: `origin.as_ptr()` is valid for `origin.len()` elements of type T
-        // (read-only during the epoch). `result.as_mut_ptr()` is valid for
-        // `result.len()` elements of type T (write destination, populated by MPI
-        // when the epoch closes). `T::TAG` correctly represents T's memory layout
-        // per the `MpiDatatype` invariant. `op as i32` is the discriminant of a
-        // valid `ReduceOp` variant, which the C shim maps to the corresponding
-        // `MPI_Op` via `get_op()`. `win_handle` is a valid MPI window handle.
-        // Non-aliasing of `origin` and `result` is guaranteed by Rust's
-        // `&[T]` / `&mut [T]` exclusivity rules. The caller is responsible for
-        // ensuring this call is inside an active access epoch and that `origin`
-        // remains valid and `result` is not read before the epoch closes (see the
-        // Safety Contract in the method docs).
+        let (o_ptr, o_n, dt) = buf(origin);
+        let (r_ptr, r_n, _) = buf_mut(result);
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is read by MPI and `result` is written by MPI until the epoch
+        // closes; the signature does not tie either buffer to the epoch, so keeping
+        // `origin` alive and unmodified, and `result` alive and unread, until then is the
+        // caller's documented obligation. `origin` (`&[T]`) and `result` (`&mut [T]`)
+        // cannot alias. `target_rank`, `target_disp`, and `target_count` are passed
+        // through unchecked; a value outside the target window is an MPI-level error or
+        // an out-of-bounds remote access, and this function does not check it.
+        // `op as i32` is a valid `ReduceOp` discriminant that the shim maps to an
+        // `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_get_accumulate(
-                origin.as_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
-                result.as_mut_ptr().cast::<std::ffi::c_void>(),
-                result_count,
-                T::TAG as i32,
+                o_ptr,
+                o_n,
+                dt,
+                r_ptr,
+                r_n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 op as i32,
                 self.win_handle,
             )
@@ -2315,19 +2340,25 @@ impl<T: MpiDatatype> Win<'_, T> {
         // other implementations.  See PendingFetchResult docs for the
         // lifetime contract.
         let origin_box: Box<T> = Box::new(origin);
-        let result_box: Box<MaybeUninit<T>> = Box::new(MaybeUninit::uninit());
-        // SAFETY: origin_box.as_ref() points to a heap allocation that
-        // lives for the lifetime of PendingFetchResult (we move it into
-        // the returned struct below).  result_box similarly.  Both
-        // addresses remain valid until the user consumes the
-        // PendingFetchResult via resolve() (or drops it).  `T::TAG`,
-        // `op as i32`, target_rank, target_disp, and win_handle invariants
-        // are unchanged from the previous implementation.
+        // SAFETY: `Box::into_raw` never returns a null pointer.
+        let result_ptr: NonNull<MaybeUninit<T>> =
+            unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(MaybeUninit::uninit()))) };
+        // SAFETY: `origin_box` points to a heap allocation moved into the returned
+        // `PendingFetchResult`; MPI reads through it until the epoch closes.
+        // `result_ptr` is a raw pointer that owns its allocation (obtained from
+        // `Box::into_raw` above, never a cast from a shared borrow); MPI writes through
+        // it until the epoch closes. The caller must keep the returned
+        // `PendingFetchResult` alive and call `resolve` only after the epoch closes —
+        // `resolve` is `unsafe` for that reason. `result_ptr`'s allocation is freed
+        // exactly once by `PendingFetchResult`'s `Drop`, on both the `resolve` and
+        // drop-without-resolve paths. `T::TAG` matches T's memory layout per the
+        // `MpiDatatype` invariant. `op as i32` is a valid `ReduceOp` discriminant that
+        // the shim maps to an `MPI_Op`. `target_rank`, `target_disp`, and `win_handle`
+        // are passed through unchecked.
         let ret = unsafe {
             ffi::ferrompi_fetch_and_op(
                 (origin_box.as_ref() as *const T).cast::<std::ffi::c_void>(),
-                (result_box.as_ref() as *const MaybeUninit<T> as *mut MaybeUninit<T>)
-                    .cast::<std::ffi::c_void>(),
+                result_ptr.as_ptr().cast::<std::ffi::c_void>(),
                 T::TAG as i32,
                 target_rank,
                 target_disp,
@@ -2335,11 +2366,17 @@ impl<T: MpiDatatype> Win<'_, T> {
                 self.win_handle,
             )
         };
-        Error::check_with_op(ret, "fetch_and_op")?;
+        Error::check_with_op(ret, "fetch_and_op").map_err(|e| {
+            // SAFETY: `result_ptr` was obtained from `Box::into_raw` above and has not
+            // been freed; reconstructing the `Box` here and dropping it frees the
+            // allocation exactly once on this error path.
+            unsafe { drop(Box::from_raw(result_ptr.as_ptr())) };
+            e
+        })?;
         Ok(PendingFetchResult {
             _origin: origin_box,
             _compare: None,
-            result: result_box,
+            result: result_ptr,
         })
     }
 }
@@ -2467,30 +2504,43 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
         // storage would have been reused.  See PendingFetchResult docs.
         let origin_box: Box<T> = Box::new(origin);
         let compare_box: Box<T> = Box::new(compare);
-        let result_box: Box<MaybeUninit<T>> = Box::new(MaybeUninit::uninit());
-        // SAFETY: origin_box, compare_box, and result_box all point to
-        // heap allocations that live until PendingFetchResult is consumed
-        // or dropped (we move them into the returned struct below).
-        // `T::TAG`, target_rank, target_disp, and win_handle invariants
-        // are unchanged from the previous implementation.  `AtomicMpiDatatype`
-        // restricts T to integer/byte types per MPI 4.1 §12.5.4.
+        // SAFETY: `Box::into_raw` never returns a null pointer.
+        let result_ptr: NonNull<MaybeUninit<T>> =
+            unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(MaybeUninit::uninit()))) };
+        // SAFETY: `origin_box` and `compare_box` point to heap allocations moved into
+        // the returned `PendingFetchResult`; MPI reads through them until the epoch
+        // closes. `result_ptr` is a raw pointer that owns its allocation (obtained from
+        // `Box::into_raw` above, never a cast from a shared borrow); MPI writes through
+        // it until the epoch closes. The caller must keep the returned
+        // `PendingFetchResult` alive and call `resolve` only after the epoch closes —
+        // `resolve` is `unsafe` for that reason. `result_ptr`'s allocation is freed
+        // exactly once by `PendingFetchResult`'s `Drop`, on both the `resolve` and
+        // drop-without-resolve paths. `T::TAG` matches T's memory layout per the
+        // `MpiDatatype` invariant; `AtomicMpiDatatype` restricts T to the integer and
+        // byte types MPI supports for compare-and-swap (MPI 4.1 §12.5.4). `target_rank`,
+        // `target_disp`, and `win_handle` are passed through unchecked.
         let ret = unsafe {
             ffi::ferrompi_compare_and_swap(
                 (origin_box.as_ref() as *const T).cast::<std::ffi::c_void>(),
                 (compare_box.as_ref() as *const T).cast::<std::ffi::c_void>(),
-                (result_box.as_ref() as *const MaybeUninit<T> as *mut MaybeUninit<T>)
-                    .cast::<std::ffi::c_void>(),
+                result_ptr.as_ptr().cast::<std::ffi::c_void>(),
                 T::TAG as i32,
                 target_rank,
                 target_disp,
                 self.win_handle,
             )
         };
-        Error::check_with_op(ret, "compare_and_swap")?;
+        Error::check_with_op(ret, "compare_and_swap").map_err(|e| {
+            // SAFETY: `result_ptr` was obtained from `Box::into_raw` above and has not
+            // been freed; reconstructing the `Box` here and dropping it frees the
+            // allocation exactly once on this error path.
+            unsafe { drop(Box::from_raw(result_ptr.as_ptr())) };
+            e
+        })?;
         Ok(PendingFetchResult {
             _origin: origin_box,
             _compare: Some(compare_box),
-            result: result_box,
+            result: result_ptr,
         })
     }
 }
@@ -2935,6 +2985,39 @@ mod tests {
         let _ = _check_u32 as fn(&Win<'_, u32>) -> Result<PendingFetchResult<u32>>;
         let _ = _check_u64 as fn(&Win<'_, u64>) -> Result<PendingFetchResult<u64>>;
         let _ = _check_u8 as fn(&Win<'_, u8>) -> Result<PendingFetchResult<u8>>;
+    }
+
+    #[test]
+    fn pending_fetch_result_resolve_and_drop_without_resolve() {
+        use std::mem::MaybeUninit;
+
+        fn make(value: i32) -> PendingFetchResult<i32> {
+            // SAFETY: `Box::into_raw` never returns a null pointer.
+            let result_ptr =
+                unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(MaybeUninit::new(value)))) };
+            PendingFetchResult {
+                _origin: Box::new(0),
+                _compare: None,
+                result: result_ptr,
+            }
+        }
+
+        // Resolve path: reads the value, then Drop frees `result` (and `_origin`) exactly once.
+        let resolved = make(42);
+        // SAFETY: no MPI epoch is involved; `result` was initialised directly above.
+        let value = unsafe { resolved.resolve() };
+        assert_eq!(value, 42);
+
+        // Drop-without-resolve path: Drop frees `result` (and `_origin`) exactly once.
+        let unresolved = make(7);
+        drop(unresolved);
+
+        // Compile-time witness: the manual Send/Sync impls restore the auto-trait
+        // behavior PendingFetchResult<T> had when `result` was a `Box<MaybeUninit<T>>`.
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<PendingFetchResult<i32>>();
+        assert_sync::<PendingFetchResult<i32>>();
     }
 
     #[test]

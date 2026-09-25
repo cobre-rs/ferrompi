@@ -124,6 +124,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | SND-12 | Uninitialised window memory exposed as `&[T]` | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | SND-13 | `SharedWindow` slices over concurrently-written memory (observed miscompile) | critical | repro | 0.6 (D-5); 0.5.x doc warning | planned (ferrompi-0.5.x-hardening: doc warning); API fix open (0.6) |
 | SND-14 | `UserOp` fat-pointer transmute relies on unspecified layout | minor | reading | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| SND-15 | `fetch_and_op`/`compare_and_swap` result pointer derived from a shared borrow | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 
 ### Correctness — [02](findings/02-correctness.md)
 

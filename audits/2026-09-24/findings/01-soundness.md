@@ -131,3 +131,11 @@ Severity legend: **critical** = safe code → UB / memory corruption / data race
 - **Defect:** Rust does not guarantee the `(data, vtable)` order/layout of trait-object pointers.
 - **Fix direction:** store a thin pointer: `Box<Box<dyn Fn…>>` → `*mut c_void` (one pointer across FFI, no transmute); also removes the second registry (BLT-15).
 - **Acceptance:** no `transmute` in `op.rs`; `test_user_op` passes under Miri-free review + MPI suite.
+
+### SND-15 — `fetch_and_op`/`compare_and_swap` result pointer derived from a shared borrow
+
+- **Severity:** minor · **Verified:** reading · **Target:** 0.5.x
+- **Locations:** `src/window.rs:2329` (`fetch_and_op`), `:2481` (`compare_and_swap`) — both `(result_box.as_ref() as *const MaybeUninit<T> as *mut MaybeUninit<T>)`.
+- **Defect:** the result pointer MPI writes through is obtained by casting away constness from `result_box.as_ref()`, a shared reference. A write through a pointer derived from a shared borrow is undefined behaviour in Rust, independent of whether the write happens to work in practice.
+- **Fix direction:** `PendingFetchResult.result` becomes a raw-owned `NonNull<MaybeUninit<T>>` obtained from `Box::into_raw`, never derived from a reference; that pointer, unchanged, is what MPI receives. A `Drop` impl frees the allocation exactly once, on the `resolve` path, the drop-without-resolve path, and the FFI error path.
+- **Acceptance:** no cast from a shared borrow feeds a write pointer in `window.rs`; a non-MPI unit test constructs `PendingFetchResult` values, resolves one and drops another unresolved, with no double free; `PendingFetchResult`'s `Send`/`Sync` auto traits are unchanged.
