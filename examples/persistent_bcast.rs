@@ -185,7 +185,8 @@ fn main() -> Result<()> {
     {
         let mut buffer = vec![0.0f64; buffer_size];
 
-        if let Ok(mut persistent) = world.bcast_init(&mut buffer, 0) {
+        if common::mpi_major() >= 4 {
+            let mut persistent = world.bcast_init(&mut buffer, 0)?;
             world.barrier()?;
 
             let start = Mpi::wtime();
