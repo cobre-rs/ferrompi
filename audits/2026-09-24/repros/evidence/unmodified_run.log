@@ -1,0 +1,87 @@
+
+╔════════════════════════════════════════════════════╗
+║       FerroMPI Integration Test Runner            ║
+╚════════════════════════════════════════════════════╝
+
+  Processes:   4
+  Features:    default
+  Build mode:  debug
+  mpiexec:     mpiexec
+  mpiexec args: (none)
+
+Building examples...
+   Compiling ferrompi v0.5.0 (/home/rogerio/git/ferrompi)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.54s
+Build successful!
+
+════════════════════════════════════════
+Running integration tests
+════════════════════════════════════════
+  SKIP  hello_world (binary not found)
+  SKIP  test_lifecycle (binary not found)
+  SKIP  test_collectives (binary not found)
+  SKIP  test_blocking_extra (binary not found)
+  SKIP  test_nonblocking (binary not found)
+  SKIP  test_p2p_extra (binary not found)
+  SKIP  test_nonblocking_collectives (binary not found)
+  SKIP  test_waitany (binary not found)
+  SKIP  test_cancel (binary not found)
+  SKIP  test_persistent (binary not found)
+  SKIP  test_info (binary not found)
+  SKIP  test_comm_split (binary not found)
+  SKIP  test_errhandler_returns (binary not found)
+  SKIP  test_gather_inplace (binary not found)
+  SKIP  test_allgather_inplace (binary not found)
+  SKIP  test_scatter_inplace (binary not found)
+  SKIP  test_alltoall_inplace (binary not found)
+  SKIP  test_igather_inplace (binary not found)
+  SKIP  test_iallgather_inplace (binary not found)
+  SKIP  test_iscatter_inplace (binary not found)
+  SKIP  test_ialltoall_inplace (binary not found)
+  SKIP  test_gather_init_inplace (binary not found)
+  SKIP  test_allgather_init_inplace (binary not found)
+  SKIP  test_scatter_init_inplace (binary not found)
+  SKIP  test_alltoall_init_inplace (binary not found)
+  SKIP  test_allreduce_bytes (binary not found)
+  SKIP  test_error_context (binary not found)
+  SKIP  test_request_table_concurrency (binary not found)
+  SKIP  test_comm_table_concurrency (binary not found)
+  SKIP  test_group_basic (binary not found)
+  SKIP  test_group_set_ops (binary not found)
+  SKIP  test_group_ranges (binary not found)
+  SKIP  test_comm_from_group (binary not found)
+  SKIP  test_group_compare (binary not found)
+  SKIP  test_group_translate (binary not found)
+  SKIP  test_custom_dt_contiguous (binary not found)
+  SKIP  test_custom_dt_vector (binary not found)
+  SKIP  test_custom_dt_struct (binary not found)
+  SKIP  test_custom_dt_resized (binary not found)
+  SKIP  test_custom_dt_p2p (binary not found)
+  SKIP  test_mpi_from_group (binary not found)
+  SKIP  test_user_op (binary not found)
+  SKIP  test_persistent_p2p (binary not found)
+  SKIP  test_persistent_rsend (binary not found)
+  SKIP  test_persistent_ssend (binary not found)
+  SKIP  test_persistent_bsend (binary not found)
+  SKIP  test_persistent_count_overflow (binary not found)
+  SKIP  test_waitall_count_overflow (binary not found)
+  SKIP  test_get_group_invalid_handle (binary not found)
+  SKIP  test_create_from_group_null_handle (binary not found)
+
+────────────────────────────────────────
+Running existing examples as smoke tests
+────────────────────────────────────────
+  SKIP  ring (binary not found)
+  SKIP  allreduce (binary not found)
+  SKIP  nonblocking (binary not found)
+  SKIP  comm_split (binary not found)
+  SKIP  reduce_op_bitwise (binary not found)
+  SKIP  reduce_op_maxloc (binary not found)
+
+  Running persistent_bcast (n=4, MPI 4.0+)... DONE (MPI 4.0+ required; may show 'not available')
+  SKIP  hybrid_openmp (binary not found)
+
+╔════════════════════════════════════════════════════╗
+║  Results: 0 passed, 0 failed, 57 skipped (57 total)
+║  All tests passed!
+╚════════════════════════════════════════════════════╝

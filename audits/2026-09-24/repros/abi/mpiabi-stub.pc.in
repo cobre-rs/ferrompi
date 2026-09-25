@@ -1,0 +1,6 @@
+prefix=@PREFIX@
+Name: mpiabi-stub
+Description: MPI Forum reference ABI stubs (scratch)
+Version: 5.0
+Cflags: -I${prefix}
+Libs: -L${prefix} -lmpi_abi

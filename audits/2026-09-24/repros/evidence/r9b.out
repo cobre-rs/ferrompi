@@ -1,0 +1,3 @@
+rank0: wait_all -> Err(Mpi { class: Intern, code: 17, message: "See the MPI_ERROR field in MPI_Status for the error code", operation: Some("waitall") })
+rank0: dropping stale requests (no new requests posted)...
+rank0: dropped OK

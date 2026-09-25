@@ -1,0 +1,155 @@
+
+╔════════════════════════════════════════════════════╗
+║       FerroMPI Integration Test Runner            ║
+╚════════════════════════════════════════════════════╝
+
+  Processes:   1
+  Features:    rma
+  Build mode:  debug
+  mpiexec:     mpiexec
+  mpiexec args: (none)
+
+Building examples...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.04s
+Build successful!
+
+════════════════════════════════════════
+Running integration tests
+════════════════════════════════════════
+  Running hello_world (n=1)... PASS
+  Running test_lifecycle (n=2)... PASS
+  Running test_collectives (n=1)... FAIL (exit code: 101)
+    --- output ---
+    
+    thread 'main' (73932) panicked at examples/test_collectives.rs:19:5:
+    test_collectives requires at least 2 processes, got 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    --- end ---
+  Running test_blocking_extra (n=1)... FAIL (exit code: 101)
+    --- output ---
+    
+    thread 'main' (73941) panicked at examples/test_blocking_extra.rs:17:5:
+    test_blocking_extra requires at least 2 processes, got 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    --- end ---
+  Running test_nonblocking (n=1)... FAIL (exit code: 101)
+    --- output ---
+    
+    thread 'main' (73950) panicked at examples/test_nonblocking.rs:16:5:
+    test_nonblocking requires at least 2 processes, got 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    --- end ---
+  Running test_p2p_extra (n=1)... FAIL (exit code: 101)
+    --- output ---
+    
+    thread 'main' (73959) panicked at examples/test_p2p_extra.rs:301:5:
+    test_p2p_extra requires at least 2 processes, got 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    --- end ---
+  Running test_nonblocking_collectives (n=1)... FAIL (exit code: 101)
+    --- output ---
+    
+    thread 'main' (73968) panicked at examples/test_nonblocking_collectives.rs:22:5:
+    test_nonblocking_collectives requires at least 2 processes, got 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    --- end ---
+  Running test_waitany (n=4)... PASS
+  Running test_cancel (n=2)... PASS
+  Running test_persistent (n=1)... FAIL (exit code: 101)
+    --- output ---
+    
+    thread 'main' (74003) panicked at examples/test_persistent.rs:26:5:
+    test_persistent requires at least 2 processes, got 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    --- end ---
+  Running test_info (n=2)... PASS
+  Running test_comm_split (n=4)... PASS
+  Running test_errhandler_returns (n=1)... FAIL (exit code: 101)
+    --- output ---
+    
+    thread 'main' (74038) panicked at examples/test_errhandler_returns.rs:17:5:
+    test_errhandler_returns requires at least 2 processes, got 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    --- end ---
+  Running test_gather_inplace (n=4)... PASS
+  Running test_allgather_inplace (n=4)... PASS
+  Running test_scatter_inplace (n=4)... PASS
+  Running test_alltoall_inplace (n=4)... PASS
+  Running test_igather_inplace (n=4)... PASS
+  Running test_iallgather_inplace (n=4)... PASS
+  Running test_iscatter_inplace (n=4)... PASS
+  Running test_ialltoall_inplace (n=4)... PASS
+  Running test_gather_init_inplace (n=4)... PASS
+  Running test_allgather_init_inplace (n=4)... PASS
+  Running test_scatter_init_inplace (n=4)... PASS
+  Running test_alltoall_init_inplace (n=4)... PASS
+  Running test_allreduce_bytes (n=4)... PASS
+  Running test_error_context (n=2)... PASS
+  Running test_request_table_concurrency (n=2)... PASS
+  Running test_comm_table_concurrency (n=1)... PASS
+  Running test_group_basic (n=4)... PASS
+  Running test_group_set_ops (n=4)... PASS
+  Running test_group_ranges (n=4)... PASS
+  Running test_comm_from_group (n=4)... PASS
+  Running test_group_compare (n=4)... PASS
+  Running test_group_translate (n=4)... PASS
+  Running test_custom_dt_contiguous (n=2)... PASS
+  Running test_custom_dt_vector (n=2)... PASS
+  Running test_custom_dt_struct (n=2)... PASS
+  Running test_custom_dt_resized (n=2)... PASS
+  Running test_custom_dt_p2p (n=2)... PASS
+  Running test_mpi_from_group (n=4)... PASS
+  Running test_user_op (n=4)... PASS
+  Running test_persistent_p2p (n=2)... PASS
+  Running test_persistent_rsend (n=2)... PASS
+  Running test_persistent_ssend (n=2)... PASS
+  Running test_persistent_bsend (n=2)... PASS
+  Running test_persistent_count_overflow (n=2)... PASS
+  Running test_waitall_count_overflow (n=2)... PASS
+  Running test_get_group_invalid_handle (n=2)... PASS
+  Running test_create_from_group_null_handle (n=2)... PASS
+
+────────────────────────────────────────
+Running existing examples as smoke tests
+────────────────────────────────────────
+  Running ring (n=1)... PASS
+  Running allreduce (n=1)... PASS
+  Running nonblocking (n=1)... PASS
+  Running comm_split (n=1)... PASS
+  Running reduce_op_bitwise (n=2)... PASS
+  Running reduce_op_maxloc (n=4)... PASS
+
+  Running persistent_bcast (n=1, MPI 4.0+)... DONE (MPI 4.0+ required; may show 'not available')
+  Running hybrid_openmp (n=2)... PASS
+
+────────────────────────────────────────
+Running RMA/shared memory tests
+────────────────────────────────────────
+  Running test_rma_window (n=1)... FAIL (exit code: 101)
+    --- output ---
+    
+    thread 'main' (74680) panicked at examples/test_rma_window.rs:18:5:
+    test_rma_window requires at least 2 processes, got 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+    --- end ---
+  Running test_rma_win_create (n=2)... PASS
+  Running test_rma_win_fence (n=2)... PASS
+  Running test_rma_win_pscw (n=2)... PASS
+  Running test_rma_win_lock (n=2)... PASS
+  Running test_rma_win_flush_sync (n=2)... PASS
+  Running test_rma_put (n=2)... PASS
+  Running test_rma_rput (n=2)... PASS
+  Running test_rma_rget (n=2)... PASS
+  Running test_rma_get (n=2)... PASS
+  Running test_rma_accumulate (n=2)... PASS
+  Running test_rma_raccumulate (n=2)... PASS
+  Running test_rma_get_accumulate (n=2)... PASS
+  Running test_rma_fetch_and_op (n=2)... PASS
+  Running test_rma_compare_and_swap (n=2)... PASS
+  Running shared_memory (n=1)... PASS
+
+╔════════════════════════════════════════════════════╗
+║  Results: 65 passed, 8 failed, 0 skipped (73 total)
+║  Failed tests: test_collectives test_blocking_extra test_nonblocking test_p2p_extra test_nonblocking_collectives test_persistent test_errhandler_returns test_rma_window
+╚════════════════════════════════════════════════════╝
+EXIT 8

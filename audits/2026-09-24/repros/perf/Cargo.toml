@@ -1,0 +1,15 @@
+[package]
+name = "perfprobe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ferrompi = { path = "../../../..", features = ["rma"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+
+[workspace]

@@ -1,0 +1,6 @@
+prefix=@PREFIX@
+Name: mpich
+Description: decoy MPI (e.g. a system MPICH different from the one MPICC points to)
+Version: 3.3.2
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib -lmpich_decoy
