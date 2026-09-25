@@ -5,6 +5,7 @@
 //! the closing fence.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_put
+// mpi-test: np=2
 
 use ferrompi::{Mpi, Win, WinFenceAssert};
 

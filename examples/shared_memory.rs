@@ -5,6 +5,7 @@
 //! both fence (active target) and lock/unlock (passive target) synchronization.
 //!
 //! Run with: mpiexec -n 4 cargo run --example shared_memory --features rma
+// mpi-test: np=2..
 
 use ferrompi::{LockType, Mpi, Result, SharedWindow};
 

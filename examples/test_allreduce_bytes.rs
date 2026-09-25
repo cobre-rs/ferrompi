@@ -5,6 +5,7 @@
 //! of the receive buffer must equal `(1<<0) | (1<<1) | (1<<2) | (1<<3) = 0b1111`.
 //!
 //! Run with: mpiexec -n 4 cargo run --example test_allreduce_bytes
+// mpi-test: np=4
 
 use ferrompi::{Mpi, ReduceOp, Result};
 

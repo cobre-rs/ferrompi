@@ -13,6 +13,7 @@
 //! collective calls.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_comm_from_group
+// mpi-test: np=4
 
 use ferrompi::{Mpi, ReduceOp};
 

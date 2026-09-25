@@ -5,6 +5,7 @@
 //! without leaking MPI state.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_p2p
+// mpi-test: np=2
 
 use ferrompi::Mpi;
 

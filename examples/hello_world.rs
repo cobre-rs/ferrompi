@@ -1,6 +1,7 @@
 //! Hello World example - basic MPI initialization and communication.
 //!
 //! Run with: mpiexec -n 4 cargo run --example hello_world
+// mpi-test: np=2..
 
 use ferrompi::{Mpi, Result};
 

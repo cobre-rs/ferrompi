@@ -6,6 +6,7 @@
 //! coverage (f64, i32, u64).
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_rma_window
+// mpi-test: np=2..
 
 use ferrompi::{LockType, Mpi, SharedWindow};
 

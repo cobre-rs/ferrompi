@@ -14,6 +14,7 @@
 //! MPI collective calls.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_mpi_from_group
+// mpi-test: np=4 skip-ok=openmpi
 
 use ferrompi::{Mpi, ReduceOp};
 

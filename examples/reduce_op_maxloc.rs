@@ -8,6 +8,7 @@
 //! After `MinLoc`: every rank holds `{ value: 0.0, index: 0 }`.
 //!
 //! Run with: mpiexec -n 4 cargo run --example reduce_op_maxloc
+// mpi-test: np=4
 
 use ferrompi::{DoubleInt, Mpi, ReduceOp, Result};
 

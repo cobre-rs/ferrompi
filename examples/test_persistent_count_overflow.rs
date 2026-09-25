@@ -6,6 +6,7 @@
 //! `MPI_ERR_COUNT` (mapped to `MpiErrorClass::Count`) and exit 0.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_count_overflow
+// mpi-test: np=2 skip-ok=openmpi
 
 use ferrompi::{Error, Mpi, MpiErrorClass};
 

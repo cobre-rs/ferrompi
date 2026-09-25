@@ -6,6 +6,7 @@
 //! to post a matching receive.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_bsend
+// mpi-test: np=2
 
 use ferrompi::{Mpi, ReduceOp};
 

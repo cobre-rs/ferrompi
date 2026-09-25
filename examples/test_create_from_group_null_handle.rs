@@ -10,6 +10,7 @@
 //! `MPI_Comm_create_from_group` is not available on older MPI runtimes).
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_create_from_group_null_handle
+// mpi-test: np=2 skip-ok=openmpi
 
 use ferrompi::{Error, Mpi, ReduceOp};
 

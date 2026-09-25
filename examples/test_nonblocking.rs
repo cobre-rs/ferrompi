@@ -4,6 +4,7 @@
 //! and blocking send/recv. Each operation is verified with assertions.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_nonblocking
+// mpi-test: np=2..
 
 use ferrompi::Mpi;
 

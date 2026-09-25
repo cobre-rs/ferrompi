@@ -5,6 +5,7 @@
 //! operation name "bcast".
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_error_context
+// mpi-test: np=2
 
 use ferrompi::Mpi;
 

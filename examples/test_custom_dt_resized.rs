@@ -10,6 +10,7 @@
 //! `process::exit` call so that no rank exits while others are still inside MPI.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_custom_dt_resized
+// mpi-test: np=2
 
 use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, ReduceOp, StructField};
 

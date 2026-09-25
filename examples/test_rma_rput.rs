@@ -9,6 +9,7 @@
 //!    window memory and asserts the correct values.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_rput
+// mpi-test: np=2
 
 use ferrompi::{LockType, Mpi, Win};
 

@@ -14,6 +14,7 @@
 //!    and `guard.flush_all()`, then drop the guard (→ unlock_all).
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_lock
+// mpi-test: np=2
 
 use ferrompi::{LockType, Mpi, ReduceOp, Win, WinFenceAssert};
 

@@ -13,6 +13,7 @@
 //!    `[11, 22, 33, 44]`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_raccumulate
+// mpi-test: np=2
 
 use ferrompi::{LockType, Mpi, ReduceOp, Win, WinFenceAssert};
 

@@ -1,6 +1,7 @@
 //! Rank 1 posts an irecv for a message that never arrives, then
 //! probes with get_status, cancels, and waits.
 //! Rank 0 does nothing and exits.
+// mpi-test: np=2
 
 use ferrompi::{Mpi, Result};
 

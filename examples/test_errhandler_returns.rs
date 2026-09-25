@@ -5,6 +5,7 @@
 //! default `MPI_ERRORS_ARE_FATAL` handler.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_errhandler_returns
+// mpi-test: np=2..
 
 use ferrompi::{Error, Mpi, MpiErrorClass};
 

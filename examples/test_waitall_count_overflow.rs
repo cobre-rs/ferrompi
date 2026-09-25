@@ -9,6 +9,7 @@
 //! `malloc` call, returning `MPI_ERR_COUNT` without allocating memory.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_waitall_count_overflow
+// mpi-test: np=2
 
 use ferrompi::{Error, Mpi, MpiErrorClass};
 

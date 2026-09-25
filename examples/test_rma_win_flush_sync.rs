@@ -18,6 +18,7 @@
 //!    to be portable across all conformant implementations.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_flush_sync
+// mpi-test: np=2
 
 use ferrompi::{LockType, Mpi, ReduceOp, Win, WinFenceAssert};
 

@@ -6,6 +6,7 @@
 //! f64 coverage in test_nonblocking.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_p2p_extra
+// mpi-test: np=2..
 
 use ferrompi::Mpi;
 

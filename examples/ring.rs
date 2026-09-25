@@ -3,6 +3,7 @@
 //! Each process sends data to the next process in a ring pattern.
 //!
 //! Run with: mpiexec -n 4 cargo run --example ring
+// mpi-test: np=2..
 
 use ferrompi::{Mpi, Result};
 

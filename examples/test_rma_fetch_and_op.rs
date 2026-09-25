@@ -12,6 +12,7 @@
 //!      equals `999` (post-update).
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_fetch_and_op
+// mpi-test: np=2
 
 use ferrompi::{Mpi, PendingFetchResult, ReduceOp, Win, WinFenceAssert};
 

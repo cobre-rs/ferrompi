@@ -16,6 +16,7 @@
 //! collective calls.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_group_compare
+// mpi-test: np=4
 
 use ferrompi::{GroupComparison, Mpi, ReduceOp};
 

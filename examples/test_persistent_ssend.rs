@@ -7,6 +7,7 @@
 //! starting the send, then waiting on the receive, then waiting on the send.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_ssend
+// mpi-test: np=2
 
 use ferrompi::Mpi;
 

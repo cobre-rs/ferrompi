@@ -12,6 +12,7 @@
 //! #SBATCH --cpus-per-task=4
 //! srun ./target/release/examples/hybrid_openmp
 //! ```
+// mpi-test: np=2
 
 use ferrompi::{Mpi, ReduceOp, Result, ThreadLevel};
 

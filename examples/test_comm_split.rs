@@ -5,6 +5,7 @@
 //! within sub-communicators. Also tests split_type and split_shared.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_comm_split
+// mpi-test: np=4
 
 use ferrompi::{Communicator, Mpi, ReduceOp, SplitType};
 

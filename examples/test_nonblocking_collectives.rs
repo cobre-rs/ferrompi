@@ -10,6 +10,7 @@
 //! math in `test_collectives.rs`.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_nonblocking_collectives
+// mpi-test: np=2..
 
 use ferrompi::{Mpi, ReduceOp};
 

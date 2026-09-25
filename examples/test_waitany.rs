@@ -6,6 +6,7 @@
 //! of posted requests.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_waitany
+// mpi-test: np=4
 
 use ferrompi::{Mpi, Request};
 use std::time::Duration;

@@ -4,6 +4,7 @@
 //! thread_level, and world.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_lifecycle
+// mpi-test: np=2
 
 use ferrompi::{Mpi, ThreadLevel};
 

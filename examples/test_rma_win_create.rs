@@ -5,6 +5,7 @@
 //! `Drop` implementation does not produce MPI errors.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_create
+// mpi-test: np=2 skip-ok=openmpi-4
 
 use ferrompi::{Mpi, Win};
 

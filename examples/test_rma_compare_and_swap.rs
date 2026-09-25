@@ -12,6 +12,7 @@
 //!      and rank 1's window slot 0 equals `100` (unchanged).
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_compare_and_swap
+// mpi-test: np=2
 
 use ferrompi::{Mpi, PendingFetchResult, Win, WinFenceAssert};
 

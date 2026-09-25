@@ -4,6 +4,7 @@
 //! ranks, and that `WinFenceAssert` composition works as expected.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_fence
+// mpi-test: np=2
 
 use ferrompi::{Mpi, Win, WinFenceAssert};
 

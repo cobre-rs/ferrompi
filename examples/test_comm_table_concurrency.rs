@@ -23,6 +23,7 @@
 //!     ./target/x86_64-unknown-linux-gnu/debug/examples/test_comm_table_concurrency
 //! Expected result: no TSan diagnostics from ferrompi C code; any reports
 //! from libmpi internals are known benign.
+// mpi-test: np=1
 
 use ferrompi::{Communicator, Mpi, ThreadLevel};
 use std::collections::HashSet;

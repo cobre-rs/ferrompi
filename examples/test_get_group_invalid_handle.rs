@@ -10,6 +10,7 @@
 //! code that maps to `MpiErrorClass::Group` or `MpiErrorClass::Arg`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_get_group_invalid_handle
+// mpi-test: np=2
 
 use ferrompi::{Error, Mpi, MpiErrorClass};
 

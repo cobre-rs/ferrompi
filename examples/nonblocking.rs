@@ -4,6 +4,7 @@
 //! nonblocking collectives.
 //!
 //! Run with: mpiexec -n 4 cargo run --example nonblocking
+// mpi-test: np=2..
 
 use ferrompi::{Mpi, ReduceOp, Request, Result};
 

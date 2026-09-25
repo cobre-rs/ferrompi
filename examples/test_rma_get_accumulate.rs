@@ -11,6 +11,7 @@
 //!      fence, `result == [99]` and rank 1's window is unchanged at `[99]`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_get_accumulate
+// mpi-test: np=2
 
 use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
 

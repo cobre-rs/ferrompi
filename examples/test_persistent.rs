@@ -14,6 +14,7 @@
 //! (active path) for full Drop coverage.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_persistent
+// mpi-test: np=2.. skip-ok=openmpi
 
 use ferrompi::{Mpi, PersistentRequest, ReduceOp};
 

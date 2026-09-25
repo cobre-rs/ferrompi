@@ -18,6 +18,7 @@
 //!     ./target/x86_64-unknown-linux-gnu/debug/examples/test_request_table_concurrency
 //! Expected result: no TSan diagnostics from ferrompi C code; any reports
 //! from libmpi internals (allreduce, progress engine) are known benign.
+// mpi-test: np=2
 
 use ferrompi::{Mpi, ThreadLevel};
 use std::sync::atomic::{AtomicBool, Ordering};
