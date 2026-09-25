@@ -1,7 +1,7 @@
 //! Point-to-point communication: send, recv, isend, irecv, sendrecv, probe, iprobe.
 
 use crate::comm::Communicator;
-use crate::datatype::MpiDatatype;
+use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::datatype_builder::CustomDatatype;
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -27,18 +27,9 @@ impl Communicator {
     /// world.send(&data, 1, 0).unwrap();
     /// ```
     pub fn send<T: MpiDatatype>(&self, data: &[T], dest: i32, tag: i32) -> Result<()> {
-        // SAFETY: data.as_ptr() is valid for data.len() elements; MpiDatatype::TAG matches T's
-        // memory layout; the buffer remains valid for the blocking duration of this call.
-        let ret = unsafe {
-            ffi::ferrompi_send(
-                data.as_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                dest,
-                tag,
-                self.handle,
-            )
-        };
+        let (p, n, dt) = buf(data);
+        // SAFETY: this blocking call returns only after MPI is done with the buffer.
+        let ret = unsafe { ffi::ferrompi_send(p, n, dt, dest, tag, self.handle) };
         Error::check_with_op(ret, "send")
     }
 
@@ -67,13 +58,13 @@ impl Communicator {
         let mut actual_tag: i32 = 0;
         let mut actual_count: i64 = 0;
 
-        // SAFETY: data.as_mut_ptr() is exclusively writable for data.len() elements; MpiDatatype::TAG
-        // matches T's memory layout; the buffer remains valid for the blocking duration of this call.
+        let (p, n, dt) = buf_mut(data);
+        // SAFETY: this blocking call returns only after MPI is done with the buffer.
         let ret = unsafe {
             ffi::ferrompi_recv(
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 source,
                 tag,
                 self.handle,
@@ -111,19 +102,11 @@ impl Communicator {
     /// ```
     pub fn isend<T: MpiDatatype>(&self, data: &[T], dest: i32, tag: i32) -> Result<Request> {
         let mut request_handle: i64 = 0;
-        // SAFETY: data.as_ptr() is valid for data.len() elements; the caller must keep the buffer
-        // alive and unmodified until the returned Request is waited on.
-        let ret = unsafe {
-            ffi::ferrompi_isend(
-                data.as_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                dest,
-                tag,
-                self.handle,
-                &mut request_handle,
-            )
-        };
+        let (p, n, dt) = buf(data);
+        // SAFETY: the returned Request does not borrow data; keeping it alive and unmodified
+        // until completion is the caller's obligation, which this signature does not enforce.
+        let ret =
+            unsafe { ffi::ferrompi_isend(p, n, dt, dest, tag, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "isend")?;
         Ok(Request::new(request_handle))
     }
@@ -155,19 +138,11 @@ impl Communicator {
     /// ```
     pub fn irecv<T: MpiDatatype>(&self, data: &mut [T], source: i32, tag: i32) -> Result<Request> {
         let mut request_handle: i64 = 0;
-        // SAFETY: data.as_mut_ptr() is exclusively writable for data.len() elements; the caller
-        // must not read the buffer until the returned Request is waited on.
-        let ret = unsafe {
-            ffi::ferrompi_irecv(
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                source,
-                tag,
-                self.handle,
-                &mut request_handle,
-            )
-        };
+        let (p, n, dt) = buf_mut(data);
+        // SAFETY: the returned Request does not borrow data; keeping it alive and unread
+        // until completion is the caller's obligation, which this signature does not enforce.
+        let ret =
+            unsafe { ffi::ferrompi_irecv(p, n, dt, source, tag, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "irecv")?;
         Ok(Request::new(request_handle))
     }
@@ -216,18 +191,20 @@ impl Communicator {
         let mut actual_tag: i32 = 0;
         let mut actual_count: i64 = 0;
 
-        // SAFETY: send and recv are valid for their respective lengths, do not alias each other,
-        // and both outlive this blocking call.
+        let (sp, sn, sdt) = buf(send);
+        let (rp, rn, rdt) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]); this blocking call returns
+        // only after MPI is done with both buffers.
         let ret = unsafe {
             ffi::ferrompi_sendrecv(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
+                sp,
+                sn,
+                sdt,
                 dest,
                 sendtag,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                T::TAG as i32,
+                rp,
+                rn,
+                rdt,
                 source,
                 recvtag,
                 self.handle,

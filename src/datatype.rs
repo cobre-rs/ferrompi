@@ -38,6 +38,8 @@
 //! |-----------------|----------------|-----------|
 //! | u8-like bytes   | `MPI_BYTE`     | 13        |
 
+use std::ffi::c_void;
+
 /// Internal module to seal [`MpiDatatype`] — prevents external implementations.
 mod sealed {
     pub trait Sealed {}
@@ -133,6 +135,24 @@ pub enum DatatypeTag {
 pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {
     /// The datatype tag used for FFI dispatch to the C layer.
     const TAG: DatatypeTag;
+}
+
+/// Describes a typed slice for MPI FFI as `(pointer, count, tag)`.
+///
+/// The pointer is valid for `s.len()` elements of `T` for as long as the
+/// borrow of `s` lives (for [`buf_mut`], it is also valid for writes and
+/// unaliased). The count is exact: a slice length never exceeds
+/// `isize::MAX <= i64::MAX`. The tag is the MPI datatype that the sealed
+/// `MpiDatatype` impl assigns to `T`, so MPI's element size and layout equal
+/// `T`'s. The pointer is never null, even for an empty slice, so a NULL
+/// passed elsewhere as an in-place marker stays unambiguous.
+pub(crate) fn buf<T: MpiDatatype>(s: &[T]) -> (*const c_void, i64, i32) {
+    (s.as_ptr().cast(), s.len() as i64, T::TAG as i32)
+}
+
+/// See [`buf`].
+pub(crate) fn buf_mut<T: MpiDatatype>(s: &mut [T]) -> (*mut c_void, i64, i32) {
+    (s.as_mut_ptr().cast(), s.len() as i64, T::TAG as i32)
 }
 
 macro_rules! impl_mpi_datatype {
