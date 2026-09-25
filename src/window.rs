@@ -95,22 +95,13 @@ pub struct WinFenceAssert(i32);
 static FENCE_MODE_VALUES: OnceLock<[i32; 4]> = OnceLock::new();
 
 /// Query the four MPI fence mode constants, caching the result.
-///
-/// On MPI < 3 builds the C shim returns `MPI_ERR_OTHER`; in that case we fall
-/// back to `[0; 4]` (all bits zero, meaning "no assertion"), which is safe —
-/// `MPI_Win_fence(0, win)` is always valid.
 fn fence_mode_values() -> [i32; 4] {
     *FENCE_MODE_VALUES.get_or_init(|| {
         let mut out = [0i32; 4];
         // SAFETY: `out` is a stack-allocated 4-element array; we pass a valid
         // pointer to its first element. The C shim writes exactly 4 i32 values.
-        let ret = unsafe { ffi::ferrompi_win_fence_mode_values(out.as_mut_ptr()) };
-        if ret != 0 {
-            // MPI_ERR_OTHER from the <MPI_3 stub — keep the [0; 4] sentinel.
-            [0i32; 4]
-        } else {
-            out
-        }
+        unsafe { ffi::ferrompi_win_fence_mode_values(out.as_mut_ptr()) };
+        out
     })
 }
 
@@ -223,22 +214,13 @@ pub struct WinPscwAssert(i32);
 static PSCW_MODE_VALUES: OnceLock<[i32; 3]> = OnceLock::new();
 
 /// Query the three MPI PSCW mode constants, caching the result.
-///
-/// On MPI < 3 builds the C shim returns `MPI_ERR_OTHER`; in that case we fall
-/// back to `[0; 3]` (all bits zero, meaning "no assertion"), which is safe —
-/// `MPI_Win_post(group, 0, win)` is always valid.
 fn pscw_mode_values() -> [i32; 3] {
     *PSCW_MODE_VALUES.get_or_init(|| {
         let mut out = [0i32; 3];
         // SAFETY: `out` is a stack-allocated 3-element array; we pass a valid
         // pointer to its first element. The C shim writes exactly 3 i32 values.
-        let ret = unsafe { ffi::ferrompi_win_pscw_mode_values(out.as_mut_ptr()) };
-        if ret != 0 {
-            // MPI_ERR_OTHER from the <MPI_3 stub — keep the [0; 3] sentinel.
-            [0i32; 3]
-        } else {
-            out
-        }
+        unsafe { ffi::ferrompi_win_pscw_mode_values(out.as_mut_ptr()) };
+        out
     })
 }
 

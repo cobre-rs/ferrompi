@@ -972,7 +972,7 @@ extern "C" {
 
     pub fn ferrompi_win_fence(assert_val: int32_t, win: int32_t) -> c_int;
 
-    pub fn ferrompi_win_fence_mode_values(out: *mut int32_t) -> c_int;
+    pub fn ferrompi_win_fence_mode_values(out: *mut int32_t);
 
     pub fn ferrompi_win_lock(
         lock_type: int32_t,
@@ -1007,7 +1007,7 @@ extern "C" {
 
     pub fn ferrompi_win_test(win: int32_t, flag: *mut int32_t) -> c_int;
 
-    pub fn ferrompi_win_pscw_mode_values(out: *mut int32_t) -> c_int;
+    pub fn ferrompi_win_pscw_mode_values(out: *mut int32_t);
 
     pub fn ferrompi_put(
         origin: *const c_void,

@@ -1236,12 +1236,10 @@ int ferrompi_win_fence(int32_t assert_val, int32_t win);
  *   out[3] = MPI_MODE_NOSUCCEED
  *
  * The values are implementation-defined and must be queried at runtime.
- * Returns MPI_SUCCESS on MPI >= 3 builds, MPI_ERR_OTHER otherwise.
  *
  * @param out 4-element int32_t array to receive the constants
- * @return MPI error code
  */
-int ferrompi_win_fence_mode_values(int32_t* out);
+void ferrompi_win_fence_mode_values(int32_t* out);
 
 /**
  * Lock a window at a target rank (MPI_Win_lock).
@@ -1419,12 +1417,10 @@ int ferrompi_win_test(int32_t win, int32_t* flag);
  *   out[2] = MPI_MODE_NOPUT
  *
  * The values are implementation-defined and must be queried at runtime.
- * Returns MPI_SUCCESS on MPI >= 3 builds, MPI_ERR_OTHER otherwise.
  *
  * @param out 3-element int32_t array to receive the constants
- * @return MPI error code
  */
-int ferrompi_win_pscw_mode_values(int32_t* out);
+void ferrompi_win_pscw_mode_values(int32_t* out);
 
 /**
  * One-sided write: copy data from a local origin buffer into a remote rank's

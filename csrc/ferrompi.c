@@ -2256,10 +2256,8 @@ int ferrompi_ireduce_scatter_block(
 }
 
 /* ============================================================
- * Persistent Point-to-Point (MPI 1.1+; enabled for MPI >= 3 per project policy)
+ * Persistent Point-to-Point (MPI 1.1+)
  * ============================================================ */
-
-#if MPI_VERSION >= 3
 
 int ferrompi_send_init(
     const void* buf,
@@ -2384,51 +2382,9 @@ int ferrompi_ssend_init(
     return ret;
 }
 
-#else /* MPI_VERSION < 3 */
-
-int ferrompi_send_init(
-    const void* buf, int64_t count, int32_t datatype_tag,
-    int32_t dest, int32_t tag, int32_t comm_handle, int64_t* request_handle
-) {
-    (void)buf; (void)count; (void)datatype_tag;
-    (void)dest; (void)tag; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_recv_init(
-    void* buf, int64_t count, int32_t datatype_tag,
-    int32_t source, int32_t tag, int32_t comm_handle, int64_t* request_handle
-) {
-    (void)buf; (void)count; (void)datatype_tag;
-    (void)source; (void)tag; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_rsend_init(
-    const void* buf, int64_t count, int32_t datatype_tag,
-    int32_t dest, int32_t tag, int32_t comm_handle, int64_t* request_handle
-) {
-    (void)buf; (void)count; (void)datatype_tag;
-    (void)dest; (void)tag; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_ssend_init(
-    const void* buf, int64_t count, int32_t datatype_tag,
-    int32_t dest, int32_t tag, int32_t comm_handle, int64_t* request_handle
-) {
-    (void)buf; (void)count; (void)datatype_tag;
-    (void)dest; (void)tag; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
-}
-
-#endif /* MPI_VERSION >= 3 */
-
 /* ============================================================
  * Buffered Send Buffer Management and Persistent Buffered Send (MPI 1.1+)
  * ============================================================ */
-
-#if MPI_VERSION >= 3
 
 /**
  * Attach a user-provided buffer for use by buffered sends.
@@ -2495,29 +2451,6 @@ int ferrompi_bsend_init(
 
     return ret;
 }
-
-#else /* MPI_VERSION < 3 */
-
-int ferrompi_buffer_attach(void* buffer, int64_t size) {
-    (void)buffer; (void)size;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_buffer_detach(void** buffer, int64_t* size) {
-    (void)buffer; (void)size;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_bsend_init(
-    const void* buf, int64_t count, int32_t datatype_tag,
-    int32_t dest, int32_t tag, int32_t comm_handle, int64_t* request_handle
-) {
-    (void)buf; (void)count; (void)datatype_tag;
-    (void)dest; (void)tag; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
-}
-
-#endif /* MPI_VERSION >= 3 */
 
 /* ============================================================
  * Generic Persistent Collectives (MPI 4.0+)
@@ -3866,8 +3799,6 @@ int ferrompi_testsome(int64_t count, int64_t* request_handles,
  * RMA Window Operations (MPI 3.0+)
  * ============================================================ */
 
-#if MPI_VERSION >= 3
-
 int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_handle,
                                   int32_t comm_handle, void** baseptr, int32_t* win_handle) {
     MPI_Comm comm = get_comm(comm_handle);
@@ -3969,12 +3900,11 @@ int ferrompi_win_fence(int32_t assert_val, int32_t win_handle) {
     return MPI_Win_fence(assert_val, win);
 }
 
-int ferrompi_win_fence_mode_values(int32_t* out) {
+void ferrompi_win_fence_mode_values(int32_t* out) {
     out[0] = MPI_MODE_NOSTORE;
     out[1] = MPI_MODE_NOPUT;
     out[2] = MPI_MODE_NOPRECEDE;
     out[3] = MPI_MODE_NOSUCCEED;
-    return MPI_SUCCESS;
 }
 
 int ferrompi_win_lock(int32_t lock_type, int32_t rank, int32_t assert_val, int32_t win_handle) {
@@ -4069,11 +3999,10 @@ int ferrompi_win_test(int32_t win_handle, int32_t* flag) {
     return ret;
 }
 
-int ferrompi_win_pscw_mode_values(int32_t* out) {
+void ferrompi_win_pscw_mode_values(int32_t* out) {
     out[0] = MPI_MODE_NOCHECK;
     out[1] = MPI_MODE_NOSTORE;
     out[2] = MPI_MODE_NOPUT;
-    return MPI_SUCCESS;
 }
 
 int ferrompi_put(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
@@ -4234,206 +4163,6 @@ int ferrompi_compare_and_swap(const void* origin, const void* compare, void* res
     return MPI_Compare_and_swap(origin, compare, result, dt, target_rank,
                                 (MPI_Aint)target_disp, win);
 }
-
-#else /* MPI_VERSION < 3 */
-
-int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_handle,
-                                  int32_t comm_handle, void** baseptr, int32_t* win_handle) {
-    (void)size; (void)disp_unit; (void)info_handle; (void)comm_handle; (void)baseptr; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t info_handle,
-                         int32_t comm_handle, int32_t* win_handle) {
-    (void)base; (void)size; (void)disp_unit; (void)info_handle; (void)comm_handle; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info_handle,
-                           int32_t comm_handle, void** baseptr, int32_t* win_handle) {
-    (void)size; (void)disp_unit; (void)info_handle; (void)comm_handle; (void)baseptr; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_shared_query(int32_t win_handle, int32_t rank,
-                               int64_t* size, int32_t* disp_unit, void** baseptr) {
-    (void)win_handle; (void)rank; (void)size; (void)disp_unit; (void)baseptr;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_free(int32_t win_handle) {
-    (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_fence(int32_t assert_val, int32_t win_handle) {
-    (void)assert_val; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_fence_mode_values(int32_t* out) {
-    (void)out;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_lock(int32_t lock_type, int32_t rank, int32_t assert_val, int32_t win_handle) {
-    (void)lock_type; (void)rank; (void)assert_val; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_unlock(int32_t rank, int32_t win_handle) {
-    (void)rank; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_lock_all(int32_t assert_val, int32_t win_handle) {
-    (void)assert_val; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_unlock_all(int32_t win_handle) {
-    (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_flush(int32_t rank, int32_t win_handle) {
-    (void)rank; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_flush_all(int32_t win_handle) {
-    (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_flush_local(int32_t rank, int32_t win_handle) {
-    (void)rank; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_flush_local_all(int32_t win_handle) {
-    (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_sync(int32_t win_handle) {
-    (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_post(int32_t group_handle, int32_t assert_val, int32_t win_handle) {
-    (void)group_handle; (void)assert_val; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_start(int32_t group_handle, int32_t assert_val, int32_t win_handle) {
-    (void)group_handle; (void)assert_val; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_complete(int32_t win_handle) {
-    (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_wait(int32_t win_handle) {
-    (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_test(int32_t win_handle, int32_t* flag) {
-    (void)win_handle; (void)flag;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_win_pscw_mode_values(int32_t* out) {
-    (void)out;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_put(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                 int32_t target_rank, int64_t target_disp, int64_t target_count,
-                 int32_t target_dt_tag, int32_t win_handle) {
-    (void)origin; (void)origin_count; (void)origin_dt_tag;
-    (void)target_rank; (void)target_disp; (void)target_count;
-    (void)target_dt_tag; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_rput(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                  int32_t target_rank, int64_t target_disp, int64_t target_count,
-                  int32_t target_dt_tag, int32_t win_handle, int64_t* request_handle) {
-    (void)origin; (void)origin_count; (void)origin_dt_tag;
-    (void)target_rank; (void)target_disp; (void)target_count;
-    (void)target_dt_tag; (void)win_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_get(void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                 int32_t target_rank, int64_t target_disp, int64_t target_count,
-                 int32_t target_dt_tag, int32_t win_handle) {
-    (void)origin; (void)origin_count; (void)origin_dt_tag;
-    (void)target_rank; (void)target_disp; (void)target_count;
-    (void)target_dt_tag; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_rget(void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                  int32_t target_rank, int64_t target_disp, int64_t target_count,
-                  int32_t target_dt_tag, int32_t win_handle, int64_t* request_handle) {
-    (void)origin; (void)origin_count; (void)origin_dt_tag;
-    (void)target_rank; (void)target_disp; (void)target_count;
-    (void)target_dt_tag; (void)win_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_accumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                        int32_t target_rank, int64_t target_disp, int64_t target_count,
-                        int32_t target_dt_tag, int32_t op_tag, int32_t win_handle) {
-    (void)origin; (void)origin_count; (void)origin_dt_tag;
-    (void)target_rank; (void)target_disp; (void)target_count;
-    (void)target_dt_tag; (void)op_tag; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_raccumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                         int32_t target_rank, int64_t target_disp, int64_t target_count,
-                         int32_t target_dt_tag, int32_t op_tag, int32_t win_handle,
-                         int64_t* request_handle) {
-    (void)origin; (void)origin_count; (void)origin_dt_tag;
-    (void)target_rank; (void)target_disp; (void)target_count;
-    (void)target_dt_tag; (void)op_tag; (void)win_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_get_accumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                            void* result, int64_t result_count, int32_t result_dt_tag,
-                            int32_t target_rank, int64_t target_disp, int64_t target_count,
-                            int32_t target_dt_tag, int32_t op_tag, int32_t win_handle) {
-    (void)origin; (void)origin_count; (void)origin_dt_tag;
-    (void)result; (void)result_count; (void)result_dt_tag;
-    (void)target_rank; (void)target_disp; (void)target_count;
-    (void)target_dt_tag; (void)op_tag; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_fetch_and_op(const void* origin, void* result, int32_t dt_tag,
-                          int32_t target_rank, int64_t target_disp,
-                          int32_t op_tag, int32_t win_handle) {
-    (void)origin; (void)result; (void)dt_tag;
-    (void)target_rank; (void)target_disp; (void)op_tag; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-int ferrompi_compare_and_swap(const void* origin, const void* compare, void* result,
-                               int32_t dt_tag, int32_t target_rank, int64_t target_disp,
-                               int32_t win_handle) {
-    (void)origin; (void)compare; (void)result; (void)dt_tag;
-    (void)target_rank; (void)target_disp; (void)win_handle;
-    return MPI_ERR_OTHER;
-}
-
-#endif /* MPI_VERSION >= 3 */
 
 /* ============================================================
  * Utility Functions
