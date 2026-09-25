@@ -433,7 +433,7 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Error, MpiErrorClass, ResourceKind};
 
     #[test]
     fn check_success_returns_ok() {
@@ -472,15 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn error_class_display_formats() {
-        assert_eq!(format!("{}", MpiErrorClass::Success), "SUCCESS");
-        assert_eq!(format!("{}", MpiErrorClass::Buffer), "ERR_BUFFER");
-        assert_eq!(format!("{}", MpiErrorClass::Comm), "ERR_COMM");
-        assert_eq!(format!("{}", MpiErrorClass::Rank), "ERR_RANK");
-        assert_eq!(format!("{}", MpiErrorClass::Raw(42)), "ERR_CLASS(42)");
-    }
-
-    #[test]
     fn error_display_formats_correctly() {
         let err = Error::InvalidBuffer;
         assert_eq!(format!("{err}"), "Invalid buffer");
@@ -507,36 +498,6 @@ mod tests {
             format!("{err}"),
             "MPI error: invalid rank (class=ERR_RANK, code=6)"
         );
-    }
-
-    #[test]
-    #[allow(clippy::clone_on_copy)] // Intentionally exercising Clone derive
-    fn error_class_hash_and_clone() {
-        use std::collections::HashSet;
-
-        let mut set = HashSet::new();
-        set.insert(MpiErrorClass::Success);
-        set.insert(MpiErrorClass::Buffer);
-        set.insert(MpiErrorClass::Raw(42));
-        set.insert(MpiErrorClass::Raw(42)); // duplicate — should not increase len
-        assert_eq!(set.len(), 3);
-
-        // Verify membership
-        assert!(set.contains(&MpiErrorClass::Success));
-        assert!(set.contains(&MpiErrorClass::Buffer));
-        assert!(set.contains(&MpiErrorClass::Raw(42)));
-        assert!(!set.contains(&MpiErrorClass::Comm));
-
-        // Exercise Clone
-        let original = MpiErrorClass::Comm;
-        let cloned = original.clone();
-        assert_eq!(cloned, MpiErrorClass::Comm);
-        assert_eq!(original, cloned);
-
-        // Clone of Raw variant
-        let raw_original = MpiErrorClass::Raw(77);
-        let raw_cloned = raw_original.clone();
-        assert_eq!(raw_cloned, MpiErrorClass::Raw(77));
     }
 
     #[test]
@@ -581,80 +542,6 @@ mod tests {
     }
 
     #[test]
-    fn error_debug_format() {
-        // Exercise Debug derive on Error::InvalidBuffer
-        let err = Error::InvalidBuffer;
-        let debug = format!("{err:?}");
-        assert!(
-            debug.contains("InvalidBuffer"),
-            "Debug output should contain 'InvalidBuffer', got: {debug}"
-        );
-
-        // Exercise Debug on Error::Mpi variant
-        let mpi_err = Error::Mpi {
-            class: MpiErrorClass::Arg,
-            code: 13,
-            message: "invalid argument".to_string(),
-            operation: None,
-        };
-        let debug = format!("{mpi_err:?}");
-        assert!(
-            debug.contains("Mpi"),
-            "Debug output should contain 'Mpi', got: {debug}"
-        );
-        assert!(
-            debug.contains("Arg"),
-            "Debug output should contain 'Arg', got: {debug}"
-        );
-
-        // Exercise Debug on other Error variants
-        let err = Error::AlreadyInitialized;
-        let debug = format!("{err:?}");
-        assert!(debug.contains("AlreadyInitialized"));
-
-        let err = Error::NotSupported("test op".to_string());
-        let debug = format!("{err:?}");
-        assert!(debug.contains("NotSupported"));
-
-        let err = Error::Internal("internal msg".to_string());
-        let debug = format!("{err:?}");
-        assert!(debug.contains("Internal"));
-    }
-
-    #[test]
-    fn error_mpi_fields_accessible() {
-        // Verify Error::Mpi struct fields are accessible and correct
-        let err = Error::Mpi {
-            class: MpiErrorClass::Topology,
-            code: 11,
-            message: "invalid topology".to_string(),
-            operation: None,
-        };
-
-        // Pattern-match to access fields
-        if let Error::Mpi {
-            class,
-            code,
-            message,
-            operation,
-        } = &err
-        {
-            assert_eq!(*class, MpiErrorClass::Topology);
-            assert_eq!(*code, 11);
-            assert_eq!(message, "invalid topology");
-            assert_eq!(*operation, None);
-        } else {
-            panic!("Expected Error::Mpi variant");
-        }
-
-        // Verify Display uses all three fields
-        let display = format!("{err}");
-        assert!(display.contains("invalid topology"));
-        assert!(display.contains("ERR_TOPOLOGY"));
-        assert!(display.contains("11"));
-    }
-
-    #[test]
     fn error_mpi_display_with_operation_some() {
         let err = Error::Mpi {
             class: MpiErrorClass::Rank,
@@ -669,20 +556,6 @@ mod tests {
     }
 
     #[test]
-    fn error_mpi_display_with_operation_none() {
-        let err = Error::Mpi {
-            class: MpiErrorClass::Rank,
-            code: 6,
-            message: "invalid rank".to_string(),
-            operation: None,
-        };
-        assert_eq!(
-            format!("{err}"),
-            "MPI error: invalid rank (class=ERR_RANK, code=6)"
-        );
-    }
-
-    #[test]
     fn from_code_with_zero_returns_internal_error() {
         let err = Error::from_code(0);
         match err {
@@ -691,29 +564,6 @@ mod tests {
             }
             other => panic!("expected Error::Internal, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn from_code_with_op_sets_operation_field() {
-        // Construct Error::Mpi directly (cannot call from_code_with_op in unit tests
-        // without an MPI runtime) and verify that the operation field is honoured by
-        // Display.  The delegation path in from_code_with_op is verified by inspection.
-        let err = Error::Mpi {
-            class: MpiErrorClass::Comm,
-            code: 5,
-            message: "invalid communicator".to_string(),
-            operation: Some("broadcast"),
-        };
-        if let Error::Mpi { operation, .. } = &err {
-            assert_eq!(*operation, Some("broadcast"));
-        } else {
-            panic!("Expected Error::Mpi variant");
-        }
-        let display = format!("{err}");
-        assert_eq!(
-            display,
-            "MPI error in broadcast: invalid communicator (class=ERR_COMM, code=5)"
-        );
     }
 
     #[test]

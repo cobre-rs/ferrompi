@@ -260,7 +260,9 @@ impl fmt::Display for TopologyInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(feature = "numa")]
+    use super::SlurmInfo;
+    use super::{HostEntry, ThreadLevel, TopologyInfo};
 
     fn sample_topology() -> TopologyInfo {
         TopologyInfo {

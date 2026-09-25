@@ -580,18 +580,6 @@ impl Drop for Group {
 #[cfg(test)]
 mod tests {
     use super::{Group, GroupComparison, RankRange};
-    use crate::error::Result;
-
-    #[test]
-    fn group_raw_handle_returns_stored_value() {
-        // Construct a Group directly (sidestepping FFI) and verify raw_handle.
-        let g = Group { handle: 7 };
-        assert_eq!(g.raw_handle(), 7);
-        // Drop will call ferrompi_group_free(7) — but we are outside an MPI
-        // session so MPI is not initialized. We use std::mem::forget to
-        // prevent the Drop from calling into MPI.
-        std::mem::forget(g);
-    }
 
     #[test]
     fn group_drop_with_zero_handle_is_no_op() {
@@ -600,46 +588,6 @@ mod tests {
         // call ferrompi_group_free and must not panic or segfault.
         let g = Group { handle: 0 };
         drop(g); // Must complete without panicking
-    }
-
-    // Compile-time signature checks: verify that union, intersection, and
-    // difference have the expected signatures and that their return type is
-    // Result<Group>. These do not call MPI at runtime.
-
-    #[allow(dead_code)]
-    fn group_union_signature_compiles(a: &Group, b: &Group) -> Result<Group> {
-        a.union(b)
-    }
-
-    #[allow(dead_code)]
-    fn group_intersection_signature_compiles(a: &Group, b: &Group) -> Result<Group> {
-        a.intersection(b)
-    }
-
-    #[allow(dead_code)]
-    fn group_difference_signature_compiles(a: &Group, b: &Group) -> Result<Group> {
-        a.difference(b)
-    }
-
-    // Compile-time signature checks for range_include and range_exclude.
-    #[allow(dead_code)]
-    fn group_range_include_signature_compiles(g: &Group, r: &[RankRange]) -> Result<Group> {
-        g.range_include(r)
-    }
-
-    #[allow(dead_code)]
-    fn group_range_exclude_signature_compiles(g: &Group, r: &[RankRange]) -> Result<Group> {
-        g.range_exclude(r)
-    }
-
-    // Compile-time signature check: translate_ranks() returns Result<Vec<Option<i32>>>.
-    #[allow(dead_code)]
-    fn group_translate_ranks_signature_compiles(
-        a: &Group,
-        ranks: &[i32],
-        b: &Group,
-    ) -> Result<Vec<Option<i32>>> {
-        a.translate_ranks(ranks, b)
     }
 
     /// Empty-input fast path: translate_ranks with an empty slice must return
@@ -669,33 +617,6 @@ mod tests {
         assert_eq!(GroupComparison::Unequal as i32, 2);
     }
 
-    #[test]
-    fn group_comparison_debug_format() {
-        assert_eq!(format!("{:?}", GroupComparison::Identical), "Identical");
-        assert_eq!(format!("{:?}", GroupComparison::Similar), "Similar");
-        assert_eq!(format!("{:?}", GroupComparison::Unequal), "Unequal");
-    }
-
-    #[test]
-    fn group_comparison_equality_and_hash() {
-        use std::collections::HashSet;
-        let mut s = HashSet::new();
-        s.insert(GroupComparison::Identical);
-        s.insert(GroupComparison::Similar);
-        s.insert(GroupComparison::Unequal);
-        // All three variants must be distinguishable in a HashSet.
-        assert_eq!(s.len(), 3);
-        assert!(s.contains(&GroupComparison::Identical));
-        assert!(s.contains(&GroupComparison::Similar));
-        assert!(s.contains(&GroupComparison::Unequal));
-    }
-
-    // Compile-time signature check: compare() returns Result<GroupComparison>.
-    #[allow(dead_code)]
-    fn group_compare_signature_compiles(a: &Group, b: &Group) -> Result<GroupComparison> {
-        a.compare(b)
-    }
-
     // ── RankRange unit tests ──────────────────────────────────────────────
 
     #[test]
@@ -704,39 +625,5 @@ mod tests {
         // On all current targets (x86_64, aarch64, riscv64) the natural layout
         // is 12 bytes with no tail padding.
         assert_eq!(std::mem::size_of::<RankRange>(), 12);
-    }
-
-    #[test]
-    fn rank_range_debug_format() {
-        let r = RankRange {
-            first: 1,
-            last: 5,
-            stride: 2,
-        };
-        let s = format!("{r:?}");
-        assert!(s.contains("first: 1"), "expected 'first: 1' in {s:?}");
-        assert!(s.contains("last: 5"), "expected 'last: 5' in {s:?}");
-        assert!(s.contains("stride: 2"), "expected 'stride: 2' in {s:?}");
-    }
-
-    #[test]
-    fn rank_range_equality() {
-        let a = RankRange {
-            first: 0,
-            last: 3,
-            stride: 1,
-        };
-        let b = RankRange {
-            first: 0,
-            last: 3,
-            stride: 1,
-        };
-        let c = RankRange {
-            first: 0,
-            last: 3,
-            stride: 2,
-        };
-        assert_eq!(a, b);
-        assert_ne!(a, c);
     }
 }

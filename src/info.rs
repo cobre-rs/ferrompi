@@ -220,7 +220,7 @@ impl Drop for Info {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::Info;
 
     // --- Null info object tests ---
 

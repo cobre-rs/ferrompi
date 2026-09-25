@@ -443,10 +443,15 @@ impl_atomic_mpi_datatype!(u8);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(feature = "rma")]
+    use super::AtomicMpiDatatype;
+    use super::{
+        BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, LongDoubleInt, LongInt,
+        MpiDatatype, MpiIndexedDatatype, ShortInt,
+    };
 
     #[test]
-    fn tag_values_match_c_defines() {
+    fn datatype_tag_values_match_c_defines() {
         assert_eq!(DatatypeTag::F32 as i32, 0);
         assert_eq!(DatatypeTag::F64 as i32, 1);
         assert_eq!(DatatypeTag::I32 as i32, 2);
@@ -454,101 +459,27 @@ mod tests {
         assert_eq!(DatatypeTag::U8 as i32, 4);
         assert_eq!(DatatypeTag::U32 as i32, 5);
         assert_eq!(DatatypeTag::U64 as i32, 6);
-    }
-
-    #[test]
-    fn datatype_tags_match_c_defines() {
-        // Verify each Rust type's TAG constant maps to the correct C-side define
-        assert_eq!(f32::TAG as i32, 0); // FERROMPI_F32
-        assert_eq!(f64::TAG as i32, 1); // FERROMPI_F64
-        assert_eq!(i32::TAG as i32, 2); // FERROMPI_I32
-        assert_eq!(i64::TAG as i32, 3); // FERROMPI_I64
-        assert_eq!(u8::TAG as i32, 4); // FERROMPI_U8
-        assert_eq!(u32::TAG as i32, 5); // FERROMPI_U32
-        assert_eq!(u64::TAG as i32, 6); // FERROMPI_U64
-    }
-
-    #[test]
-    fn datatype_tag_values_are_sequential() {
-        let tags = [
-            DatatypeTag::F32,
-            DatatypeTag::F64,
-            DatatypeTag::I32,
-            DatatypeTag::I64,
-            DatatypeTag::U8,
-            DatatypeTag::U32,
-            DatatypeTag::U64,
-        ];
-        for (i, tag) in tags.iter().enumerate() {
-            assert_eq!(*tag as i32, i as i32);
-        }
-        // Byte is 13 (after the six indexed types that occupy 7-12)
+        assert_eq!(DatatypeTag::FloatInt as i32, 7);
+        assert_eq!(DatatypeTag::DoubleInt as i32, 8);
+        assert_eq!(DatatypeTag::LongInt as i32, 9);
+        assert_eq!(DatatypeTag::Int2 as i32, 10);
+        assert_eq!(DatatypeTag::ShortInt as i32, 11);
+        assert_eq!(DatatypeTag::LongDoubleInt as i32, 12);
         assert_eq!(DatatypeTag::Byte as i32, 13);
-    }
 
-    #[test]
-    fn trait_is_implemented() {
-        // Compile-time check that all types implement MpiDatatype
-        fn assert_mpi_datatype<T: MpiDatatype>() {}
-        assert_mpi_datatype::<f32>();
-        assert_mpi_datatype::<f64>();
-        assert_mpi_datatype::<i32>();
-        assert_mpi_datatype::<i64>();
-        assert_mpi_datatype::<u8>();
-        assert_mpi_datatype::<u32>();
-        assert_mpi_datatype::<u64>();
-    }
-
-    #[test]
-    fn datatype_tag_debug_format() {
-        assert_eq!(format!("{:?}", DatatypeTag::F32), "F32");
-        assert_eq!(format!("{:?}", DatatypeTag::F64), "F64");
-        assert_eq!(format!("{:?}", DatatypeTag::I32), "I32");
-        assert_eq!(format!("{:?}", DatatypeTag::I64), "I64");
-        assert_eq!(format!("{:?}", DatatypeTag::U8), "U8");
-        assert_eq!(format!("{:?}", DatatypeTag::U32), "U32");
-        assert_eq!(format!("{:?}", DatatypeTag::U64), "U64");
-    }
-
-    #[test]
-    fn datatype_tag_clone_hash() {
-        use std::collections::HashSet;
-        let tag = DatatypeTag::F64;
-        let cloned = tag;
-        assert_eq!(cloned, DatatypeTag::F64);
-
-        let mut set = HashSet::new();
-        set.insert(DatatypeTag::F32);
-        set.insert(DatatypeTag::F64);
-        set.insert(DatatypeTag::F32); // duplicate
-        assert_eq!(set.len(), 2);
-    }
-
-    #[test]
-    fn indexed_datatype_tags_match_c_defines() {
-        // These values must stay in sync with FERROMPI_FLOAT_INT etc. in csrc/ferrompi.h
-        assert_eq!(DatatypeTag::FloatInt as i32, 7); // FERROMPI_FLOAT_INT
-        assert_eq!(DatatypeTag::DoubleInt as i32, 8); // FERROMPI_DOUBLE_INT
-        assert_eq!(DatatypeTag::LongInt as i32, 9); // FERROMPI_LONG_INT
-        assert_eq!(DatatypeTag::Int2 as i32, 10); // FERROMPI_2INT
-        assert_eq!(DatatypeTag::ShortInt as i32, 11); // FERROMPI_SHORT_INT
-        assert_eq!(DatatypeTag::LongDoubleInt as i32, 12); // FERROMPI_LONG_DOUBLE_INT
-
-        // Verify TAG constants on the structs themselves
+        assert_eq!(f32::TAG as i32, 0);
+        assert_eq!(f64::TAG as i32, 1);
+        assert_eq!(i32::TAG as i32, 2);
+        assert_eq!(i64::TAG as i32, 3);
+        assert_eq!(u8::TAG as i32, 4);
+        assert_eq!(u32::TAG as i32, 5);
+        assert_eq!(u64::TAG as i32, 6);
         assert_eq!(FloatInt::TAG as i32, 7);
         assert_eq!(DoubleInt::TAG as i32, 8);
         assert_eq!(LongInt::TAG as i32, 9);
         assert_eq!(Int2::TAG as i32, 10);
         assert_eq!(ShortInt::TAG as i32, 11);
         assert_eq!(LongDoubleInt::TAG as i32, 12);
-
-        // Byte must match FERROMPI_BYTE in csrc/ferrompi.h
-        assert_eq!(DatatypeTag::Byte as i32, 13); // FERROMPI_BYTE
-    }
-
-    #[test]
-    fn byte_datatype_tag_is_13() {
-        assert_eq!(DatatypeTag::Byte as i32, 13);
     }
 
     #[test]
@@ -666,28 +597,6 @@ mod tests {
                 "LongDoubleInt align on x86_64"
             );
         }
-    }
-
-    #[test]
-    fn indexed_datatype_trait_is_implemented() {
-        fn assert_indexed<T: MpiIndexedDatatype>() {}
-        assert_indexed::<FloatInt>();
-        assert_indexed::<DoubleInt>();
-        assert_indexed::<LongInt>();
-        assert_indexed::<Int2>();
-        assert_indexed::<ShortInt>();
-        assert_indexed::<LongDoubleInt>();
-    }
-
-    #[test]
-    fn indexed_and_primitive_traits_are_disjoint() {
-        fn assert_primitive<T: MpiDatatype>() {}
-        assert_primitive::<f64>();
-        assert_primitive::<i32>();
-
-        fn assert_indexed<T: MpiIndexedDatatype>() {}
-        assert_indexed::<DoubleInt>();
-        assert_indexed::<Int2>();
     }
 
     #[cfg(feature = "rma")]

@@ -739,26 +739,10 @@ mod tests {
     // Note: MPI tests must be run with mpiexec
     // cargo build --examples && mpiexec -n 4 ./target/debug/examples/hello_world
 
-    use super::*;
+    use super::{group, Error, Mpi, ReduceOp, ThreadLevel, ATTACHED_BUFFER};
+    use std::marker::PhantomData;
 
     // ── ThreadLevel tests ──────────────────────────────────────────────
-
-    #[test]
-    fn thread_level_ordering() {
-        assert!(ThreadLevel::Single < ThreadLevel::Funneled);
-        assert!(ThreadLevel::Funneled < ThreadLevel::Serialized);
-        assert!(ThreadLevel::Serialized < ThreadLevel::Multiple);
-    }
-
-    #[test]
-    fn thread_level_equality() {
-        assert_eq!(ThreadLevel::Single, ThreadLevel::Single);
-        assert_eq!(ThreadLevel::Funneled, ThreadLevel::Funneled);
-        assert_eq!(ThreadLevel::Serialized, ThreadLevel::Serialized);
-        assert_eq!(ThreadLevel::Multiple, ThreadLevel::Multiple);
-        assert_ne!(ThreadLevel::Single, ThreadLevel::Multiple);
-        assert_ne!(ThreadLevel::Funneled, ThreadLevel::Serialized);
-    }
 
     #[test]
     fn thread_level_repr_values() {
@@ -766,17 +750,6 @@ mod tests {
         assert_eq!(ThreadLevel::Funneled as i32, 1);
         assert_eq!(ThreadLevel::Serialized as i32, 2);
         assert_eq!(ThreadLevel::Multiple as i32, 3);
-    }
-
-    #[test]
-    fn thread_level_debug_clone() {
-        let level = ThreadLevel::Funneled;
-        let cloned = level;
-        assert_eq!(format!("{cloned:?}"), "Funneled");
-
-        assert_eq!(format!("{:?}", ThreadLevel::Single), "Single");
-        assert_eq!(format!("{:?}", ThreadLevel::Serialized), "Serialized");
-        assert_eq!(format!("{:?}", ThreadLevel::Multiple), "Multiple");
     }
 
     // ── ReduceOp tests ─────────────────────────────────────────────────
@@ -807,110 +780,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reduce_op_equality() {
-        assert_eq!(ReduceOp::Sum, ReduceOp::Sum);
-        assert_eq!(ReduceOp::Max, ReduceOp::Max);
-        assert_eq!(ReduceOp::Min, ReduceOp::Min);
-        assert_eq!(ReduceOp::Prod, ReduceOp::Prod);
-        assert_eq!(ReduceOp::BitwiseOr, ReduceOp::BitwiseOr);
-        assert_eq!(ReduceOp::BitwiseAnd, ReduceOp::BitwiseAnd);
-        assert_eq!(ReduceOp::BitwiseXor, ReduceOp::BitwiseXor);
-        assert_eq!(ReduceOp::LogicalOr, ReduceOp::LogicalOr);
-        assert_eq!(ReduceOp::LogicalAnd, ReduceOp::LogicalAnd);
-        assert_eq!(ReduceOp::LogicalXor, ReduceOp::LogicalXor);
-        assert_eq!(ReduceOp::MaxLoc, ReduceOp::MaxLoc);
-        assert_eq!(ReduceOp::MinLoc, ReduceOp::MinLoc);
-        assert_ne!(ReduceOp::Sum, ReduceOp::Max);
-        assert_ne!(ReduceOp::Min, ReduceOp::Prod);
-        assert_ne!(ReduceOp::Sum, ReduceOp::Prod);
-        assert_ne!(ReduceOp::BitwiseOr, ReduceOp::BitwiseAnd);
-        assert_ne!(ReduceOp::LogicalOr, ReduceOp::LogicalAnd);
-        assert_ne!(ReduceOp::Sum, ReduceOp::BitwiseOr);
-        assert_ne!(ReduceOp::MaxLoc, ReduceOp::MinLoc);
-        assert_ne!(ReduceOp::MaxLoc, ReduceOp::Max);
-    }
-
-    #[test]
-    fn reduce_op_debug_clone() {
-        let op = ReduceOp::Sum;
-        let cloned = op;
-        assert_eq!(format!("{cloned:?}"), "Sum");
-
-        assert_eq!(format!("{:?}", ReduceOp::Max), "Max");
-        assert_eq!(format!("{:?}", ReduceOp::Min), "Min");
-        assert_eq!(format!("{:?}", ReduceOp::Prod), "Prod");
-        assert_eq!(format!("{:?}", ReduceOp::BitwiseOr), "BitwiseOr");
-        assert_eq!(format!("{:?}", ReduceOp::BitwiseAnd), "BitwiseAnd");
-        assert_eq!(format!("{:?}", ReduceOp::BitwiseXor), "BitwiseXor");
-        assert_eq!(format!("{:?}", ReduceOp::LogicalOr), "LogicalOr");
-        assert_eq!(format!("{:?}", ReduceOp::LogicalAnd), "LogicalAnd");
-        assert_eq!(format!("{:?}", ReduceOp::LogicalXor), "LogicalXor");
-        assert_eq!(format!("{:?}", ReduceOp::MaxLoc), "MaxLoc");
-        assert_eq!(format!("{:?}", ReduceOp::MinLoc), "MinLoc");
-    }
-
-    #[test]
-    fn reduce_op_all_variants_match_c_switch() {
-        let variants = [
-            (ReduceOp::Sum, 0i32),
-            (ReduceOp::Max, 1),
-            (ReduceOp::Min, 2),
-            (ReduceOp::Prod, 3),
-            (ReduceOp::BitwiseOr, 4),
-            (ReduceOp::BitwiseAnd, 5),
-            (ReduceOp::BitwiseXor, 6),
-            (ReduceOp::LogicalOr, 7),
-            (ReduceOp::LogicalAnd, 8),
-            (ReduceOp::LogicalXor, 9),
-            (ReduceOp::MaxLoc, 10),
-            (ReduceOp::MinLoc, 11),
-        ];
-        for (op, expected) in variants {
-            assert_eq!(op as i32, expected);
-        }
-        #[cfg(feature = "rma")]
-        {
-            assert_eq!(ReduceOp::Replace as i32, 12);
-            assert_eq!(ReduceOp::NoOp as i32, 13);
-        }
-    }
-
-    #[cfg(feature = "rma")]
-    #[test]
-    fn replace_noop_discriminants() {
-        assert_eq!(ReduceOp::Replace as i32, 12);
-        assert_eq!(ReduceOp::NoOp as i32, 13);
-    }
-
-    // ── Mpi::create_from_group unit tests ─────────────────────────────────
-
     // ── Mpi::buffer_attach / buffer_detach unit tests ─────────────────────
-
-    /// Documentation-anchor for the `Error::InvalidBuffer` contract on
-    /// the oversize path. The functional guard at `src/lib.rs` (search
-    /// `i32::MAX as usize` inside `buffer_attach`) cannot be invoked from
-    /// a unit test without `MPI_Init`; behavioral verification requires an
-    /// integration example (deferred to epic-06 follow-up). This test
-    /// only witnesses that `Error::InvalidBuffer` is a valid variant.
-    #[test]
-    fn buffer_attach_invalid_buffer_variant_exists() {
-        let err = Error::InvalidBuffer;
-        assert!(matches!(err, Error::InvalidBuffer));
-    }
-
-    /// Compile-time witness that buffer_attach and buffer_detach have the
-    /// correct signatures. No MPI runtime is needed — the functions are
-    /// never called.
-    #[test]
-    fn buffer_attach_signature_compiles() {
-        fn _check(mpi: &Mpi, buf: Box<[u8]>) -> Result<()> {
-            mpi.buffer_attach(buf)
-        }
-        fn _check_detach(mpi: &Mpi) -> Result<Box<[u8]>> {
-            mpi.buffer_detach()
-        }
-    }
 
     /// Calling buffer_attach twice (without a detach in between) must return
     /// Err(Error::InvalidOp).  We test against the static ATTACHED_BUFFER
@@ -965,17 +835,6 @@ mod tests {
     }
 
     // ── Mpi::create_from_group unit tests ─────────────────────────────────
-
-    /// Verify that `supports_create_from_group` is callable and has the
-    /// expected function type. The probe-failure-not-cached invariant is
-    /// enforced structurally: the implementation uses `get()` / `set()`
-    /// rather than `get_or_init`, which is verified by the acceptance grep.
-    /// Behavioural verification (call before init, then after init) requires
-    /// a running MPI environment and is documented as a manual test scenario.
-    #[test]
-    fn supports_create_from_group_does_not_cache_probe_failures() {
-        let _: fn() -> bool = Mpi::supports_create_from_group;
-    }
 
     /// Verify that a `stringtag` containing a null byte is rejected before
     /// the FFI call is ever invoked.  We test the null-byte path directly

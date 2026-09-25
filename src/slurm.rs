@@ -71,7 +71,10 @@ pub fn node_list() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        cpus_per_task, is_slurm_job, job_id, local_rank, local_size, node_list, node_name,
+        num_nodes,
+    };
 
     #[test]
     fn not_in_slurm_by_default() {

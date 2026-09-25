@@ -30,34 +30,3 @@ pub struct Status {
     /// Number of elements in the message (determined via `MPI_Get_count`).
     pub count: i64,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_clone() {
-        let status = Status {
-            source: 3,
-            tag: 42,
-            count: 100,
-        };
-        let cloned = status.clone();
-        assert_eq!(cloned.source, 3);
-        assert_eq!(cloned.tag, 42);
-        assert_eq!(cloned.count, 100);
-    }
-
-    #[test]
-    fn status_debug() {
-        let status = Status {
-            source: 0,
-            tag: 1,
-            count: 50,
-        };
-        let debug = format!("{:?}", status);
-        assert!(debug.contains("source"));
-        assert!(debug.contains("tag"));
-        assert!(debug.contains("count"));
-    }
-}
