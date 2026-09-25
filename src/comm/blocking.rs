@@ -1,7 +1,7 @@
 //! Blocking collective operations: barrier, broadcast, reduce, allreduce, scan, gather, scatter, alltoall.
 
 use crate::comm::Communicator;
-use crate::datatype::{BytePermutable, DatatypeTag, MpiDatatype, MpiIndexedDatatype};
+use crate::datatype::{buf, buf_mut, BytePermutable, DatatypeTag, MpiDatatype, MpiIndexedDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::op::UserOp;
@@ -50,19 +50,9 @@ impl Communicator {
     /// ```
     #[inline]
     pub fn broadcast<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<()> {
-        let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of T (Rust borrow rules
-            // prevent any aliasing). cast to *mut c_void is the standard FFI convention for
-            // passing typed buffers to C. T::TAG matches T's MPI datatype per ADR-0003.
-            // The slice outlives the blocking call.
-            ffi::ferrompi_bcast(
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                root,
-                self.handle,
-            )
-        };
+        let (p, n, dt) = buf_mut(data);
+        // SAFETY: this blocking call returns only after MPI is done with the buffer.
+        let ret = unsafe { ffi::ferrompi_bcast(p, n, dt, root, self.handle) };
         Error::check_with_op(ret, "bcast")
     }
 
@@ -95,21 +85,11 @@ impl Communicator {
         if send.len() != recv.len() {
             return Err(Error::InvalidBuffer);
         }
-        let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() is verified above.
-            // cast to *const/*mut c_void is the standard FFI convention. T::TAG matches T's MPI
-            // datatype per ADR-0003. Both slices outlive this blocking call.
-            ffi::ferrompi_reduce(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                root,
-                self.handle,
-            )
-        };
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]).
+        let ret = unsafe { ffi::ferrompi_reduce(sp, rp, n, dt, op as i32, root, self.handle) };
         Error::check_with_op(ret, "reduce")
     }
 
@@ -175,40 +155,19 @@ impl Communicator {
         op: ReduceOp,
         root: i32,
     ) -> Result<()> {
-        let data_ptr = data.as_mut_ptr().cast::<std::ffi::c_void>();
+        let (p, n, dt) = buf_mut(data);
         let ret = if self.rank() == root {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of T; NULL as
-            // sendbuf is the shim's in-place marker, which ferrompi_reduce maps to
-            // MPI_IN_PLACE so data is both input and output at root. T::TAG matches
-            // T's MPI datatype per ADR-0003. The slice outlives this blocking call.
+            // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
+            // this NULL is unambiguous); ferrompi_reduce maps it to MPI_IN_PLACE, so data is
+            // both input and output at root.
             unsafe {
-                ffi::ferrompi_reduce(
-                    std::ptr::null(),
-                    data_ptr,
-                    data.len() as i64,
-                    T::TAG as i32,
-                    op as i32,
-                    root,
-                    self.handle,
-                )
+                ffi::ferrompi_reduce(std::ptr::null(), p, n, dt, op as i32, root, self.handle)
             }
         } else {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of T, passed as
-            // both sendbuf and recvbuf: strict MPI builds reject a NULL recvbuf at
-            // non-root, and MPI ignores recvbuf there, so the computation is
-            // unaffected. T::TAG matches T's MPI datatype per ADR-0003. The slice
-            // outlives this blocking call.
-            unsafe {
-                ffi::ferrompi_reduce(
-                    data_ptr,
-                    data_ptr,
-                    data.len() as i64,
-                    T::TAG as i32,
-                    op as i32,
-                    root,
-                    self.handle,
-                )
-            }
+            // SAFETY: data is passed as both sendbuf and recvbuf because strict MPI builds
+            // reject a NULL recvbuf at non-root; MPI ignores recvbuf there, so the computation
+            // is unaffected.
+            unsafe { ffi::ferrompi_reduce(p, p, n, dt, op as i32, root, self.handle) }
         };
         Error::check_with_op(ret, "reduce_inplace")
     }
@@ -241,20 +200,11 @@ impl Communicator {
         if send.len() != recv.len() {
             return Err(Error::InvalidBuffer);
         }
-        let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() is verified above.
-            // cast to *const/*mut c_void is the standard FFI convention. T::TAG matches T's MPI
-            // datatype per ADR-0003. Both slices outlive this blocking call.
-            ffi::ferrompi_allreduce(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                self.handle,
-            )
-        };
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]).
+        let ret = unsafe { ffi::ferrompi_allreduce(sp, rp, n, dt, op as i32, self.handle) };
         Error::check_with_op(ret, "allreduce")
     }
 
@@ -270,21 +220,12 @@ impl Communicator {
     /// world.allreduce_inplace(&mut data, ReduceOp::Sum).unwrap();
     /// ```
     pub fn allreduce_inplace<T: MpiDatatype>(&self, data: &mut [T], op: ReduceOp) -> Result<()> {
-        let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of T (no aliasing via
-            // Rust borrow rules). NULL as sendbuf is the shim's in-place marker, which
-            // ferrompi_allreduce maps to MPI_IN_PLACE, so data serves as both send and
-            // receive buffer. T::TAG matches T's MPI datatype per ADR-0003. The slice
-            // outlives this blocking call.
-            ffi::ferrompi_allreduce(
-                std::ptr::null(),
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                self.handle,
-            )
-        };
+        let (p, n, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
+        // NULL is unambiguous); ferrompi_allreduce maps it to MPI_IN_PLACE, so data serves as
+        // both send and receive buffer.
+        let ret =
+            unsafe { ffi::ferrompi_allreduce(std::ptr::null(), p, n, dt, op as i32, self.handle) };
         Error::check_with_op(ret, "allreduce_inplace")
     }
 
@@ -354,21 +295,13 @@ impl Communicator {
         if send.len() != recv.len() {
             return Err(Error::InvalidBuffer);
         }
-        let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() verified above.
-            // T::TAG matches T's MPI datatype per ADR-0003. op.raw_handle() is a valid MPI_Op
-            // registered by UserOp::new and kept alive for the lifetime of `op`. Both slices
-            // outlive this blocking call.
-            ffi::ferrompi_allreduce_user_op(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                op.raw_handle(),
-                self.handle,
-            )
-        };
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]). op.raw_handle() is a valid MPI_Op registered by UserOp::new and
+        // kept alive for the lifetime of `op`.
+        let ret =
+            unsafe { ffi::ferrompi_allreduce_user_op(sp, rp, n, dt, op.raw_handle(), self.handle) };
         Error::check_with_op(ret, "allreduce_user_op")
     }
 
@@ -431,12 +364,12 @@ impl Communicator {
         if send.len() != recv.len() {
             return Err(Error::InvalidBuffer);
         }
+        // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T
+        // (T: MpiIndexedDatatype — one of the six predefined MPI paired types). They cannot
+        // alias (Rust borrow rules). send.len() == recv.len() verified above. op has been
+        // validated to be MaxLoc or MinLoc, which are the only valid ops for indexed types.
+        // T::TAG matches T's MPI paired datatype. Slices outlive this call.
         let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T
-            // (T: MpiIndexedDatatype — one of the six predefined MPI paired types). They cannot
-            // alias (Rust borrow rules). send.len() == recv.len() verified above. op has been
-            // validated to be MaxLoc or MinLoc, which are the only valid ops for indexed types.
-            // T::TAG matches T's MPI paired datatype per ADR-0003. Slices outlive this call.
             ffi::ferrompi_allreduce(
                 send.as_ptr().cast::<std::ffi::c_void>(),
                 recv.as_mut_ptr().cast::<std::ffi::c_void>(),
@@ -516,15 +449,15 @@ impl Communicator {
         if byte_count > i64::MAX as usize {
             return Err(Error::InvalidBuffer);
         }
+        // SAFETY:
+        // - send and recv are valid slices of T where T: BytePermutable (Copy + Send + 'static).
+        // - byte_count = send.len() * size_of::<T>() bytes, which is the exact memory
+        //   footprint of each slice. The cast to *const c_void / *mut c_void is safe
+        //   because we pass the byte count to MPI (MPI_BYTE datatype), so MPI treats
+        //   the buffer as raw bytes matching exactly the memory of the slices.
+        // - DatatypeTag::Byte maps to MPI_BYTE in the C layer (case FERROMPI_BYTE).
+        // - send and recv do not alias (send is &[T], recv is &mut [T]).
         let ret = unsafe {
-            // SAFETY:
-            // - send and recv are valid slices of T where T: BytePermutable (Copy + Send + 'static).
-            // - byte_count = send.len() * size_of::<T>() bytes, which is the exact memory
-            //   footprint of each slice. The cast to *const c_void / *mut c_void is safe
-            //   because we pass the byte count to MPI (MPI_BYTE datatype), so MPI treats
-            //   the buffer as raw bytes matching exactly the memory of the slices.
-            // - DatatypeTag::Byte maps to MPI_BYTE in the C layer (case FERROMPI_BYTE).
-            // - send and recv do not alias (send is &[T], recv is &mut [T]).
             ffi::ferrompi_allreduce(
                 send.as_ptr().cast::<std::ffi::c_void>(),
                 recv.as_mut_ptr().cast::<std::ffi::c_void>(),
@@ -568,19 +501,11 @@ impl Communicator {
         if send.len() != recv.len() {
             return Err(Error::InvalidBuffer);
         }
-        let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() verified above.
-            // T::TAG matches T's MPI datatype per ADR-0003. Both slices outlive this blocking call.
-            ffi::ferrompi_scan(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                self.handle,
-            )
-        };
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]).
+        let ret = unsafe { ffi::ferrompi_scan(sp, rp, n, dt, op as i32, self.handle) };
         Error::check_with_op(ret, "scan")
     }
 
@@ -621,20 +546,11 @@ impl Communicator {
         if send.len() != recv.len() {
             return Err(Error::InvalidBuffer);
         }
-        let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() verified above.
-            // T::TAG matches T's MPI datatype per ADR-0003. Both slices outlive this blocking
-            // call. Note: MPI leaves recv undefined on rank 0, which is documented above.
-            ffi::ferrompi_exscan(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                self.handle,
-            )
-        };
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]). MPI leaves recv undefined on rank 0, documented above.
+        let ret = unsafe { ffi::ferrompi_exscan(sp, rp, n, dt, op as i32, self.handle) };
         Error::check_with_op(ret, "exscan")
     }
 
@@ -709,20 +625,12 @@ impl Communicator {
     /// world.gather(&send, &mut recv, 0).unwrap();
     /// ```
     pub fn gather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], root: i32) -> Result<()> {
-        let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). At non-root, recv is ignored by MPI.
-            // T::TAG matches T's MPI datatype per ADR-0003. Both slices outlive this blocking call.
-            ffi::ferrompi_gather(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                root,
-                self.handle,
-            )
-        };
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]); at non-root, recv is ignored by
+        // MPI. The root-side receive-length relation (recv.len() >= send.len() * size) is not
+        // checked by this function.
+        let ret = unsafe { ffi::ferrompi_gather(sp, n, rp, n, dt, root, self.handle) };
         Error::check_with_op(ret, "gather")
     }
 
@@ -739,19 +647,11 @@ impl Communicator {
     /// world.allgather(&send, &mut recv).unwrap();
     /// ```
     pub fn allgather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<()> {
-        let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). T::TAG matches T's MPI datatype per ADR-0003.
-            // Both slices outlive this blocking call.
-            ffi::ferrompi_allgather(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                self.handle,
-            )
-        };
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). The every-rank receive-length
+        // relation (recv.len() >= send.len() * size) is not checked by this function.
+        let ret = unsafe { ffi::ferrompi_allgather(sp, n, rp, n, dt, self.handle) };
         Error::check_with_op(ret, "allgather")
     }
 
@@ -797,21 +697,14 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let recvcount = (data.len() / size) as i64;
+        let (p, _, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
+        // NULL is unambiguous); ferrompi_gather maps it to MPI_IN_PLACE, so data serves as both
+        // root's send contribution (at offset rank*recvcount) and the receive buffer.
+        // data.len() % size == 0 is checked above, and the guard above guarantees
+        // self.rank() == root, the only rank MPI_IN_PLACE is valid for in MPI_Gather.
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice. NULL as sendbuf is
-            // the shim's in-place marker, which ferrompi_gather maps to MPI_IN_PLACE; data
-            // serves as both root's send contribution (at offset rank*recvcount) and the
-            // receive buffer. The guard above guarantees self.rank() == root, which is the
-            // only rank MPI_IN_PLACE is valid for in MPI_Gather.
-            ffi::ferrompi_gather(
-                std::ptr::null(),
-                0,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recvcount,
-                T::TAG as i32,
-                root,
-                self.handle,
-            )
+            ffi::ferrompi_gather(std::ptr::null(), 0, p, recvcount, dt, root, self.handle)
         };
         Error::check_with_op(ret, "gather_inplace")
     }
@@ -848,20 +741,13 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let recvcount = (data.len() / size) as i64;
-        let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice. NULL as sendbuf is
-            // the shim's in-place marker, which ferrompi_allgather maps to MPI_IN_PLACE.
-            // Each rank's contribution (at offset rank*recvcount) must be pre-written by
-            // the caller; MPI fills the remaining slots in-place.
-            ffi::ferrompi_allgather(
-                std::ptr::null(),
-                0,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recvcount,
-                T::TAG as i32,
-                self.handle,
-            )
-        };
+        let (p, _, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
+        // NULL is unambiguous); ferrompi_allgather maps it to MPI_IN_PLACE. data.len() % size
+        // == 0 is checked above; each rank's slot must be pre-written by the caller before this
+        // call.
+        let ret =
+            unsafe { ffi::ferrompi_allgather(std::ptr::null(), 0, p, recvcount, dt, self.handle) };
         Error::check_with_op(ret, "allgather_inplace")
     }
 
@@ -900,39 +786,28 @@ impl Communicator {
     pub fn scatter_inplace<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<()> {
         let is_root = self.rank() == root;
         let size = self.size() as usize;
-        let (sendbuf, sendcount, recvbuf, recvcount) = if is_root {
+        let (sendbuf, sendcount, recvbuf, recvcount, dt) = if is_root {
             if size == 0 || data.len() % size != 0 {
                 return Err(Error::InvalidBuffer);
             }
             let per = (data.len() / size) as i64;
-            (
-                data.as_ptr().cast::<std::ffi::c_void>(),
-                per,
-                std::ptr::null_mut::<std::ffi::c_void>(),
-                0i64,
-            )
+            let (sp, _, dt) = buf(data);
+            (sp, per, std::ptr::null_mut::<std::ffi::c_void>(), 0i64, dt)
         } else {
-            (
-                std::ptr::null::<std::ffi::c_void>(),
-                0i64,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-            )
+            let (rp, rn, dt) = buf_mut(data);
+            (std::ptr::null::<std::ffi::c_void>(), 0i64, rp, rn, dt)
         };
+        // SAFETY: at root, recvbuf is NULL, the in-place marker (buf's pointer is never null,
+        // so this NULL is unambiguous); ferrompi_scatter maps it to MPI_IN_PLACE so root's own
+        // slot is retained. data.len() % size == 0 is checked above. At non-root, sendbuf is
+        // null, which the MPI standard ignores on non-root scatter.
         let ret = unsafe {
-            // SAFETY: At root, sendbuf points to valid data of length sendcount*size elements
-            // (guaranteed by the divisibility check above); recvbuf is NULL, the shim's
-            // in-place marker, which ferrompi_scatter maps to MPI_IN_PLACE so root's own
-            // slot is retained. At non-root, recvbuf points to a valid mutable slice of
-            // length recvcount elements; sendbuf is null (MPI standard ignores sendbuf on
-            // non-root scatter). Both pointers are cast to *const/*mut c_void as required
-            // by the C FFI. The slice outlives the call.
             ffi::ferrompi_scatter(
                 sendbuf,
                 sendcount,
                 recvbuf,
                 recvcount,
-                T::TAG as i32,
+                dt,
                 root,
                 self.handle,
             )
@@ -978,20 +853,12 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let recvcount = (data.len() / size) as i64;
-        let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of length recvcount*size
-            // elements (guaranteed by the divisibility check above). NULL as sendbuf is the
-            // shim's in-place marker, which ferrompi_alltoall maps to MPI_IN_PLACE; the caller
-            // must pre-write each slot before calling this method.
-            ffi::ferrompi_alltoall(
-                std::ptr::null(),
-                0,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recvcount,
-                T::TAG as i32,
-                self.handle,
-            )
-        };
+        let (p, _, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
+        // NULL is unambiguous); ferrompi_alltoall maps it to MPI_IN_PLACE. data.len() % size ==
+        // 0 is checked above; the caller must pre-write each slot before calling this method.
+        let ret =
+            unsafe { ffi::ferrompi_alltoall(std::ptr::null(), 0, p, recvcount, dt, self.handle) };
         Error::check_with_op(ret, "alltoall_inplace")
     }
 
@@ -1011,20 +878,12 @@ impl Communicator {
     /// world.scatter(&send, &mut recv, 0).unwrap();
     /// ```
     pub fn scatter<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], root: i32) -> Result<()> {
-        let ret = unsafe {
-            // SAFETY: send is a valid shared slice (ignored by MPI at non-root) and recv is a
-            // valid exclusive slice of T; they cannot alias (Rust borrow rules). T::TAG matches
-            // T's MPI datatype per ADR-0003. Both slices outlive this blocking call.
-            ffi::ferrompi_scatter(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                T::TAG as i32,
-                root,
-                self.handle,
-            )
-        };
+        let (sp, _, _) = buf(send);
+        let (rp, n, dt) = buf_mut(recv);
+        // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
+        // &mut [T]). The root-side send-length relation (send.len() >= recv.len() * size) is
+        // not checked by this function.
+        let ret = unsafe { ffi::ferrompi_scatter(sp, n, rp, n, dt, root, self.handle) };
         Error::check_with_op(ret, "scatter")
     }
 
@@ -1059,20 +918,11 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let count = (send.len() / size) as i64;
-        let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() and divisibility
-            // by size are both verified above. T::TAG matches T's MPI datatype per ADR-0003.
-            // Both slices outlive this blocking call.
-            ffi::ferrompi_alltoall(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                count,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                count,
-                T::TAG as i32,
-                self.handle,
-            )
-        };
+        let (sp, _, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len() and
+        // divisibility by size are both verified above.
+        let ret = unsafe { ffi::ferrompi_alltoall(sp, count, rp, count, dt, self.handle) };
         Error::check_with_op(ret, "alltoall")
     }
 
@@ -1111,20 +961,12 @@ impl Communicator {
         if send.len() != recv.len() * size {
             return Err(Error::InvalidBuffer);
         }
-        let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() * size is verified
-            // above. T::TAG matches T's MPI datatype per ADR-0003. Both slices outlive this
-            // blocking call.
-            ffi::ferrompi_reduce_scatter_block(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                self.handle,
-            )
-        };
+        let (sp, _, _) = buf(send);
+        let (rp, n, dt) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len() * size
+        // is verified above.
+        let ret =
+            unsafe { ffi::ferrompi_reduce_scatter_block(sp, rp, n, dt, op as i32, self.handle) };
         Error::check_with_op(ret, "reduce_scatter_block")
     }
 }
