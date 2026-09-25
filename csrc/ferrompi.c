@@ -126,14 +126,14 @@ static atomic_int next_datatype_hint;
 
 // User-defined op table.  _Atomic(MPI_Op) provides happens-before ordering for
 // the MPI_Op payload across the four access sites:
-//   - WRITER ferrompi_op_create_user (csrc/ferrompi.c:~4686):
+//   - WRITER ferrompi_op_create_user:
 //       atomic_store_explicit(release) after MPI_Op_create.
-//   - WRITER free_op_slot (csrc/ferrompi.c:~4568):
+//   - WRITER free_op_slot:
 //       atomic_store_explicit(release) of MPI_OP_NULL.
-//   - WRITER ferrompi_op_free (csrc/ferrompi.c:~4699):
+//   - WRITER ferrompi_op_free:
 //       stages through a local; loads (acquire), invokes MPI_Op_free
 //       on the local, stores (release) the result back.
-//   - READER ferrompi_allreduce_user_op (csrc/ferrompi.c:~4726):
+//   - READER ferrompi_allreduce_user_op:
 //       atomic_load_explicit(acquire) before the MPI_Allreduce call.
 // The acquire/release pairing guarantees that any thread observing
 // op_used[h] == 1 (via the existing op_used acquire protocol) and then
@@ -495,11 +495,11 @@ static int32_t alloc_group(MPI_Group group) {
  *
  * The MPI_GROUP_NULL sentinel pairs with the
  *   `if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;`
- * guards at ferrompi_comm_create_from_group_parent (line ~723),
- * ferrompi_comm_create_from_group (line ~743), and the group-operation
- * shims at lines ~3216-3338.  Callers without that guard (group_incl,
- * group_excl, group_size, group_rank) correctly defer to MPI's own
- * MPI_ERR_GROUP for invalid handles. */
+ * guards at ferrompi_comm_create_from_group_parent,
+ * ferrompi_comm_create_from_group, and the group-operation shims.
+ * Callers without that guard (group_incl, group_excl, group_size,
+ * group_rank) correctly defer to MPI's own MPI_ERR_GROUP for invalid
+ * handles. */
 static MPI_Group get_group(int32_t handle) {
     // Slot 0: lazily return MPI_GROUP_EMPTY (always valid post-init)
     if (handle == 0) {
