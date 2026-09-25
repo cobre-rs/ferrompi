@@ -94,6 +94,9 @@ pub struct CustomDatatype {
 // appropriate thread level. The table slot is only mutated (freed) in Drop,
 // which consumes the value — so there is no concurrent mutation risk.
 unsafe impl Send for CustomDatatype {}
+// SAFETY: &CustomDatatype exposes only reads of the immutable handle field and
+// FFI calls whose concurrent use MPI governs by the initialized thread level;
+// this type does not itself check that level.
 unsafe impl Sync for CustomDatatype {}
 
 impl CustomDatatype {

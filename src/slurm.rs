@@ -84,6 +84,30 @@ mod tests {
         }
     }
 
+    /// Set an environment variable for `slurm_env_var_parsing` below.
+    fn set_env(key: &str, value: &str) {
+        // SAFETY: slurm_env_var_parsing is the only test in this crate that
+        // writes SLURM_* variables; this unit-test binary's only concurrent
+        // readers of the environment go through std::env, which serializes
+        // with this write, and no unit test calls into C code that reads the
+        // environment.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+
+    /// Unset an environment variable for `slurm_env_var_parsing` below.
+    fn unset_env(key: &str) {
+        // SAFETY: slurm_env_var_parsing is the only test in this crate that
+        // writes SLURM_* variables; this unit-test binary's only concurrent
+        // readers of the environment go through std::env, which serializes
+        // with this write, and no unit test calls into C code that reads the
+        // environment.
+        unsafe {
+            std::env::remove_var(key);
+        }
+    }
+
     /// Tests that mutate environment variables are combined into a single test
     /// to avoid data races when tests run in parallel. `env::set_var` and
     /// `env::remove_var` are not thread-safe — multiple tests touching the same
@@ -91,136 +115,84 @@ mod tests {
     #[test]
     fn slurm_env_var_parsing() {
         // --- local_size: parses SLURM_TASKS_PER_NODE "4(x2)" format ---
-        unsafe {
-            std::env::set_var("SLURM_TASKS_PER_NODE", "4(x2)");
-            std::env::remove_var("SLURM_NTASKS_PER_NODE");
-        }
+        set_env("SLURM_TASKS_PER_NODE", "4(x2)");
+        unset_env("SLURM_NTASKS_PER_NODE");
         assert_eq!(local_size(), Some(4));
 
         // --- local_size: SLURM_NTASKS_PER_NODE takes priority ---
-        unsafe {
-            std::env::set_var("SLURM_NTASKS_PER_NODE", "8");
-            std::env::set_var("SLURM_TASKS_PER_NODE", "4(x2)");
-        }
+        set_env("SLURM_NTASKS_PER_NODE", "8");
+        set_env("SLURM_TASKS_PER_NODE", "4(x2)");
         assert_eq!(local_size(), Some(8));
 
         // --- local_size: returns None when neither var is set ---
-        unsafe {
-            std::env::remove_var("SLURM_NTASKS_PER_NODE");
-            std::env::remove_var("SLURM_TASKS_PER_NODE");
-        }
+        unset_env("SLURM_NTASKS_PER_NODE");
+        unset_env("SLURM_TASKS_PER_NODE");
         assert_eq!(local_size(), None);
 
         // --- is_slurm_job: detects SLURM_JOB_ID ---
-        unsafe {
-            std::env::set_var("SLURM_JOB_ID", "12345");
-        }
+        set_env("SLURM_JOB_ID", "12345");
         assert!(is_slurm_job());
         assert_eq!(job_id(), Some("12345".to_string()));
-        unsafe {
-            std::env::remove_var("SLURM_JOB_ID");
-        }
+        unset_env("SLURM_JOB_ID");
 
         // --- num_nodes: parses SLURM_NNODES ---
-        unsafe {
-            std::env::set_var("SLURM_NNODES", "16");
-        }
+        set_env("SLURM_NNODES", "16");
         assert_eq!(num_nodes(), Some(16));
-        unsafe {
-            std::env::remove_var("SLURM_NNODES");
-        }
+        unset_env("SLURM_NNODES");
 
         // --- cpus_per_task: parses SLURM_CPUS_PER_TASK ---
-        unsafe {
-            std::env::set_var("SLURM_CPUS_PER_TASK", "4");
-        }
+        set_env("SLURM_CPUS_PER_TASK", "4");
         assert_eq!(cpus_per_task(), Some(4));
-        unsafe {
-            std::env::remove_var("SLURM_CPUS_PER_TASK");
-        }
+        unset_env("SLURM_CPUS_PER_TASK");
 
         // --- node_name: returns None when neither var is set ---
-        unsafe {
-            std::env::remove_var("SLURM_NODENAME");
-            std::env::remove_var("SLURMD_NODENAME");
-        }
+        unset_env("SLURM_NODENAME");
+        unset_env("SLURMD_NODENAME");
         assert_eq!(node_name(), None);
 
         // --- node_name: SLURM_NODENAME takes priority ---
-        unsafe {
-            std::env::set_var("SLURM_NODENAME", "node01");
-        }
+        set_env("SLURM_NODENAME", "node01");
         assert_eq!(node_name(), Some("node01".to_string()));
-        unsafe {
-            std::env::remove_var("SLURM_NODENAME");
-        }
+        unset_env("SLURM_NODENAME");
 
         // --- node_name: falls back to SLURMD_NODENAME ---
-        unsafe {
-            std::env::set_var("SLURMD_NODENAME", "node02");
-        }
+        set_env("SLURMD_NODENAME", "node02");
         assert_eq!(node_name(), Some("node02".to_string()));
-        unsafe {
-            std::env::remove_var("SLURMD_NODENAME");
-        }
+        unset_env("SLURMD_NODENAME");
 
         // --- node_list: returns None when not set ---
-        unsafe {
-            std::env::remove_var("SLURM_NODELIST");
-        }
+        unset_env("SLURM_NODELIST");
         assert_eq!(node_list(), None);
 
         // --- node_list: returns value when set ---
-        unsafe {
-            std::env::set_var("SLURM_NODELIST", "node[001-004]");
-        }
+        set_env("SLURM_NODELIST", "node[001-004]");
         assert_eq!(node_list(), Some("node[001-004]".to_string()));
-        unsafe {
-            std::env::remove_var("SLURM_NODELIST");
-        }
+        unset_env("SLURM_NODELIST");
 
         // --- local_rank: returns None for non-numeric value ---
-        unsafe {
-            std::env::set_var("SLURM_LOCALID", "not_a_number");
-        }
+        set_env("SLURM_LOCALID", "not_a_number");
         assert_eq!(local_rank(), None);
 
         // --- local_rank: parses valid numeric value ---
-        unsafe {
-            std::env::set_var("SLURM_LOCALID", "3");
-        }
+        set_env("SLURM_LOCALID", "3");
         assert_eq!(local_rank(), Some(3));
-        unsafe {
-            std::env::remove_var("SLURM_LOCALID");
-        }
+        unset_env("SLURM_LOCALID");
 
         // --- local_size: non-numeric NTASKS_PER_NODE falls through to TASKS_PER_NODE ---
-        unsafe {
-            std::env::set_var("SLURM_NTASKS_PER_NODE", "garbage");
-            std::env::set_var("SLURM_TASKS_PER_NODE", "6(x3)");
-        }
+        set_env("SLURM_NTASKS_PER_NODE", "garbage");
+        set_env("SLURM_TASKS_PER_NODE", "6(x3)");
         assert_eq!(local_size(), Some(6));
-        unsafe {
-            std::env::remove_var("SLURM_NTASKS_PER_NODE");
-            std::env::remove_var("SLURM_TASKS_PER_NODE");
-        }
+        unset_env("SLURM_NTASKS_PER_NODE");
+        unset_env("SLURM_TASKS_PER_NODE");
 
         // --- num_nodes: returns None for non-numeric value ---
-        unsafe {
-            std::env::set_var("SLURM_NNODES", "not_a_number");
-        }
+        set_env("SLURM_NNODES", "not_a_number");
         assert_eq!(num_nodes(), None);
-        unsafe {
-            std::env::remove_var("SLURM_NNODES");
-        }
+        unset_env("SLURM_NNODES");
 
         // --- cpus_per_task: returns None for non-numeric value ---
-        unsafe {
-            std::env::set_var("SLURM_CPUS_PER_TASK", "abc");
-        }
+        set_env("SLURM_CPUS_PER_TASK", "abc");
         assert_eq!(cpus_per_task(), None);
-        unsafe {
-            std::env::remove_var("SLURM_CPUS_PER_TASK");
-        }
+        unset_env("SLURM_CPUS_PER_TASK");
     }
 }

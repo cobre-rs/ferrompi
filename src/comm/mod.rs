@@ -77,6 +77,9 @@ pub struct Communicator {
 // pattern, eliminating data races under MPI_THREAD_MULTIPLE.
 // See docs/adr/0002-handle-tables.md for the full rationale and design.
 unsafe impl Send for Communicator {}
+// SAFETY: &Communicator exposes only reads of immutable fields and FFI calls
+// whose concurrent use MPI governs by the initialized thread level, and this
+// type does not check that level.
 unsafe impl Sync for Communicator {}
 
 impl Communicator {
@@ -140,6 +143,10 @@ impl Drop for Communicator {
     fn drop(&mut self) {
         // Don't free COMM_WORLD (handle 0)
         if self.handle != 0 {
+            // SAFETY: self.handle is a valid, non-zero communicator handle
+            // registered in the C-side comm table (checked above); Drop takes
+            // &mut self and runs at most once per value, so this cannot
+            // double-free the handle.
             unsafe { ffi::ferrompi_comm_free(self.handle) };
         }
     }

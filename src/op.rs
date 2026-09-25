@@ -115,6 +115,9 @@ impl RegistrySlot {
 // SAFETY: AtomicPtr<()> is Send + Sync by design; raw pointers are wrapped in
 // atomics which provide the necessary synchronisation.
 unsafe impl Send for RegistrySlot {}
+// SAFETY: &RegistrySlot exposes only atomic loads/stores of the two pointer
+// fields; every access goes through AtomicPtr's own synchronisation, so
+// concurrent shared access from multiple threads has no data race.
 unsafe impl Sync for RegistrySlot {}
 
 static REGISTRY: [RegistrySlot; MAX_OPS] = [
@@ -200,6 +203,10 @@ pub unsafe extern "C" fn rust_user_op_invoke(
     // count to reconstruct properly-typed slices.  The adapter must not use
     // .len() as a byte count — it is the MPI element count.
     let invec_bytes: &[u8] = unsafe { std::slice::from_raw_parts(invec.cast::<u8>(), len_usize) };
+    // SAFETY: inoutvec spans `len * size_of::<T>()` bytes at the MPI-provided
+    // address, aliased with no other live reference for the duration of this
+    // call; the adapter casts the pointer and uses len_usize as the element
+    // count, not a byte count.
     let inoutvec_bytes: &mut [u8] =
         unsafe { std::slice::from_raw_parts_mut(inoutvec.cast::<u8>(), len_usize) };
 
@@ -347,6 +354,8 @@ impl<T: MpiDatatype> UserOp<T> {
     {
         // Step 1: allocate a slot in the C-side op table.
         let mut slot: i32 = -1;
+        // SAFETY: slot is a local out-parameter written by ferrompi_op_alloc_slot
+        // before this function reads it below (guarded by the `ret != 0` check).
         let ret = unsafe { ffi::ferrompi_op_alloc_slot(&mut slot) };
         if ret != 0 {
             return Err(Error::Mpi {
@@ -389,6 +398,11 @@ impl<T: MpiDatatype> UserOp<T> {
                 let invec: &[T] = unsafe {
                     std::slice::from_raw_parts(invec_bytes.as_ptr().cast::<T>(), elem_count)
                 };
+                // SAFETY: inoutvec_bytes.as_mut_ptr() points to a valid MPI-provided
+                // buffer of at least elem_count * size_of::<T>() bytes, aliased with
+                // no other live reference; T: MpiDatatype implies T: Copy with stable
+                // layout, and MPI provides properly-aligned buffers for the
+                // registered type. elem_count is MPI's *len, used as element count.
                 let inoutvec: &mut [T] = unsafe {
                     std::slice::from_raw_parts_mut(
                         inoutvec_bytes.as_mut_ptr().cast::<T>(),
@@ -422,11 +436,18 @@ impl<T: MpiDatatype> UserOp<T> {
         // ferrompi_op_set_closure stores the fat-pointer halves into the C-side
         // op_closure_data/op_closure_vtbl arrays so the C trampolines can pass
         // them to rust_user_op_invoke.
+        // SAFETY: slot is in range (checked by ferrompi_op_alloc_slot above);
+        // raw_fat[0]/raw_fat[1] are the two halves of a fat pointer this
+        // function just published into REGISTRY[idx], stored with Release
+        // ordering above so the trampoline observes a consistent pair.
         unsafe {
             ffi::ferrompi_op_set_closure(slot, raw_fat[0].cast(), raw_fat[1].cast());
         }
 
         let mut handle: i32 = -1;
+        // SAFETY: handle is a local out-parameter written by
+        // ferrompi_op_create_user before this function reads it below; slot is
+        // the value ferrompi_op_alloc_slot returned above.
         let ret = unsafe { ffi::ferrompi_op_create_user(slot, commute, &mut handle) };
         if ret != 0 {
             // Rollback: MPI_Op_create failed so no MPI_Op was registered.
@@ -454,6 +475,10 @@ impl<T: MpiDatatype> UserOp<T> {
                 drop(closure);
             }
             // Release the C-side slot without calling MPI_Op_free.
+            // SAFETY: slot is the value ferrompi_op_alloc_slot returned above;
+            // the closure fat pointer stored in it has just been reconstructed
+            // and dropped (or was already null), so no dangling pointer remains
+            // for a later trampoline call to observe.
             unsafe { ffi::ferrompi_op_free_slot_only(slot) };
             return Err(Error::from_code_with_op(ret, "op_create"));
         }

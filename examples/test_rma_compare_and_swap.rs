@@ -64,9 +64,11 @@ fn main() {
         win.fence(WinFenceAssert::default())
             .expect("test 1 closing fence failed");
 
-        // SAFETY: epoch is closed; the result buffer is now populated.
         let mut old = 0i32;
         if let Some(p) = pending {
+            // SAFETY: the preceding fence closed the epoch, so MPI has
+            // populated the result buffer per PendingFetchResult::resolve's
+            // safety contract.
             old = unsafe { p.resolve() };
         }
 
@@ -122,9 +124,11 @@ fn main() {
         win.fence(WinFenceAssert::default())
             .expect("test 2 closing fence failed");
 
-        // SAFETY: epoch is closed; the result buffer is now populated.
         let mut old = 0i32;
         if let Some(p) = pending {
+            // SAFETY: the preceding fence closed the epoch, so MPI has
+            // populated the result buffer per PendingFetchResult::resolve's
+            // safety contract.
             old = unsafe { p.resolve() };
         }
 

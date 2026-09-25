@@ -118,6 +118,9 @@ pub struct Group {
 // Communicator (see src/comm/mod.rs); users must ensure adequate thread
 // support and serialize access when using ThreadLevel::Serialized.
 unsafe impl Send for Group {}
+// SAFETY: &Group exposes only reads of the immutable handle field and FFI
+// calls whose concurrent use MPI governs by the initialized thread level;
+// this type does not itself check that level.
 unsafe impl Sync for Group {}
 
 impl Group {

@@ -11,6 +11,9 @@ use crate::ffi;
 /// Returns (MPI_ERR_FILE, MPI_ERR_INFO, MPI_ERR_WIN) from the C layer.
 fn impl_error_classes() -> (i32, i32, i32) {
     static CLASSES: OnceLock<(i32, i32, i32)> = OnceLock::new();
+    // SAFETY: these three functions take no arguments and return a compile-time
+    // MPI_ERR_* constant; there is no pointer, buffer, or initialization
+    // precondition to uphold.
     *CLASSES.get_or_init(|| unsafe {
         (
             ffi::ferrompi_err_file(),
@@ -313,6 +316,9 @@ impl Error {
         let mut msg_buf = [0u8; 512];
         let mut msg_len: i32 = 0;
 
+        // SAFETY: class and msg_len are local out-parameters; msg_buf is a
+        // local 512-byte buffer and the C layer writes at most msg_buf.len()
+        // bytes into it, reporting the written length through msg_len.
         let ret = unsafe {
             ffi::ferrompi_error_info(
                 code,

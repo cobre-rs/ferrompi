@@ -188,6 +188,7 @@
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
+#![deny(clippy::undocumented_unsafe_blocks)]
 // Clippy suppressions live at the call site (`#[allow(clippy::NAME)]`
 // with a justification comment) rather than crate-wide.
 
@@ -399,6 +400,9 @@ impl Mpi {
         }
 
         let mut provided: i32 = 0;
+        // SAFETY: provided is a local out-parameter written by MPI_Init_thread;
+        // the CAS swap above guarantees this is the only call to MPI_Init_thread
+        // in the process, so there is no concurrent or repeated initialization.
         let ret = unsafe { ffi::ferrompi_init_thread(required as i32, &mut provided) };
 
         if ret != 0 {
@@ -438,6 +442,8 @@ impl Mpi {
     ///
     /// This is a high-resolution timer suitable for benchmarking.
     pub fn wtime() -> f64 {
+        // SAFETY: ferrompi_wtime takes no pointer arguments and touches no
+        // Rust-owned memory; it is a pure read of MPI_Wtime().
         unsafe { ffi::ferrompi_wtime() }
     }
 
@@ -449,6 +455,10 @@ impl Mpi {
         // MPI_MAX_LIBRARY_VERSION_STRING is 8192 in most implementations.
         let mut buf = [0u8; 8192];
         let mut len: i32 = 0;
+        // SAFETY: buf is a local 8192-byte buffer sized to
+        // MPI_MAX_LIBRARY_VERSION_STRING; the C layer writes at most buf.len()
+        // bytes into it and reports the written length through the local `len`
+        // out-parameter.
         let ret = unsafe {
             ffi::ferrompi_get_library_version(buf.as_mut_ptr().cast::<c_char>(), &mut len)
         };
@@ -464,6 +474,9 @@ impl Mpi {
     pub fn version() -> Result<String> {
         let mut buf = [0u8; 256];
         let mut len: i32 = 0;
+        // SAFETY: buf is a local 256-byte buffer, large enough for an MPI
+        // version string ("MPI x.y"); the C layer writes at most buf.len()
+        // bytes into it and reports the written length through `len`.
         let ret = unsafe { ffi::ferrompi_get_version(buf.as_mut_ptr().cast::<c_char>(), &mut len) };
 
         if ret != 0 {
@@ -479,6 +492,8 @@ impl Mpi {
     /// Check if MPI has been initialized.
     pub fn is_initialized() -> bool {
         let mut flag: i32 = 0;
+        // SAFETY: flag is a local out-parameter that ferrompi_initialized writes
+        // before this function reads it below.
         unsafe { ffi::ferrompi_initialized(&mut flag) };
         flag != 0
     }
@@ -486,6 +501,8 @@ impl Mpi {
     /// Check if MPI has been finalized.
     pub fn is_finalized() -> bool {
         let mut flag: i32 = 0;
+        // SAFETY: flag is a local out-parameter that ferrompi_finalized writes
+        // before this function reads it below.
         unsafe { ffi::ferrompi_finalized(&mut flag) };
         flag != 0
     }
@@ -701,6 +718,10 @@ impl Drop for Mpi {
     fn drop(&mut self) {
         // Only finalize if we successfully initialized
         if MPI_INITIALIZED.load(Ordering::SeqCst) {
+            // SAFETY: ferrompi_finalize takes no arguments. MPI_INITIALIZED is
+            // true, so MPI_Init(_thread) succeeded and MPI_Finalize has not yet
+            // been called for this process; the flag is cleared immediately
+            // below so a second Mpi drop cannot finalize twice.
             unsafe {
                 ffi::ferrompi_finalize();
             }

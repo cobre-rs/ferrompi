@@ -30,7 +30,7 @@ pub fn init_mpi_for_bench() -> Mpi {
     // rank 0 writes.
     let rank = mpi.world().rank();
     if rank != 0 {
-        // SAFETY (env mutation): bench binaries are single-threaded at this
+        // SAFETY: bench binaries are single-threaded at this
         // point — Criterion has not yet spawned its measurement threads, and
         // MPI has just been initialized with ThreadLevel::Single.  Setting an
         // environment variable here races with no other thread.

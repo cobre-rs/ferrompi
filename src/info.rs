@@ -69,6 +69,8 @@ impl Info {
     /// ```
     pub fn new() -> Result<Self> {
         let mut handle: i32 = 0;
+        // SAFETY: handle is a local out-parameter written by ferrompi_info_create
+        // before this function reads it below.
         let ret = unsafe { ffi::ferrompi_info_create(&mut handle) };
         Error::check_with_op(ret, "info_create")?;
         Ok(Info {
@@ -130,6 +132,10 @@ impl Info {
             CString::new(key).map_err(|_| Error::Internal("info key contains null byte".into()))?;
         let c_value = CString::new(value)
             .map_err(|_| Error::Internal("info value contains null byte".into()))?;
+        // SAFETY: c_key and c_value are CStrings that outlive this call and are
+        // guaranteed null-terminated with no interior nul (CString::new already
+        // rejected embedded nuls above); self.handle is a valid, non-null info
+        // handle (is_null is checked above).
         let ret = unsafe { ffi::ferrompi_info_set(self.handle, c_key.as_ptr(), c_value.as_ptr()) };
         Error::check_with_op(ret, "info_set")
     }
@@ -169,6 +175,9 @@ impl Info {
         let mut buf = vec![0u8; INFO_VALUE_MAX_LEN as usize];
         let mut valuelen: i32 = INFO_VALUE_MAX_LEN;
         let mut flag: i32 = 0;
+        // SAFETY: c_key is a CString that outlives this call; buf is sized to
+        // INFO_VALUE_MAX_LEN and valuelen is passed in as that capacity, so the
+        // C layer writes at most buf.len() bytes; flag is a local out-parameter.
         let ret = unsafe {
             ffi::ferrompi_info_get(
                 self.handle,

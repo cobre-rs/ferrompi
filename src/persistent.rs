@@ -117,6 +117,10 @@ impl PersistentRequest {
         if self.active {
             return Err(Error::Internal("Request is already active".into()));
         }
+        // SAFETY: self.handle is a valid persistent MPI request handle
+        // registered in the C-side request table by the *_init constructor
+        // that produced this PersistentRequest; self.active is false, so
+        // MPI_Start is not being called on an already-active request.
         let ret = unsafe { ffi::ferrompi_start(self.handle) };
         Error::check_with_op(ret, "start")?;
         self.active = true;
@@ -143,6 +147,10 @@ impl PersistentRequest {
         // by MPI regardless of whether MPI reports an error; re-waiting on it
         // would be a use-after-free of the request handle.
         self.active = false;
+        // SAFETY: self.handle is a valid persistent MPI request handle
+        // registered in the C-side request table; self.active was true on
+        // entry (checked above), so start() was called and MPI holds an
+        // in-flight operation on this handle for ferrompi_wait to complete.
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
         Error::check_with_op(ret, "wait")
     }
@@ -156,6 +164,10 @@ impl PersistentRequest {
             return Ok(true);
         }
         let mut flag: i32 = 0;
+        // SAFETY: self.handle is a valid persistent MPI request handle
+        // registered in the C-side request table; self.active was true on
+        // entry (checked above). flag is a local out-parameter written by
+        // ferrompi_test before this function reads it below.
         let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag) };
         Error::check_with_op(ret, "test")?;
         if flag != 0 {

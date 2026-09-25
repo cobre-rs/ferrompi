@@ -137,6 +137,10 @@ impl Request {
         // by MPI regardless of whether MPI reports an error; re-waiting on it
         // would be a use-after-free of the request handle.
         self.completed = true;
+        // SAFETY: self.handle is a valid MPI request handle registered in the
+        // C-side request table by the nonblocking constructor that produced
+        // this Request; self.completed was false on entry (checked above), so
+        // MPI_Wait has not already consumed this handle.
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
         Error::check_with_op(ret, "wait")
     }
@@ -155,6 +159,10 @@ impl Request {
             return Ok(true);
         }
         let mut flag: i32 = 0;
+        // SAFETY: self.handle is a valid MPI request handle registered in the
+        // C-side request table; self.completed was false on entry (checked
+        // above), so MPI_Test has not already consumed this handle. flag is a
+        // local out-parameter written before this function reads it below.
         let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag) };
         Error::check_with_op(ret, "test")?;
         if flag != 0 {
@@ -203,11 +211,12 @@ impl Request {
         }
         let len = requests.len();
         let mut outcount: i64 = 0;
-        // SAFETY: with_handles / with_index_buf supply valid, appropriately-sized
-        // [i64] handle and [i32] index buffers whose lengths match `count`;
-        // outcount is a valid stack-allocated output parameter.
         let (ret, completed) = with_handles(requests, |handles| {
             with_index_buf(len, |indices| {
+                // SAFETY: with_handles / with_index_buf supply valid,
+                // appropriately-sized [i64] handle and [i32] index buffers whose
+                // lengths match `count`; outcount is a valid stack-allocated
+                // output parameter.
                 let ret = unsafe {
                     ffi::ferrompi_waitsome(
                         handles.len() as i64,
@@ -287,11 +296,12 @@ impl Request {
         }
         let len = requests.len();
         let mut outcount: i64 = 0;
-        // SAFETY: with_handles / with_index_buf supply valid, appropriately-sized
-        // [i64] handle and [i32] index buffers whose lengths match `count`;
-        // outcount is a valid stack-allocated output parameter.
         let (ret, completed) = with_handles(requests, |handles| {
             with_index_buf(len, |indices| {
+                // SAFETY: with_handles / with_index_buf supply valid,
+                // appropriately-sized [i64] handle and [i32] index buffers whose
+                // lengths match `count`; outcount is a valid stack-allocated
+                // output parameter.
                 let ret = unsafe {
                     ffi::ferrompi_testsome(
                         handles.len() as i64,
