@@ -1,7 +1,7 @@
 //! Persistent point-to-point (MPI 1.1+) and persistent collective operations (MPI 4.0+).
 
 use crate::comm::Communicator;
-use crate::datatype::MpiDatatype;
+use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::persistent::PersistentRequest;
@@ -46,20 +46,13 @@ impl Communicator {
         tag: i32,
     ) -> Result<PersistentRequest> {
         let mut request_handle: i64 = 0;
+        let (p, n, dt) = buf(data);
+        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
+        // is freed and does not borrow it; keeping `data` alive and untouched between
+        // start() and completion is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid slice of T; cast to *const c_void is the standard
-            // pattern for MPI send buffers. The caller is responsible for not modifying
-            // data while the request is active (between start and wait). The slice must
-            // remain valid for the entire lifetime of the returned PersistentRequest.
-            ffi::ferrompi_send_init(
-                data.as_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                dest,
-                tag,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_send_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "send_init")?;
         Ok(PersistentRequest::new(request_handle))
@@ -115,21 +108,13 @@ impl Communicator {
         tag: i32,
     ) -> Result<PersistentRequest> {
         let mut request_handle: i64 = 0;
+        let (p, n, dt) = buf(data);
+        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
+        // is freed and does not borrow it; keeping `data` alive and untouched between
+        // start() and completion is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid slice of T; cast to *const c_void is the standard
-            // pattern for MPI send buffers. The caller is responsible for not modifying
-            // data while the request is active (between start and wait). The slice must
-            // remain valid for the entire lifetime of the returned PersistentRequest.
-            // A buffer must be attached via Mpi::buffer_attach before start() is called.
-            ffi::ferrompi_bsend_init(
-                data.as_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                dest,
-                tag,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_bsend_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "bsend_init")?;
         Ok(PersistentRequest::new(request_handle))
@@ -189,22 +174,13 @@ impl Communicator {
         tag: i32,
     ) -> Result<PersistentRequest> {
         let mut request_handle: i64 = 0;
+        let (p, n, dt) = buf(data);
+        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
+        // is freed and does not borrow it; keeping `data` alive and untouched between
+        // start() and completion is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid slice of T; cast to *const c_void is the standard
-            // pattern for MPI send buffers. The caller is responsible for not modifying
-            // data while the request is active (between start and wait). The slice must
-            // remain valid for the entire lifetime of the returned PersistentRequest.
-            // Additionally, per the MPI ready-mode safety contract, the caller must
-            // ensure the matching receive is already posted before calling start().
-            ffi::ferrompi_rsend_init(
-                data.as_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                dest,
-                tag,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_rsend_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "rsend_init")?;
         Ok(PersistentRequest::new(request_handle))
@@ -254,20 +230,13 @@ impl Communicator {
         tag: i32,
     ) -> Result<PersistentRequest> {
         let mut request_handle: i64 = 0;
+        let (p, n, dt) = buf(data);
+        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
+        // is freed and does not borrow it; keeping `data` alive and untouched between
+        // start() and completion is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid slice of T; cast to *const c_void is the standard
-            // pattern for MPI send buffers. The caller is responsible for not modifying
-            // data while the request is active (between start and wait). The slice must
-            // remain valid for the entire lifetime of the returned PersistentRequest.
-            ffi::ferrompi_ssend_init(
-                data.as_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                dest,
-                tag,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_ssend_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "ssend_init")?;
         Ok(PersistentRequest::new(request_handle))
@@ -306,20 +275,13 @@ impl Communicator {
         tag: i32,
     ) -> Result<PersistentRequest> {
         let mut request_handle: i64 = 0;
+        let (p, n, dt) = buf_mut(data);
+        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
+        // is freed and does not borrow it; keeping `data` alive and untouched between
+        // start() and completion is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of T; cast to
-            // *mut c_void is the standard pattern for MPI receive buffers. The buffer
-            // must remain valid for the entire lifetime of the returned PersistentRequest;
-            // the caller must call wait() after each start() before accessing the data.
-            ffi::ferrompi_recv_init(
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                source,
-                tag,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_recv_init(p, n, dt, source, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "recv_init")?;
         Ok(PersistentRequest::new(request_handle))
@@ -358,20 +320,13 @@ impl Communicator {
         root: i32,
     ) -> Result<PersistentRequest> {
         let mut request_handle: i64 = 0;
-        let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of T (Rust borrow rules
-            // prevent aliasing). T::TAG matches T's MPI datatype per ADR-0003. The caller must
-            // keep `data` alive for the entire lifetime of the returned PersistentRequest
-            // (including all start/wait cycles) per ADR-0004 §"Buffer-lifetime invariant".
-            ffi::ferrompi_bcast_init(
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                root,
-                self.handle,
-                &mut request_handle,
-            )
-        };
+        let (p, n, dt) = buf_mut(data);
+        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
+        // is freed and does not borrow it; keeping `data` alive and untouched between
+        // start() and completion is the caller's documented obligation, which this
+        // signature does not enforce.
+        let ret =
+            unsafe { ffi::ferrompi_bcast_init(p, n, dt, root, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "bcast_init")?;
         Ok(PersistentRequest::new(request_handle))
     }
@@ -404,21 +359,15 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let mut request_handle: i64 = 0;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]). The returned PersistentRequest records both pointers until the
+        // request is freed and does not borrow either slice; keeping both alive and
+        // untouched between start() and completion is the caller's documented obligation,
+        // which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() verified above.
-            // T::TAG matches T's MPI datatype per ADR-0003. Both slices must remain alive for
-            // the entire lifetime of the returned PersistentRequest per ADR-0004
-            // §"Buffer-lifetime invariant".
-            ffi::ferrompi_allreduce_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_allreduce_init(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "allreduce_init")?;
         Ok(PersistentRequest::new(request_handle))
@@ -433,17 +382,19 @@ impl Communicator {
         op: ReduceOp,
     ) -> Result<PersistentRequest> {
         let mut request_handle: i64 = 0;
+        let (p, n, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
+        // this NULL is unambiguous); ferrompi_allreduce_init maps it to MPI_IN_PLACE, so data
+        // serves as both send and receive buffer. The returned PersistentRequest records
+        // `data`'s pointer until the request is freed and does not borrow it; keeping it
+        // alive and untouched between start() and completion is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of T. NULL as sendbuf is
-            // the shim's in-place marker, which ferrompi_allreduce_init maps to MPI_IN_PLACE, so
-            // data serves as both send and receive buffer. T::TAG matches T's MPI datatype per
-            // ADR-0003. `data` must remain alive for the entire lifetime of the returned
-            // PersistentRequest per ADR-0004 §"Buffer-lifetime invariant".
             ffi::ferrompi_allreduce_init(
                 std::ptr::null(),
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 op as i32,
                 self.handle,
                 &mut request_handle,
@@ -490,17 +441,20 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let mut request_handle: i64 = 0;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]); recv is ignored by MPI at non-root. The returned
+        // PersistentRequest records both pointers until the request is freed and does not
+        // borrow either slice; keeping both alive and untouched between start() and
+        // completion is the caller's documented obligation, which this signature does not
+        // enforce.
         let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() verified above.
-            // T::TAG matches T's MPI datatype per ADR-0003. Both slices must remain alive for
-            // the entire lifetime of the returned PersistentRequest per ADR-0004
-            // §"Buffer-lifetime invariant". recv is ignored by MPI at non-root.
             ffi::ferrompi_reduce_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
+                sp,
+                rp,
+                n,
+                dt,
                 op as i32,
                 root,
                 self.handle,
@@ -521,22 +475,16 @@ impl Communicator {
         root: i32,
     ) -> Result<PersistentRequest> {
         let mut request_handle: i64 = 0;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]); recv is ignored by MPI at
+        // non-root. The root-side receive-length relation (recv.len() >= send.len() * size)
+        // is not checked by this function. The returned PersistentRequest records both
+        // pointers until the request is freed and does not borrow either slice; keeping both
+        // alive and untouched between start() and completion is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). recv is ignored by MPI at non-root.
-            // T::TAG matches T's MPI datatype per ADR-0003. Both slices must remain alive for
-            // the entire lifetime of the returned PersistentRequest per ADR-0004
-            // §"Buffer-lifetime invariant".
-            ffi::ferrompi_gather_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                root,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_gather_init(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "gather_init")?;
         Ok(PersistentRequest::new(request_handle))
@@ -574,21 +522,16 @@ impl Communicator {
         root: i32,
     ) -> Result<PersistentRequest> {
         let mut request_handle: i64 = 0;
+        let (sp, _, _) = buf(send);
+        let (rp, n, dt) = buf_mut(recv);
+        // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
+        // &mut [T]). The root-side send-length relation (send.len() >= recv.len() * size)
+        // is not checked by this function. The returned PersistentRequest records both
+        // pointers until the request is freed and does not borrow either slice; keeping both
+        // alive and untouched between start() and completion is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: send is a valid shared slice (ignored by MPI at non-root) and recv is a
-            // valid exclusive slice of T; they cannot alias (Rust borrow rules). T::TAG matches
-            // T's MPI datatype per ADR-0003. Both slices must remain alive for the entire
-            // lifetime of the returned PersistentRequest per ADR-0004 §"Buffer-lifetime invariant".
-            ffi::ferrompi_scatter_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                T::TAG as i32,
-                root,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_scatter_init(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "scatter_init")?;
         Ok(PersistentRequest::new(request_handle))
@@ -624,20 +567,16 @@ impl Communicator {
         recv: &mut [T],
     ) -> Result<PersistentRequest> {
         let mut request_handle: i64 = 0;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). The every-rank
+        // receive-length relation (recv.len() >= send.len() * size) is not checked by this
+        // function. The returned PersistentRequest records both pointers until the request
+        // is freed and does not borrow either slice; keeping both alive and untouched
+        // between start() and completion is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). T::TAG matches T's MPI datatype per ADR-0003.
-            // Both slices must remain alive for the entire lifetime of the returned
-            // PersistentRequest per ADR-0004 §"Buffer-lifetime invariant".
-            ffi::ferrompi_allgather_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_allgather_init(sp, n, rp, n, dt, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "allgather_init")?;
         Ok(PersistentRequest::new(request_handle))
@@ -678,21 +617,15 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let mut request_handle: i64 = 0;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]). The returned PersistentRequest records both pointers until the
+        // request is freed and does not borrow either slice; keeping both alive and
+        // untouched between start() and completion is the caller's documented obligation,
+        // which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() verified above.
-            // T::TAG matches T's MPI datatype per ADR-0003. Both slices must remain alive for
-            // the entire lifetime of the returned PersistentRequest per ADR-0004
-            // §"Buffer-lifetime invariant".
-            ffi::ferrompi_scan_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_scan_init(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "scan_init")?;
         Ok(PersistentRequest::new(request_handle))
@@ -733,21 +666,16 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let mut request_handle: i64 = 0;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]). MPI leaves recv undefined on rank 0, documented above. The
+        // returned PersistentRequest records both pointers until the request is freed and
+        // does not borrow either slice; keeping both alive and untouched between start() and
+        // completion is the caller's documented obligation, which this signature does not
+        // enforce.
         let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() verified above.
-            // T::TAG matches T's MPI datatype per ADR-0003. Both slices must remain alive for
-            // the entire lifetime of the returned PersistentRequest per ADR-0004
-            // §"Buffer-lifetime invariant". Note: MPI leaves recv undefined on rank 0.
-            ffi::ferrompi_exscan_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_exscan_init(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "exscan_init")?;
         Ok(PersistentRequest::new(request_handle))
@@ -790,20 +718,22 @@ impl Communicator {
         if size == 0 || send.len() % size != 0 {
             return Err(Error::InvalidBuffer);
         }
-        let count_per_rank = send.len() / size;
+        let count_per_rank = (send.len() / size) as i64;
         let mut request_handle: i64 = 0;
+        let (sp, _, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len() and
+        // divisibility by size are both verified above. The returned PersistentRequest
+        // records both pointers until the request is freed and does not borrow either
+        // slice; keeping both alive and untouched between start() and completion is the
+        // caller's documented obligation, which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() and divisibility
-            // by size are both verified above. T::TAG matches T's MPI datatype per ADR-0003.
-            // Both slices must remain alive for the entire lifetime of the returned
-            // PersistentRequest per ADR-0004 §"Buffer-lifetime invariant".
             ffi::ferrompi_alltoall_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                count_per_rank as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                count_per_rank as i64,
-                T::TAG as i32,
+                sp,
+                count_per_rank,
+                rp,
+                count_per_rank,
+                dt,
                 self.handle,
                 &mut request_handle,
             )
@@ -849,17 +779,19 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let mut request_handle: i64 = 0;
+        let (sp, _, _) = buf(send);
+        let (rp, n, dt) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len() *
+        // size is verified above. The returned PersistentRequest records both pointers until
+        // the request is freed and does not borrow either slice; keeping both alive and
+        // untouched between start() and completion is the caller's documented obligation,
+        // which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T;
-            // they cannot alias (Rust borrow rules). send.len() == recv.len() * size is verified
-            // above. T::TAG matches T's MPI datatype per ADR-0003. Both slices must remain alive
-            // for the entire lifetime of the returned PersistentRequest per ADR-0004
-            // §"Buffer-lifetime invariant".
             ffi::ferrompi_reduce_scatter_block_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                T::TAG as i32,
+                sp,
+                rp,
+                n,
+                dt,
                 op as i32,
                 self.handle,
                 &mut request_handle,
@@ -915,19 +847,22 @@ impl Communicator {
         }
         let recvcount = (data.len() / size) as i64;
         let mut request_handle: i64 = 0;
+        let (p, _, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
+        // this NULL is unambiguous); ferrompi_gather_init maps it to MPI_IN_PLACE, so data
+        // serves as both root's send contribution and the receive buffer. data.len() % size
+        // == 0 is checked above, and the guard above guarantees self.rank() == root, the
+        // only rank MPI_IN_PLACE is valid for in MPI_Gather_init. The returned
+        // PersistentRequest records `data`'s pointer until the request is freed and does not
+        // borrow it; keeping it alive and untouched between start() and completion is the
+        // caller's documented obligation, which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice. NULL as sendbuf is the
-            // shim's in-place marker, which ferrompi_gather_init maps to MPI_IN_PLACE; data
-            // serves as both root's send contribution and the receive buffer. The guard above
-            // guarantees self.rank() == root, which is the only rank MPI_IN_PLACE is valid for
-            // in MPI_Gather_init. The buffer must remain valid for the lifetime of the returned
-            // PersistentRequest; the caller must call wait() after each start().
             ffi::ferrompi_gather_init(
                 std::ptr::null(),
                 0,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
+                p,
                 recvcount,
-                T::TAG as i32,
+                dt,
                 root,
                 self.handle,
                 &mut request_handle,
@@ -979,18 +914,21 @@ impl Communicator {
         }
         let recvcount = (data.len() / size) as i64;
         let mut request_handle: i64 = 0;
+        let (p, _, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
+        // this NULL is unambiguous); ferrompi_allgather_init maps it to MPI_IN_PLACE.
+        // data.len() % size == 0 is checked above; each rank's slot (at offset
+        // rank*recvcount) must be pre-written by the caller before each start(). The
+        // returned PersistentRequest records `data`'s pointer until the request is freed and
+        // does not borrow it; keeping it alive and untouched between start() and completion
+        // is the caller's documented obligation, which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice. NULL as sendbuf is the
-            // shim's in-place marker, which ferrompi_allgather_init maps to MPI_IN_PLACE. Each
-            // rank's contribution (at offset rank*recvcount) must be pre-written by the caller
-            // before each start(). The buffer must remain valid for the lifetime of the
-            // returned PersistentRequest.
             ffi::ferrompi_allgather_init(
                 std::ptr::null(),
                 0,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
+                p,
                 recvcount,
-                T::TAG as i32,
+                dt,
                 self.handle,
                 &mut request_handle,
             )
@@ -1045,40 +983,32 @@ impl Communicator {
     ) -> Result<PersistentRequest> {
         let is_root = self.rank() == root;
         let size = self.size() as usize;
-        let (sendbuf, sendcount, recvbuf, recvcount) = if is_root {
+        let (sendbuf, sendcount, recvbuf, recvcount, dt) = if is_root {
             if size == 0 || data.len() % size != 0 {
                 return Err(Error::InvalidBuffer);
             }
             let per = (data.len() / size) as i64;
-            (
-                data.as_ptr().cast::<std::ffi::c_void>(),
-                per,
-                std::ptr::null_mut::<std::ffi::c_void>(),
-                0i64,
-            )
+            let (sp, _, dt) = buf(data);
+            (sp, per, std::ptr::null_mut::<std::ffi::c_void>(), 0i64, dt)
         } else {
-            (
-                std::ptr::null::<std::ffi::c_void>(),
-                0i64,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-            )
+            let (rp, rn, dt) = buf_mut(data);
+            (std::ptr::null::<std::ffi::c_void>(), 0i64, rp, rn, dt)
         };
         let mut request_handle: i64 = 0;
+        // SAFETY: at root, recvbuf is NULL, the in-place marker (buf's pointer is never null,
+        // so this NULL is unambiguous); ferrompi_scatter_init maps it to MPI_IN_PLACE so
+        // root's own slot is retained. data.len() % size == 0 is checked above. At non-root,
+        // sendbuf is null, which the MPI standard ignores on non-root scatter. The returned
+        // PersistentRequest records `data`'s pointer until the request is freed and does not
+        // borrow it; keeping it alive and untouched between start() and completion is the
+        // caller's documented obligation, which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: At root, sendbuf points to valid data of length sendcount*size elements
-            // (guaranteed by the divisibility check above); recvbuf is NULL, the shim's in-place
-            // marker, which ferrompi_scatter_init maps to MPI_IN_PLACE so root's own slot is
-            // retained. At non-root, recvbuf points to a valid mutable slice of length recvcount
-            // elements; sendbuf is null (MPI standard ignores sendbuf on non-root scatter). Both
-            // pointers are cast to *const/*mut c_void as required by the C FFI. The buffer must
-            // remain valid for the lifetime of the returned PersistentRequest.
             ffi::ferrompi_scatter_init(
                 sendbuf,
                 sendcount,
                 recvbuf,
                 recvcount,
-                T::TAG as i32,
+                dt,
                 root,
                 self.handle,
                 &mut request_handle,
@@ -1133,18 +1063,21 @@ impl Communicator {
         }
         let recvcount = (data.len() / size) as i64;
         let mut request_handle: i64 = 0;
+        let (p, _, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
+        // this NULL is unambiguous); ferrompi_alltoall_init maps it to MPI_IN_PLACE.
+        // data.len() % size == 0 is checked above; the caller must pre-write each slot
+        // before each start() call. The returned PersistentRequest records `data`'s pointer
+        // until the request is freed and does not borrow it; keeping it alive and untouched
+        // between start() and completion is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of length recvcount*size
-            // elements (guaranteed by the divisibility check above). NULL as sendbuf is the
-            // shim's in-place marker, which ferrompi_alltoall_init maps to MPI_IN_PLACE; the
-            // caller must pre-write each slot before each start() call. The buffer must remain
-            // valid for the lifetime of the returned PersistentRequest.
             ffi::ferrompi_alltoall_init(
                 std::ptr::null(),
                 0,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
+                p,
                 recvcount,
-                T::TAG as i32,
+                dt,
                 self.handle,
                 &mut request_handle,
             )
