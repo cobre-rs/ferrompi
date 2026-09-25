@@ -45,7 +45,7 @@ fn bench_iterative_allreduce(c: &mut Criterion, world: &Communicator) {
 
     // ── Persistent benchmark ──────────────────────────────────────────────────
     // The PersistentRequest is created once, outside b.iter, so setup cost is
-    // not included in the per-sample measurement — matching the ticket spec.
+    // not included in the per-sample measurement.
     let mut persistent = world
         .allreduce_init(&send, &mut recv, ReduceOp::Sum)
         .unwrap();

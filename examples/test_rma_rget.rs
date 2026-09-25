@@ -38,7 +38,7 @@ fn main() {
     //   Rank 0: lock(Shared, rank=1) → rget(&mut buf, 1, 0, 4)
     //           → req.wait() → assert buf == [100, 200, 300, 400]
     //           → drop guard (unlock)
-    //   All:    sentinel allreduce before exit
+    //   All:    `common::check` verdict
     // ========================================================================
     {
         const N: usize = 4;

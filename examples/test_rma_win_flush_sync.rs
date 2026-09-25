@@ -1,8 +1,7 @@
 //! Integration test for Win::flush_local / flush_local_all / sync helpers.
 //!
-//! Verifies that the three local-completion helpers introduced in ticket-056
-//! compile and run correctly without issuing any RMA data operations.
-//! Data-movement tests are deferred to tickets 034 / 057–062.
+//! Verifies that the three local-completion helpers compile and run
+//! correctly without issuing any RMA data operations.
 //!
 //! Test matrix (all on a 2-rank world):
 //!

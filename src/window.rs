@@ -789,13 +789,8 @@ impl<T> Drop for PendingFetchResult<T> {
     }
 }
 
-/// Tracks whether the local buffer is caller-supplied or MPI-managed.
-///
-/// This controls `Drop` semantics: in both cases `MPI_Win_free` is called
-/// (the MPI standard says the user buffer is left alone for `Win_create`,
-/// while MPI-allocated memory is freed for `Win_allocate`), so the C layer
-/// handles the distinction. The variant is preserved for clarity and future
-/// introspection.
+/// Whether a window's local memory is caller-supplied (`Win::create`) or
+/// MPI-allocated (`Win::allocate`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WinKind {
     /// Buffer was supplied by the caller (`Win::create`). The user owns the
@@ -858,13 +853,6 @@ pub struct Win<'a, T: MpiDatatype> {
     local_len: usize,
     /// Number of processes in the window's communicator.
     comm_size: i32,
-    /// Whether the buffer is caller-supplied or MPI-managed.
-    ///
-    /// Preserved for clarity and future introspection (e.g., epoch helpers
-    /// in tickets 053–056 may expose this). The field is not read today
-    /// because Drop delegates buffer cleanup entirely to MPI_Win_free.
-    #[allow(dead_code)]
-    kind: WinKind,
     /// Captures the `'a` lifetime so the borrow checker enforces that a
     /// caller-supplied buffer outlives the `Win`. For `Win::allocate` (which
     /// uses `'static`) this is a zero-sized phantom that imposes no constraint.
@@ -943,7 +931,6 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
             local_ptr,
             local_len: buf.len(),
             comm_size: comm.size(),
-            kind: WinKind::Created,
             _marker: std::marker::PhantomData,
         })
     }
@@ -1022,7 +1009,6 @@ impl<T: MpiDatatype> Win<'static, T> {
             local_ptr,
             local_len: local_count,
             comm_size: comm.size(),
-            kind: WinKind::Allocated,
             _marker: std::marker::PhantomData,
         })
     }
@@ -1068,8 +1054,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// Get the raw MPI window handle.
     ///
     /// Provided for advanced use cases where direct access to the underlying
-    /// MPI window handle is needed (e.g., custom FFI calls or epoch helpers
-    /// from tickets 053–056).
+    /// MPI window handle is needed (e.g., custom FFI calls).
     pub fn raw_handle(&self) -> i32 {
         self.win_handle
     }

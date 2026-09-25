@@ -329,7 +329,7 @@ pub enum ReduceOp {
     MinLoc = 11,
     /// Replace the target buffer with the source value (`MPI_REPLACE`).
     ///
-    /// Only valid for `MPI_Accumulate`-family operations (Epic 7). Passing to
+    /// Only valid for `MPI_Accumulate`-family operations. Passing to
     /// `allreduce`, `reduce`, `scan`, etc. returns `MPI_ERR_OP` from MPI.
     ///
     /// This variant is only present when the `rma` feature is enabled.
@@ -337,7 +337,7 @@ pub enum ReduceOp {
     Replace = 12,
     /// No-op: leaves the target buffer unchanged (`MPI_NO_OP`).
     ///
-    /// Only valid for `MPI_Accumulate`-family operations (Epic 7). Passing to
+    /// Only valid for `MPI_Accumulate`-family operations. Passing to
     /// `allreduce`, `reduce`, `scan`, etc. returns `MPI_ERR_OP` from MPI.
     ///
     /// # Compile-time availability

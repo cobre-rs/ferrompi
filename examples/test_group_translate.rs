@@ -1,6 +1,6 @@
 //! Integration test for `Group::translate_ranks`.
 //!
-//! Exercises the acceptance criteria from ticket-049:
+//! Checks:
 //!
 //! 1. `gw.translate_ranks(&[0, 1, 2, 3], &gsub)` where `gsub = gw.include(&[1, 3])`
 //!    → `[None, Some(0), None, Some(1)]`.

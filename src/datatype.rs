@@ -61,8 +61,8 @@ mod sealed_byte {
 
 /// Internal module to seal [`AtomicMpiDatatype`] — a separate seal for types
 /// eligible for `MPI_Compare_and_swap` (integer and byte types only).
+#[cfg(feature = "rma")]
 mod sealed_atomic {
-    #[allow(dead_code)]
     pub trait Sealed {}
 }
 
@@ -183,9 +183,8 @@ impl_mpi_datatype!(u64, DatatypeTag::U64);
 ///
 /// Use these types exclusively with [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed) and
 /// [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) / [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc). They are **not** valid for
-/// `broadcast`, `send`, `recv`, or other collectives (MPI treats them as
-/// opaque structure types that require `MPI_Type_commit`; ferrompi does not
-/// yet manage committed derived types — that is Epic 6).
+/// `broadcast`, `send`, `recv`, or other collectives: they implement
+/// [`MpiIndexedDatatype`], not [`MpiDatatype`], which those APIs require.
 ///
 /// # Example
 ///

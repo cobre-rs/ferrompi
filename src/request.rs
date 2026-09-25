@@ -34,7 +34,7 @@ pub(crate) fn with_handles<E, R>(
 }
 
 /// Run `f` with a zeroed `i32` index scratch buffer of length `len`,
-/// stack-allocated when small (PERF-03). Used for the `*some` output indices.
+/// stack-allocated when small. Used for the `*some` output indices.
 #[inline]
 fn with_index_buf<R>(len: usize, f: impl FnOnce(&mut [i32]) -> R) -> R {
     if len <= HANDLE_STACK_CAP {
@@ -78,9 +78,6 @@ fn with_index_buf<R>(len: usize, f: impl FnOnce(&mut [i32]) -> R) -> R {
 /// `break`, or a panic unwind — prefer calling `wait()` or `test()` explicitly
 /// so that failure modes remain observable.** See also the migration guide note
 /// in [`doc::migrating_from_rsmpi`](crate::doc::migrating_from_rsmpi).
-///
-/// A `MPI_Cancel`-then-`MPI_Wait`-with-timeout approach to make drop non-blocking
-/// is under consideration and planned for v0.5.
 ///
 /// # Example
 ///
@@ -455,9 +452,6 @@ impl Drop for Request {
     /// is the only guard that prevents a double-wait here. Any refactoring of
     /// `wait()` must preserve that assignment, or this `Drop` impl becomes
     /// unsound (double-freeing the request handle).
-    ///
-    /// The `MPI_Cancel`-then-`MPI_Wait`-with-timeout alternative is deferred
-    /// to v0.5 (see ADR-0004 §"Drop behavior for nonblocking Request").
     fn drop(&mut self) {
         if !self.completed {
             // SAFETY: self.handle is a valid MPI request handle registered in the
@@ -489,7 +483,7 @@ mod tests {
     #[test]
     fn wait_when_already_completed_returns_ok() {
         // wait() takes self by value (consuming).
-        // With completed: true, it returns Ok(()) on line 63 before any FFI.
+        // With completed: true, it returns Ok(()) before any FFI call.
         // Drop then runs, but !self.completed is false, so Drop is a no-op.
         let req = Request {
             handle: 0,

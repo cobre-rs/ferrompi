@@ -164,7 +164,7 @@ fn main() {
     //
     // Rank 0 sends 1 Pair element; rank 1 posts a recv with a 0-element buffer.
     // MPI must return an error (MPI_ERR_TRUNCATE or another class — both are
-    // accepted per the acceptance criteria).
+    // accepted).
     // ========================================================================
     {
         let dt = make_pair_datatype();

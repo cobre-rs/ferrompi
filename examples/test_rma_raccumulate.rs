@@ -47,7 +47,7 @@ fn main() {
     //           → drop guard  (remote completion — visible at rank 1)
     //   All:    barrier
     //   Rank 1: assert local window == [11, 22, 33, 44]
-    //   All:    sentinel allreduce before exit
+    //   All:    `common::check` verdict
     // ========================================================================
     const N: usize = 4;
     let mut win = Win::<i32>::allocate(&world, N).expect("Win::allocate failed");

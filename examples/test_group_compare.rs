@@ -1,6 +1,6 @@
 //! Integration test for `Group::compare` and `GroupComparison`.
 //!
-//! Exercises all four acceptance criteria from ticket-048:
+//! Checks:
 //!
 //! 1. `include(&[1, 2])` vs `include(&[2, 1])` — same members, different
 //!    ordering → `Similar`.  Using reversed ranks forces MPI_SIMILAR even on

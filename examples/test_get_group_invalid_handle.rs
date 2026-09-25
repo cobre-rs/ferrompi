@@ -1,13 +1,9 @@
 //! Integration test for the corrected `get_group` sentinel contract.
 //!
 //! Calls `ferrompi_group_size` directly via `extern "C"` with an out-of-range
-//! group handle (999), which must NOT return `MPI_SUCCESS`.  Before ticket-012,
-//! `get_group` returned `MPI_GROUP_EMPTY` for invalid handles, so `group_size`
-//! would silently succeed with size=0.  After the fix it returns
-//! `MPI_GROUP_NULL`, and MPI itself returns `MPI_ERR_GROUP`.
-//!
-//! Acceptance criterion (ticket-012): the call returns a non-zero MPI error
-//! code that maps to `MpiErrorClass::Group` or `MpiErrorClass::Arg`.
+//! group handle (999), which must NOT return `MPI_SUCCESS`. An out-of-range
+//! handle yields `MPI_GROUP_NULL`, so `MPI_Group_size` returns a non-zero
+//! error code that maps to `MpiErrorClass::Group` or `MpiErrorClass::Arg`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_get_group_invalid_handle
 // mpi-test: np=2
@@ -39,8 +35,8 @@ fn main() {
     // ========================================================================
     // Test: ferrompi_group_size with an out-of-range handle returns an error
     //
-    // Handle 999 is well past MAX_GROUPS (64).  After ticket-012 get_group
-    // returns MPI_GROUP_NULL for this input, and MPI_Group_size returns
+    // Handle 999 is well past MAX_GROUPS (64), so get_group returns
+    // MPI_GROUP_NULL for this input, and MPI_Group_size returns
     // MPI_ERR_GROUP (or similar implementation-specific error).
     // ========================================================================
 

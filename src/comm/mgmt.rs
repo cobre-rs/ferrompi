@@ -52,7 +52,7 @@ impl Communicator {
     /// Returns a [`Group`] containing all processes in this communicator.
     /// Use [`Group::include`] or [`Group::exclude`] on the returned group
     /// to derive sub-groups, which can then be used with
-    /// `MPI_Comm_create_group` (a future epic).
+    /// [`Communicator::create_from_group`](Self::create_from_group).
     ///
     /// # Errors
     ///

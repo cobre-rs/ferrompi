@@ -2,7 +2,7 @@
 //!
 //! Verifies that `Win::lock`, `Win::lock_all`, `WinLockGuard::flush`, and
 //! `WinLockAllGuard::flush` / `flush_all` work correctly without issuing any
-//! RMA data operations. Data-movement tests are deferred to ticket-034 / 057–058.
+//! RMA data operations.
 //!
 //! Test matrix (all on a 2-rank world):
 //!

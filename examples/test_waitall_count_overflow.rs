@@ -5,8 +5,8 @@
 //! so that no real buffer allocation is required.  Both ranks must observe
 //! `MPI_ERR_COUNT` (mapped to `MpiErrorClass::Count`) and exit 0.
 //!
-//! This test verifies ticket-011: the overflow guard must fire BEFORE any
-//! `malloc` call, returning `MPI_ERR_COUNT` without allocating memory.
+//! The overflow guard must fire before any `malloc` call, returning
+//! `MPI_ERR_COUNT` without allocating memory.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_waitall_count_overflow
 // mpi-test: np=2

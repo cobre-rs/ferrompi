@@ -54,12 +54,8 @@ fn main() {
         let total_posted = requests.len();
         let mut completions = 0usize;
 
-        // Drive completions with wait_any; remove completed entries by swap-remove
-        // so the vector shrinks naturally. We track original indices by keeping a
-        // parallel index map so that wait_any indices stay valid after removals.
-        //
-        // Simpler approach matching the ticket spec: loop until the vec is empty,
-        // using swap-remove on each returned index.
+        // Loop until the vec is empty: wait_any returns an index into the
+        // current vec, then swap_remove removes that entry.
         while !requests.is_empty() {
             let idx = Request::wait_any(&mut requests)
                 .expect("wait_any failed")
