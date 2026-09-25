@@ -211,7 +211,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | BLT-16 | Benches measuring nothing; duplicated bench protocol | 210 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-20 | Six copies of the slot-claim loop | 70 | superseded by ARC-01 | open |
 | BLT-21 | Process artifacts, stale line refs, expired promises in comments | 45 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
-| BLT-23 | `Group::undefined()` FFI call returning literal −1 | 35 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| BLT-23 | `Group::undefined()` FFI call returning literal −1 | 35 | 0.5.x† | fixed (e874118) |
 | BLT-25 | Dead C branches (errhandler install) | 30 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-26 | `const _` Send/Sync asserts beside `unsafe impl` | 27 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-27 | Dead `ferrompi_init`; module-wide `allow(dead_code)` | 25 | 0.5.x† | fixed (3cde221) |
