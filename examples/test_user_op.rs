@@ -9,6 +9,8 @@
 
 use ferrompi::{Mpi, ReduceOp, UserOp};
 
+mod common;
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -207,24 +209,5 @@ fn main() {
         }
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — gate process::exit so no rank exits early.
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    if global_ok == 0 {
-        if rank == 0 {
-            eprintln!("FAIL: at least one rank failed a UserOp assertion");
-        }
-        std::process::exit(1);
-    }
-
-    if rank == 0 {
-        println!();
-        println!("========================================");
-        println!("All UserOp tests passed!");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_user_op");
 }

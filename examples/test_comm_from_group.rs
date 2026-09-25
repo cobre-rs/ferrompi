@@ -16,6 +16,8 @@
 
 use ferrompi::{Mpi, ReduceOp};
 
+mod common;
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -64,7 +66,8 @@ fn main() {
                 // Participate in subsequent collective calls with fallback.
                 // We cannot join sub-comm collectives without a comm, so we
                 // skip them and let the sentinel allreduce catch the failure.
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                let ok = local_ok as i32;
+                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
                 std::process::exit(1);
             }
         };
@@ -116,24 +119,5 @@ fn main() {
         }
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — gate process::exit so no rank exits early.
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    if global_ok == 0 {
-        if rank == 0 {
-            eprintln!("FAIL: at least one rank failed a create_from_group assertion");
-        }
-        std::process::exit(1);
-    }
-
-    if rank == 0 {
-        println!();
-        println!("========================================");
-        println!("All create_from_group tests passed!");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_comm_from_group");
 }

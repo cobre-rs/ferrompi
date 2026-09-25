@@ -23,23 +23,28 @@ use ferrompi::{Mpi, ThreadLevel};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+mod common;
+
 const NUM_THREADS: usize = 4;
 const ITERATIONS: usize = 100;
 
 fn main() {
     let mpi = Mpi::init_thread(ThreadLevel::Multiple).expect("MPI init failed");
+    let world = mpi.world();
 
     // If the MPI library cannot provide MPI_THREAD_MULTIPLE, skip gracefully.
     // Some builds (e.g. certain Cray MPT configurations) deliberately refuse it.
     if mpi.thread_level() < ThreadLevel::Multiple {
-        println!(
-            "SKIP: MPI provided {:?}, MPI_THREAD_MULTIPLE required; skipping test",
-            mpi.thread_level()
+        common::skip(
+            &world,
+            &format!(
+                "MPI provided {:?}, MPI_THREAD_MULTIPLE required; skipping test",
+                mpi.thread_level()
+            ),
         );
         return;
     }
 
-    let world = mpi.world();
     let rank = world.rank();
     let size = world.size();
 
@@ -119,23 +124,9 @@ fn main() {
     // Aggregate error state across ranks BEFORE any process exits.  If any
     // rank exited early, surviving ranks would deadlock at this allreduce —
     // so the exit-on-failure path runs after the collective, never before.
-    let local_ok: i32 = if any_error.load(Ordering::Acquire) {
-        0
-    } else {
-        1
-    };
-    let global_ok = world
-        .allreduce_scalar(local_ok, ferrompi::ReduceOp::Min)
-        .expect("allreduce_scalar failed");
-
-    if global_ok == 0 {
-        if rank == 0 {
-            eprintln!("FAIL: at least one rank reported a thread error");
-        }
-        std::process::exit(1);
-    }
-
-    if rank == 0 {
-        println!("OK: request table concurrency test passed");
-    }
+    common::check(
+        &world,
+        !any_error.load(Ordering::Acquire),
+        "test_request_table_concurrency",
+    );
 }

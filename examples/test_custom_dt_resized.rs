@@ -13,6 +13,8 @@
 
 use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, ReduceOp, StructField};
 
+mod common;
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -147,30 +149,5 @@ fn main() {
         }
     }
 
-    // ========================================================================
-    // Sentinel allreduce: every rank must reach this point.
-    // Reduces local_ok across all ranks so that any per-rank failure causes
-    // the whole job to exit non-zero.
-    // ========================================================================
-    let local_flag: i32 = if local_ok { 1 } else { 0 };
-    let global_flag = match world.allreduce_scalar(local_flag, ReduceOp::Min) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("rank {rank}: sentinel allreduce failed: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    if global_flag == 0 {
-        if rank == 0 {
-            eprintln!("FAIL: one or more ranks reported a test failure");
-        }
-        std::process::exit(1);
-    }
-
-    if rank == 0 {
-        println!("\n=========================================");
-        println!("All custom datatype resized tests passed!");
-        println!("=========================================");
-    }
+    common::check(&world, local_ok, "test_custom_dt_resized");
 }

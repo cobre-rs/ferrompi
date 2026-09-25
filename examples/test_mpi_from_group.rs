@@ -18,6 +18,8 @@
 
 use ferrompi::{Error, Mpi, ReduceOp};
 
+mod common;
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -41,9 +43,10 @@ fn main() {
         .unwrap_or(0);
 
     if major < 4 {
-        if rank == 0 {
-            println!("SKIP: requires MPI 4.0+ (detected: {version_str})");
-        }
+        common::skip(
+            &world,
+            &format!("requires MPI 4.0+ (detected: {version_str})"),
+        );
         return;
     }
 
@@ -62,9 +65,10 @@ fn main() {
         Ok(c) => c,
         Err(Error::NotSupported(ref name)) => {
             // Runtime MPI < 4.0 despite header reporting >= 4.
-            if rank == 0 {
-                println!("SKIP: {name} not supported at runtime (version: {version_str})");
-            }
+            common::skip(
+                &world,
+                &format!("{name} not supported at runtime (version: {version_str})"),
+            );
             // Participate in sentinel allreduce so no rank hangs.
             let _ = world.allreduce_scalar(1i32, ReduceOp::Min);
             return;
@@ -108,24 +112,5 @@ fn main() {
         }
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — gate process::exit so no rank exits early.
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    if global_ok == 0 {
-        if rank == 0 {
-            eprintln!("FAIL: at least one rank failed a create_from_group assertion");
-        }
-        std::process::exit(1);
-    }
-
-    if rank == 0 {
-        println!();
-        println!("========================================");
-        println!("All create_from_group (Mpi) tests passed!");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_mpi_from_group");
 }
