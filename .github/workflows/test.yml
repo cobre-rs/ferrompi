@@ -15,7 +15,7 @@ jobs:
   test:
     name: Test (${{ matrix.mpi }}, ${{ matrix.features == '' && 'default' || matrix.features }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     strategy:
       fail-fast: false
@@ -23,8 +23,11 @@ jobs:
         mpi: [mpich, openmpi]
         features: ["", "rma"]
         include:
+          - mpi: mpich
+            np_list: "2 3 4"
           - mpi: openmpi
             pkg: libopenmpi-dev openmpi-bin
+            np_list: "4"
 
     steps:
       - name: Checkout code
@@ -104,7 +107,7 @@ jobs:
       - name: MPI integration tests
         run: |
           chmod +x tests/run_mpi_tests.sh
-          MPI_NP_LIST=4 ./tests/run_mpi_tests.sh "${{ matrix.features }}"
+          MPI_NP_LIST="${{ matrix.np_list }}" ./tests/run_mpi_tests.sh "${{ matrix.features }}"
 
       - name: Build documentation
         if: matrix.features == 'rma'
