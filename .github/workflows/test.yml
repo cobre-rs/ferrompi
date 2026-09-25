@@ -14,7 +14,7 @@ env:
 jobs:
   test:
     name: Test (${{ matrix.mpi }}, ${{ matrix.features == '' && 'default' || matrix.features }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     strategy:
@@ -23,8 +23,6 @@ jobs:
         mpi: [mpich, openmpi]
         features: ["", "rma"]
         include:
-          - mpi: mpich
-            pkg: mpich libmpich-dev
           - mpi: openmpi
             pkg: libopenmpi-dev openmpi-bin
 
@@ -59,45 +57,30 @@ jobs:
             ${{ runner.os }}-target-${{ matrix.mpi }}-${{ matrix.features }}-
             ${{ runner.os }}-target-${{ matrix.mpi }}-
 
-      - name: Install MPI
+      - name: Install MPI (Open MPI)
+        if: matrix.mpi == 'openmpi'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.pkg }} pkg-config libhwloc-dev
+          sudo apt-get install -y ${{ matrix.pkg }} pkg-config
           mpiexec --version
 
-      - name: Hotfix MPICH on Ubuntu Noble
+      - name: Setup MPICH
         if: matrix.mpi == 'mpich'
-        run: |
-          # Workaround for broken MPICH 4.2.0 package in Ubuntu 24.04 LTS (Noble)
-          # See: https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338
-          # See: https://github.com/mpi4py/setup-mpi/issues/13
-          # Adapted from https://github.com/mpi4py/setup-mpi/blob/master/setup-mpi.sh
-          ARCH=$(dpkg --print-architecture)
-          REPO=https://archive.ubuntu.com/ubuntu
-          LIBUCX=libucx0_1.18.1+ds-2_${ARCH}.deb
-          LIBMPICH=libmpich12_4.2.1-5_${ARCH}.deb
-          curl -sSOf ${REPO}/pool/universe/u/ucx/${LIBUCX}
-          curl -sSOf ${REPO}/pool/universe/m/mpich/${LIBMPICH}
-          TMPDIR=$(mktemp -d)
-          dpkg-deb -x ${LIBUCX} ${TMPDIR}
-          dpkg-deb -x ${LIBMPICH} ${TMPDIR}
-          LIBDIR=/usr/lib/$(arch)-linux-gnu
-          sudo cp -a ${TMPDIR}${LIBDIR}/ucx ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0 ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12 ${LIBDIR}
-          sudo ldconfig
-          rm -rf ${TMPDIR} ${LIBUCX} ${LIBMPICH}
-          echo "MPICH hotfix applied successfully"
+        uses: ./.github/actions/setup-mpich
+
+      - name: MPICH hotfix fixture test
+        if: matrix.mpi == 'mpich'
+        run: bash .github/scripts/mpich-hotfix-test.sh
 
       - name: Configure OpenMPI environment
         if: matrix.mpi == 'openmpi'
         run: |
-          echo "OMPI_MCA_rmaps_base_oversubscribe=1" >> "$GITHUB_ENV"
-          echo "OMPI_ALLOW_RUN_AS_ROOT=1" >> "$GITHUB_ENV"
-          echo "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1" >> "$GITHUB_ENV"
-          echo "OMPI_MCA_btl=self,tcp" >> "$GITHUB_ENV"
+          {
+            echo "OMPI_MCA_rmaps_base_oversubscribe=1"
+            echo "OMPI_ALLOW_RUN_AS_ROOT=1"
+            echo "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
+            echo "OMPI_MCA_btl=self,tcp"
+          } >> "$GITHUB_ENV"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -131,7 +114,7 @@ jobs:
 
   coverage:
     name: Code Coverage
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
@@ -154,33 +137,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-coverage-
 
-      - name: Install MPI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mpich libmpich-dev pkg-config libhwloc-dev libpmix-dev libucx-dev
-
-      - name: Hotfix MPICH on Ubuntu Noble
-        run: |
-          # Workaround for broken MPICH 4.2.0 package in Ubuntu 24.04 LTS (Noble)
-          # See: https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338
-          ARCH=$(dpkg --print-architecture)
-          REPO=https://archive.ubuntu.com/ubuntu
-          LIBUCX=libucx0_1.18.1+ds-2_${ARCH}.deb
-          LIBMPICH=libmpich12_4.2.1-5_${ARCH}.deb
-          curl -sSOf ${REPO}/pool/universe/u/ucx/${LIBUCX}
-          curl -sSOf ${REPO}/pool/universe/m/mpich/${LIBMPICH}
-          TMPDIR=$(mktemp -d)
-          dpkg-deb -x ${LIBUCX} ${TMPDIR}
-          dpkg-deb -x ${LIBMPICH} ${TMPDIR}
-          LIBDIR=/usr/lib/$(arch)-linux-gnu
-          sudo cp -a ${TMPDIR}${LIBDIR}/ucx ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0 ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12 ${LIBDIR}
-          sudo ldconfig
-          rm -rf ${TMPDIR} ${LIBUCX} ${LIBMPICH}
-          echo "MPICH hotfix applied successfully"
+      - name: Setup MPICH
+        uses: ./.github/actions/setup-mpich
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov

@@ -15,7 +15,7 @@ permissions:
 jobs:
   audit:
     name: Security Audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -33,7 +33,7 @@ jobs:
 
   dependency-review:
     name: Dependency Review
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event_name == 'pull_request'
     timeout-minutes: 10
     continue-on-error: true  # Don't fail CI if dependency graph is not enabled

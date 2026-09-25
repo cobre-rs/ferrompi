@@ -11,7 +11,7 @@ env:
 jobs:
   verify-and-test:
     name: Verify and Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -22,45 +22,20 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install MPI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mpich libmpich-dev pkg-config
-
-      - name: Hotfix MPICH on Ubuntu Noble
-        run: |
-          # Workaround for broken MPICH 4.2.0 package in Ubuntu 24.04 LTS (Noble)
-          # See: https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338
-          ARCH=$(dpkg --print-architecture)
-          REPO=https://archive.ubuntu.com/ubuntu
-          LIBUCX=libucx0_1.18.1+ds-2_${ARCH}.deb
-          LIBMPICH=libmpich12_4.2.1-5_${ARCH}.deb
-          curl -sSOf ${REPO}/pool/universe/u/ucx/${LIBUCX}
-          curl -sSOf ${REPO}/pool/universe/m/mpich/${LIBMPICH}
-          TMPDIR=$(mktemp -d)
-          dpkg-deb -x ${LIBUCX} ${TMPDIR}
-          dpkg-deb -x ${LIBMPICH} ${TMPDIR}
-          LIBDIR=/usr/lib/$(arch)-linux-gnu
-          sudo cp -a ${TMPDIR}${LIBDIR}/ucx ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0 ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12 ${LIBDIR}
-          sudo ldconfig
-          rm -rf ${TMPDIR} ${LIBUCX} ${LIBMPICH}
-          echo "MPICH hotfix applied successfully"
+      - name: Setup MPICH
+        uses: ./.github/actions/setup-mpich
 
       - name: Extract version from tag
         id: tag_version
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
-          echo "version=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Extract version from Cargo.toml
         id: cargo_version
         run: |
           VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Verify versions match
         run: |
@@ -99,7 +74,7 @@ jobs:
   publish:
     name: Publish to crates.io
     needs: [verify-and-test]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment:
       name: crates-io
@@ -111,30 +86,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install MPI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mpich libmpich-dev pkg-config
-
-      - name: Hotfix MPICH on Ubuntu Noble
-        run: |
-          ARCH=$(dpkg --print-architecture)
-          REPO=https://archive.ubuntu.com/ubuntu
-          LIBUCX=libucx0_1.18.1+ds-2_${ARCH}.deb
-          LIBMPICH=libmpich12_4.2.1-5_${ARCH}.deb
-          curl -sSOf ${REPO}/pool/universe/u/ucx/${LIBUCX}
-          curl -sSOf ${REPO}/pool/universe/m/mpich/${LIBMPICH}
-          TMPDIR=$(mktemp -d)
-          dpkg-deb -x ${LIBUCX} ${TMPDIR}
-          dpkg-deb -x ${LIBMPICH} ${TMPDIR}
-          LIBDIR=/usr/lib/$(arch)-linux-gnu
-          sudo cp -a ${TMPDIR}${LIBDIR}/ucx ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0 ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12 ${LIBDIR}
-          sudo ldconfig
-          rm -rf ${TMPDIR} ${LIBUCX} ${LIBMPICH}
+      - name: Setup MPICH
+        uses: ./.github/actions/setup-mpich
 
       - name: Publish to crates.io
         run: cargo publish
@@ -144,7 +97,7 @@ jobs:
   create-release:
     name: Create GitHub Release
     needs: [publish]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
@@ -158,7 +111,7 @@ jobs:
         id: release_notes
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
           # Try to extract changelog section
           if [ -f "CHANGELOG.md" ]; then

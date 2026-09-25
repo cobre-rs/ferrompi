@@ -1,0 +1,13 @@
+name: Setup MPICH
+description: Installs MPICH on Ubuntu 24.04, with the checksum-verified Noble hotfix applied.
+
+runs:
+  using: composite
+  steps:
+    - name: Install MPICH
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y mpich libmpich-dev pkg-config
+
+    - name: Hotfix MPICH on Ubuntu Noble
+      shell: bash
+      run: bash "$GITHUB_WORKSPACE/.github/scripts/mpich-hotfix.sh"
