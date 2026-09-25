@@ -74,7 +74,7 @@ fn main() {
     });
     common::check(&world, worker_ok, "worker calls below Serialized rejected");
 
-    // R32: a wait() rejected by the thread check must leave `active` unchanged,
+    // A wait() rejected by the thread check must leave `active` unchanged,
     // so a later wait() on the init thread still owns a live request.
     let mut rbuf7 = [0i32; 1];
     let sbuf7 = [7i32; 1];
