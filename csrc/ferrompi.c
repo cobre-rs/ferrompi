@@ -176,7 +176,7 @@ static void init_tables(void) {
     }
 
     // Note: MPI_COMM_WORLD must be set AFTER MPI_Init is called
-    // comm_table[0] will be set in ferrompi_init* functions; comm_used[0] is
+    // comm_table[0] will be set in ferrompi_init_thread; comm_used[0] is
     // set to 1 there as well, immediately after MPI_COMM_WORLD is assigned.
     for (int i = 0; i < MAX_COMMS; i++) {
         comm_table[i] = MPI_COMM_NULL;
@@ -687,23 +687,6 @@ int ferrompi_init_thread(int required, int* provided) {
         }
     }
     
-    return ret;
-}
-
-int ferrompi_init(void) {
-    init_tables();
-    int ret = MPI_Init(NULL, NULL);
-
-    // Initialize COMM_WORLD after MPI_Init and install the error handler
-    if (ret == MPI_SUCCESS) {
-        comm_table[0] = MPI_COMM_WORLD;
-        atomic_store_explicit(&comm_used[0], 1, memory_order_release);
-        int eh_ret = install_errors_return(MPI_COMM_WORLD);
-        if (eh_ret != MPI_SUCCESS) {
-            return eh_ret;
-        }
-    }
-
     return ret;
 }
 

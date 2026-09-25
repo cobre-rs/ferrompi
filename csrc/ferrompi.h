@@ -72,12 +72,6 @@ extern "C" {
 int ferrompi_init_thread(int required, int* provided);
 
 /**
- * Initialize MPI (single-threaded)
- * @return MPI error code
- */
-int ferrompi_init(void);
-
-/**
  * Finalize MPI
  * @return MPI error code
  */

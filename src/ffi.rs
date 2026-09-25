@@ -2,7 +2,6 @@
 //!
 //! These are low-level unsafe functions. Use the safe wrappers in the parent module.
 
-#![allow(dead_code)]
 #![allow(non_camel_case_types)]
 
 use std::os::raw::{c_char, c_double, c_int, c_void};
@@ -12,7 +11,9 @@ pub type int32_t = i32;
 pub type int64_t = i64;
 
 // Lock type constants matching the C header defines
+#[cfg(feature = "rma")]
 pub const FERROMPI_LOCK_EXCLUSIVE: int32_t = 0;
+#[cfg(feature = "rma")]
 pub const FERROMPI_LOCK_SHARED: int32_t = 1;
 
 extern "C" {
@@ -21,7 +22,6 @@ extern "C" {
     // ============================================================
 
     pub fn ferrompi_init_thread(required: c_int, provided: *mut c_int) -> c_int;
-    pub fn ferrompi_init() -> c_int;
     pub fn ferrompi_finalize() -> c_int;
     pub fn ferrompi_initialized(flag: *mut c_int) -> c_int;
     pub fn ferrompi_finalized(flag: *mut c_int) -> c_int;
@@ -926,6 +926,153 @@ extern "C" {
     pub fn ferrompi_startall(count: int64_t, requests: *mut int64_t) -> c_int;
 
     // ============================================================
+    // Utility Functions
+    // ============================================================
+
+    pub fn ferrompi_get_library_version(buf: *mut c_char, len: *mut int32_t) -> c_int;
+    pub fn ferrompi_get_version(version: *mut c_char, len: *mut int32_t) -> c_int;
+    pub fn ferrompi_get_processor_name(name: *mut c_char, len: *mut int32_t) -> c_int;
+    pub fn ferrompi_wtime() -> c_double;
+    pub fn ferrompi_abort(comm: int32_t, errorcode: int32_t) -> c_int;
+
+    // ============================================================
+    // Custom Datatype Operations
+    // ============================================================
+
+    pub fn ferrompi_type_contiguous(
+        count: int32_t,
+        basetype_tag: int32_t,
+        newtype_handle: *mut int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_type_vector(
+        count: int32_t,
+        blocklength: int32_t,
+        stride: int32_t,
+        basetype_tag: int32_t,
+        newtype_handle: *mut int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_type_create_struct(
+        count: int32_t,
+        blocklengths: *const int32_t,
+        displacements: *const int64_t,
+        basetype_tags: *const int32_t,
+        newtype_handle: *mut int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_type_create_resized(
+        old_handle: int32_t,
+        lb: int64_t,
+        extent: int64_t,
+        newtype_handle: *mut int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_type_free(type_handle: int32_t) -> c_int;
+
+    // ============================================================
+    // Custom-Datatype Point-to-Point
+    // ============================================================
+
+    pub fn ferrompi_send_custom(
+        buf: *const c_void,
+        count: int64_t,
+        datatype_handle: int32_t,
+        dest: int32_t,
+        tag: int32_t,
+        comm: int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_recv_custom(
+        buf: *mut c_void,
+        count: int64_t,
+        datatype_handle: int32_t,
+        source: int32_t,
+        tag: int32_t,
+        comm: int32_t,
+        actual_source: *mut int32_t,
+        actual_tag: *mut int32_t,
+        actual_count: *mut int64_t,
+    ) -> c_int;
+
+    pub fn ferrompi_isend_custom(
+        buf: *const c_void,
+        count: int64_t,
+        datatype_handle: int32_t,
+        dest: int32_t,
+        tag: int32_t,
+        comm: int32_t,
+        request: *mut int64_t,
+    ) -> c_int;
+
+    pub fn ferrompi_irecv_custom(
+        buf: *mut c_void,
+        count: int64_t,
+        datatype_handle: int32_t,
+        source: int32_t,
+        tag: int32_t,
+        comm: int32_t,
+        request: *mut int64_t,
+    ) -> c_int;
+
+    // ============================================================
+    // User-Defined Reduction Op (MPI_Op_create)
+    // ============================================================
+
+    /// Allocate a free slot in the op-slot table.
+    /// Writes the slot index to `*out_slot`.
+    /// Returns MPI_SUCCESS on success, MPI_ERR_OTHER if the table is full.
+    pub fn ferrompi_op_alloc_slot(out_slot: *mut int32_t) -> c_int;
+
+    /// Store the Rust fat-pointer halves (data + vtable) for the given slot.
+    /// Must be called after `ferrompi_op_alloc_slot` and before
+    /// `ferrompi_op_create_user`.
+    pub fn ferrompi_op_set_closure(slot: int32_t, data: *mut c_void, vtbl: *mut c_void);
+
+    /// Create an MPI_Op for the given slot.
+    /// `commute = 1` → commutative; `commute = 0` → non-commutative.
+    /// Writes the handle (same value as `slot`) to `*out_handle`.
+    pub fn ferrompi_op_create_user(
+        slot: int32_t,
+        commute: int32_t,
+        out_handle: *mut int32_t,
+    ) -> c_int;
+
+    /// Free the MPI_Op and release the slot.
+    /// Drop ordering: MPI_Op_free → ferrompi_op_drop_closure → free_op_slot.
+    pub fn ferrompi_op_free(handle: int32_t) -> c_int;
+
+    /// Release the op slot WITHOUT calling MPI_Op_free.
+    ///
+    /// Use this in rollback paths where `MPI_Op_create` failed and the slot
+    /// therefore holds `MPI_OP_NULL`.  Clears the closure pointers and marks
+    /// the slot as unused.  Does not invoke `ferrompi_op_drop_closure` — the
+    /// caller must have already dropped the closure before calling this.
+    pub fn ferrompi_op_free_slot_only(handle: int32_t) -> c_int;
+
+    /// MPI_Allreduce using a user-defined reduction op.
+    pub fn ferrompi_allreduce_user_op(
+        sendbuf: *const c_void,
+        recvbuf: *mut c_void,
+        count: int64_t,
+        datatype_tag: int32_t,
+        op_handle: int32_t,
+        comm: int32_t,
+    ) -> c_int;
+
+    // ============================================================
+    // Error Class Constants
+    // ============================================================
+
+    pub fn ferrompi_err_file() -> int32_t;
+    pub fn ferrompi_err_info() -> int32_t;
+    pub fn ferrompi_err_win() -> int32_t;
+
+}
+
+#[cfg(feature = "rma")]
+extern "C" {
+    // ============================================================
     // RMA / Window
     // ============================================================
 
@@ -1114,148 +1261,4 @@ extern "C" {
         target_disp: int64_t,
         win_handle: int32_t,
     ) -> c_int;
-
-    // ============================================================
-    // Utility Functions
-    // ============================================================
-
-    pub fn ferrompi_get_library_version(buf: *mut c_char, len: *mut int32_t) -> c_int;
-    pub fn ferrompi_get_version(version: *mut c_char, len: *mut int32_t) -> c_int;
-    pub fn ferrompi_get_processor_name(name: *mut c_char, len: *mut int32_t) -> c_int;
-    pub fn ferrompi_wtime() -> c_double;
-    pub fn ferrompi_abort(comm: int32_t, errorcode: int32_t) -> c_int;
-
-    // ============================================================
-    // Custom Datatype Operations
-    // ============================================================
-
-    pub fn ferrompi_type_contiguous(
-        count: int32_t,
-        basetype_tag: int32_t,
-        newtype_handle: *mut int32_t,
-    ) -> c_int;
-
-    pub fn ferrompi_type_vector(
-        count: int32_t,
-        blocklength: int32_t,
-        stride: int32_t,
-        basetype_tag: int32_t,
-        newtype_handle: *mut int32_t,
-    ) -> c_int;
-
-    pub fn ferrompi_type_create_struct(
-        count: int32_t,
-        blocklengths: *const int32_t,
-        displacements: *const int64_t,
-        basetype_tags: *const int32_t,
-        newtype_handle: *mut int32_t,
-    ) -> c_int;
-
-    pub fn ferrompi_type_create_resized(
-        old_handle: int32_t,
-        lb: int64_t,
-        extent: int64_t,
-        newtype_handle: *mut int32_t,
-    ) -> c_int;
-
-    pub fn ferrompi_type_free(type_handle: int32_t) -> c_int;
-
-    // ============================================================
-    // Custom-Datatype Point-to-Point
-    // ============================================================
-
-    pub fn ferrompi_send_custom(
-        buf: *const c_void,
-        count: int64_t,
-        datatype_handle: int32_t,
-        dest: int32_t,
-        tag: int32_t,
-        comm: int32_t,
-    ) -> c_int;
-
-    pub fn ferrompi_recv_custom(
-        buf: *mut c_void,
-        count: int64_t,
-        datatype_handle: int32_t,
-        source: int32_t,
-        tag: int32_t,
-        comm: int32_t,
-        actual_source: *mut int32_t,
-        actual_tag: *mut int32_t,
-        actual_count: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_isend_custom(
-        buf: *const c_void,
-        count: int64_t,
-        datatype_handle: int32_t,
-        dest: int32_t,
-        tag: int32_t,
-        comm: int32_t,
-        request: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_irecv_custom(
-        buf: *mut c_void,
-        count: int64_t,
-        datatype_handle: int32_t,
-        source: int32_t,
-        tag: int32_t,
-        comm: int32_t,
-        request: *mut int64_t,
-    ) -> c_int;
-
-    // ============================================================
-    // User-Defined Reduction Op (MPI_Op_create)
-    // ============================================================
-
-    /// Allocate a free slot in the op-slot table.
-    /// Writes the slot index to `*out_slot`.
-    /// Returns MPI_SUCCESS on success, MPI_ERR_OTHER if the table is full.
-    pub fn ferrompi_op_alloc_slot(out_slot: *mut int32_t) -> c_int;
-
-    /// Store the Rust fat-pointer halves (data + vtable) for the given slot.
-    /// Must be called after `ferrompi_op_alloc_slot` and before
-    /// `ferrompi_op_create_user`.
-    pub fn ferrompi_op_set_closure(slot: int32_t, data: *mut c_void, vtbl: *mut c_void);
-
-    /// Create an MPI_Op for the given slot.
-    /// `commute = 1` → commutative; `commute = 0` → non-commutative.
-    /// Writes the handle (same value as `slot`) to `*out_handle`.
-    pub fn ferrompi_op_create_user(
-        slot: int32_t,
-        commute: int32_t,
-        out_handle: *mut int32_t,
-    ) -> c_int;
-
-    /// Free the MPI_Op and release the slot.
-    /// Drop ordering: MPI_Op_free → ferrompi_op_drop_closure → free_op_slot.
-    pub fn ferrompi_op_free(handle: int32_t) -> c_int;
-
-    /// Release the op slot WITHOUT calling MPI_Op_free.
-    ///
-    /// Use this in rollback paths where `MPI_Op_create` failed and the slot
-    /// therefore holds `MPI_OP_NULL`.  Clears the closure pointers and marks
-    /// the slot as unused.  Does not invoke `ferrompi_op_drop_closure` — the
-    /// caller must have already dropped the closure before calling this.
-    pub fn ferrompi_op_free_slot_only(handle: int32_t) -> c_int;
-
-    /// MPI_Allreduce using a user-defined reduction op.
-    pub fn ferrompi_allreduce_user_op(
-        sendbuf: *const c_void,
-        recvbuf: *mut c_void,
-        count: int64_t,
-        datatype_tag: int32_t,
-        op_handle: int32_t,
-        comm: int32_t,
-    ) -> c_int;
-
-    // ============================================================
-    // Error Class Constants
-    // ============================================================
-
-    pub fn ferrompi_err_file() -> int32_t;
-    pub fn ferrompi_err_info() -> int32_t;
-    pub fn ferrompi_err_win() -> int32_t;
-
 }
