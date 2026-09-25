@@ -118,7 +118,7 @@ jobs:
       - name: MPI integration tests
         run: |
           chmod +x tests/run_mpi_tests.sh
-          MPI_NP=4 ./tests/run_mpi_tests.sh "${{ matrix.features }}"
+          MPI_NP_LIST=4 ./tests/run_mpi_tests.sh "${{ matrix.features }}"
 
       - name: Build documentation
         if: matrix.features == 'rma'
