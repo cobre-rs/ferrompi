@@ -115,9 +115,13 @@ fn test_send_recv<T: ferrompi::MpiDatatype + TestValue>(
     let tag = tag_base;
     let buf_len = 4;
 
+    let partner = if rank % 2 == 0 { rank + 1 } else { rank - 1 };
+    if partner >= size {
+        return;
+    }
+
     if rank % 2 == 0 {
         // Even rank: send first, then receive
-        let partner = (rank + 1) % size;
         let send_data: Vec<T> = (0..buf_len)
             .map(|i| T::from_rank_indexed(rank, i))
             .collect();
@@ -151,7 +155,6 @@ fn test_send_recv<T: ferrompi::MpiDatatype + TestValue>(
         verify_data(&recv_data, partner, rank, "send/recv");
     } else {
         // Odd rank: receive first, then send
-        let partner = (rank + size - 1) % size;
         let mut recv_data = vec![T::from_rank(0); buf_len];
         let (src, actual_tag, count) = world
             .recv(&mut recv_data, partner, tag)

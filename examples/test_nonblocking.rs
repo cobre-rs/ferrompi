@@ -155,46 +155,47 @@ fn main() {
     {
         let tag = 400;
         if size >= 2 {
-            if rank % 2 == 0 {
-                let partner = (rank + 1) % size;
-                let send_data = vec![(rank * 11) as f64; 3];
-                world.send(&send_data, partner, tag).expect("send failed");
+            let partner = if rank % 2 == 0 { rank + 1 } else { rank - 1 };
+            if partner < size {
+                if rank % 2 == 0 {
+                    let send_data = vec![(rank * 11) as f64; 3];
+                    world.send(&send_data, partner, tag).expect("send failed");
 
-                let mut recv_data = vec![0.0f64; 3];
-                let (src, _, _) = world
-                    .recv(&mut recv_data, partner, tag)
-                    .expect("recv failed");
-                assert_eq!(
-                    src, partner,
-                    "rank {rank}: recv source = {src}, expected {partner}"
-                );
-                let expected = (partner * 11) as f64;
-                for &v in &recv_data {
-                    assert!(
-                        (v - expected).abs() < f64::EPSILON,
-                        "rank {rank}: send/recv got {v}, expected {expected}"
+                    let mut recv_data = vec![0.0f64; 3];
+                    let (src, _, _) = world
+                        .recv(&mut recv_data, partner, tag)
+                        .expect("recv failed");
+                    assert_eq!(
+                        src, partner,
+                        "rank {rank}: recv source = {src}, expected {partner}"
                     );
-                }
-            } else {
-                let partner = (rank + size - 1) % size;
-                let mut recv_data = vec![0.0f64; 3];
-                let (src, _, _) = world
-                    .recv(&mut recv_data, partner, tag)
-                    .expect("recv failed");
-                assert_eq!(
-                    src, partner,
-                    "rank {rank}: recv source = {src}, expected {partner}"
-                );
-                let expected = (partner * 11) as f64;
-                for &v in &recv_data {
-                    assert!(
-                        (v - expected).abs() < f64::EPSILON,
-                        "rank {rank}: send/recv got {v}, expected {expected}"
+                    let expected = (partner * 11) as f64;
+                    for &v in &recv_data {
+                        assert!(
+                            (v - expected).abs() < f64::EPSILON,
+                            "rank {rank}: send/recv got {v}, expected {expected}"
+                        );
+                    }
+                } else {
+                    let mut recv_data = vec![0.0f64; 3];
+                    let (src, _, _) = world
+                        .recv(&mut recv_data, partner, tag)
+                        .expect("recv failed");
+                    assert_eq!(
+                        src, partner,
+                        "rank {rank}: recv source = {src}, expected {partner}"
                     );
-                }
+                    let expected = (partner * 11) as f64;
+                    for &v in &recv_data {
+                        assert!(
+                            (v - expected).abs() < f64::EPSILON,
+                            "rank {rank}: send/recv got {v}, expected {expected}"
+                        );
+                    }
 
-                let send_data = vec![(rank * 11) as f64; 3];
-                world.send(&send_data, partner, tag).expect("send failed");
+                    let send_data = vec![(rank * 11) as f64; 3];
+                    world.send(&send_data, partner, tag).expect("send failed");
+                }
             }
         }
         if rank == 0 {
