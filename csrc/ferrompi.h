@@ -408,13 +408,14 @@ int ferrompi_iprobe(
 int ferrompi_bcast(void* buf, int64_t count, int32_t datatype_tag, int32_t root, int32_t comm);
 
 /**
- * In-place blocking collectives (generic).
+ * In-place blocking and nonblocking collectives (generic).
  *
- * The blocking reduce, allreduce, gather, allgather and alltoall siblings below
- * substitute MPI_IN_PLACE for sendbuf when sendbuf == NULL; ferrompi_scatter
- * substitutes MPI_IN_PLACE for recvbuf when recvbuf == NULL. Rust never produces
- * NULL from a slice (as_ptr() on an empty slice is dangling but non-null), so
- * NULL is an unambiguous in-place marker from the Rust side.
+ * The blocking reduce, allreduce, gather, allgather and alltoall siblings below,
+ * and their nonblocking igather, iallgather and ialltoall counterparts, substitute
+ * MPI_IN_PLACE for sendbuf when sendbuf == NULL; ferrompi_scatter and
+ * ferrompi_iscatter substitute MPI_IN_PLACE for recvbuf when recvbuf == NULL.
+ * Rust never produces NULL from a slice (as_ptr() on an empty slice is dangling
+ * but non-null), so NULL is an unambiguous in-place marker from the Rust side.
  */
 
 /** Reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
@@ -422,36 +423,6 @@ int ferrompi_reduce(const void* sendbuf, void* recvbuf, int64_t count, int32_t d
 
 /** All-reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
 int ferrompi_allreduce(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t comm);
-
-/** Nonblocking in-place gather (generic). Valid only at root (is_root != 0); non-root returns MPI_ERR_ARG. */
-int ferrompi_igather_inplace(void* recvbuf, int64_t recvcount,
-                              int32_t datatype_tag, int32_t root,
-                              int32_t is_root, int32_t comm,
-                              int64_t* request);
-
-/** Nonblocking in-place all-gather (generic). Valid at every rank. */
-int ferrompi_iallgather_inplace(void* recvbuf, int64_t recvcount,
-                                 int32_t datatype_tag, int32_t comm,
-                                 int64_t* request);
-
-/**
- * Nonblocking in-place scatter (generic).
- *
- * At root (is_root != 0): sendbuf is the full sendcount*size buffer; MPI_IN_PLACE
- * is passed as recvbuf so root's own slot is retained in place.
- * At non-root (is_root == 0): regular scatter path; sendbuf is NULL, recvbuf
- * receives recvcount elements.
- */
-int ferrompi_iscatter_inplace(const void* sendbuf, int64_t sendcount,
-                               void* recvbuf, int64_t recvcount,
-                               int32_t datatype_tag, int32_t root,
-                               int32_t is_root, int32_t comm,
-                               int64_t* request);
-
-/** Nonblocking in-place all-to-all (generic). Valid at every rank. */
-int ferrompi_ialltoall_inplace(void* recvbuf, int64_t recvcount,
-                                int32_t datatype_tag, int32_t comm,
-                                int64_t* request);
 
 /**
  * Inclusive prefix reduction (scan).
@@ -621,13 +592,13 @@ int ferrompi_iallreduce(const void* sendbuf, void* recvbuf, int64_t count, int32
 /** Nonblocking reduce (generic) */
 int ferrompi_ireduce(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t root, int32_t comm, int64_t* request);
 
-/** Nonblocking gather (generic) */
+/** Nonblocking gather (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_igather(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t root, int32_t comm, int64_t* request);
 
-/** Nonblocking all-gather (generic) */
+/** Nonblocking all-gather (generic). NULL sendbuf maps to MPI_IN_PLACE. */
 int ferrompi_iallgather(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t comm, int64_t* request);
 
-/** Nonblocking scatter (generic) */
+/** Nonblocking scatter (generic). NULL recvbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_iscatter(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t root, int32_t comm, int64_t* request);
 
 /** Nonblocking barrier */
@@ -639,7 +610,7 @@ int ferrompi_iscan(const void* sendbuf, void* recvbuf, int64_t count, int32_t da
 /** Nonblocking exclusive scan (generic) */
 int ferrompi_iexscan(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t comm, int64_t* request);
 
-/** Nonblocking all-to-all (generic) */
+/** Nonblocking all-to-all (generic). NULL sendbuf maps to MPI_IN_PLACE. */
 int ferrompi_ialltoall(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t comm, int64_t* request);
 
 /** Nonblocking gatherv (generic, variable-count) */

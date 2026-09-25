@@ -1575,18 +1575,19 @@ int ferrompi_igather(
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     MPI_Request req;
     int ret;
 
 #if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
-        ret = MPI_Igather_c(sendbuf, (MPI_Count)sendcount, dt,
+        ret = MPI_Igather_c(sb, (MPI_Count)sendcount, dt,
                             recvbuf, (MPI_Count)recvcount, dt,
                             root, comm, &req);
     } else
 #endif
     {
-        ret = MPI_Igather(sendbuf, (int)sendcount, dt,
+        ret = MPI_Igather(sb, (int)sendcount, dt,
                           recvbuf, (int)recvcount, dt,
                           root, comm, &req);
     }
@@ -1614,18 +1615,19 @@ int ferrompi_iallgather(
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     MPI_Request req;
     int ret;
 
 #if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
-        ret = MPI_Iallgather_c(sendbuf, (MPI_Count)sendcount, dt,
+        ret = MPI_Iallgather_c(sb, (MPI_Count)sendcount, dt,
                                 recvbuf, (MPI_Count)recvcount, dt,
                                 comm, &req);
     } else
 #endif
     {
-        ret = MPI_Iallgather(sendbuf, (int)sendcount, dt,
+        ret = MPI_Iallgather(sb, (int)sendcount, dt,
                              recvbuf, (int)recvcount, dt,
                              comm, &req);
     }
@@ -1654,19 +1656,20 @@ int ferrompi_iscatter(
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    void* rb = recvbuf ? recvbuf : MPI_IN_PLACE;
     MPI_Request req;
     int ret;
 
 #if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
         ret = MPI_Iscatter_c(sendbuf, (MPI_Count)sendcount, dt,
-                             recvbuf, (MPI_Count)recvcount, dt,
+                             rb, (MPI_Count)recvcount, dt,
                              root, comm, &req);
     } else
 #endif
     {
         ret = MPI_Iscatter(sendbuf, (int)sendcount, dt,
-                           recvbuf, (int)recvcount, dt,
+                           rb, (int)recvcount, dt,
                            root, comm, &req);
     }
 
@@ -1784,17 +1787,18 @@ int ferrompi_ialltoall(
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     MPI_Request req;
     int ret;
 
 #if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
-        ret = MPI_Ialltoall_c(sendbuf, (MPI_Count)sendcount, dt,
+        ret = MPI_Ialltoall_c(sb, (MPI_Count)sendcount, dt,
                                recvbuf, (MPI_Count)recvcount, dt, comm, &req);
     } else
 #endif
     {
-        ret = MPI_Ialltoall(sendbuf, (int)sendcount, dt,
+        ret = MPI_Ialltoall(sb, (int)sendcount, dt,
                             recvbuf, (int)recvcount, dt, comm, &req);
     }
 
@@ -1806,143 +1810,6 @@ int ferrompi_ialltoall(
         }
     }
 
-    return ret;
-}
-
-int ferrompi_igather_inplace(void* recvbuf, int64_t recvcount,
-                              int32_t datatype_tag, int32_t root,
-                              int32_t is_root, int32_t comm_handle,
-                              int64_t* request_handle) {
-    MPI_Comm comm = get_comm(comm_handle);
-    MPI_Datatype dt = get_datatype(datatype_tag);
-    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    if (!is_root) return MPI_ERR_ARG;
-    MPI_Request req;
-    int ret;
-#if MPI_VERSION >= 4
-    if (recvcount > INT_MAX) {
-        ret = MPI_Igather_c(MPI_IN_PLACE, 0, dt,
-                            recvbuf, (MPI_Count)recvcount, dt,
-                            root, comm, &req);
-    } else
-#endif
-    {
-        ret = MPI_Igather(MPI_IN_PLACE, 0, dt,
-                          recvbuf, (int)recvcount, dt,
-                          root, comm, &req);
-    }
-    if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
-        if (*request_handle < 0) {
-            complete_unregistered_request(&req);
-            return FERROMPI_ERR_REQUESTS_FULL;
-        }
-    }
-    return ret;
-}
-
-int ferrompi_iallgather_inplace(void* recvbuf, int64_t recvcount,
-                                 int32_t datatype_tag, int32_t comm_handle,
-                                 int64_t* request_handle) {
-    MPI_Comm comm = get_comm(comm_handle);
-    MPI_Datatype dt = get_datatype(datatype_tag);
-    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Request req;
-    int ret;
-#if MPI_VERSION >= 4
-    if (recvcount > INT_MAX) {
-        ret = MPI_Iallgather_c(MPI_IN_PLACE, 0, dt,
-                               recvbuf, (MPI_Count)recvcount, dt,
-                               comm, &req);
-    } else
-#endif
-    {
-        ret = MPI_Iallgather(MPI_IN_PLACE, 0, dt,
-                             recvbuf, (int)recvcount, dt,
-                             comm, &req);
-    }
-    if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
-        if (*request_handle < 0) {
-            complete_unregistered_request(&req);
-            return FERROMPI_ERR_REQUESTS_FULL;
-        }
-    }
-    return ret;
-}
-
-int ferrompi_iscatter_inplace(const void* sendbuf, int64_t sendcount,
-                               void* recvbuf, int64_t recvcount,
-                               int32_t datatype_tag, int32_t root,
-                               int32_t is_root, int32_t comm_handle,
-                               int64_t* request_handle) {
-    MPI_Comm comm = get_comm(comm_handle);
-    MPI_Datatype dt = get_datatype(datatype_tag);
-    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Request req;
-    int ret;
-    if (is_root) {
-#if MPI_VERSION >= 4
-        if (sendcount > INT_MAX) {
-            ret = MPI_Iscatter_c(sendbuf, (MPI_Count)sendcount, dt,
-                                 MPI_IN_PLACE, 0, dt,
-                                 root, comm, &req);
-        } else
-#endif
-        {
-            ret = MPI_Iscatter(sendbuf, (int)sendcount, dt,
-                               MPI_IN_PLACE, 0, dt,
-                               root, comm, &req);
-        }
-    } else {
-#if MPI_VERSION >= 4
-        if (recvcount > INT_MAX) {
-            ret = MPI_Iscatter_c(NULL, 0, dt,
-                                 recvbuf, (MPI_Count)recvcount, dt,
-                                 root, comm, &req);
-        } else
-#endif
-        {
-            ret = MPI_Iscatter(NULL, 0, dt,
-                               recvbuf, (int)recvcount, dt,
-                               root, comm, &req);
-        }
-    }
-    if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
-        if (*request_handle < 0) {
-            complete_unregistered_request(&req);
-            return FERROMPI_ERR_REQUESTS_FULL;
-        }
-    }
-    return ret;
-}
-
-int ferrompi_ialltoall_inplace(void* recvbuf, int64_t recvcount,
-                                int32_t datatype_tag, int32_t comm_handle,
-                                int64_t* request_handle) {
-    MPI_Comm comm = get_comm(comm_handle);
-    MPI_Datatype dt = get_datatype(datatype_tag);
-    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Request req;
-    int ret;
-#if MPI_VERSION >= 4
-    if (recvcount > INT_MAX) {
-        ret = MPI_Ialltoall_c(MPI_IN_PLACE, 0, dt,
-                              recvbuf, (MPI_Count)recvcount, dt, comm, &req);
-    } else
-#endif
-    {
-        ret = MPI_Ialltoall(MPI_IN_PLACE, 0, dt,
-                            recvbuf, (int)recvcount, dt, comm, &req);
-    }
-    if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
-        if (*request_handle < 0) {
-            complete_unregistered_request(&req);
-            return FERROMPI_ERR_REQUESTS_FULL;
-        }
-    }
     return ret;
 }
 

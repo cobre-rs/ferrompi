@@ -452,44 +452,6 @@ extern "C" {
         request: *mut int64_t,
     ) -> c_int;
 
-    pub fn ferrompi_igather_inplace(
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
-        root: int32_t,
-        is_root: int32_t,
-        comm: int32_t,
-        request: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_iallgather_inplace(
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
-        comm: int32_t,
-        request: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_iscatter_inplace(
-        sendbuf: *const c_void,
-        sendcount: int64_t,
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
-        root: int32_t,
-        is_root: int32_t,
-        comm: int32_t,
-        request: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_ialltoall_inplace(
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
-        comm: int32_t,
-        request: *mut int64_t,
-    ) -> c_int;
-
     pub fn ferrompi_igatherv(
         sendbuf: *const c_void,
         sendcount: int64_t,
