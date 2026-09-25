@@ -614,28 +614,12 @@ static int install_errors_return(MPI_Comm comm) {
     return MPI_Comm_set_errhandler(comm, MPI_ERRORS_RETURN);
 }
 
-/* Mirrors install_errors_return for MPI_Win.  Used by the three Win
- * creators so that RMA errors return rather than abort.
- *
- * Best-effort: per MPI-3 §9.4.4, a window's default error handler is
- * MPI_ERRORS_ARE_FATAL.  We try to upgrade it to MPI_ERRORS_RETURN so
- * RMA errors surface as Result::Err in Rust instead of aborting the
- * process.  However, OpenMPI 4.x has been observed to reject
- * MPI_Win_set_errhandler with MPI_ERR_WIN on freshly-created windows
- * in some configurations (e.g., under --btl=self,tcp in CI).  Treating
- * that as a hard failure would make Win creation unusable on OpenMPI 4.x.
- *
- * Trade-off: if the errhandler-install fails, log to stderr and keep
- * the window.  Subsequent RMA errors on that window will then trigger
- * the default MPI_ERRORS_ARE_FATAL behaviour — equivalent to the
- * pre-ticket-008 behaviour, but now visible to operators via the
- * stderr log.  Returns MPI_SUCCESS so the caller proceeds with
- * window registration; returns the original MPI error code only on
- * non-recoverable conditions (none of which are reachable here in
- * practice). */
-static int install_errors_return_win(MPI_Win win) {
-    int eh_ret = MPI_Win_set_errhandler(win, MPI_ERRORS_RETURN);
-    if (eh_ret != MPI_SUCCESS) {
+/* Install MPI_ERRORS_RETURN on a window, best-effort: Open MPI 4.x can
+ * reject MPI_Win_set_errhandler on a fresh window, in which case the
+ * window keeps MPI_ERRORS_ARE_FATAL and a warning is printed. */
+static void install_errors_return_win(MPI_Win win) {
+    int ret = MPI_Win_set_errhandler(win, MPI_ERRORS_RETURN);
+    if (ret != MPI_SUCCESS) {
         /* Note: cannot use Rust's logging from C; stderr is the
          * portable fallback. */
         fprintf(stderr,
@@ -644,9 +628,8 @@ static int install_errors_return_win(MPI_Win win) {
                 "error handler (MPI_ERRORS_ARE_FATAL).  Subsequent RMA errors "
                 "on this window will abort the process rather than return as "
                 "Result::Err.  This is a known OpenMPI 4.x quirk.\n",
-                eh_ret);
+                ret);
     }
-    return MPI_SUCCESS;
 }
 
 /* ============================================================
@@ -909,20 +892,10 @@ int ferrompi_comm_create_from_group(int32_t group_h,
     int ret = MPI_Comm_create_from_group(g, stringtag, MPI_INFO_NULL,
                                          MPI_ERRORS_RETURN, &new_comm);
     if (ret != MPI_SUCCESS) return ret;
-    /* MPI 4.0 §7.4.3: MPI_Comm_create_from_group returns MPI_COMM_NULL on
-     * ranks not in the supplied group.  v0.4.1 surfaces this as
-     * Err(MpiErrorClass::Other) rather than Ok(None); a future v0.5 change
-     * should move Mpi::create_from_group to Result<Option<Communicator>> for
-     * symmetry with the MPI-3 parent variant (Communicator::create_from_group).
-     * See ADR-0005 for the v0.5 follow-up. */
+    /* MPI_COMM_NULL is returned on ranks outside the group */
     if (new_comm == MPI_COMM_NULL) {
         return MPI_ERR_OTHER;
     }
-    /* MPI_ERRORS_RETURN already installed via the errhandler argument;
-     * call install_errors_return defensively to ensure consistency
-     * with all other comm-creating shims (epic-02 invariant). */
-    int eh_ret = install_errors_return(new_comm);
-    if (eh_ret != MPI_SUCCESS) { MPI_Comm_free(&new_comm); return eh_ret; }
     *out_h = alloc_comm(new_comm);
     if (*out_h < 0) { MPI_Comm_free(&new_comm); return FERROMPI_ERR_COMMS_FULL; }
     return MPI_SUCCESS;
@@ -3784,11 +3757,7 @@ int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_h
     if (ret == MPI_SUCCESS) {
         /* Install MPI_ERRORS_RETURN so RMA errors are returned rather than
          * aborting the process (mirrors the communicator error-handler pattern). */
-        int eh_ret = install_errors_return_win(win);
-        if (eh_ret != MPI_SUCCESS) {
-            MPI_Win_free(&win);
-            return eh_ret;
-        }
+        install_errors_return_win(win);
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
             MPI_Win_free(&win);
@@ -3809,11 +3778,7 @@ int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t inf
     if (ret == MPI_SUCCESS) {
         /* Install MPI_ERRORS_RETURN so RMA errors are returned rather than
          * aborting the process (mirrors the communicator error-handler pattern). */
-        int eh_ret = install_errors_return_win(win);
-        if (eh_ret != MPI_SUCCESS) {
-            MPI_Win_free(&win);
-            return eh_ret;
-        }
+        install_errors_return_win(win);
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
             MPI_Win_free(&win);
@@ -3834,11 +3799,7 @@ int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info_handle,
     if (ret == MPI_SUCCESS) {
         /* Install MPI_ERRORS_RETURN so RMA errors are returned rather than
          * aborting the process (mirrors the communicator error-handler pattern). */
-        int eh_ret = install_errors_return_win(win);
-        if (eh_ret != MPI_SUCCESS) {
-            MPI_Win_free(&win);
-            return eh_ret;
-        }
+        install_errors_return_win(win);
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
             MPI_Win_free(&win);
