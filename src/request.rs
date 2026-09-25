@@ -2,6 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::rt;
 
 /// Element count at or below which request-handle scratch buffers live on the
 /// stack. Draining a handful-to-few-dozen in-flight requests on the completion
@@ -134,6 +135,7 @@ impl Request {
         if self.completed {
             return Ok(());
         }
+        Error::check_with_op(rt::enter(), "wait")?;
         // Mark completed BEFORE the FFI call so that Drop does not attempt a
         // second MPI_Wait on error.  A request handed to MPI_Wait is consumed
         // by MPI regardless of whether MPI reports an error; re-waiting on it
@@ -459,7 +461,10 @@ impl Drop for Request {
             // The handle has not been freed because self.completed is false, meaning
             // wait() was never called. ferrompi_wait calls MPI_Wait which frees the
             // handle on success; the completed flag guards against a double-free.
-            unsafe { ffi::ferrompi_wait(self.handle) };
+            // Calls the unguarded raw wrapper (not the lifecycle-guarded one) so
+            // Drop always attempts the wait; a future rt::drop_guard is a
+            // separate concern from the FFI lifecycle check.
+            unsafe { ffi::raw::ferrompi_wait(self.handle) };
         }
     }
 }

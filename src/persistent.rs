@@ -43,6 +43,7 @@
 
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::rt;
 
 /// A persistent MPI request handle.
 ///
@@ -119,17 +120,19 @@ impl PersistentRequest {
             // Not started, nothing to wait for
             return Ok(());
         }
-        // Mark inactive BEFORE the FFI call so that Drop does not attempt a
-        // second MPI_Wait on error.  A request handed to MPI_Wait is consumed
-        // by MPI regardless of whether MPI reports an error; re-waiting on it
-        // would be a use-after-free of the request handle.
-        self.active = false;
         // SAFETY: self.handle is a valid persistent MPI request handle
         // registered in the C-side request table; self.active was true on
         // entry (checked above), so start() was called and MPI holds an
         // in-flight operation on this handle for ferrompi_wait to complete.
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
-        Error::check_with_op(ret, "wait")
+        Error::check_with_op(ret, "wait")?;
+        // Mark inactive only on success: on an MPI error (including a
+        // rejected call, which ferrompi_wait's own guard returns before
+        // touching MPI) the request stays active, so Drop waits (immediate
+        // for an inactive persistent request) before MPI_Request_free, and
+        // Rust never marks a request inactive that MPI may still hold.
+        self.active = false;
+        Ok(())
     }
 
     /// Test if the operation has completed without blocking.
@@ -192,6 +195,7 @@ impl PersistentRequest {
         if requests.is_empty() {
             return Ok(());
         }
+        Error::check_with_op(rt::enter(), "waitall")?;
 
         // Mark all inactive BEFORE the FFI call: MPI_Waitall consumes every
         // request handle regardless of whether it reports an error, so Drop
@@ -230,7 +234,10 @@ impl Drop for PersistentRequest {
             // so start() was called and MPI holds an in-flight operation on this
             // handle. ferrompi_wait calls MPI_Wait which completes the operation
             // and releases the handle's active state before request_free below.
-            unsafe { ffi::ferrompi_wait(self.handle) };
+            // Calls the unguarded raw wrapper (not the lifecycle-guarded one) so
+            // Drop always attempts the wait; a future rt::drop_guard is a
+            // separate concern from the FFI lifecycle check.
+            unsafe { ffi::raw::ferrompi_wait(self.handle) };
         }
         // Free the persistent request
         // SAFETY: self.handle is a valid persistent MPI request handle. If it was
