@@ -11,7 +11,7 @@
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_rget
 
-use ferrompi::{LockType, Mpi, ReduceOp, Win};
+use ferrompi::{LockType, Mpi, Win};
 
 mod common;
 
@@ -64,9 +64,7 @@ fn main() {
                 Ok(g) => g,
                 Err(e) => {
                     eprintln!("rank 0: FAIL: Win::lock(Shared, 1) failed: {e}");
-                    local_ok = false;
-                    let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                    return;
+                    world.abort(1);
                 }
             };
 
@@ -76,10 +74,8 @@ fn main() {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("rank 0: FAIL: Win::rget returned error: {e}");
-                    local_ok = false;
                     drop(guard);
-                    let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                    return;
+                    world.abort(1);
                 }
             };
 

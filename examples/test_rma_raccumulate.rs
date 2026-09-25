@@ -68,9 +68,7 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank 0: FAIL: Win::lock(Exclusive, 1) failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 
@@ -80,10 +78,8 @@ fn main() {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("rank 0: FAIL: Win::raccumulate returned error: {e}");
-                local_ok = false;
                 drop(guard);
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 

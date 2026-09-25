@@ -54,18 +54,14 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
         let access_group = match world_group.include(&[1]) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([1]) failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 
@@ -87,18 +83,14 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
         let exposure_group = match world_group.include(&[0]) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([0]) failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 
@@ -131,18 +123,14 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() [test 2] failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
         let access_group = match world_group.include(&[1]) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([1]) [test 2] failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 
@@ -169,18 +157,14 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() [test 2] failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
         let exposure_group = match world_group.include(&[0]) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([0]) [test 2] failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 

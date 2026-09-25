@@ -66,9 +66,7 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: Win::lock(Shared, 0) failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 
@@ -101,9 +99,7 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: Win::lock_all failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 
