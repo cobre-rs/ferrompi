@@ -247,12 +247,16 @@ impl Communicator {
     /// In the standard case `MPI_Abort` terminates the entire process
     /// group and this function never returns. If `MPI_Abort` itself
     /// returns (non-standard but observed in some implementations during
-    /// internal failures), this function falls back to
-    /// [`std::process::abort`], which raises `SIGABRT` and terminates
-    /// the current process immediately. The original `errorcode` is lost
-    /// in that fallback path because `process::abort` does not accept an
-    /// exit code; the signal code (usually 134 = 128 + 6) is the best
-    /// evidence the caller has that the fallback triggered.
+    /// internal failures), or if ferrompi rejects the call before it
+    /// reaches MPI (the lifecycle/thread-level conditions of
+    /// [`Error::Finalized`](crate::Error::Finalized) and
+    /// [`Error::ThreadLevelViolation`](crate::Error::ThreadLevelViolation)),
+    /// this function falls back to [`std::process::abort`], which raises
+    /// `SIGABRT` and terminates the current process immediately. The
+    /// original `errorcode` is lost in that fallback path because
+    /// `process::abort` does not accept an exit code; the signal code
+    /// (usually 134 = 128 + 6) is the best evidence the caller has that
+    /// the fallback triggered.
     pub fn abort(&self, errorcode: i32) -> ! {
         // SAFETY: ferrompi_abort delegates to MPI_Abort, which is
         // defined to terminate all processes in the communicator and
@@ -265,12 +269,13 @@ impl Communicator {
         // Defense in depth: the MPI standard says MPI_Abort "should"
         // terminate all processes but does not strictly guarantee the
         // calling process aborts before return. If MPI_Abort ever
-        // returns (non-standard implementation behavior), we must still
-        // honor the `-> !` contract. std::process::abort() raises
-        // SIGABRT and is guaranteed to diverge without running
+        // returns (non-standard implementation behavior), or if the
+        // lifecycle guard rejected the call above before it reached MPI,
+        // we must still honor the `-> !` contract. std::process::abort()
+        // raises SIGABRT and is guaranteed to diverge without running
         // destructors — which is the right outcome, because any
-        // destructor that touches MPI state after a failed MPI_Abort
-        // has undefined behavior.
+        // destructor that touches MPI state after a failed or rejected
+        // MPI_Abort has undefined behavior.
         std::process::abort()
     }
 }

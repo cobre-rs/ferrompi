@@ -205,6 +205,7 @@ mod info;
 mod op;
 mod persistent;
 mod request;
+mod rt;
 #[cfg(feature = "numa")]
 pub mod slurm;
 mod status;
@@ -350,7 +351,9 @@ pub enum ReduceOp {
 /// MPI environment handle.
 ///
 /// This type represents an initialized MPI environment. There can only be one
-/// instance of this type at a time. When dropped, it finalizes MPI.
+/// instance of this type at a time. When dropped, it finalizes MPI. After the
+/// handle is dropped, every MPI-calling method returns
+/// `Err(`[`Error::Finalized`]`)` without calling MPI.
 ///
 /// # Example
 ///
@@ -421,6 +424,8 @@ impl Mpi {
             2 => ThreadLevel::Serialized,
             _ => ThreadLevel::Multiple,
         };
+
+        rt::activate(thread_level);
 
         Ok(Mpi {
             thread_level,
@@ -713,12 +718,18 @@ impl Mpi {
 
 impl Drop for Mpi {
     fn drop(&mut self) {
-        // Only finalize if we successfully initialized
-        if MPI_INITIALIZED.load(Ordering::SeqCst) {
-            // SAFETY: ferrompi_finalize takes no arguments. MPI_INITIALIZED is
-            // true, so MPI_Init(_thread) succeeded and MPI_Finalize has not yet
-            // been called for this process; the flag is cleared immediately
-            // below so a second Mpi drop cannot finalize twice.
+        // rt::finalize() moves the lifecycle state from Active to Finalized
+        // before ferrompi_finalize runs, so a handle whose drop is nested
+        // inside the finalize sweep (a closure captured by a request/op that
+        // the sweep drops) observes Finalized and makes no MPI call. It also
+        // returns false for a stub Mpi built without init (Uninit) and for a
+        // second call on an already-finalized state, so this branch runs
+        // ferrompi_finalize at most once.
+        if rt::finalize() {
+            // SAFETY: ferrompi_finalize takes no arguments. rt::finalize()
+            // just returned true, so state was Active — MPI_Init(_thread)
+            // succeeded and MPI_Finalize has not yet been called for this
+            // process.
             unsafe {
                 ffi::ferrompi_finalize();
             }
