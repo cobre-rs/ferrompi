@@ -29,9 +29,8 @@ fn main() -> Result<()> {
         io::stderr().flush().ok();
     }
 
-    // Give the launcher's stdout/stderr forwarder a chance to drain rank 0's
-    // marker before MPI_Abort tears the job down.
     world.barrier()?;
+    // Covers the launcher's stderr-forwarding race with MPI_Abort (Hydra can tear the job down before forwarding rank 0's already-written marker).
     std::thread::sleep(Duration::from_millis(100));
 
     if world.rank() == 0 {
