@@ -123,7 +123,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | SND-11 | `Communicator` Send+Sync regardless of thread level | critical | repro | 0.5.x (D-3, D-9) | planned (ferrompi-0.5.x-hardening) |
 | SND-12 | Uninitialised window memory exposed as `&[T]` | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | SND-13 | `SharedWindow` slices over concurrently-written memory (observed miscompile) | critical | repro | 0.6 (D-5); 0.5.x doc warning | planned (ferrompi-0.5.x-hardening: doc warning); API fix open (0.6) |
-| SND-14 | `UserOp` fat-pointer transmute relies on unspecified layout | minor | reading | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| SND-14 | `UserOp` fat-pointer transmute relies on unspecified layout | minor | reading | 0.5.x† | fixed (2d53b18) |
 | SND-15 | `fetch_and_op`/`compare_and_swap` result pointer derived from a shared borrow | minor | reading | 0.5.x | fixed (9777b12) |
 
 ### Correctness — [02](findings/02-correctness.md)
@@ -144,7 +144,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-12 | Pre-MPI-4 stubs never yield `NotSupported`; 3 contradicting docs | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-13 | `Win::sync` rustdoc wrong; example fails on MPICH | minor | repro | 0.5.x docs / 0.6 API | planned (ferrompi-0.5.x-hardening: docs); sync on lock guards open (0.6) |
 | COR-14 | `MPI_UNDEFINED` from `MPI_Get_count` leaks; rc ignored | nit | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
-| COR-15 | `op_set_closure` no bounds check; `op_create_user` no `op_used` check | nit | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| COR-15 | `op_set_closure` no bounds check; `op_create_user` no `op_used` check | nit | reading | 0.5.x | fixed (2d53b18) |
 | COR-16 | `type_create_struct` maybe-uninitialised arrays at count 0 | nit | compiler | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 
 ### Architecture / API — [03](findings/03-architecture-api.md)
@@ -191,7 +191,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | PRF-03 | `ffi_overhead` bench cannot measure FFI overhead | minor | measured | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | PRF-04 | "Persistent 10–30% faster" refuted as stated; bench at 1 MiB only | minor | measured | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | PRF-05 | `start_all`/`wait_all` zero 512 B scratch per call | nit | measured | — | wont-fix (adds `unsafe` for ~8 ns; rejected in 0.5.x planning) |
-| PRF-06 | Dead per-callback tag lookup; `Vec` per `wait_some`; topology 256·P | nit | reading | 0.5.x | planned (ferrompi-0.5.x-hardening: callback tag lookup); Vec return and topology 256·P deferred |
+| PRF-06 | Dead per-callback tag lookup; `Vec` per `wait_some`; topology 256·P | nit | reading | 0.5.x | fixed (2d53b18) for the callback tag lookup; Vec return and topology 256·P deferred |
 | PRF-07 | `[profile.release]` doesn't reach downstream; comment says it does | minor | Cargo semantics | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 
 ### Bloat / overengineering — [06](findings/06-bloat-overengineering.md)
@@ -208,7 +208,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | BLT-10 | 42 redundant `[[example]]` entries | 185 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-11 | Tables/indexes repeated across 3–5 docs; marketing tone | 250 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-14 | 15 in-place C shims differ only by `MPI_IN_PLACE`; dead `is_root` | 300 | 0.5.x† | fixed (38c789e) |
-| BLT-15 | `UserOp` double registry + dead per-callback lookup | 120 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| BLT-15 | `UserOp` double registry + dead per-callback lookup | 120 | 0.5.x† | fixed (2d53b18) |
 | BLT-16 | Benches measuring nothing; duplicated bench protocol | 210 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-20 | Six copies of the slot-claim loop | 70 | superseded by ARC-01 | open |
 | BLT-21 | Process artifacts, stale line refs, expired promises in comments | 45 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
