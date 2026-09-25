@@ -115,6 +115,49 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  test-openmpi5:
+    name: Test (openmpi5, rma)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    container:
+      image: debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c # trixie, resolved 2026-09-25
+      options: --shm-size=1g --cap-add=SYS_PTRACE
+
+    env:
+      OMPI_ALLOW_RUN_AS_ROOT: 1
+      OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: 1
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Install OpenMPI and build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends openmpi-bin libopenmpi-dev pkg-config build-essential ca-certificates curl git jq
+
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-openmpi5-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-openmpi5-
+
+      - name: Check MPI version
+        run: mpiexec --version
+
+      - name: MPI integration tests (rma)
+        run: MPI_NP_LIST=4 ./tests/run_mpi_tests.sh rma
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04
