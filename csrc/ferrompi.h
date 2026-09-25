@@ -410,6 +410,7 @@ int ferrompi_reduce_scatter_block_init(const void* sendbuf, void* recvbuf, int64
 
 int ferrompi_info_create(int32_t* info_handle);
 
+/** Free an MPI_Info object (MPI_Info_free). No-op on an invalid or already-freed handle. */
 int ferrompi_info_free(int32_t info_handle);
 
 int ferrompi_info_set(int32_t info_handle, const char* key, const char* value);
@@ -434,8 +435,10 @@ int ferrompi_waitall(int64_t count, int64_t* requests);
 
 int ferrompi_request_free(int64_t request);
 
+/** Non-destructive status query (MPI_Request_get_status). Does not free the request handle. */
 int ferrompi_request_get_status(int64_t request, int32_t* flag);
 
+/** Request cancellation of a pending operation (MPI_Cancel). Does not free the request handle. */
 int ferrompi_cancel(int64_t request);
 
 int ferrompi_waitany(int64_t count, int64_t* requests, int32_t* index);
@@ -470,6 +473,7 @@ int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info,
 int ferrompi_win_shared_query(int32_t win, int32_t rank,
                                int64_t* size, int32_t* disp_unit, void** baseptr);
 
+/** Free an MPI window (MPI_Win_free). No-op on an invalid or already-freed handle. */
 int ferrompi_win_free(int32_t win);
 
 int ferrompi_win_fence(int32_t assert_val, int32_t win);
@@ -607,6 +611,10 @@ int ferrompi_group_translate_ranks(int32_t group1_handle, int32_t n,
  * Custom Datatype Operations
  * ============================================================ */
 
+/**
+ * ferrompi_type_contiguous, ferrompi_type_vector and ferrompi_type_create_struct
+ * store the returned handle in the internal datatype table, committed on return.
+ */
 int ferrompi_type_contiguous(int32_t count, int32_t basetype_tag,
                               int32_t* newtype_handle);
 
@@ -675,6 +683,7 @@ int ferrompi_irecv_custom(
  * User-Defined Reduction Op (MPI_Op_create)
  * ============================================================ */
 
+/** ferrompi_op_alloc_slot and ferrompi_op_set_closure must both be called before ferrompi_op_create_user. */
 int ferrompi_op_alloc_slot(int32_t* out_slot);
 
 void ferrompi_op_set_closure(int32_t slot, void* data, void* vtbl);
@@ -683,6 +692,7 @@ int ferrompi_op_create_user(int32_t slot, int32_t commute, int32_t* out_handle);
 
 int ferrompi_op_free(int32_t handle);
 
+/** Release the op slot without calling MPI_Op_free. The caller must already have dropped the Rust closure. */
 int ferrompi_op_free_slot_only(int32_t handle);
 
 int ferrompi_allreduce_user_op(
