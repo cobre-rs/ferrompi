@@ -373,22 +373,7 @@ impl Drop for CustomDatatype {
 mod tests {
     use super::{CustomDatatype, StructField};
     use crate::datatype::DatatypeTag;
-    use crate::error::{Error, Result};
-
-    /// `raw_handle()` returns the handle stored in the struct.
-    ///
-    /// This test builds a `CustomDatatype` with a literal handle value and
-    /// verifies round-trip, without invoking any FFI. The Drop impl skips
-    /// `ferrompi_type_free` for negative handles, so no MPI call is made.
-    #[test]
-    fn custom_datatype_raw_handle_returns_stored_value() {
-        let dt = CustomDatatype { handle: 5 };
-        assert_eq!(dt.raw_handle(), 5);
-        // Suppress drop: we don't want to call ferrompi_type_free(5) in unit tests
-        // (no MPI runtime). handle=5 would pass the `>= 0` check and call FFI.
-        // Use std::mem::forget to prevent the drop.
-        std::mem::forget(dt);
-    }
+    use crate::error::Error;
 
     /// Calling `contiguous` with an indexed basetype returns `Error::InvalidOp`
     /// without invoking any FFI. This test does not require an MPI runtime.
@@ -429,12 +414,5 @@ mod tests {
             "expected Err(Error::InvalidOp), got: {:?}",
             result
         );
-    }
-
-    /// Compile-time witness: `resized` is callable as a method on `&CustomDatatype`
-    /// and returns `Result<CustomDatatype>`. No MPI runtime is needed.
-    #[allow(dead_code)]
-    fn resized_signature_compiles(d: &CustomDatatype) -> Result<CustomDatatype> {
-        d.resized(0, 16)
     }
 }

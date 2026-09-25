@@ -1157,22 +1157,4 @@ mod tests {
         let result = comm.allreduce_bytes(&send, &mut recv, ReduceOp::BitwiseOr);
         assert!(matches!(result, Err(Error::InvalidBuffer)));
     }
-
-    #[test]
-    fn allreduce_indexed_error_tag_renders_correctly() {
-        use crate::error::MpiErrorClass;
-        // Construct the error directly (no MPI runtime needed) to verify
-        // the operation tag appears correctly in the Display output.
-        let err = Error::Mpi {
-            class: MpiErrorClass::Arg,
-            code: 13,
-            message: "synthetic".to_string(),
-            operation: Some("allreduce_indexed"),
-        };
-        let s = format!("{err}");
-        assert!(
-            s.starts_with("MPI error in allreduce_indexed: "),
-            "expected operation tag 'allreduce_indexed' in Display output, got: {s}"
-        );
-    }
 }

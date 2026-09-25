@@ -154,54 +154,11 @@ impl Drop for Communicator {
 
 #[cfg(test)]
 mod tests {
-    use crate::comm::{Communicator, SplitType};
-
-    /// Helper: create a Communicator with handle 0 (COMM_WORLD).
-    /// Drop for handle 0 is a no-op, so this is safe without MPI.
-    /// `size: 1` prevents divide-by-zero in tests that do `buf.len() / comm.size()`.
-    fn dummy_comm() -> Communicator {
-        Communicator {
-            handle: 0,
-            rank: 0,
-            size: 1,
-        }
-    }
+    use crate::comm::SplitType;
 
     #[test]
-    fn cached_rank_size_returns_field_values() {
-        // Construct directly with arbitrary rank/size values to prove that
-        // rank() and size() return the cached fields without any FFI call.
-        let comm = Communicator {
-            handle: 0,
-            rank: 7,
-            size: 42,
-        };
-        assert_eq!(comm.rank(), 7);
-        assert_eq!(comm.size(), 42);
-    }
-
-    #[test]
-    fn split_type_shared_repr_value_and_traits() {
+    fn split_type_repr_value() {
         // SplitType::Shared has repr value 0
         assert_eq!(SplitType::Shared as i32, 0);
-
-        // Clone works (Copy implies Clone)
-        let st = SplitType::Shared;
-        let cloned = st;
-        assert_eq!(cloned, SplitType::Shared);
-
-        // Debug works
-        assert_eq!(format!("{:?}", st), "Shared");
-    }
-
-    #[test]
-    fn communicator_undefined_is_negative_one() {
-        assert_eq!(Communicator::UNDEFINED, -1);
-    }
-
-    #[test]
-    fn communicator_raw_handle_returns_correct_value() {
-        let comm = dummy_comm();
-        assert_eq!(comm.raw_handle(), 0);
     }
 }

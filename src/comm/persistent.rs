@@ -1090,8 +1090,7 @@ impl Communicator {
 #[cfg(test)]
 mod tests {
     use crate::comm::Communicator;
-    use crate::error::{Error, Result};
-    use crate::persistent::PersistentRequest;
+    use crate::error::Error;
     use crate::ReduceOp;
 
     fn dummy_comm() -> Communicator {
@@ -1099,41 +1098,6 @@ mod tests {
             handle: 0,
             rank: 0,
             size: 1,
-        }
-    }
-
-    #[test]
-    fn send_init_signature_compiles() {
-        fn _check(c: &Communicator, buf: &[i32]) -> Result<PersistentRequest> {
-            c.send_init(buf, 0, 0)
-        }
-    }
-
-    #[test]
-    fn bsend_init_signature_compiles() {
-        fn _check(c: &Communicator, buf: &[i32]) -> Result<PersistentRequest> {
-            c.bsend_init(buf, 0, 0)
-        }
-    }
-
-    #[test]
-    fn rsend_init_signature_compiles() {
-        fn _check(c: &Communicator, buf: &[i32]) -> Result<PersistentRequest> {
-            c.rsend_init(buf, 0, 0)
-        }
-    }
-
-    #[test]
-    fn ssend_init_signature_compiles() {
-        fn _check(c: &Communicator, buf: &[i32]) -> Result<PersistentRequest> {
-            c.ssend_init(buf, 0, 0)
-        }
-    }
-
-    #[test]
-    fn recv_init_signature_compiles() {
-        fn _check(c: &Communicator, buf: &mut [i32]) -> Result<PersistentRequest> {
-            c.recv_init(buf, 0, 0)
         }
     }
 

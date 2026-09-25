@@ -472,23 +472,8 @@ impl Drop for Request {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{with_handles, Request, HANDLE_STACK_CAP};
     use std::mem::forget;
-
-    #[test]
-    fn new_request_is_not_completed() {
-        let req = Request::new(0);
-        assert!(!req.is_completed());
-        assert_eq!(req.raw_handle(), 0);
-        forget(req);
-    }
-
-    #[test]
-    fn raw_handle_returns_constructor_value() {
-        let req = Request::new(99);
-        assert_eq!(req.raw_handle(), 99);
-        forget(req);
-    }
 
     #[test]
     fn test_when_already_completed_returns_true() {

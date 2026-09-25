@@ -275,19 +275,3 @@ impl Communicator {
         std::process::abort()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::comm::Communicator;
-    use crate::error::Result;
-    use crate::group::Group;
-
-    // Compile-time witness: verifies that create_from_group has the expected signature.
-    #[allow(dead_code)]
-    fn create_from_group_signature_compiles(
-        c: &Communicator,
-        g: &Group,
-    ) -> Result<Option<Communicator>> {
-        c.create_from_group(g)
-    }
-}

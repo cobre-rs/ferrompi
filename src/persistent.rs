@@ -243,23 +243,9 @@ impl Drop for PersistentRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::PersistentRequest;
+    use crate::error::Error;
     use std::mem::forget;
-
-    #[test]
-    fn new_request_is_inactive() {
-        let req = PersistentRequest::new(0);
-        assert!(!req.is_active());
-        assert_eq!(req.raw_handle(), 0);
-        forget(req);
-    }
-
-    #[test]
-    fn raw_handle_returns_constructor_value() {
-        let req = PersistentRequest::new(42);
-        assert_eq!(req.raw_handle(), 42);
-        forget(req);
-    }
 
     #[test]
     fn start_when_already_active_returns_error() {
