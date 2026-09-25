@@ -201,7 +201,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | BLT-02 | Private C header restates signatures in Doxygen | 800 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-03 | `MPI_VERSION < 3` branches unreachable | 455 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-04 | 12 near-identical in-place example binaries | 450 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
-| BLT-06 | Example scaffolding duplicated in 26 files | 390 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| BLT-06 | Example scaffolding duplicated in 26 files | 390 | 0.5.x† | fixed (f503dbf) |
 | BLT-08 | Boilerplate SAFETY / marshalling; 59 `unsafe` blocks without SAFETY | 300 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-09 | Three drifted test runners + deprecated `test.sh` | 200 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-10 | 42 redundant `[[example]]` entries | 185 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
