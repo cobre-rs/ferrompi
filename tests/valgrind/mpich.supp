@@ -1,0 +1,24 @@
+# Valgrind memcheck suppressions for the MPICH CI leg (ticket-018, R68/R73).
+#
+# Admission rule -- every entry in this file must satisfy all four:
+#   1. Names an exact error kind (Memcheck:Param, Memcheck:Addr8, ...), never
+#      a wildcard kind.
+#   2. Has at least one `fun:` frame inside MPICH, UCX, libfabric, hwloc or
+#      libc -- i.e. the report originates in a dependency, not in code this
+#      project owns.
+#   3. Never names a `ferrompi_*`, `rust_*` or example frame. A suppression
+#      that hides such a frame would mask the very defects this job exists
+#      to catch and must be rejected.
+#   4. Never uses an `obj:` wildcard line naming a shared object instead of a
+#      function; use `...` to elide frames instead, so a suppression stays
+#      pinned to a named function, not "anything in this shared object".
+#
+# Entries are added only for reports observed on the CI MPICH job
+# (Ubuntu 24.04's hotfixed libmpich12 4.2.1-5 + UCX, see
+# .github/scripts/mpich-hotfix.sh) for the examples tagged `valgrind` in
+# their `// mpi-test:` directive. Generate candidates with
+# `--gen-suppressions=all` on a throwaway CI run, then copy in only the
+# entries that satisfy the rule above.
+#
+# --leak-check is off (D-8: window memory leaks by design), so no entry here
+# is a Leak suppression.

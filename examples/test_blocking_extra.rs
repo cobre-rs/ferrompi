@@ -5,7 +5,7 @@
 //! beyond the f64 tests in test_collectives.rs.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_blocking_extra
-// mpi-test: np=2..
+// mpi-test: np=2.. valgrind
 
 use ferrompi::{Mpi, ReduceOp};
 

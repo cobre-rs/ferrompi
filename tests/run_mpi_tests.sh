@@ -10,6 +10,11 @@
 #
 # Usage:
 #   tests/run_mpi_tests.sh [features]
+#   tests/run_mpi_tests.sh --valgrind [features]
+#
+# --valgrind selects only examples whose directive has the `valgrind` flag,
+# runs each once at its minimal np under `valgrind --error-exitcode=99`
+# with tests/valgrind/mpich.supp, and multiplies the per-run timeout by 10.
 #
 # Environment:
 #   MPI_NP_LIST       Space-separated process counts (default: 4)
@@ -26,6 +31,8 @@ FEATURES=""
 IMPL_ID=""
 FEATURE_CLOSURE=""
 TMPDIR_RUN=""
+VALGRIND_MODE=0
+VALGRIND_SUPP=""
 declare -a MPI_NP_LIST_ARR=()
 declare -a MPIEXEC_ARGS=()
 
@@ -34,6 +41,7 @@ declare -A DIRECTIVE_TIMEOUT=()
 declare -A DIRECTIVE_SKIPOK=()
 declare -A DIRECTIVE_EXPECT=()
 declare -A DIRECTIVE_STDERR=()
+declare -A DIRECTIVE_VALGRIND=()
 declare -a DIRECTIVE_ORDER=()
 
 declare -A ARTIFACTS=()
@@ -52,12 +60,14 @@ RUNS_EXECUTED=0
 # ==========================================================================
 
 # parse_directive <line>
-# Parses the content of a `// mpi-test: ` line into np/timeout/skip-ok/expect
-# fields. Prints "<np>|<timeout>|<skip-ok>|<expect>" (empty string for an
-# absent field) and returns 0, or prints a reason on stderr and returns 1.
+# Parses the content of a `// mpi-test: ` line into
+# np/timeout/skip-ok/expect/valgrind fields. Prints
+# "<np>|<timeout>|<skip-ok>|<expect>|<valgrind>" (empty string for an absent
+# field, "1" for the valgrind flag) and returns 0, or prints a reason on
+# stderr and returns 1.
 parse_directive() {
   local line="$1"
-  local np="" tmo="" skip_ok="" expect=""
+  local np="" tmo="" skip_ok="" expect="" valgrind=""
   local -a kvs
   read -ra kvs <<<"$line"
 
@@ -95,6 +105,9 @@ parse_directive() {
             ;;
         esac
         ;;
+      valgrind)
+        valgrind=1
+        ;;
       *)
         echo "unknown directive key: $kv" >&2
         return 1
@@ -107,7 +120,7 @@ parse_directive() {
     return 1
   fi
 
-  printf '%s|%s|%s|%s\n' "$np" "$tmo" "$skip_ok" "$expect"
+  printf '%s|%s|%s|%s|%s\n' "$np" "$tmo" "$skip_ok" "$expect" "$valgrind"
 }
 
 # expand_np <spec> <np-list...>
@@ -137,6 +150,21 @@ expand_np() {
   else
     echo "${matched[*]}"
   fi
+}
+
+# valgrind_np <spec>
+# Prints the minimal np for valgrind mode: np=N and np=N.. both give N.
+valgrind_np() {
+  local spec="$1"
+  echo "${spec%..}"
+}
+
+# build_cmd <suppressions-path>
+# Prints the valgrind invocation prefix inserted between `mpiexec -n <np>`
+# and the executable.
+build_cmd() {
+  local supp="$1"
+  echo "valgrind -q --error-exitcode=99 --track-origins=yes --leak-check=no --suppressions=$supp"
 }
 
 # impl_id <mpiexec --version output>
@@ -218,6 +246,11 @@ classify() {
 
   if [[ "$exit_code" == "124" || "$exit_code" == "137" ]]; then
     echo "FAIL timeout"
+    return 0
+  fi
+
+  if [[ "$exit_code" == "99" ]]; then
+    echo "FAIL valgrind errors"
     return 0
   fi
 
@@ -335,8 +368,8 @@ discover() {
       echo "ERROR: $f: invalid // mpi-test: directive: $line" >&2
       exit 2
     fi
-    local np tmo skip_ok expect
-    IFS='|' read -r np tmo skip_ok expect <<<"$parsed"
+    local np tmo skip_ok expect valgrind
+    IFS='|' read -r np tmo skip_ok expect valgrind <<<"$parsed"
 
     if ((stderr_count > 1)); then
       echo "ERROR: $f: more than one // mpi-test-stderr line" >&2
@@ -364,6 +397,7 @@ discover() {
     DIRECTIVE_SKIPOK["$base"]="$skip_ok"
     DIRECTIVE_EXPECT["$base"]="$expect"
     DIRECTIVE_STDERR["$base"]="$stderr_literal"
+    DIRECTIVE_VALGRIND["$base"]="$valgrind"
   done
 }
 
@@ -393,10 +427,16 @@ build() {
 
 # run_all
 # Runs every discovered example (expanding np) through mpiexec, prints one
-# report line per run, and tallies PASS/SKIP/SKIP(feature)/FAIL.
+# report line per run, and tallies PASS/SKIP/SKIP(feature)/FAIL. In
+# VALGRIND_MODE, only valgrind-tagged examples run, each once at its minimal
+# np under the valgrind prefix, with the timeout multiplied by 10.
 run_all() {
   local name
   for name in "${DIRECTIVE_ORDER[@]}"; do
+    if ((VALGRIND_MODE)) && [[ -z "${DIRECTIVE_VALGRIND[$name]}" ]]; then
+      continue
+    fi
+
     local np_spec="${DIRECTIVE_NP[$name]}"
     local run_timeout="${DIRECTIVE_TIMEOUT[$name]}"
     local skip_ok="${DIRECTIVE_SKIPOK[$name]}"
@@ -404,6 +444,10 @@ run_all() {
     local literal="${DIRECTIVE_STDERR[$name]}"
     local required="${REQUIRED_FEATURES[$name]:-}"
     local exe="${ARTIFACTS[$name]:-}"
+
+    if ((VALGRIND_MODE)); then
+      run_timeout=$((run_timeout * 10))
+    fi
 
     if [[ -z "$exe" ]]; then
       local outcome
@@ -421,13 +465,24 @@ run_all() {
     fi
 
     local -a nps
-    read -ra nps <<<"$(expand_np "$np_spec" "${MPI_NP_LIST_ARR[@]}")"
+    if ((VALGRIND_MODE)); then
+      nps=("$(valgrind_np "$np_spec")")
+    else
+      read -ra nps <<<"$(expand_np "$np_spec" "${MPI_NP_LIST_ARR[@]}")"
+    fi
 
     local np
     for np in "${nps[@]}"; do
       local outfile="$TMPDIR_RUN/${name}.np${np}.out"
       local rc=0
-      timeout --kill-after=10 "$run_timeout" "$MPIEXEC" "${MPIEXEC_ARGS[@]}" -n "$np" "$exe" >"$outfile" 2>&1 || rc=$?
+      local -a exec_cmd=("$MPIEXEC" "${MPIEXEC_ARGS[@]}" -n "$np")
+      if ((VALGRIND_MODE)); then
+        local -a vg_prefix
+        read -ra vg_prefix <<<"$(build_cmd "$VALGRIND_SUPP")"
+        exec_cmd+=("${vg_prefix[@]}")
+      fi
+      exec_cmd+=("$exe")
+      timeout --kill-after=10 "$run_timeout" "${exec_cmd[@]}" >"$outfile" 2>&1 || rc=$?
 
       local outcome
       outcome=$(classify "$rc" "$outfile" "$skip_ok" "$expect" "$literal" "$IMPL_ID")
@@ -467,15 +522,26 @@ run_all() {
 # ==========================================================================
 
 main() {
+  if [[ "${1:-}" == "--valgrind" ]]; then
+    VALGRIND_MODE=1
+    shift
+  fi
   FEATURES="${1:-}"
 
   local -a missing=()
   command -v "$MPIEXEC" >/dev/null 2>&1 || missing+=("$MPIEXEC")
   command -v cargo >/dev/null 2>&1 || missing+=("cargo")
   command -v jq >/dev/null 2>&1 || missing+=("jq")
+  if ((VALGRIND_MODE)); then
+    command -v valgrind >/dev/null 2>&1 || missing+=("valgrind")
+  fi
   if ((${#missing[@]} > 0)); then
     echo "ERROR: missing required tool(s): ${missing[*]}" >&2
     exit 2
+  fi
+
+  if ((VALGRIND_MODE)); then
+    VALGRIND_SUPP="$(git rev-parse --show-toplevel)/tests/valgrind/mpich.supp"
   fi
 
   read -ra MPI_NP_LIST_ARR <<<"$MPI_NP_LIST"
@@ -498,6 +564,9 @@ main() {
   echo "  np list:      ${MPI_NP_LIST_ARR[*]}"
   echo "  features:     ${FEATURES:-default}"
   echo "  timeout:      ${MPI_TEST_TIMEOUT}s"
+  if ((VALGRIND_MODE)); then
+    echo "  mode:         valgrind (suppressions=$VALGRIND_SUPP)"
+  fi
   echo
 
   discover examples

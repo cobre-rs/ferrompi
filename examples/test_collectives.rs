@@ -7,7 +7,7 @@
 //! Each operation is verified with meaningful assertions.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_collectives
-// mpi-test: np=2..
+// mpi-test: np=2.. valgrind
 
 use ferrompi::{Mpi, ReduceOp};
 
