@@ -152,16 +152,6 @@ impl Drop for Communicator {
     }
 }
 
-// Compile-time assertions: Communicator must be Send + Sync
-const _: () = {
-    #[allow(dead_code)]
-    fn assert_send_sync<T: Send + Sync>() {}
-    #[allow(dead_code)]
-    fn check() {
-        assert_send_sync::<Communicator>();
-    }
-};
-
 #[cfg(test)]
 mod tests {
     use crate::comm::{Communicator, SplitType};

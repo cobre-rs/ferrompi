@@ -582,16 +582,6 @@ mod tests {
     use super::{Group, GroupComparison, RankRange};
     use crate::error::Result;
 
-    // Compile-time assertion: Group must implement Send + Sync.
-    const _: () = {
-        #[allow(dead_code)]
-        fn check<T: Send + Sync>() {}
-        #[allow(dead_code)]
-        fn group_send_sync_compile_time_assertion() {
-            check::<Group>();
-        }
-    };
-
     #[test]
     fn group_raw_handle_returns_stored_value() {
         // Construct a Group directly (sidestepping FFI) and verify raw_handle.

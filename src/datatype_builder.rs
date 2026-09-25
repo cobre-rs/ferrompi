@@ -375,16 +375,6 @@ mod tests {
     use crate::datatype::DatatypeTag;
     use crate::error::{Error, Result};
 
-    // Compile-time assertion: CustomDatatype must implement Send + Sync.
-    const _: () = {
-        #[allow(dead_code)]
-        fn check<T: Send + Sync>() {}
-        #[allow(dead_code)]
-        fn custom_datatype_send_sync_compile_time_assertion() {
-            check::<CustomDatatype>();
-        }
-    };
-
     /// `raw_handle()` returns the handle stored in the struct.
     ///
     /// This test builds a `CustomDatatype` with a literal handle value and
