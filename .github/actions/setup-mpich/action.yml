@@ -10,4 +10,7 @@ runs:
 
     - name: Hotfix MPICH on Ubuntu Noble
       shell: bash
-      run: bash "$GITHUB_WORKSPACE/.github/scripts/mpich-hotfix.sh"
+      run: |
+        bash "$GITHUB_WORKSPACE/.github/scripts/mpich-hotfix.sh"
+        # Hosted runners are single-node with no RDMA fabric; without this, UCX may probe an unusable IB device (e.g. Azure mana_0) and fail MPI_Init.
+        echo "UCX_TLS=self,sm,tcp" >> "$GITHUB_ENV"
