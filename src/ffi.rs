@@ -62,7 +62,6 @@ extern "C" {
     // Group Operations
     // ============================================================
 
-    pub fn ferrompi_mpi_undefined() -> int32_t;
     pub fn ferrompi_comm_group(comm: int32_t, group_handle: *mut int32_t) -> c_int;
     pub fn ferrompi_group_incl(
         group_handle: int32_t,

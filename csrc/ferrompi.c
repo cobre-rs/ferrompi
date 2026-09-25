@@ -3232,13 +3232,6 @@ int ferrompi_info_get(int32_t info_handle, const char* key, char* value, int32_t
  * Group Operations
  * ============================================================ */
 
-int32_t ferrompi_mpi_undefined(void) {
-    // Always return -1 so that callers can use a portable literal.
-    // ferrompi_group_rank normalizes MPI_UNDEFINED to -1 before returning,
-    // so this sentinel must match that normalized value.
-    return -1;
-}
-
 int ferrompi_comm_group(int32_t comm_handle, int32_t* group_handle) {
     if (comm_handle < 0) return MPI_ERR_COMM;
     MPI_Comm comm = get_comm(comm_handle);

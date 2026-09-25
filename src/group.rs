@@ -24,6 +24,7 @@
 
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::Communicator;
 
 /// Outcome of [`Group::compare`].
 ///
@@ -179,10 +180,7 @@ impl Group {
     /// Return the normalised `MPI_UNDEFINED` sentinel value (`-1`).
     ///
     /// [`rank`](Self::rank) returns `-1` when the calling process is not a
-    /// member of the group. The C shim normalises the implementation-defined
-    /// `MPI_UNDEFINED` constant (e.g. `-32766` on MPICH) to `-1` before
-    /// returning, so this method always returns `-1` regardless of the
-    /// underlying MPI implementation.
+    /// member of the group.
     ///
     /// This function does not require an active MPI session.
     ///
@@ -199,9 +197,8 @@ impl Group {
     ///     println!("not a member of this sub-group");
     /// }
     /// ```
-    pub fn undefined() -> i32 {
-        // SAFETY: ferrompi_mpi_undefined is a pure query with no pointer arguments.
-        unsafe { ffi::ferrompi_mpi_undefined() }
+    pub const fn undefined() -> i32 {
+        Communicator::UNDEFINED
     }
 
     /// Create a new group containing only the specified ranks from this group.

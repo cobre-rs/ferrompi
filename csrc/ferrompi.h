@@ -1699,12 +1699,6 @@ int ferrompi_abort(int32_t comm, int32_t errorcode);
 #define FERROMPI_GROUP_EMPTY 0
 
 /**
- * Return the MPI_UNDEFINED sentinel value for this MPI implementation.
- * Used by Group::rank() to expose the implementation's actual value.
- */
-int32_t ferrompi_mpi_undefined(void);
-
-/**
  * Get the group of a communicator (MPI_Comm_group).
  * @param comm_handle Communicator handle
  * @param group_handle Output: group handle
