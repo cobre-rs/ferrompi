@@ -206,7 +206,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | BLT-09 | Three drifted test runners + deprecated `test.sh` | 200 | 0.5.x† | fixed (a0501aa) |
 | BLT-10 | 42 redundant `[[example]]` entries | 185 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-11 | Tables/indexes repeated across 3–5 docs; marketing tone | 250 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
-| BLT-14 | 15 in-place C shims differ only by `MPI_IN_PLACE`; dead `is_root` | 300 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| BLT-14 | 15 in-place C shims differ only by `MPI_IN_PLACE`; dead `is_root` | 300 | 0.5.x† | fixed (38c789e) |
 | BLT-15 | `UserOp` double registry + dead per-callback lookup | 120 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-16 | Benches measuring nothing; duplicated bench protocol | 210 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-20 | Six copies of the slot-claim loop | 70 | superseded by ARC-01 | open |
