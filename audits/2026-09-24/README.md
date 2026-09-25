@@ -198,7 +198,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 
 | ID | Title | ~Lines | Target | Status |
 |---|---|---:|---|---|
-| BLT-01 | 76/181 unit tests catch no regression; 16 compile witnesses | 1,000 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| BLT-01 | 76/181 unit tests catch no regression; 16 compile witnesses | 1,000 | 0.5.x† | fixed (99f3f9d) |
 | BLT-02 | Private C header restates signatures in Doxygen | 800 | 0.5.x† | fixed (f09d912) |
 | BLT-03 | `MPI_VERSION < 3` branches unreachable | 455 | 0.5.x† | fixed (7c6daa0) |
 | BLT-04 | 12 near-identical in-place example binaries | 450 | 0.5.x† | fixed (25b1b5d) |
@@ -218,7 +218,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | BLT-27 | Dead `ferrompi_init`; module-wide `allow(dead_code)` | 25 | 0.5.x† | fixed (3cde221) |
 | BLT-29 | `with_handles` implemented twice | 20 | 0.5.x† | fixed (2b1237e) |
 | BLT-32 | `ReduceOp` compile_fail doctest via 14 `cfg_attr` | 16 | 0.6 (with ARC-02) | open |
-| BLT-34 | `use super::*` in 11 test modules | — | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| BLT-34 | `use super::*` in 11 test modules | — | 0.5.x† | fixed (99f3f9d) |
 
 ### Documentation — [07](findings/07-docs.md)
 
