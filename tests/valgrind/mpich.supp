@@ -1,4 +1,4 @@
-# Valgrind memcheck suppressions for the MPICH CI leg (ticket-018, R68/R73).
+# Valgrind memcheck suppressions for the MPICH CI leg.
 #
 # Admission rule -- every entry in this file must satisfy all four:
 #   1. Names an exact error kind (Memcheck:Param, Memcheck:Addr8, ...), never
@@ -20,5 +20,5 @@
 # `--gen-suppressions=all` on a throwaway CI run, then copy in only the
 # entries that satisfy the rule above.
 #
-# --leak-check is off (D-8: window memory leaks by design), so no entry here
-# is a Leak suppression.
+# --leak-check is off because RMA window memory is deliberately left
+# unfreed at finalize, so no entry here is a Leak suppression.
