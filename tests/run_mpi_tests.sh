@@ -345,11 +345,17 @@ artifact_outcome() {
 # building anything.
 discover() {
   local examples_dir="$1"
-  local f base line stderr_count
+  local f base line stderr_count directive_count
   for f in $(printf '%s\n' "$examples_dir"/*.rs | sort); do
     base=$(basename "$f" .rs)
     line=$(sed -n 's#^// mpi-test: ##p' "$f" | head -1)
     stderr_count=$(grep -c '^// mpi-test-stderr: ' "$f" || true)
+    directive_count=$(grep -c '^// mpi-test: ' "$f" || true)
+
+    if ((directive_count > 1)); then
+      echo "ERROR: $f: more than one // mpi-test: line" >&2
+      exit 2
+    fi
 
     if [[ -z "$line" ]]; then
       if ((stderr_count > 0)); then

@@ -1,9 +1,10 @@
 //! Integration test for Win PSCW (post/start/complete/wait) active-target epoch helpers.
 //!
 //! Verifies that the four PSCW epoch methods — `Win::post`, `Win::start`,
-//! `Win::complete`, and `Win::wait_exposure` — correctly open and close epochs
-//! without issuing any RMA data operations. Data-movement tests are deferred to
-//! the RMA data-op tickets (ticket-034 / ticket-057 / ticket-058).
+//! `Win::complete`, and `Win::wait_exposure` — correctly open and close epochs.
+//! Tests 1 and 2 exercise the epoch helpers alone (no RMA data operations);
+//! test 3 issues a real `Win::put` inside a `WinPscwAssert::no_check()` epoch
+//! on its own window and checks the transferred data.
 //!
 //! Rank 0 acts as the *target* (exposure side): calls `post` then `wait_exposure`.
 //! Rank 1 acts as the *origin* (access side): calls `start` then `complete`.

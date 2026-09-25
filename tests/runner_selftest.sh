@@ -14,8 +14,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/run_mpi_tests.sh
 source "$SCRIPT_DIR/run_mpi_tests.sh"
-set +e
-set -uo pipefail
+set -euo pipefail
 
 SELFTEST_TMP=$(mktemp -d)
 trap 'rm -rf "$SELFTEST_TMP"' EXIT
@@ -105,8 +104,8 @@ d=$(mk_dir)
 cat >"$d/test_x.rs" <<'EOF'
 fn main() {}
 EOF
-out=$( (discover "$d") 2>&1 )
-rc=$?
+rc=0
+out=$( (discover "$d") 2>&1 ) || rc=$?
 check "discover: missing directive exit code" "$rc" "2"
 check "discover: missing directive names test_x.rs" "$(contains "$out" "test_x.rs")" "yes"
 
@@ -129,6 +128,16 @@ EOF
 rc=0
 (discover "$d") >/dev/null 2>&1 || rc=$?
 check "discover: stderr line without directive rejected" "$rc" "2"
+
+d=$(mk_dir)
+cat >"$d/example_two_directives.rs" <<'EOF'
+// mpi-test: np=1
+// mpi-test: np=2
+fn main() {}
+EOF
+rc=0
+(discover "$d") >/dev/null 2>&1 || rc=$?
+check "discover: two mpi-test lines rejected" "$rc" "2"
 
 # --- expand_np -------------------------------------------------------------
 
