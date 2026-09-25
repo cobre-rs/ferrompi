@@ -59,27 +59,25 @@ fn main() {
     // Test 1: g1.union(&g2).size() == 3
     //   g1 = {0, 1}, g2 = {1, 2} → union = {0, 1, 2}
     // ========================================================================
-    {
-        match g1.union(&g2) {
-            Ok(u) => match u.size() {
-                Ok(s) if s == 3 => {
-                    if rank == 0 {
-                        println!("PASS: Test 1 — g1.union(&g2).size() = {s}");
-                    }
+    match g1.union(&g2) {
+        Ok(u) => match u.size() {
+            Ok(s) if s == 3 => {
+                if rank == 0 {
+                    println!("PASS: Test 1 — g1.union(&g2).size() = {s}");
                 }
-                Ok(s) => {
-                    eprintln!("rank {rank}: FAIL Test 1: union size = {s}, expected 3");
-                    local_ok = false;
-                }
-                Err(e) => {
-                    eprintln!("rank {rank}: FAIL Test 1: union.size() error: {e}");
-                    local_ok = false;
-                }
-            },
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 1: g1.union(&g2) failed: {e}");
+            }
+            Ok(s) => {
+                eprintln!("rank {rank}: FAIL Test 1: union size = {s}, expected 3");
                 local_ok = false;
             }
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL Test 1: union.size() error: {e}");
+                local_ok = false;
+            }
+        },
+        Err(e) => {
+            eprintln!("rank {rank}: FAIL Test 1: g1.union(&g2) failed: {e}");
+            local_ok = false;
         }
     }
 
@@ -87,27 +85,25 @@ fn main() {
     // Test 2: g1.intersection(&g2).size() == 1
     //   g1 = {0, 1}, g2 = {1, 2} → intersection = {1}
     // ========================================================================
-    {
-        match g1.intersection(&g2) {
-            Ok(i) => match i.size() {
-                Ok(s) if s == 1 => {
-                    if rank == 0 {
-                        println!("PASS: Test 2 — g1.intersection(&g2).size() = {s}");
-                    }
+    match g1.intersection(&g2) {
+        Ok(i) => match i.size() {
+            Ok(s) if s == 1 => {
+                if rank == 0 {
+                    println!("PASS: Test 2 — g1.intersection(&g2).size() = {s}");
                 }
-                Ok(s) => {
-                    eprintln!("rank {rank}: FAIL Test 2: intersection size = {s}, expected 1");
-                    local_ok = false;
-                }
-                Err(e) => {
-                    eprintln!("rank {rank}: FAIL Test 2: intersection.size() error: {e}");
-                    local_ok = false;
-                }
-            },
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 2: g1.intersection(&g2) failed: {e}");
+            }
+            Ok(s) => {
+                eprintln!("rank {rank}: FAIL Test 2: intersection size = {s}, expected 1");
                 local_ok = false;
             }
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL Test 2: intersection.size() error: {e}");
+                local_ok = false;
+            }
+        },
+        Err(e) => {
+            eprintln!("rank {rank}: FAIL Test 2: g1.intersection(&g2) failed: {e}");
+            local_ok = false;
         }
     }
 
@@ -115,27 +111,25 @@ fn main() {
     // Test 3: g1.difference(&g2).size() == 1
     //   g1 = {0, 1}, g2 = {1, 2} → difference = {0}
     // ========================================================================
-    {
-        match g1.difference(&g2) {
-            Ok(d) => match d.size() {
-                Ok(s) if s == 1 => {
-                    if rank == 0 {
-                        println!("PASS: Test 3 — g1.difference(&g2).size() = {s}");
-                    }
+    match g1.difference(&g2) {
+        Ok(d) => match d.size() {
+            Ok(s) if s == 1 => {
+                if rank == 0 {
+                    println!("PASS: Test 3 — g1.difference(&g2).size() = {s}");
                 }
-                Ok(s) => {
-                    eprintln!("rank {rank}: FAIL Test 3: difference size = {s}, expected 1");
-                    local_ok = false;
-                }
-                Err(e) => {
-                    eprintln!("rank {rank}: FAIL Test 3: difference.size() error: {e}");
-                    local_ok = false;
-                }
-            },
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 3: g1.difference(&g2) failed: {e}");
+            }
+            Ok(s) => {
+                eprintln!("rank {rank}: FAIL Test 3: difference size = {s}, expected 1");
                 local_ok = false;
             }
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL Test 3: difference.size() error: {e}");
+                local_ok = false;
+            }
+        },
+        Err(e) => {
+            eprintln!("rank {rank}: FAIL Test 3: g1.difference(&g2) failed: {e}");
+            local_ok = false;
         }
     }
 

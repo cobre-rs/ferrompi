@@ -93,8 +93,6 @@ fn main() {
                             status.count
                         );
                         local_ok = false;
-                    } else if rank == 1 {
-                        // We are rank 1 here; print from rank 0 after barrier instead.
                     }
                 }
                 Err(e) => {

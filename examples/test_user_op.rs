@@ -49,12 +49,9 @@ fn main() {
         let send = vec![rank as f64 + 1.5_f64];
         let mut recv = vec![0.0_f64];
 
-        match world.allreduce_with_op(&send, &mut recv, &op) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 1: allreduce_with_op failed: {e}");
-                local_ok = false;
-            }
+        if let Err(e) = world.allreduce_with_op(&send, &mut recv, &op) {
+            eprintln!("rank {rank}: FAIL Test 1: allreduce_with_op failed: {e}");
+            local_ok = false;
         }
 
         let expected = (size - 1) as f64 + 1.5_f64;
@@ -93,12 +90,9 @@ fn main() {
         let send = vec![contrib];
         let mut recv = vec![0i32];
 
-        match world.allreduce_with_op(&send, &mut recv, &op) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 2: allreduce_with_op failed: {e}");
-                local_ok = false;
-            }
+        if let Err(e) = world.allreduce_with_op(&send, &mut recv, &op) {
+            eprintln!("rank {rank}: FAIL Test 2: allreduce_with_op failed: {e}");
+            local_ok = false;
         }
 
         let effective_size = size.min(30);
@@ -194,12 +188,9 @@ fn main() {
         let send = vec![rank + 1];
         let mut recv = vec![0i32];
 
-        match world.allreduce_with_op(&send, &mut recv, &op) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 4: allreduce_with_op failed: {e}");
-                local_ok = false;
-            }
+        if let Err(e) = world.allreduce_with_op(&send, &mut recv, &op) {
+            eprintln!("rank {rank}: FAIL Test 4: allreduce_with_op failed: {e}");
+            local_ok = false;
         }
 
         if recv[0] != 1 {

@@ -92,8 +92,7 @@ fn main() {
         collected.len()
     );
 
-    let handles: Vec<i32> = collected.iter().map(|c| c.raw_handle()).collect();
-    let unique: HashSet<i32> = handles.iter().copied().collect();
+    let unique: HashSet<i32> = collected.iter().map(|c| c.raw_handle()).collect();
     assert_eq!(
         unique.len(),
         TOTAL_HANDLES,

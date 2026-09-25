@@ -112,9 +112,8 @@ fn main() {
             );
             let _ = world.allreduce_scalar(0i32, ReduceOp::Min);
             std::process::exit(1);
-        } else {
-            println!("PASS rank {rank}: create_from_group succeeded for member rank");
         }
+        println!("PASS rank {rank}: create_from_group succeeded for member rank");
     }
 
     // Sentinel barrier: all ranks must reach this point.

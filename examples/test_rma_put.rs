@@ -83,8 +83,7 @@ fn main() {
 
         if rank == 0 {
             let buf = [1.0f64, 2.0, 3.0, 4.0];
-            let result = win.put(&buf, 5, 0, buf.len() as i64);
-            if result.is_ok() {
+            if win.put(&buf, 5, 0, buf.len() as i64).is_ok() {
                 eprintln!("FAIL: expected Err for invalid rank 5, got Ok");
                 local_ok = false;
             }
