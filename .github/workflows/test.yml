@@ -115,6 +115,9 @@ jobs:
       - name: Build examples
         run: cargo build --examples --features "${{ matrix.features }}"
 
+      - name: Runner self-test
+        run: bash tests/runner_selftest.sh
+
       - name: MPI integration tests
         run: |
           chmod +x tests/run_mpi_tests.sh

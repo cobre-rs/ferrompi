@@ -284,17 +284,36 @@ classify() {
   echo "PASS"
 }
 
+# artifact_outcome <required-features-csv> <closure-csv>
+# Decides the outcome for an example whose build artifact is missing.
+# Prints "SKIP(feature)" if any required feature falls outside the closure,
+# or "FAIL missing binary" otherwise.
+artifact_outcome() {
+  local required_csv="$1" closure_csv="$2"
+  local -a reqs
+  IFS=',' read -ra reqs <<<"$required_csv"
+  local req
+  for req in "${reqs[@]}"; do
+    if [[ ",$closure_csv," != *",$req,"* ]]; then
+      echo "SKIP(feature)"
+      return 0
+    fi
+  done
+  echo "FAIL missing binary"
+}
+
 # ==========================================================================
 # Discovery, build and execution
 # ==========================================================================
 
-# discover
-# Reads every top-level examples/*.rs, validates its directive grammar and
-# populates the DIRECTIVE_* globals. Exits 2 on any grammar error, before
+# discover <examples-dir>
+# Reads every top-level <examples-dir>/*.rs, validates its directive grammar
+# and populates the DIRECTIVE_* globals. Exits 2 on any grammar error, before
 # building anything.
 discover() {
+  local examples_dir="$1"
   local f base line stderr_count
-  for f in $(printf '%s\n' examples/*.rs | sort); do
+  for f in $(printf '%s\n' "$examples_dir"/*.rs | sort); do
     base=$(basename "$f" .rs)
     line=$(sed -n 's#^// mpi-test: ##p' "$f" | head -1)
     stderr_count=$(grep -c '^// mpi-test-stderr: ' "$f" || true)
@@ -387,17 +406,10 @@ run_all() {
     local exe="${ARTIFACTS[$name]:-}"
 
     if [[ -z "$exe" ]]; then
-      local gated=0
-      local -a reqs
-      IFS=',' read -ra reqs <<<"$required"
-      local req
-      for req in "${reqs[@]}"; do
-        if [[ ",$FEATURE_CLOSURE," != *",$req,"* ]]; then
-          gated=1
-        fi
-      done
+      local outcome
+      outcome=$(artifact_outcome "$required" "$FEATURE_CLOSURE")
 
-      if ((gated == 1)); then
+      if [[ "$outcome" == "SKIP(feature)" ]]; then
         echo "SKIP(feature) $name (np=$np_spec) required-features=$required"
         SKIP_FEATURE_COUNT=$((SKIP_FEATURE_COUNT + 1))
       else
@@ -488,7 +500,7 @@ main() {
   echo "  timeout:      ${MPI_TEST_TIMEOUT}s"
   echo
 
-  discover
+  discover examples
   build "$FEATURES"
 
   local metadata
