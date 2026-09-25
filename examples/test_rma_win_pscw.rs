@@ -55,8 +55,7 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() failed: {e}");
                 local_ok = false;
-                let ok = i32::from(local_ok);
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                 return;
             }
         };
@@ -65,8 +64,7 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([1]) failed: {e}");
                 local_ok = false;
-                let ok = i32::from(local_ok);
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                 return;
             }
         };
@@ -90,8 +88,7 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() failed: {e}");
                 local_ok = false;
-                let ok = i32::from(local_ok);
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                 return;
             }
         };
@@ -100,8 +97,7 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([0]) failed: {e}");
                 local_ok = false;
-                let ok = i32::from(local_ok);
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                 return;
             }
         };
@@ -136,8 +132,7 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() [test 2] failed: {e}");
                 local_ok = false;
-                let ok = i32::from(local_ok);
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                 return;
             }
         };
@@ -146,8 +141,7 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([1]) [test 2] failed: {e}");
                 local_ok = false;
-                let ok = i32::from(local_ok);
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                 return;
             }
         };
@@ -176,8 +170,7 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() [test 2] failed: {e}");
                 local_ok = false;
-                let ok = i32::from(local_ok);
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                 return;
             }
         };
@@ -186,8 +179,7 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([0]) [test 2] failed: {e}");
                 local_ok = false;
-                let ok = i32::from(local_ok);
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                 return;
             }
         };

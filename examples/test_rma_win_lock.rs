@@ -66,8 +66,7 @@ fn main() {
                 // Still need to participate in test-2 and test-3 barriers, so
                 // we synthesise a dummy guard path by jumping ahead.
                 // Use a sentinel allreduce and return.
-                let ok = i32::from(local_ok);
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                 return;
             }
         };
@@ -96,8 +95,7 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: Win::lock(Exclusive, 0) failed: {e}");
                 local_ok = false;
-                let ok = i32::from(local_ok);
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                 return;
             }
         };
@@ -126,8 +124,7 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: Win::lock_all failed: {e}");
                 local_ok = false;
-                let ok = i32::from(local_ok);
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                 return;
             }
         };

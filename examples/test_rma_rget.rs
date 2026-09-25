@@ -65,8 +65,7 @@ fn main() {
                 Err(e) => {
                     eprintln!("rank 0: FAIL: Win::lock(Shared, 1) failed: {e}");
                     local_ok = false;
-                    let ok = i32::from(local_ok);
-                    let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                    let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                     return;
                 }
             };
@@ -79,8 +78,7 @@ fn main() {
                     eprintln!("rank 0: FAIL: Win::rget returned error: {e}");
                     local_ok = false;
                     drop(guard);
-                    let ok = i32::from(local_ok);
-                    let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                    let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
                     return;
                 }
             };
