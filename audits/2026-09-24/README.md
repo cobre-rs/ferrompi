@@ -199,7 +199,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 |---|---|---:|---|---|
 | BLT-01 | 76/181 unit tests catch no regression; 16 compile witnesses | 1,000 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-02 | Private C header restates signatures in Doxygen | 800 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
-| BLT-03 | `MPI_VERSION < 3` branches unreachable | 455 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| BLT-03 | `MPI_VERSION < 3` branches unreachable | 455 | 0.5.x† | fixed (7c6daa0) |
 | BLT-04 | 12 near-identical in-place example binaries | 450 | 0.5.x† | fixed (25b1b5d) |
 | BLT-06 | Example scaffolding duplicated in 26 files | 390 | 0.5.x† | fixed (f503dbf) |
 | BLT-08 | Boilerplate SAFETY / marshalling; 59 `unsafe` blocks without SAFETY | 300 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
