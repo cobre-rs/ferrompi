@@ -502,10 +502,7 @@ mod tests {
 
     #[test]
     fn error_class_display_all_variants() {
-        // Comprehensive test of ALL Display implementations.
-        // The existing `error_class_display_formats` test covers Success,
-        // Buffer, Comm, Rank, and Raw. This test covers every variant
-        // exhaustively for completeness.
+        // Covers the Display output of every MpiErrorClass variant.
         let cases = [
             (MpiErrorClass::Success, "SUCCESS"),
             (MpiErrorClass::Buffer, "ERR_BUFFER"),

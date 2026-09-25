@@ -244,7 +244,6 @@ impl Communicator {
     /// ```
     pub fn allreduce_scalar<T: MpiDatatype>(&self, value: T, op: ReduceOp) -> Result<T> {
         let send = [value];
-        // T is Copy, so zero-init is safe for numeric types.
         let mut recv = [value]; // placeholder, will be overwritten
         self.allreduce(&send, &mut recv, op)?;
         Ok(recv[0])

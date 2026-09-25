@@ -366,6 +366,15 @@ pub struct SharedWindow<T: MpiDatatype> {
     comm_size: i32,
 }
 
+fn win_size_and_disp_unit<T>(count: usize) -> Result<(i64, i32)> {
+    let byte_size = count
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or(Error::InvalidBuffer)?;
+    let size = i64::try_from(byte_size).map_err(|_| Error::InvalidBuffer)?;
+    let disp_unit = std::mem::size_of::<T>() as i32;
+    Ok((size, disp_unit))
+}
+
 impl<T: MpiDatatype> SharedWindow<T> {
     /// Allocate a shared memory window.
     ///
@@ -395,11 +404,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
     /// let win = SharedWindow::<f64>::allocate(&node, 1024).unwrap();
     /// ```
     pub fn allocate(comm: &Communicator, local_count: usize) -> Result<Self> {
-        let byte_size = local_count
-            .checked_mul(std::mem::size_of::<T>())
-            .ok_or(Error::InvalidBuffer)?;
-        let size = i64::try_from(byte_size).map_err(|_| Error::InvalidBuffer)?;
-        let disp_unit = std::mem::size_of::<T>() as i32;
+        let (size, disp_unit) = win_size_and_disp_unit::<T>(local_count)?;
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut win_handle: i32 = 0;
 
@@ -891,12 +896,7 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// let win = Win::create(&world, &mut buf).unwrap();
     /// ```
     pub fn create(comm: &Communicator, buf: &'a mut [T]) -> Result<Self> {
-        let byte_size = buf
-            .len()
-            .checked_mul(std::mem::size_of::<T>())
-            .ok_or(Error::InvalidBuffer)?;
-        let size = i64::try_from(byte_size).map_err(|_| Error::InvalidBuffer)?;
-        let disp_unit = std::mem::size_of::<T>() as i32;
+        let (size, disp_unit) = win_size_and_disp_unit::<T>(buf.len())?;
         let mut win_handle: i32 = 0;
 
         // SAFETY: `buf` is a valid, aligned mutable slice borrowed for `'a`.
@@ -970,11 +970,7 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// let win = Win::<f64>::allocate(&world, 32).unwrap();
     /// ```
     pub fn allocate(comm: &Communicator, local_count: usize) -> Result<Self> {
-        let byte_size = local_count
-            .checked_mul(std::mem::size_of::<T>())
-            .ok_or(Error::InvalidBuffer)?;
-        let size = i64::try_from(byte_size).map_err(|_| Error::InvalidBuffer)?;
-        let disp_unit = std::mem::size_of::<T>() as i32;
+        let (size, disp_unit) = win_size_and_disp_unit::<T>(local_count)?;
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut win_handle: i32 = 0;
 

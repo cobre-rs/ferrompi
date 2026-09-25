@@ -478,10 +478,7 @@ impl Mpi {
         // version string ("MPI x.y"); the C layer writes at most buf.len()
         // bytes into it and reports the written length through `len`.
         let ret = unsafe { ffi::ferrompi_get_version(buf.as_mut_ptr().cast::<c_char>(), &mut len) };
-
-        if ret != 0 {
-            return Err(Error::from_code_with_op(ret, "get_version"));
-        }
+        Error::check_with_op(ret, "get_version")?;
 
         let len = (len.max(0) as usize).min(buf.len());
         let s = std::str::from_utf8(&buf[..len])
@@ -742,6 +739,15 @@ mod tests {
     use super::{group, Error, Mpi, ReduceOp, ThreadLevel, ATTACHED_BUFFER};
     use std::marker::PhantomData;
 
+    /// Minimal stub `Mpi` handle for tests that never call `Mpi::init`
+    /// because their early-return path fires before any MPI call.
+    fn stub_mpi() -> Mpi {
+        Mpi {
+            thread_level: ThreadLevel::Single,
+            _marker: PhantomData,
+        }
+    }
+
     // ── ThreadLevel tests ──────────────────────────────────────────────
 
     #[test]
@@ -798,10 +804,7 @@ mod tests {
             }
         }
 
-        let mpi = Mpi {
-            thread_level: ThreadLevel::Single,
-            _marker: PhantomData,
-        };
+        let mpi = stub_mpi();
         let buf2 = vec![0u8; 8].into_boxed_slice();
         let result = mpi.buffer_attach(buf2);
         assert!(
@@ -823,10 +826,7 @@ mod tests {
             *g = None;
         }
 
-        let mpi = Mpi {
-            thread_level: ThreadLevel::Single,
-            _marker: PhantomData,
-        };
+        let mpi = stub_mpi();
         let result = mpi.buffer_detach();
         assert!(
             matches!(result, Err(Error::InvalidOp)),
@@ -847,10 +847,7 @@ mod tests {
         // because the null-byte check fires before the version probe or FFI).
         // We bypass init by constructing the struct directly — this is valid
         // inside the crate's own test module where the fields are accessible.
-        let mpi = Mpi {
-            thread_level: ThreadLevel::Single,
-            _marker: PhantomData,
-        };
+        let mpi = stub_mpi();
         // Group with handle 0 (MPI_GROUP_EMPTY sentinel) — never dereferenced
         // because the null-byte check fires first.
         let g = group::Group { handle: 0 };

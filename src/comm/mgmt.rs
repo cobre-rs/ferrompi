@@ -88,6 +88,17 @@ impl Communicator {
         Self::from_handle(new_handle)
     }
 
+    /// Convert a communicator-handle result into `Option<Self>`, treating a
+    /// negative handle as `MPI_COMM_NULL` (used by split, split_type, and
+    /// create_from_group).
+    fn from_optional_handle(new_handle: i32) -> Result<Option<Self>> {
+        if new_handle < 0 {
+            Ok(None)
+        } else {
+            Self::from_handle(new_handle).map(Some)
+        }
+    }
+
     /// Split this communicator into sub-communicators based on color and key.
     ///
     /// Processes with the same `color` are placed in the same new communicator.
@@ -112,11 +123,7 @@ impl Communicator {
         // SAFETY: self.handle is owned by this Communicator; remaining arguments are scalars.
         let ret = unsafe { ffi::ferrompi_comm_split(self.handle, color, key, &mut new_handle) };
         Error::check_with_op(ret, "comm_split")?;
-        if new_handle < 0 {
-            Ok(None)
-        } else {
-            Self::from_handle(new_handle).map(Some)
-        }
+        Self::from_optional_handle(new_handle)
     }
 
     /// Split this communicator by type.
@@ -145,11 +152,7 @@ impl Communicator {
             ffi::ferrompi_comm_split_type(self.handle, split_type as i32, key, &mut new_handle)
         };
         Error::check_with_op(ret, "comm_split_type")?;
-        if new_handle < 0 {
-            Ok(None)
-        } else {
-            Self::from_handle(new_handle).map(Some)
-        }
+        Self::from_optional_handle(new_handle)
     }
 
     /// Create a communicator containing only processes that share memory.
@@ -214,11 +217,7 @@ impl Communicator {
             ffi::ferrompi_comm_create_from_group_parent(self.handle, group.handle, &mut new_handle)
         };
         Error::check_with_op(ret, "comm_create_from_group_parent")?;
-        if new_handle < 0 {
-            Ok(None)
-        } else {
-            Self::from_handle(new_handle).map(Some)
-        }
+        Self::from_optional_handle(new_handle)
     }
 
     /// Abort MPI execution across all processes in this communicator.
