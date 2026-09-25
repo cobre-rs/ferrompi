@@ -1,7 +1,7 @@
 //! Nonblocking collective operations: ibroadcast, iallreduce, ireduce, igather, etc.
 
 use crate::comm::Communicator;
-use crate::datatype::MpiDatatype;
+use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::request::Request;
@@ -33,16 +33,11 @@ impl Communicator {
     /// ```
     pub fn ibroadcast<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<Request> {
         let mut request_handle: i64 = 0;
-        let ret = unsafe {
-            ffi::ferrompi_ibcast(
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                root,
-                self.handle,
-                &mut request_handle,
-            )
-        };
+        let (p, n, dt) = buf_mut(data);
+        // SAFETY: the returned Request does not borrow `data`; keeping it alive and
+        // untouched until the request completes is the caller's documented obligation,
+        // which this signature does not enforce.
+        let ret = unsafe { ffi::ferrompi_ibcast(p, n, dt, root, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "ibcast")?;
         Ok(Request::new(request_handle))
     }
@@ -72,16 +67,14 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let mut request_handle: i64 = 0;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]). The returned Request does not borrow either slice; keeping
+        // both alive and untouched until the request completes is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
-            ffi::ferrompi_iallreduce(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_iallreduce(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "iallreduce")?;
         Ok(Request::new(request_handle))
@@ -121,12 +114,18 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let mut request_handle: i64 = 0;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]). The returned Request does not borrow either slice; keeping
+        // both alive and untouched until the request completes is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_ireduce(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
+                sp,
+                rp,
+                n,
+                dt,
                 op as i32,
                 root,
                 self.handle,
@@ -167,17 +166,15 @@ impl Communicator {
         root: i32,
     ) -> Result<Request> {
         let mut request_handle: i64 = 0;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]); at non-root, recv is
+        // ignored by MPI. The root-side receive-length relation (recv.len() >= send.len()
+        // * size) is not checked by this function. The returned Request does not borrow
+        // either slice; keeping both alive and untouched until the request completes is
+        // the caller's documented obligation, which this signature does not enforce.
         let ret = unsafe {
-            ffi::ferrompi_igather(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                root,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_igather(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "igather")?;
         Ok(Request::new(request_handle))
@@ -202,17 +199,15 @@ impl Communicator {
     /// ```
     pub fn iallgather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<Request> {
         let mut request_handle: i64 = 0;
-        let ret = unsafe {
-            ffi::ferrompi_iallgather(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                self.handle,
-                &mut request_handle,
-            )
-        };
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). The every-rank
+        // receive-length relation (recv.len() >= send.len() * size) is not checked by
+        // this function. The returned Request does not borrow either slice; keeping both
+        // alive and untouched until the request completes is the caller's documented
+        // obligation, which this signature does not enforce.
+        let ret =
+            unsafe { ffi::ferrompi_iallgather(sp, n, rp, n, dt, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "iallgather")?;
         Ok(Request::new(request_handle))
     }
@@ -241,17 +236,15 @@ impl Communicator {
         root: i32,
     ) -> Result<Request> {
         let mut request_handle: i64 = 0;
+        let (sp, _, _) = buf(send);
+        let (rp, n, dt) = buf_mut(recv);
+        // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
+        // &mut [T]). The root-side send-length relation (send.len() >= recv.len() * size)
+        // is not checked by this function. The returned Request does not borrow either
+        // slice; keeping both alive and untouched until the request completes is the
+        // caller's documented obligation, which this signature does not enforce.
         let ret = unsafe {
-            ffi::ferrompi_iscatter(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                T::TAG as i32,
-                root,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_iscatter(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "iscatter")?;
         Ok(Request::new(request_handle))
@@ -274,6 +267,9 @@ impl Communicator {
     /// ```
     pub fn ibarrier(&self) -> Result<Request> {
         let mut request_handle: i64 = 0;
+        // SAFETY: this call takes only the communicator handle and a request out-pointer;
+        // there is no data buffer, so the returned Request has no buffer-lifetime
+        // obligation.
         let ret = unsafe { ffi::ferrompi_ibarrier(self.handle, &mut request_handle) };
         Error::check_with_op(ret, "ibarrier")?;
         Ok(Request::new(request_handle))
@@ -310,16 +306,14 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let mut request_handle: i64 = 0;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]). The returned Request does not borrow either slice; keeping
+        // both alive and untouched until the request completes is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
-            ffi::ferrompi_iscan(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_iscan(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "iscan")?;
         Ok(Request::new(request_handle))
@@ -360,16 +354,14 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let mut request_handle: i64 = 0;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]). The returned Request does not borrow either slice; keeping
+        // both alive and untouched until the request completes is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
-            ffi::ferrompi_iexscan(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_iexscan(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "iexscan")?;
         Ok(Request::new(request_handle))
@@ -404,16 +396,15 @@ impl Communicator {
         }
         let count = (send.len() / size) as i64;
         let mut request_handle: i64 = 0;
+        let (sp, _, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len()
+        // and divisibility by size are both verified above. The returned Request does not
+        // borrow either slice; keeping both alive and untouched until the request
+        // completes is the caller's documented obligation, which this signature does not
+        // enforce.
         let ret = unsafe {
-            ffi::ferrompi_ialltoall(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                count,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                count,
-                T::TAG as i32,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_ialltoall(sp, count, rp, count, dt, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "ialltoall")?;
         Ok(Request::new(request_handle))
@@ -453,12 +444,18 @@ impl Communicator {
             return Err(Error::InvalidBuffer);
         }
         let mut request_handle: i64 = 0;
+        let (sp, _, _) = buf(send);
+        let (rp, n, dt) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len()
+        // * size is verified above. The returned Request does not borrow either slice;
+        // keeping both alive and untouched until the request completes is the caller's
+        // documented obligation, which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_ireduce_scatter_block(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                T::TAG as i32,
+                sp,
+                rp,
+                n,
+                dt,
                 op as i32,
                 self.handle,
                 &mut request_handle,
@@ -505,19 +502,21 @@ impl Communicator {
         }
         let recvcount = (data.len() / size) as i64;
         let mut request_handle: i64 = 0;
+        let (p, _, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
+        // this NULL is unambiguous); ferrompi_igather maps it to MPI_IN_PLACE, so data
+        // serves as both root's send contribution and the receive buffer. data.len() %
+        // size == 0 is checked above, and the guard above guarantees self.rank() == root,
+        // the only rank MPI_IN_PLACE is valid for in MPI_Igather. The returned Request
+        // does not borrow data; keeping it alive and untouched until the request completes
+        // is the caller's documented obligation, which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice. NULL as sendbuf is
-            // the shim's in-place marker, which ferrompi_igather maps to MPI_IN_PLACE; data
-            // serves as both root's send contribution and the receive buffer. The guard
-            // above guarantees self.rank() == root, which is the only rank MPI_IN_PLACE is
-            // valid for in MPI_Igather. The buffer outlives the returned Request handle;
-            // the caller must call wait() before accessing or dropping the buffer.
             ffi::ferrompi_igather(
                 std::ptr::null(),
                 0,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
+                p,
                 recvcount,
-                T::TAG as i32,
+                dt,
                 root,
                 self.handle,
                 &mut request_handle,
@@ -559,18 +558,20 @@ impl Communicator {
         }
         let recvcount = (data.len() / size) as i64;
         let mut request_handle: i64 = 0;
+        let (p, _, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
+        // this NULL is unambiguous); ferrompi_iallgather maps it to MPI_IN_PLACE.
+        // data.len() % size == 0 is checked above; each rank's slot must be pre-written by
+        // the caller before this call. The returned Request does not borrow data; keeping
+        // it alive and untouched until the request completes is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice. NULL as sendbuf is
-            // the shim's in-place marker, which ferrompi_iallgather maps to MPI_IN_PLACE.
-            // Each rank's contribution (at offset rank*recvcount) must be pre-written by
-            // the caller. The buffer outlives the returned Request; the caller must call
-            // wait() before accessing or dropping the buffer.
             ffi::ferrompi_iallgather(
                 std::ptr::null(),
                 0,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
+                p,
                 recvcount,
-                T::TAG as i32,
+                dt,
                 self.handle,
                 &mut request_handle,
             )
@@ -612,41 +613,32 @@ impl Communicator {
     pub fn iscatter_inplace<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<Request> {
         let is_root = self.rank() == root;
         let size = self.size() as usize;
-        let (sendbuf, sendcount, recvbuf, recvcount) = if is_root {
+        let (sendbuf, sendcount, recvbuf, recvcount, dt) = if is_root {
             if size == 0 || data.len() % size != 0 {
                 return Err(Error::InvalidBuffer);
             }
             let per = (data.len() / size) as i64;
-            (
-                data.as_ptr().cast::<std::ffi::c_void>(),
-                per,
-                std::ptr::null_mut::<std::ffi::c_void>(),
-                0i64,
-            )
+            let (sp, _, dt) = buf(data);
+            (sp, per, std::ptr::null_mut::<std::ffi::c_void>(), 0i64, dt)
         } else {
-            (
-                std::ptr::null::<std::ffi::c_void>(),
-                0i64,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-            )
+            let (rp, rn, dt) = buf_mut(data);
+            (std::ptr::null::<std::ffi::c_void>(), 0i64, rp, rn, dt)
         };
         let mut request_handle: i64 = 0;
+        // SAFETY: at root, recvbuf is NULL, the in-place marker (buf's pointer is never
+        // null, so this NULL is unambiguous); ferrompi_iscatter maps it to MPI_IN_PLACE so
+        // root's own slot is retained. data.len() % size == 0 is checked above. At
+        // non-root, sendbuf is null, which the MPI standard ignores on non-root scatter.
+        // The returned Request does not borrow data; keeping it alive and untouched until
+        // the request completes is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
-            // SAFETY: At root, sendbuf points to valid data of length sendcount*size elements
-            // (guaranteed by the divisibility check above); recvbuf is NULL, the shim's
-            // in-place marker, which ferrompi_iscatter maps to MPI_IN_PLACE so root's own
-            // slot is retained. At non-root, recvbuf points to a valid mutable slice of
-            // length recvcount elements; sendbuf is null (MPI standard ignores sendbuf on
-            // non-root scatter). Both pointers are cast to *const/*mut c_void as required
-            // by the C FFI. The buffer outlives the returned Request; the caller must call
-            // wait() before accessing or dropping it.
             ffi::ferrompi_iscatter(
                 sendbuf,
                 sendcount,
                 recvbuf,
                 recvcount,
-                T::TAG as i32,
+                dt,
                 root,
                 self.handle,
                 &mut request_handle,
@@ -692,18 +684,20 @@ impl Communicator {
         }
         let recvcount = (data.len() / size) as i64;
         let mut request_handle: i64 = 0;
+        let (p, _, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
+        // this NULL is unambiguous); ferrompi_ialltoall maps it to MPI_IN_PLACE. data.len()
+        // % size == 0 is checked above; the caller must pre-write each slot before calling
+        // this method. The returned Request does not borrow data; keeping it alive and
+        // untouched until the request completes is the caller's documented obligation,
+        // which this signature does not enforce.
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of length recvcount*size
-            // elements (guaranteed by the divisibility check above). NULL as sendbuf is the
-            // shim's in-place marker, which ferrompi_ialltoall maps to MPI_IN_PLACE; the caller
-            // must pre-write each slot before calling this method. The buffer outlives the
-            // returned Request; the caller must call wait() before accessing or dropping it.
             ffi::ferrompi_ialltoall(
                 std::ptr::null(),
                 0,
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
+                p,
                 recvcount,
-                T::TAG as i32,
+                dt,
                 self.handle,
                 &mut request_handle,
             )
