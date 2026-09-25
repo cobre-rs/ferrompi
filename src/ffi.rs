@@ -233,64 +233,12 @@ extern "C" {
         comm: int32_t,
     ) -> c_int;
 
-    pub fn ferrompi_reduce_inplace(
-        buf: *mut c_void,
-        count: int64_t,
-        datatype_tag: int32_t,
-        op: int32_t,
-        root: int32_t,
-        is_root: int32_t,
-        comm: int32_t,
-    ) -> c_int;
-
     pub fn ferrompi_allreduce(
         sendbuf: *const c_void,
         recvbuf: *mut c_void,
         count: int64_t,
         datatype_tag: int32_t,
         op: int32_t,
-        comm: int32_t,
-    ) -> c_int;
-
-    pub fn ferrompi_allreduce_inplace(
-        buf: *mut c_void,
-        count: int64_t,
-        datatype_tag: int32_t,
-        op: int32_t,
-        comm: int32_t,
-    ) -> c_int;
-
-    pub fn ferrompi_gather_inplace(
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
-        root: int32_t,
-        is_root: int32_t,
-        comm: int32_t,
-    ) -> c_int;
-
-    pub fn ferrompi_allgather_inplace(
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
-        comm: int32_t,
-    ) -> c_int;
-
-    pub fn ferrompi_scatter_inplace(
-        sendbuf: *const c_void,
-        sendcount: int64_t,
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
-        root: int32_t,
-        is_root: int32_t,
-        comm: int32_t,
-    ) -> c_int;
-
-    pub fn ferrompi_alltoall_inplace(
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
         comm: int32_t,
     ) -> c_int;
 

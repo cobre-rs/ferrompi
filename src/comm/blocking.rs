@@ -175,21 +175,40 @@ impl Communicator {
         op: ReduceOp,
         root: i32,
     ) -> Result<()> {
-        let is_root = if self.rank() == root { 1i32 } else { 0i32 };
-        let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of T. At root,
-            // MPI uses it as both send and receive buffer (MPI_IN_PLACE semantics);
-            // at non-root it is the send buffer only. T::TAG matches T's MPI datatype
-            // per ADR-0003. The slice outlives this blocking call.
-            ffi::ferrompi_reduce_inplace(
-                data.as_mut_ptr().cast::<std::ffi::c_void>(),
-                data.len() as i64,
-                T::TAG as i32,
-                op as i32,
-                root,
-                is_root,
-                self.handle,
-            )
+        let data_ptr = data.as_mut_ptr().cast::<std::ffi::c_void>();
+        let ret = if self.rank() == root {
+            // SAFETY: data is a valid, exclusively-owned mutable slice of T; NULL as
+            // sendbuf is the shim's in-place marker, which ferrompi_reduce maps to
+            // MPI_IN_PLACE so data is both input and output at root. T::TAG matches
+            // T's MPI datatype per ADR-0003. The slice outlives this blocking call.
+            unsafe {
+                ffi::ferrompi_reduce(
+                    std::ptr::null(),
+                    data_ptr,
+                    data.len() as i64,
+                    T::TAG as i32,
+                    op as i32,
+                    root,
+                    self.handle,
+                )
+            }
+        } else {
+            // SAFETY: data is a valid, exclusively-owned mutable slice of T, passed as
+            // both sendbuf and recvbuf: strict MPI builds reject a NULL recvbuf at
+            // non-root, and MPI ignores recvbuf there, so the computation is
+            // unaffected. T::TAG matches T's MPI datatype per ADR-0003. The slice
+            // outlives this blocking call.
+            unsafe {
+                ffi::ferrompi_reduce(
+                    data_ptr,
+                    data_ptr,
+                    data.len() as i64,
+                    T::TAG as i32,
+                    op as i32,
+                    root,
+                    self.handle,
+                )
+            }
         };
         Error::check_with_op(ret, "reduce_inplace")
     }
@@ -253,9 +272,12 @@ impl Communicator {
     pub fn allreduce_inplace<T: MpiDatatype>(&self, data: &mut [T], op: ReduceOp) -> Result<()> {
         let ret = unsafe {
             // SAFETY: data is a valid, exclusively-owned mutable slice of T (no aliasing via
-            // Rust borrow rules). MPI uses it as both send (MPI_IN_PLACE) and receive buffer.
-            // T::TAG matches T's MPI datatype per ADR-0003. The slice outlives this blocking call.
-            ffi::ferrompi_allreduce_inplace(
+            // Rust borrow rules). NULL as sendbuf is the shim's in-place marker, which
+            // ferrompi_allreduce maps to MPI_IN_PLACE, so data serves as both send and
+            // receive buffer. T::TAG matches T's MPI datatype per ADR-0003. The slice
+            // outlives this blocking call.
+            ffi::ferrompi_allreduce(
+                std::ptr::null(),
                 data.as_mut_ptr().cast::<std::ffi::c_void>(),
                 data.len() as i64,
                 T::TAG as i32,
@@ -776,16 +798,18 @@ impl Communicator {
         }
         let recvcount = (data.len() / size) as i64;
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice. We cast to *mut c_void
-            // as required by the C FFI, passing the full buffer as both the in-place send
-            // contribution (root's slot at offset rank*recvcount) and the receive buffer.
-            // is_root is hardcoded to 1 because the guard above guarantees self.rank() == root.
-            ffi::ferrompi_gather_inplace(
+            // SAFETY: data is a valid, exclusively-owned mutable slice. NULL as sendbuf is
+            // the shim's in-place marker, which ferrompi_gather maps to MPI_IN_PLACE; data
+            // serves as both root's send contribution (at offset rank*recvcount) and the
+            // receive buffer. The guard above guarantees self.rank() == root, which is the
+            // only rank MPI_IN_PLACE is valid for in MPI_Gather.
+            ffi::ferrompi_gather(
+                std::ptr::null(),
+                0,
                 data.as_mut_ptr().cast::<std::ffi::c_void>(),
                 recvcount,
                 T::TAG as i32,
                 root,
-                1, // is_root == true by the guard above
                 self.handle,
             )
         };
@@ -825,10 +849,13 @@ impl Communicator {
         }
         let recvcount = (data.len() / size) as i64;
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice. We cast to *mut c_void
-            // as required by the C FFI. Each rank's contribution (at offset rank*recvcount)
-            // must be pre-written by the caller; MPI fills the remaining slots in-place.
-            ffi::ferrompi_allgather_inplace(
+            // SAFETY: data is a valid, exclusively-owned mutable slice. NULL as sendbuf is
+            // the shim's in-place marker, which ferrompi_allgather maps to MPI_IN_PLACE.
+            // Each rank's contribution (at offset rank*recvcount) must be pre-written by
+            // the caller; MPI fills the remaining slots in-place.
+            ffi::ferrompi_allgather(
+                std::ptr::null(),
+                0,
                 data.as_mut_ptr().cast::<std::ffi::c_void>(),
                 recvcount,
                 T::TAG as i32,
@@ -873,7 +900,7 @@ impl Communicator {
     pub fn scatter_inplace<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<()> {
         let is_root = self.rank() == root;
         let size = self.size() as usize;
-        let (sendbuf, sendcount, recvbuf, recvcount, is_root_flag) = if is_root {
+        let (sendbuf, sendcount, recvbuf, recvcount) = if is_root {
             if size == 0 || data.len() % size != 0 {
                 return Err(Error::InvalidBuffer);
             }
@@ -883,7 +910,6 @@ impl Communicator {
                 per,
                 std::ptr::null_mut::<std::ffi::c_void>(),
                 0i64,
-                1i32,
             )
         } else {
             (
@@ -891,23 +917,23 @@ impl Communicator {
                 0i64,
                 data.as_mut_ptr().cast::<std::ffi::c_void>(),
                 data.len() as i64,
-                0i32,
             )
         };
         let ret = unsafe {
             // SAFETY: At root, sendbuf points to valid data of length sendcount*size elements
-            // (guaranteed by the divisibility check above); recvbuf is null (MPI_IN_PLACE path).
-            // At non-root, recvbuf points to a valid mutable slice of length recvcount elements;
-            // sendbuf is null (MPI standard ignores sendbuf on non-root scatter). Both pointers
-            // are cast to *const/*mut c_void as required by the C FFI. The slice outlives the call.
-            ffi::ferrompi_scatter_inplace(
+            // (guaranteed by the divisibility check above); recvbuf is NULL, the shim's
+            // in-place marker, which ferrompi_scatter maps to MPI_IN_PLACE so root's own
+            // slot is retained. At non-root, recvbuf points to a valid mutable slice of
+            // length recvcount elements; sendbuf is null (MPI standard ignores sendbuf on
+            // non-root scatter). Both pointers are cast to *const/*mut c_void as required
+            // by the C FFI. The slice outlives the call.
+            ffi::ferrompi_scatter(
                 sendbuf,
                 sendcount,
                 recvbuf,
                 recvcount,
                 T::TAG as i32,
                 root,
-                is_root_flag,
                 self.handle,
             )
         };
@@ -954,10 +980,12 @@ impl Communicator {
         let recvcount = (data.len() / size) as i64;
         let ret = unsafe {
             // SAFETY: data is a valid, exclusively-owned mutable slice of length recvcount*size
-            // elements (guaranteed by the divisibility check above). We cast to *mut c_void as
-            // required by the C FFI. MPI_IN_PLACE is passed as sendbuf in the C wrapper; the
-            // caller must pre-write each slot before calling this method.
-            ffi::ferrompi_alltoall_inplace(
+            // elements (guaranteed by the divisibility check above). NULL as sendbuf is the
+            // shim's in-place marker, which ferrompi_alltoall maps to MPI_IN_PLACE; the caller
+            // must pre-write each slot before calling this method.
+            ffi::ferrompi_alltoall(
+                std::ptr::null(),
+                0,
                 data.as_mut_ptr().cast::<std::ffi::c_void>(),
                 recvcount,
                 T::TAG as i32,

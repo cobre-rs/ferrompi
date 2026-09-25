@@ -407,79 +407,21 @@ int ferrompi_iprobe(
 /** Broadcast (generic) */
 int ferrompi_bcast(void* buf, int64_t count, int32_t datatype_tag, int32_t root, int32_t comm);
 
-/** Reduce (generic) */
+/**
+ * In-place blocking collectives (generic).
+ *
+ * The blocking reduce, allreduce, gather, allgather and alltoall siblings below
+ * substitute MPI_IN_PLACE for sendbuf when sendbuf == NULL; ferrompi_scatter
+ * substitutes MPI_IN_PLACE for recvbuf when recvbuf == NULL. Rust never produces
+ * NULL from a slice (as_ptr() on an empty slice is dangling but non-null), so
+ * NULL is an unambiguous in-place marker from the Rust side.
+ */
+
+/** Reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
 int ferrompi_reduce(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t root, int32_t comm);
 
-/**
- * In-place reduce to root (generic).
- *
- * At root (is_root != 0): buf is both input and output (uses MPI_IN_PLACE as sendbuf).
- * At non-root (is_root == 0): buf is the send buffer, recvbuf is ignored.
- *
- * @param buf Data buffer (input on all ranks, output only at root)
- * @param count Number of elements
- * @param datatype_tag Datatype tag (FERROMPI_F32, FERROMPI_F64, etc.)
- * @param op Reduction operation
- * @param root Root rank
- * @param is_root Non-zero if this process is the root
- * @param comm Communicator handle
- * @return MPI error code
- */
-int ferrompi_reduce_inplace(void* buf, int64_t count, int32_t datatype_tag, int32_t op, int32_t root, int32_t is_root, int32_t comm);
-
-/** All-reduce (generic) */
+/** All-reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
 int ferrompi_allreduce(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t comm);
-
-/** In-place all-reduce (generic) */
-int ferrompi_allreduce_inplace(void* buf, int64_t count, int32_t datatype_tag, int32_t op, int32_t comm);
-
-/** In-place gather (generic). Valid only at root; non-root returns MPI_ERR_ARG. */
-int ferrompi_gather_inplace(void* recvbuf, int64_t recvcount,
-                             int32_t datatype_tag, int32_t root,
-                             int32_t is_root, int32_t comm);
-
-/** In-place all-gather (generic). Valid at every rank. */
-int ferrompi_allgather_inplace(void* recvbuf, int64_t recvcount,
-                                int32_t datatype_tag, int32_t comm);
-
-/**
- * In-place scatter (generic).
- *
- * At root (is_root != 0): sendbuf is the full sendcount*size buffer; MPI_IN_PLACE
- * is passed as recvbuf so root's own slot is retained in place. recvbuf is ignored.
- * At non-root (is_root == 0): regular scatter path; sendbuf is ignored (NULL), recvbuf
- * receives recvcount elements.
- *
- * @param sendbuf Send buffer (significant only at root)
- * @param sendcount Number of elements sent to each process (significant only at root)
- * @param recvbuf Receive buffer (significant only at non-root; ignored at root)
- * @param recvcount Number of elements to receive (significant only at non-root)
- * @param datatype_tag Datatype tag
- * @param root Root rank
- * @param is_root Non-zero if this process is the root
- * @param comm Communicator handle
- * @return MPI error code
- */
-int ferrompi_scatter_inplace(const void* sendbuf, int64_t sendcount,
-                              void* recvbuf, int64_t recvcount,
-                              int32_t datatype_tag, int32_t root,
-                              int32_t is_root, int32_t comm);
-
-/**
- * In-place all-to-all personalized communication (generic).
- *
- * recvbuf serves as both send and receive buffer (MPI_IN_PLACE as sendbuf).
- * Before the call, rank r must pre-write into slot s the payload destined for rank s.
- * After the call, slot s contains the data received FROM rank s.
- *
- * @param recvbuf Combined send/receive buffer (recvcount * size elements)
- * @param recvcount Number of elements per rank
- * @param datatype_tag Datatype tag
- * @param comm Communicator handle
- * @return MPI error code
- */
-int ferrompi_alltoall_inplace(void* recvbuf, int64_t recvcount,
-                               int32_t datatype_tag, int32_t comm);
 
 /** Nonblocking in-place gather (generic). Valid only at root (is_root != 0); non-root returns MPI_ERR_ARG. */
 int ferrompi_igather_inplace(void* recvbuf, int64_t recvcount,
@@ -544,13 +486,13 @@ int ferrompi_scan(const void* sendbuf, void* recvbuf, int64_t count, int32_t dat
  */
 int ferrompi_exscan(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t comm);
 
-/** Gather (generic) */
+/** Gather (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_gather(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t root, int32_t comm);
 
-/** All-gather (generic) */
+/** All-gather (generic). NULL sendbuf maps to MPI_IN_PLACE. */
 int ferrompi_allgather(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t comm);
 
-/** Scatter (generic) */
+/** Scatter (generic). NULL recvbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_scatter(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t root, int32_t comm);
 
 /**
@@ -558,7 +500,7 @@ int ferrompi_scatter(const void* sendbuf, int64_t sendcount, void* recvbuf, int6
  *
  * Each process sends sendcount elements to every other process and receives
  * recvcount elements from each. Uses MPI_Alltoall_c for counts exceeding
- * INT_MAX on MPI 4.0+.
+ * INT_MAX on MPI 4.0+. NULL sendbuf maps to MPI_IN_PLACE.
  *
  * @param sendbuf Send buffer (sendcount * size elements)
  * @param sendcount Number of elements sent to each process
