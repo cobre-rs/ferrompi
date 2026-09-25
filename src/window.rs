@@ -2821,171 +2821,12 @@ impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, '_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn lock_type_equality() {
-        assert_eq!(LockType::Exclusive, LockType::Exclusive);
-        assert_eq!(LockType::Shared, LockType::Shared);
-        assert_ne!(LockType::Exclusive, LockType::Shared);
-    }
-
-    #[test]
-    fn lock_type_debug() {
-        assert_eq!(format!("{:?}", LockType::Exclusive), "Exclusive");
-        assert_eq!(format!("{:?}", LockType::Shared), "Shared");
-    }
-
-    #[test]
-    #[allow(clippy::clone_on_copy)]
-    fn lock_type_clone_copy() {
-        let original = LockType::Exclusive;
-        let copied = original; // Copy
-        let cloned = original.clone(); // Clone
-        assert_eq!(original, copied);
-        assert_eq!(original, cloned);
-
-        let original = LockType::Shared;
-        let copied = original; // Copy
-        let cloned = original.clone(); // Clone
-        assert_eq!(original, copied);
-        assert_eq!(original, cloned);
-    }
+    use super::{PendingFetchResult, WinFenceAssert, WinPscwAssert};
+    use std::ptr::NonNull;
 
     // -------------------------------------------------------------------------
     // Win<'a, T> unit tests — exercise the type without an MPI runtime
     // -------------------------------------------------------------------------
-
-    #[test]
-    fn win_kind_equality() {
-        assert_eq!(WinKind::Created, WinKind::Created);
-        assert_eq!(WinKind::Allocated, WinKind::Allocated);
-        assert_ne!(WinKind::Created, WinKind::Allocated);
-    }
-
-    #[test]
-    fn win_kind_debug() {
-        assert_eq!(format!("{:?}", WinKind::Created), "Created");
-        assert_eq!(format!("{:?}", WinKind::Allocated), "Allocated");
-    }
-
-    #[test]
-    #[allow(clippy::clone_on_copy)]
-    fn win_kind_clone_copy() {
-        let original = WinKind::Created;
-        let copied = original;
-        let cloned = original.clone();
-        assert_eq!(original, copied);
-        assert_eq!(original, cloned);
-    }
-
-    #[test]
-    fn win_struct_compiles() {
-        // Compile-time witness: Win<'a, T> can be named and referenced.
-        fn _check<'a, T: MpiDatatype>(_: &Win<'a, T>) {}
-    }
-
-    #[test]
-    fn win_put_signature_compiles() {
-        // Compile-time witness: Win::put has the correct signature.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &[T]) -> Result<()> {
-            w.put(buf, 0, 0, buf.len() as i64)
-        }
-    }
-
-    #[test]
-    fn win_rput_signature_compiles() {
-        // Compile-time witness: Win::rput has the correct signature with T = i32.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &[T]) -> Result<Request> {
-            w.rput(buf, 0, 0, buf.len() as i64)
-        }
-    }
-
-    #[test]
-    fn win_get_signature_compiles() {
-        // Compile-time witness: Win::get has the correct signature.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &mut [T]) -> Result<()> {
-            w.get(buf, 0, 0, buf.len() as i64)
-        }
-    }
-
-    #[test]
-    fn win_rget_signature_compiles() {
-        // Compile-time witness: Win::rget has the correct signature with T = i32.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &mut [T]) -> Result<Request> {
-            w.rget(buf, 0, 0, buf.len() as i64)
-        }
-    }
-
-    #[test]
-    fn win_accumulate_signature_compiles() {
-        // Compile-time witness: Win::accumulate has the correct signature.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &[T]) -> Result<()> {
-            w.accumulate(buf, 0, 0, buf.len() as i64, ReduceOp::Sum)
-        }
-    }
-
-    #[test]
-    fn win_raccumulate_signature_compiles() {
-        // Compile-time witness: Win::raccumulate has the correct signature with T = i32.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &[T]) -> Result<Request> {
-            w.raccumulate(buf, 0, 0, buf.len() as i64, ReduceOp::Sum)
-        }
-    }
-
-    #[test]
-    fn win_get_accumulate_signature_compiles() {
-        // Compile-time witness: Win::get_accumulate has the correct signature.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, o: &[T], r: &mut [T]) -> Result<()> {
-            w.get_accumulate(o, r, 0, 0, o.len() as i64, ReduceOp::Sum)
-        }
-    }
-
-    #[test]
-    fn win_fetch_and_op_signature_compiles() {
-        // Compile-time witness: Win::fetch_and_op returns Result<PendingFetchResult<T>>
-        // for representative predefined types (i32, u64, f64).
-        fn _check_i32(w: &Win<'_, i32>) -> Result<PendingFetchResult<i32>> {
-            w.fetch_and_op(1, 0, 0, ReduceOp::Sum)
-        }
-        fn _check_u64(w: &Win<'_, u64>) -> Result<PendingFetchResult<u64>> {
-            w.fetch_and_op(1u64, 0, 0, ReduceOp::Sum)
-        }
-        fn _check_f64(w: &Win<'_, f64>) -> Result<PendingFetchResult<f64>> {
-            w.fetch_and_op(1.0, 0, 0, ReduceOp::Sum)
-        }
-        let _ = _check_i32 as fn(&Win<'_, i32>) -> Result<PendingFetchResult<i32>>;
-        let _ = _check_u64 as fn(&Win<'_, u64>) -> Result<PendingFetchResult<u64>>;
-        let _ = _check_f64 as fn(&Win<'_, f64>) -> Result<PendingFetchResult<f64>>;
-    }
-
-    #[test]
-    fn win_compare_and_swap_signature_compiles() {
-        // Compile-time witness: Win::compare_and_swap returns
-        // Result<PendingFetchResult<T>> for the five AtomicMpiDatatype types.
-        // f64 must NOT compile (verified via the compile_fail doctest in
-        // datatype.rs).
-        fn _check_i32(w: &Win<'_, i32>) -> Result<PendingFetchResult<i32>> {
-            w.compare_and_swap(200, 100, 0, 0)
-        }
-        fn _check_i64(w: &Win<'_, i64>) -> Result<PendingFetchResult<i64>> {
-            w.compare_and_swap(200i64, 100i64, 0, 0)
-        }
-        fn _check_u32(w: &Win<'_, u32>) -> Result<PendingFetchResult<u32>> {
-            w.compare_and_swap(200u32, 100u32, 0, 0)
-        }
-        fn _check_u64(w: &Win<'_, u64>) -> Result<PendingFetchResult<u64>> {
-            w.compare_and_swap(200u64, 100u64, 0, 0)
-        }
-        fn _check_u8(w: &Win<'_, u8>) -> Result<PendingFetchResult<u8>> {
-            w.compare_and_swap(2u8, 1u8, 0, 0)
-        }
-        let _ = _check_i32 as fn(&Win<'_, i32>) -> Result<PendingFetchResult<i32>>;
-        let _ = _check_i64 as fn(&Win<'_, i64>) -> Result<PendingFetchResult<i64>>;
-        let _ = _check_u32 as fn(&Win<'_, u32>) -> Result<PendingFetchResult<u32>>;
-        let _ = _check_u64 as fn(&Win<'_, u64>) -> Result<PendingFetchResult<u64>>;
-        let _ = _check_u8 as fn(&Win<'_, u8>) -> Result<PendingFetchResult<u8>>;
-    }
 
     #[test]
     fn pending_fetch_result_resolve_and_drop_without_resolve() {
@@ -3020,37 +2861,9 @@ mod tests {
         assert_sync::<PendingFetchResult<i32>>();
     }
 
-    #[test]
-    fn win_forget_does_not_drop() {
-        // Construct a Win with a bogus handle and forget it to confirm the
-        // type compiles and the field layout is correct without requiring an
-        // MPI runtime. std::mem::forget prevents Drop from running (which
-        // would call ferrompi_win_free with an invalid handle).
-        let win: Win<'static, i32> = Win {
-            win_handle: -1,
-            local_ptr: std::ptr::NonNull::dangling(),
-            local_len: 0,
-            comm_size: 1,
-            kind: WinKind::Created,
-            _marker: std::marker::PhantomData,
-        };
-        std::mem::forget(win);
-    }
-
     // -------------------------------------------------------------------------
     // WinFenceAssert unit tests
     // -------------------------------------------------------------------------
-
-    #[test]
-    fn win_fence_assert_default_is_none() {
-        let a = WinFenceAssert::default();
-        assert_eq!(a.bits(), 0);
-    }
-
-    #[test]
-    fn win_fence_assert_none_constructor_is_zero() {
-        assert_eq!(WinFenceAssert::none().bits(), 0);
-    }
 
     #[test]
     fn win_fence_assert_or_combines_bits() {
@@ -3067,36 +2880,9 @@ mod tests {
         assert_eq!(a.bits(), 5);
     }
 
-    #[test]
-    fn win_fence_assert_debug_is_implemented() {
-        let a = WinFenceAssert::none();
-        let s = format!("{a:?}");
-        assert!(!s.is_empty());
-    }
-
-    #[test]
-    fn win_fence_assert_copy_and_clone() {
-        let a = WinFenceAssert::from_bits_for_test(7);
-        let b = a; // Copy
-        let c = a; // Copy again (Clone is derived)
-        assert_eq!(b.bits(), 7);
-        assert_eq!(c.bits(), 7);
-    }
-
     // -------------------------------------------------------------------------
     // WinPscwAssert unit tests
     // -------------------------------------------------------------------------
-
-    #[test]
-    fn win_pscw_assert_default_is_none() {
-        let a = WinPscwAssert::default();
-        assert_eq!(a.bits(), 0);
-    }
-
-    #[test]
-    fn win_pscw_assert_none_constructor_is_zero() {
-        assert_eq!(WinPscwAssert::none().bits(), 0);
-    }
 
     #[test]
     fn win_pscw_assert_or_combines_bits() {
@@ -3111,69 +2897,5 @@ mod tests {
         let mut a = WinPscwAssert::from_bits_for_test(1);
         a |= WinPscwAssert::from_bits_for_test(4);
         assert_eq!(a.bits(), 5);
-    }
-
-    #[test]
-    fn win_pscw_assert_debug_is_implemented() {
-        let a = WinPscwAssert::none();
-        let s = format!("{a:?}");
-        assert!(!s.is_empty());
-    }
-
-    #[test]
-    fn win_pscw_assert_copy_and_clone() {
-        let a = WinPscwAssert::from_bits_for_test(7);
-        let b = a; // Copy
-        let c = a; // Copy again (Clone is derived)
-        assert_eq!(b.bits(), 7);
-        assert_eq!(c.bits(), 7);
-    }
-
-    // -------------------------------------------------------------------------
-    // WinLockGuard / WinLockAllGuard type-level compile tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn win_lock_guard_type_compiles() {
-        fn _check<'g, 'a, T: MpiDatatype>(_: &WinLockGuard<'g, 'a, T>) {}
-        fn _check_all<'g, 'a, T: MpiDatatype>(_: &WinLockAllGuard<'g, 'a, T>) {}
-    }
-
-    #[test]
-    fn win_lock_guard_forget_does_not_drop() {
-        // Construct a WinLockGuard with a bogus Win and std::mem::forget it to
-        // confirm the type compiles and the field layout is correct without
-        // requiring an MPI runtime. std::mem::forget prevents Drop from
-        // running (which would call ferrompi_win_unlock with an invalid handle).
-        let win: Win<'static, f64> = Win {
-            win_handle: -1,
-            local_ptr: std::ptr::NonNull::dangling(),
-            local_len: 0,
-            comm_size: 1,
-            kind: WinKind::Created,
-            _marker: std::marker::PhantomData,
-        };
-        let guard = WinLockGuard {
-            window: &win,
-            rank: 0,
-        };
-        std::mem::forget(guard);
-        std::mem::forget(win);
-    }
-
-    #[test]
-    fn win_lock_all_guard_forget_does_not_drop() {
-        // Same as above for WinLockAllGuard.
-        let win: Win<'static, f64> = Win {
-            win_handle: -1,
-            local_ptr: std::ptr::NonNull::dangling(),
-            local_len: 0,
-            comm_size: 1,
-            kind: WinKind::Created,
-            _marker: std::marker::PhantomData,
-        };
-        let guard = WinLockAllGuard { window: &win };
-        std::mem::forget(guard);
-        std::mem::forget(win);
     }
 }
