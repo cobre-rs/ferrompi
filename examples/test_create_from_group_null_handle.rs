@@ -7,12 +7,13 @@
 //! handle because the NULL guard was missing).
 //!
 //! The test is skipped gracefully when MPI_VERSION < 4 (the underlying
-//! `MPI_Comm_create_from_group` is not available on older MPI runtimes and
-//! the C shim returns `MPI_ERR_OTHER` unconditionally in that case).
+//! `MPI_Comm_create_from_group` is not available on older MPI runtimes).
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_create_from_group_null_handle
 
-use ferrompi::{Error, Mpi, MpiErrorClass, ReduceOp};
+use ferrompi::{Error, Mpi, ReduceOp};
+
+mod common;
 
 // Raw FFI declaration for the C-side shim under test.
 //
@@ -24,8 +25,8 @@ use ferrompi::{Error, Mpi, MpiErrorClass, ReduceOp};
 //   - group_h is a valid ferrompi group handle obtained from the Rust API.
 //   - stringtag is a valid null-terminated C string on the stack.
 //   - out_h points to a valid i32 on the stack.
-//   - On MPI < 4 the shim returns MPI_ERR_OTHER immediately; no group state
-//     is modified.
+//   - The caller gates on `common::mpi_major() >= 4` before calling this
+//     shim, so MPI < 4's MPI_ERR_OTHER stub path is never reached here.
 #[allow(dead_code)]
 extern "C" {
     fn ferrompi_comm_create_from_group(
@@ -45,6 +46,15 @@ fn main() {
         size == 2,
         "test_create_from_group_null_handle requires exactly 2 processes, got {size}"
     );
+
+    if common::mpi_major() < 4 {
+        let version = Mpi::version().expect("Mpi::version() failed");
+        common::skip(
+            &world,
+            &format!("ferrompi_comm_create_from_group needs MPI 4 ({version})"),
+        );
+        return;
+    }
 
     // ========================================================================
     // Build a group containing only rank 0.  Rank 1 is excluded and will
@@ -77,8 +87,7 @@ fn main() {
             // raw_ret == MPI_SUCCESS — the guard failed to fire; the
             // out_h slot may now hold MPI_COMM_NULL (corrupt state).
             //
-            // On MPI < 4 the shim returns MPI_ERR_OTHER immediately (the
-            // #else branch), so a SUCCESS here on rank 1 with MPI >= 4
+            // The version gate above already excludes MPI < 4, so a SUCCESS here
             // is definitely a bug.
             eprintln!(
                 "rank {rank}: FAIL: create_from_group returned MPI_SUCCESS for excluded rank — \
@@ -92,31 +101,16 @@ fn main() {
         let err = Error::from_code(raw_ret);
         println!("PASS rank {rank}: create_from_group for excluded rank returned: {err:?}");
     } else {
-        // Rank 0 is in the group; it must either succeed or return MPI_ERR_OTHER
-        // (on MPI < 4 the shim returns MPI_ERR_OTHER immediately).
+        // Rank 0 is in the group; the version gate above already excludes
+        // MPI < 4, so it must succeed.
         if raw_ret != 0 {
             let err = Error::from_code(raw_ret);
-            match &err {
-                Error::Mpi {
-                    class: MpiErrorClass::Other,
-                    ..
-                } => {
-                    // MPI < 4: the shim returns MPI_ERR_OTHER for the
-                    // unsupported path.  Skip gracefully.
-                    println!(
-                        "rank {rank}: SKIP: MPI_Comm_create_from_group not available \
-                         (MPI_ERR_OTHER returned — MPI < 4.0 runtime)"
-                    );
-                }
-                _ => {
-                    eprintln!(
-                        "rank {rank}: FAIL: create_from_group for member rank returned \
-                         unexpected error: {err:?}"
-                    );
-                    let _ = world.allreduce_scalar(0i32, ReduceOp::Min);
-                    std::process::exit(1);
-                }
-            }
+            eprintln!(
+                "rank {rank}: FAIL: create_from_group for member rank returned \
+                 unexpected error: {err:?}"
+            );
+            let _ = world.allreduce_scalar(0i32, ReduceOp::Min);
+            std::process::exit(1);
         } else {
             println!("PASS rank {rank}: create_from_group succeeded for member rank");
         }

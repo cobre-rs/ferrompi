@@ -6,9 +6,8 @@
 //! - On MPI 4.0+: every rank that calls `mpi.create_from_group(&g, tag)`
 //!   with the same world group and the same tag receives an `Ok(comm)` with
 //!   `comm.size() == world.size()`.
-//! - On MPI < 4.0: the method returns
-//!   `Err(Error::NotSupported("MPI_Comm_create_from_group"))` and the
-//!   example prints `SKIP` and exits 0.
+//! - On MPI < 4.0: the example prints `SKIP` and exits 0 before calling
+//!   `create_from_group`, so an `Err` from that call on MPI >= 4 fails.
 //!
 //! All assertions are guarded by a sentinel `allreduce_scalar(Min)` before
 //! any `process::exit` so that no rank exits while others are still inside
@@ -16,7 +15,7 @@
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_mpi_from_group
 
-use ferrompi::{Error, Mpi, ReduceOp};
+use ferrompi::{Mpi, ReduceOp};
 
 mod common;
 
@@ -34,18 +33,11 @@ fn main() {
     // ========================================================================
     // Version check — skip on MPI < 4.0.
     // ========================================================================
-    let version_str = Mpi::version().expect("Mpi::version() failed");
-    let major: u32 = version_str
-        .split_whitespace()
-        .nth(1)
-        .and_then(|v| v.split('.').next())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-
-    if major < 4 {
+    if common::mpi_major() < 4 {
+        let version = Mpi::version().expect("Mpi::version() failed");
         common::skip(
             &world,
-            &format!("requires MPI 4.0+ (detected: {version_str})"),
+            &format!("create_from_group needs MPI 4 ({version})"),
         );
         return;
     }
@@ -63,16 +55,6 @@ fn main() {
     // ========================================================================
     let comm = match mpi.create_from_group(&world_group, "ferrompi-test") {
         Ok(c) => c,
-        Err(Error::NotSupported(ref name)) => {
-            // Runtime MPI < 4.0 despite header reporting >= 4.
-            common::skip(
-                &world,
-                &format!("{name} not supported at runtime (version: {version_str})"),
-            );
-            // Participate in sentinel allreduce so no rank hangs.
-            let _ = world.allreduce_scalar(1i32, ReduceOp::Min);
-            return;
-        }
         Err(e) => {
             eprintln!("rank {rank}: FAIL: create_from_group returned error: {e}");
             let _ = world.allreduce_scalar(0i32, ReduceOp::Min);

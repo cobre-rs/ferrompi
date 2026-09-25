@@ -17,6 +17,8 @@
 
 use ferrompi::{Mpi, PersistentRequest, ReduceOp};
 
+mod common;
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -28,18 +30,10 @@ fn main() {
         "test_persistent requires at least 2 processes, got {size}"
     );
 
-    // ========================================================================
-    // Probe: check if persistent collectives are supported (MPI 4.0+)
-    // ========================================================================
-    let mut probe_data = vec![0.0f64; 1];
-    match world.bcast_init(&mut probe_data, 0) {
-        Ok(req) => drop(req),
-        Err(_) => {
-            if rank == 0 {
-                println!("SKIP: Persistent collectives not supported (requires MPI 4.0+)");
-            }
-            return;
-        }
+    if common::mpi_major() < 4 {
+        let version = Mpi::version().expect("Mpi::version() failed");
+        common::skip(&world, &format!("bcast_init needs MPI 4 ({version})"));
+        return;
     }
 
     let mut test_count = 0u32;

@@ -9,20 +9,7 @@
 
 use ferrompi::{Error, Mpi, MpiErrorClass};
 
-/// Returns the major version of the linked MPI runtime by parsing
-/// `MPI_Get_version` output via `Mpi::version()`.  Returns 0 on parse
-/// failure so callers can SKIP gracefully.
-fn mpi_major_version() -> u32 {
-    Mpi::version()
-        .ok()
-        .and_then(|v| {
-            v.split_whitespace()
-                .nth(1)
-                .and_then(|tok| tok.split('.').next())
-                .and_then(|s| s.parse().ok())
-        })
-        .unwrap_or(0)
-}
+mod common;
 
 // Raw FFI declaration for the C-side shim under test.
 //
@@ -69,14 +56,12 @@ fn main() {
     // that always returns MPI_ERR_OTHER, so the count guard is never
     // reached.  Skip gracefully — the count guard is still in place
     // for MPI >= 4 runtimes (covered by MPICH 4.2.x in the CI matrix).
-    if mpi_major_version() < 4 {
-        if rank == 0 {
-            println!(
-                "SKIP: test_persistent_count_overflow requires MPI 4.0+ (got MPI {}.x); \
-                 persistent collectives are stubbed on older runtimes",
-                mpi_major_version()
-            );
-        }
+    if common::mpi_major() < 4 {
+        let version = Mpi::version().expect("Mpi::version() failed");
+        common::skip(
+            &world,
+            &format!("ferrompi_allreduce_init needs MPI 4 ({version})"),
+        );
         return;
     }
 
