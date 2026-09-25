@@ -12,6 +12,8 @@
 
 use ferrompi::{Mpi, ReduceOp, Win, WinPscwAssert};
 
+mod common;
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -53,7 +55,8 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() failed: {e}");
                 local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                let ok = i32::from(local_ok);
+                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
                 return;
             }
         };
@@ -62,7 +65,8 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([1]) failed: {e}");
                 local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                let ok = i32::from(local_ok);
+                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
                 return;
             }
         };
@@ -86,7 +90,8 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() failed: {e}");
                 local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                let ok = i32::from(local_ok);
+                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
                 return;
             }
         };
@@ -95,7 +100,8 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([0]) failed: {e}");
                 local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                let ok = i32::from(local_ok);
+                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
                 return;
             }
         };
@@ -130,7 +136,8 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() [test 2] failed: {e}");
                 local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                let ok = i32::from(local_ok);
+                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
                 return;
             }
         };
@@ -139,7 +146,8 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([1]) [test 2] failed: {e}");
                 local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                let ok = i32::from(local_ok);
+                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
                 return;
             }
         };
@@ -168,7 +176,8 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: world.group() [test 2] failed: {e}");
                 local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                let ok = i32::from(local_ok);
+                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
                 return;
             }
         };
@@ -177,7 +186,8 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: group.include([0]) [test 2] failed: {e}");
                 local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                let ok = i32::from(local_ok);
+                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
                 return;
             }
         };
@@ -198,22 +208,5 @@ fn main() {
         println!("PASS: Win::test_exposure (nonblocking poll)");
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — confirms no rank diverged silently
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    assert!(
-        global_ok != 0,
-        "test_rma_win_pscw: one or more ranks reported failure"
-    );
-
-    world.barrier().expect("final barrier failed");
-    if rank == 0 {
-        println!("\n========================================");
-        println!("All Win PSCW tests passed! (2 tests)");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_rma_win_pscw");
 }

@@ -8,6 +8,8 @@
 
 use ferrompi::{Mpi, Win};
 
+mod common;
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -56,14 +58,13 @@ fn main() {
                 class: ferrompi::MpiErrorClass::Win,
                 ..
             }) => {
-                if rank == 0 {
-                    println!(
-                        "SKIP: Win::create returned MPI_ERR_WIN — likely OpenMPI 4.x \
-                         with a BTL that does not support one-sided over caller-owned \
-                         memory (e.g., --btl=self,tcp in CI). Win::allocate (Test 2) \
-                         still tested."
-                    );
-                }
+                common::skip(
+                    &world,
+                    "Win::create returned MPI_ERR_WIN — likely OpenMPI 4.x \
+                     with a BTL that does not support one-sided over caller-owned \
+                     memory (e.g., --btl=self,tcp in CI). Win::allocate (Test 2) \
+                     still tested.",
+                );
                 true
             }
             Err(e) => panic!("Win::create failed: {e}"),

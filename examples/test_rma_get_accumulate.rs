@@ -14,6 +14,8 @@
 
 use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
 
+mod common;
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -143,22 +145,5 @@ fn main() {
         println!("PASS: Win::get_accumulate NoOp (atomic read)");
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — confirms no rank diverged silently
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    assert!(
-        global_ok != 0,
-        "test_rma_get_accumulate: one or more ranks reported failure"
-    );
-
-    world.barrier().expect("final barrier failed");
-    if rank == 0 {
-        println!("\n========================================");
-        println!("All Win::get_accumulate tests passed! (2 tests)");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_rma_get_accumulate");
 }

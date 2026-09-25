@@ -21,6 +21,8 @@
 
 use ferrompi::{LockType, Mpi, ReduceOp, Win, WinFenceAssert};
 
+mod common;
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -65,7 +67,8 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: Win::lock(Shared, 0) failed: {e}");
                 local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                let ok = i32::from(local_ok);
+                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
                 return;
             }
         };
@@ -100,7 +103,8 @@ fn main() {
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: Win::lock_all failed: {e}");
                 local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                let ok = i32::from(local_ok);
+                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
                 return;
             }
         };
@@ -123,19 +127,5 @@ fn main() {
         println!("PASS: Win::flush_local_all and Win::sync inside lock_all epoch");
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — confirms no rank diverged silently.
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    assert!(
-        global_ok != 0,
-        "test_rma_win_flush_sync: one or more ranks reported failure"
-    );
-
-    if rank == 0 {
-        println!("\nPASS: Win::flush_local / flush_local_all / sync (2 tests)");
-    }
+    common::check(&world, local_ok, "test_rma_win_flush_sync");
 }
