@@ -434,11 +434,13 @@ impl Communicator {
     ) -> Result<PersistentRequest> {
         let mut request_handle: i64 = 0;
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice of T. MPI uses it as both
-            // send (MPI_IN_PLACE) and receive buffer. T::TAG matches T's MPI datatype per ADR-0003.
-            // `data` must remain alive for the entire lifetime of the returned PersistentRequest
-            // per ADR-0004 §"Buffer-lifetime invariant".
-            ffi::ferrompi_allreduce_init_inplace(
+            // SAFETY: data is a valid, exclusively-owned mutable slice of T. NULL as sendbuf is
+            // the shim's in-place marker, which ferrompi_allreduce_init maps to MPI_IN_PLACE, so
+            // data serves as both send and receive buffer. T::TAG matches T's MPI datatype per
+            // ADR-0003. `data` must remain alive for the entire lifetime of the returned
+            // PersistentRequest per ADR-0004 §"Buffer-lifetime invariant".
+            ffi::ferrompi_allreduce_init(
+                std::ptr::null(),
                 data.as_mut_ptr().cast::<std::ffi::c_void>(),
                 data.len() as i64,
                 T::TAG as i32,
@@ -914,16 +916,19 @@ impl Communicator {
         let recvcount = (data.len() / size) as i64;
         let mut request_handle: i64 = 0;
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice. We cast to *mut c_void
-            // as required by the C FFI. The guard above guarantees self.rank() == root, so
-            // is_root is hardcoded to 1. The buffer must remain valid for the lifetime of the
-            // returned PersistentRequest; the caller must call wait() after each start().
-            ffi::ferrompi_gather_init_inplace(
+            // SAFETY: data is a valid, exclusively-owned mutable slice. NULL as sendbuf is the
+            // shim's in-place marker, which ferrompi_gather_init maps to MPI_IN_PLACE; data
+            // serves as both root's send contribution and the receive buffer. The guard above
+            // guarantees self.rank() == root, which is the only rank MPI_IN_PLACE is valid for
+            // in MPI_Gather_init. The buffer must remain valid for the lifetime of the returned
+            // PersistentRequest; the caller must call wait() after each start().
+            ffi::ferrompi_gather_init(
+                std::ptr::null(),
+                0,
                 data.as_mut_ptr().cast::<std::ffi::c_void>(),
                 recvcount,
                 T::TAG as i32,
                 root,
-                1, // is_root = true by the rank guard above
                 self.handle,
                 &mut request_handle,
             )
@@ -975,11 +980,14 @@ impl Communicator {
         let recvcount = (data.len() / size) as i64;
         let mut request_handle: i64 = 0;
         let ret = unsafe {
-            // SAFETY: data is a valid, exclusively-owned mutable slice. We cast to *mut c_void
-            // as required by the C FFI. Each rank's contribution (at offset rank*recvcount)
-            // must be pre-written by the caller before each start(). The buffer must remain
-            // valid for the lifetime of the returned PersistentRequest.
-            ffi::ferrompi_allgather_init_inplace(
+            // SAFETY: data is a valid, exclusively-owned mutable slice. NULL as sendbuf is the
+            // shim's in-place marker, which ferrompi_allgather_init maps to MPI_IN_PLACE. Each
+            // rank's contribution (at offset rank*recvcount) must be pre-written by the caller
+            // before each start(). The buffer must remain valid for the lifetime of the
+            // returned PersistentRequest.
+            ffi::ferrompi_allgather_init(
+                std::ptr::null(),
+                0,
                 data.as_mut_ptr().cast::<std::ffi::c_void>(),
                 recvcount,
                 T::TAG as i32,
@@ -1037,7 +1045,7 @@ impl Communicator {
     ) -> Result<PersistentRequest> {
         let is_root = self.rank() == root;
         let size = self.size() as usize;
-        let (sendbuf, sendcount, recvbuf, recvcount, is_root_flag) = if is_root {
+        let (sendbuf, sendcount, recvbuf, recvcount) = if is_root {
             if size == 0 || data.len() % size != 0 {
                 return Err(Error::InvalidBuffer);
             }
@@ -1047,7 +1055,6 @@ impl Communicator {
                 per,
                 std::ptr::null_mut::<std::ffi::c_void>(),
                 0i64,
-                1i32,
             )
         } else {
             (
@@ -1055,25 +1062,24 @@ impl Communicator {
                 0i64,
                 data.as_mut_ptr().cast::<std::ffi::c_void>(),
                 data.len() as i64,
-                0i32,
             )
         };
         let mut request_handle: i64 = 0;
         let ret = unsafe {
             // SAFETY: At root, sendbuf points to valid data of length sendcount*size elements
-            // (guaranteed by the divisibility check above); recvbuf is null (MPI_IN_PLACE path).
-            // At non-root, recvbuf points to a valid mutable slice of length recvcount elements;
-            // sendbuf is null (MPI standard ignores sendbuf on non-root scatter). Both pointers
-            // are cast to *const/*mut c_void as required by the C FFI. The buffer must remain
-            // valid for the lifetime of the returned PersistentRequest.
-            ffi::ferrompi_scatter_init_inplace(
+            // (guaranteed by the divisibility check above); recvbuf is NULL, the shim's in-place
+            // marker, which ferrompi_scatter_init maps to MPI_IN_PLACE so root's own slot is
+            // retained. At non-root, recvbuf points to a valid mutable slice of length recvcount
+            // elements; sendbuf is null (MPI standard ignores sendbuf on non-root scatter). Both
+            // pointers are cast to *const/*mut c_void as required by the C FFI. The buffer must
+            // remain valid for the lifetime of the returned PersistentRequest.
+            ffi::ferrompi_scatter_init(
                 sendbuf,
                 sendcount,
                 recvbuf,
                 recvcount,
                 T::TAG as i32,
                 root,
-                is_root_flag,
                 self.handle,
                 &mut request_handle,
             )
@@ -1129,11 +1135,13 @@ impl Communicator {
         let mut request_handle: i64 = 0;
         let ret = unsafe {
             // SAFETY: data is a valid, exclusively-owned mutable slice of length recvcount*size
-            // elements (guaranteed by the divisibility check above). We cast to *mut c_void as
-            // required by the C FFI. MPI_IN_PLACE is passed as sendbuf in the C wrapper; the
+            // elements (guaranteed by the divisibility check above). NULL as sendbuf is the
+            // shim's in-place marker, which ferrompi_alltoall_init maps to MPI_IN_PLACE; the
             // caller must pre-write each slot before each start() call. The buffer must remain
             // valid for the lifetime of the returned PersistentRequest.
-            ffi::ferrompi_alltoall_init_inplace(
+            ffi::ferrompi_alltoall_init(
+                std::ptr::null(),
+                0,
                 data.as_mut_ptr().cast::<std::ffi::c_void>(),
                 recvcount,
                 T::TAG as i32,

@@ -590,15 +590,6 @@ extern "C" {
         request: *mut int64_t,
     ) -> c_int;
 
-    pub fn ferrompi_allreduce_init_inplace(
-        buf: *mut c_void,
-        count: int64_t,
-        datatype_tag: int32_t,
-        op: int32_t,
-        comm: int32_t,
-        request: *mut int64_t,
-    ) -> c_int;
-
     pub fn ferrompi_gather_init(
         sendbuf: *const c_void,
         sendcount: int64_t,
@@ -665,44 +656,6 @@ extern "C" {
     pub fn ferrompi_alltoall_init(
         sendbuf: *const c_void,
         sendcount: int64_t,
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
-        comm: int32_t,
-        request: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_gather_init_inplace(
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
-        root: int32_t,
-        is_root: int32_t,
-        comm: int32_t,
-        request: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_allgather_init_inplace(
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
-        comm: int32_t,
-        request: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_scatter_init_inplace(
-        sendbuf: *const c_void,
-        sendcount: int64_t,
-        recvbuf: *mut c_void,
-        recvcount: int64_t,
-        datatype_tag: int32_t,
-        root: int32_t,
-        is_root: int32_t,
-        comm: int32_t,
-        request: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_alltoall_init_inplace(
         recvbuf: *mut c_void,
         recvcount: int64_t,
         datatype_tag: int32_t,
