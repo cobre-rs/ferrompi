@@ -211,7 +211,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | BLT-15 | `UserOp` double registry + dead per-callback lookup | 120 | 0.5.x† | fixed (2d53b18) |
 | BLT-16 | Benches measuring nothing; duplicated bench protocol | 210 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-20 | Six copies of the slot-claim loop | 70 | superseded by ARC-01 | open |
-| BLT-21 | Process artifacts, stale line refs, expired promises in comments | 45 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| BLT-21 | Process artifacts, stale line refs, expired promises in comments | 45 | 0.5.x† | fixed (3d206a8) |
 | BLT-23 | `Group::undefined()` FFI call returning literal −1 | 35 | 0.5.x† | fixed (e874118) |
 | BLT-25 | Dead C branches (errhandler install) | 30 | 0.5.x† | fixed (7389231) |
 | BLT-26 | `const _` Send/Sync asserts beside `unsafe impl` | 27 | 0.5.x† | fixed (c074ed1) |
