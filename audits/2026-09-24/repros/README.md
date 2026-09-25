@@ -75,8 +75,6 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 | `soundness/src/bin/r9b_waitall_err_nor3.rs` | COR-03 (control) | Same as r9 without posting a new request | np=2 | `evidence/r9b.out`: `dropped OK`. This isolates reuse of freed MPI request objects as the trigger for r9 | Unchanged, with class `InStatus` |
 | `soundness/src/bin/r10_waitany_aba.rs` | COR-02 | `wait_any` twice on the same slice, with an unrelated `irecv` posted in between (it takes the freed slot) | np=2 | The second `wait_any` returns `Some(0)` and completes and frees `other`; `other.wait()` gives `Err "Invalid MPI_Request"` while `other.is_completed()==false` | The second `wait_any` ignores the completed entry; `other.wait()` returns `Ok` |
 | `soundness/src/bin/r11_shm_race.rs` | SND-13 | Rank 1 spins on `remote_slice(0)[0]` (a `&[u64]`) while rank 0 sets the flag through its own slice | np=2 (same node) | `evidence/r11.out`: rank 0 printed `flag set`/`exiting` 3 s apart; rank 1 never printed `observed flag`. The release build hoisted the load out of the loop: the disassembly is a single `cmpq $0x0,(%rcx)` followed by a jump to itself, so the loop never ends. The miscompilation is observed, not just theoretical | No plain `&[T]` over memory another process writes; the access API forces an atomic or volatile read, and the loop sees the flag |
-| `soundness/src/bin/r12_thread_single.rs` | SND-11 | `Mpi::init()` (Single), then 4 scoped threads share `&world` and run `irecv`+`send`+`wait` 20k times | np=2 | `evidence/r12.{1,2,3}.out`: 3 of 3 runs failed. Two hit `corrupted message` asserts (left 1415/right 1417, left 1/right 2) and one hung; all were killed | Calling from another thread below `Multiple` (or `Serialized` without serialization) is rejected (`Err`/panic, or not allowed at compile time) |
-| `soundness/src/bin/r12b_thread_multiple.rs` | SND-11 (control) | The same program initialised with `ThreadLevel::Multiple` | np=2 | `evidence/r12b.{1,2,3}.out`: 3 of 3 pass (`rank N done 2`) | Unchanged |
 | `soundness/src/bin/r13_persistent_realloc.rs` | SND-02 | `recv_init(&mut data)`, then `data.reserve(4096)` reallocates the buffer, then `start`/`send`/`wait` | np=2 | Heap corruption: SIGSEGV inside `MPI_Finalize` (gdb: `unlink_chunk`/`_int_malloc` under `Mpi::drop`) | Does not compile: the persistent request owns its buffer |
 
 ### c-shim/: C-layer correctness (`src/bin/t*.rs`) and C baselines (`c/`)
@@ -187,8 +185,6 @@ Third-party references, deliberately not copied here:
 | `mpi_rma_np8.log` | `rma`, np=8: 73/73 pass |
 | `r9.out`, `r9b.out` | Output of `soundness` r9 (hang, then SIGTERM) and r9b (`dropped OK`) |
 | `r11.out` | Output of `soundness` r11: rank 1 never observes the flag |
-| `r12.1.out`–`r12.3.out` | Output of `soundness` r12 (`ThreadLevel::Single`): corrupted-message panics or hang in 3 of 3 runs |
-| `r12b.1.out`–`r12b.3.out` | Output of `soundness` r12b (`ThreadLevel::Multiple`): 3 of 3 pass |
 | `t4.log` | Output of `c-shim` t4: `wait_all` error mis-decoded as `ERR_INTERN` (code 17 = `IN_STATUS`), then a hang on drop |
 | `bt.out` | VER: last iteration of a 300× stress run (`--test-threads=2`) of the `buffer_attach`/`buffer_detach` unit tests in `src/lib.rs`. 4 passed, 0 failures across all 300 iterations; the shared `ATTACHED_BUFFER` static does not race in practice |
 
