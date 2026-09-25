@@ -70,7 +70,8 @@ main() {
 
   local dir
   dir=$(mktemp -d)
-  trap 'rm -rf "$dir"' EXIT
+  # shellcheck disable=SC2064
+  trap "rm -rf '$dir'" EXIT
 
   download "$dir"
   verify "$dir"

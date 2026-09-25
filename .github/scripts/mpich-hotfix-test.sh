@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Fixture test for verify() in mpich-hotfix.sh. Sources the script (its main
-# is guarded, so sourcing only defines the functions) and never calls
-# download() or install(): no network, no root.
+# Fixture test for mpich-hotfix.sh. Sources the script (its main is guarded,
+# so sourcing only defines the functions) and never calls the real download()
+# or install(): no network, no root.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,6 +21,35 @@ assert_verify_fails() {
   fi
 }
 
+# assert_main_cleanup_survives_set_u
+# Regression test: main()'s EXIT trap must not reference its own `local dir`
+# after main() has returned, or it fails with "unbound variable" under
+# `set -u` even when download/verify/install all succeeded. Runs main() in
+# an isolated subshell with dpkg and the other three functions stubbed out,
+# so it needs no network, no root and no real dpkg.
+assert_main_cleanup_survives_set_u() {
+  local description="main() cleanup survives set -u after normal return"
+  local output rc=0
+  output=$(
+    bash -c "
+      set -euo pipefail
+      source '${SCRIPT_DIR}/mpich-hotfix.sh'
+      dpkg() { echo amd64; }
+      download() { :; }
+      verify() { :; }
+      install() { :; }
+      main
+    " 2>&1
+  ) || rc=$?
+
+  if [[ "$rc" != 0 ]]; then
+    echo "FAIL: $description: exited $rc: $output" >&2
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  else
+    echo "PASS: $description"
+  fi
+}
+
 main() {
   local mismatch_dir empty_dir
   mismatch_dir=$(mktemp -d)
@@ -32,6 +61,8 @@ main() {
   assert_verify_fails "checksum mismatch" "$mismatch_dir"
 
   assert_verify_fails "missing files (empty dir)" "$empty_dir"
+
+  assert_main_cleanup_survives_set_u
 
   if ((FAIL_COUNT > 0)); then
     exit 1
