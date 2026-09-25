@@ -49,7 +49,7 @@ fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("rank {rank}: FAIL: create_from_group returned error: {e}");
-            let _ = world.allreduce_scalar(0i32, ReduceOp::Min);
+            common::check(&world, false, "test_comm_from_group");
             std::process::exit(1);
         }
     };
@@ -62,12 +62,7 @@ fn main() {
             Some(c) => c,
             None => {
                 eprintln!("rank {rank}: FAIL Test 1a: expected Some(comm), got None");
-                local_ok = false;
-                // Participate in subsequent collective calls with fallback.
-                // We cannot join sub-comm collectives without a comm, so we
-                // skip them and let the sentinel allreduce catch the failure.
-                let ok = local_ok as i32;
-                let _ = world.allreduce_scalar(ok, ReduceOp::Min);
+                common::check(&world, false, "test_comm_from_group");
                 std::process::exit(1);
             }
         };
