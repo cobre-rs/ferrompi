@@ -187,12 +187,15 @@ jobs:
 
       - name: Run coverage (unit tests + MPI integration tests)
         run: |
-          chmod +x tests/run_mpi_coverage.sh
-          MPI_NP=4 ./tests/run_mpi_coverage.sh numa
+          source <(cargo llvm-cov show-env --export-prefix)
+          cargo llvm-cov clean --workspace
+          cargo test --lib --features numa
+          MPI_NP_LIST=4 ./tests/run_mpi_tests.sh numa
+          cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v6
         with:
           files: ./lcov.info
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
