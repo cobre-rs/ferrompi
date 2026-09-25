@@ -44,29 +44,6 @@
 use crate::error::{Error, Result};
 use crate::ffi;
 
-/// Element count at or below which persistent-request handle scratch buffers
-/// live on the stack, so the canonical `start_all`/`wait_all` hot loop incurs
-/// no allocator traffic per iteration (PERF-02). Mirrors `FERROMPI_REQ_STACK`
-/// in `csrc/ferrompi.c`.
-const HANDLE_STACK_CAP: usize = 64;
-
-/// Run `f` with the persistent-request handles copied into a stack buffer when
-/// the batch is small, falling back to a heap `Vec` only for large batches.
-#[inline]
-fn with_handles<R>(requests: &[PersistentRequest], f: impl FnOnce(&mut [i64]) -> R) -> R {
-    let len = requests.len();
-    if len <= HANDLE_STACK_CAP {
-        let mut buf = [0i64; HANDLE_STACK_CAP];
-        for (slot, req) in buf[..len].iter_mut().zip(requests) {
-            *slot = req.handle;
-        }
-        f(&mut buf[..len])
-    } else {
-        let mut buf: Vec<i64> = requests.iter().map(|r| r.handle).collect();
-        f(&mut buf)
-    }
-}
-
 /// A persistent MPI request handle.
 ///
 /// This type represents a persistent collective operation that has been
@@ -195,9 +172,11 @@ impl PersistentRequest {
 
         // SAFETY: with_handles provides a valid, contiguous [i64] of the
         // persistent-request handles whose length we pass as count.
-        let ret = with_handles(requests, |handles| unsafe {
-            ffi::ferrompi_startall(handles.len() as i64, handles.as_mut_ptr())
-        });
+        let ret = crate::request::with_handles(
+            requests,
+            |r| r.handle,
+            |handles| unsafe { ffi::ferrompi_startall(handles.len() as i64, handles.as_mut_ptr()) },
+        );
         Error::check_with_op(ret, "startall")?;
 
         // Mark all as active
@@ -223,9 +202,11 @@ impl PersistentRequest {
         }
         // SAFETY: with_handles provides a valid, contiguous [i64] of the
         // persistent-request handles whose length we pass as count.
-        let ret = with_handles(requests, |handles| unsafe {
-            ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr())
-        });
+        let ret = crate::request::with_handles(
+            requests,
+            |r| r.handle,
+            |handles| unsafe { ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr()) },
+        );
         Error::check_with_op(ret, "waitall")
     }
 }
