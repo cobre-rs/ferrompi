@@ -39,6 +39,12 @@ const FERROMPI_ERR_WINDOWS_FULL: i32 = -7005;
 const FERROMPI_ERR_GROUPS_FULL: i32 = -7006;
 const FERROMPI_ERR_INFOS_FULL: i32 = -7007;
 
+// Rust-only lifecycle-guard sentinels. Produced only by the Rust lifecycle
+// guard (never returned by the C layer), and outside the -7001..-7099 range
+// the C sentinels above use.
+pub(crate) const FERROMPI_ERR_FINALIZED: i32 = -7101;
+pub(crate) const FERROMPI_ERR_THREAD_LEVEL: i32 = -7102;
+
 /// Identifies which internal ferrompi handle table was exhausted in an
 /// [`Error::ResourceExhausted`].
 ///
@@ -231,11 +237,33 @@ fn fmt_mpi(
 }
 
 /// Error types for MPI operations.
+///
+/// This enum is non-exhaustive: downstream `match`es need a wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// MPI has already been initialized.
     #[error("MPI has already been initialized")]
     AlreadyInitialized,
+
+    /// MPI has been finalized.
+    ///
+    /// Returned by any MPI-calling method invoked after the [`Mpi`](crate::Mpi)
+    /// handle was dropped, and by `Mpi::init`/`Mpi::init_thread` once MPI has
+    /// been finalized. No MPI call is made.
+    #[error("MPI has been finalized")]
+    Finalized,
+
+    /// MPI call not permitted on this thread at the provided thread level.
+    ///
+    /// Returned by any MPI-calling method invoked from a thread other than
+    /// the one that called `Mpi::init_thread` while the provided level is
+    /// below [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized),
+    /// and, in debug builds only, by a call that overlaps another thread's
+    /// call at [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized).
+    /// No MPI call is made.
+    #[error("MPI call not permitted on this thread at the provided thread level")]
+    ThreadLevelViolation,
 
     /// MPI error with class, code, descriptive message, and optional operation name.
     #[error("{}", fmt_mpi(.class, .code, .message, .operation))]
@@ -310,6 +338,12 @@ impl Error {
         // MPI_Error_class on a synthetic negative code is undefined behavior.
         if let Some(resource) = ResourceKind::from_sentinel(code) {
             return Error::ResourceExhausted { resource };
+        }
+        if code == FERROMPI_ERR_FINALIZED {
+            return Error::Finalized;
+        }
+        if code == FERROMPI_ERR_THREAD_LEVEL {
+            return Error::ThreadLevelViolation;
         }
 
         let mut class: i32 = 0;
@@ -433,7 +467,9 @@ impl Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{Error, MpiErrorClass, ResourceKind};
+    use super::{
+        Error, MpiErrorClass, ResourceKind, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL,
+    };
 
     #[test]
     fn check_success_returns_ok() {
@@ -581,6 +617,20 @@ mod tests {
                 Error::ResourceExhausted { resource } => assert_eq!(resource, expected),
                 other => panic!("expected ResourceExhausted for code {code}, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn from_code_maps_guard_sentinels() {
+        // Guard sentinels are intercepted before any MPI FFI call, so this is
+        // safe to run without an initialized MPI runtime.
+        match Error::from_code(FERROMPI_ERR_FINALIZED) {
+            Error::Finalized => {}
+            other => panic!("expected Error::Finalized, got {other:?}"),
+        }
+        match Error::from_code_with_op(FERROMPI_ERR_THREAD_LEVEL, "barrier") {
+            Error::ThreadLevelViolation => {}
+            other => panic!("expected Error::ThreadLevelViolation, got {other:?}"),
         }
     }
 
