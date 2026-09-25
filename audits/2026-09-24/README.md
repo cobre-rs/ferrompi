@@ -243,7 +243,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 
 | ID | Title | Sev | Verified | Target | Status |
 |---|---|---|---|---|---|
-| INF-01 | MPI test runner passes when it ran nothing | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| INF-01 | MPI test runner passes when it ran nothing | major | repro | 0.5.x | fixed (87ac8d9) |
 | INF-02 | Declared MSRV false; no MSRV job | major | repro | 0.5.x (D-12: 1.85) | planned (ferrompi-0.5.x-hardening) |
 | INF-03 | build.rs never re-runs on MPI selection change | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | INF-04 | build.rs precedence contradicts docs; overrides fail silently | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
