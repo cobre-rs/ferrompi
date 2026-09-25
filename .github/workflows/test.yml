@@ -187,6 +187,7 @@ jobs:
 
       - name: Run coverage (unit tests + MPI integration tests)
         run: |
+          # shellcheck source=/dev/null
           source <(cargo llvm-cov show-env --export-prefix)
           cargo llvm-cov clean --workspace
           cargo test --lib --features numa
