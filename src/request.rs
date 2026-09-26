@@ -117,6 +117,10 @@ impl Request {
     }
 
     /// Get the raw request handle (for advanced use).
+    ///
+    /// The value is an opaque table handle carrying a generation counter in
+    /// its high bits; it names no request once this `Request` completes,
+    /// because completion frees the underlying table slot for reuse.
     pub fn raw_handle(&self) -> i64 {
         self.handle
     }
@@ -160,7 +164,10 @@ impl Request {
     /// # Note
     ///
     /// If this returns `true`, the request is consumed and you should not call
-    /// `wait()` or `test()` again.
+    /// `wait()` or `test()` again. A test that fails with an error still marks
+    /// the request completed when MPI completed it (e.g. a truncated
+    /// receive), so a later `Drop` does not attempt a second `MPI_Wait` on the
+    /// same slot.
     #[inline]
     pub fn test(&mut self) -> Result<bool> {
         if self.completed {
@@ -172,20 +179,29 @@ impl Request {
         // above), so MPI_Test has not already consumed this handle. flag is a
         // local out-parameter written before this function reads it below.
         let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag) };
-        Error::check_with_op(ret, "test")?;
+        // Set completed from flag BEFORE the `?` below: ferrompi_test frees
+        // the slot and reports flag=1 whenever MPI completed the request,
+        // even when it returns an error (e.g. MPI_ERR_TRUNCATE), so Drop must
+        // not re-wait on that now-freed handle.
         if flag != 0 {
             self.completed = true;
         }
+        Error::check_with_op(ret, "test")?;
         Ok(flag != 0)
     }
 
     /// Wait for any one request in a collection to complete.
     ///
-    /// Blocks until at least one request completes and returns its index. Returns
-    /// `Ok(None)` when all requests were already `MPI_REQUEST_NULL` on entry.
+    /// Blocks until at least one not-yet-completed request completes and
+    /// returns its index. An entry already marked completed is passed to the
+    /// C layer as a null sentinel and skipped; `wait_any` returns `Ok(None)`
+    /// once every entry in the slice is completed (or the slice was empty),
+    /// which is what lets the standard MPI Waitany loop idiom — calling
+    /// `wait_any` repeatedly on the same slice without removing completed
+    /// entries — terminate.
     ///
-    /// The completed `Request` is marked `completed = true` in place. Removing it
-    /// from the vector is the caller's responsibility.
+    /// The completed `Request` is marked `completed = true` in place. Removing
+    /// it from the vector is optional, not required for correctness.
     pub fn wait_any(requests: &mut [Request]) -> Result<Option<usize>> {
         if requests.is_empty() {
             return Ok(None);
@@ -196,7 +212,7 @@ impl Request {
         // i32 output parameter.
         let ret = with_handles(
             requests,
-            |r| r.handle,
+            |r| if r.completed { -1 } else { r.handle },
             |handles| unsafe {
                 ffi::ferrompi_waitany(handles.len() as i64, handles.as_mut_ptr(), &mut index)
             },
@@ -213,10 +229,13 @@ impl Request {
     /// Wait until at least one request in a collection completes.
     ///
     /// Returns the indices of all requests that completed in this call.
-    /// Returns `Ok(vec![])` when no requests were active (all null or all already done).
+    /// Returns `Ok(vec![])` when no requests were active (all null, all
+    /// already completed, or a mix of the two).
     ///
-    /// The completed `Request`s are marked `completed = true` in place. Removing
-    /// them from the vector is the caller's responsibility.
+    /// An entry already marked completed is passed to the C layer as a null
+    /// sentinel and skipped. The completed `Request`s are marked
+    /// `completed = true` in place. Removing them from the vector is
+    /// optional, not required for correctness.
     pub fn wait_some(requests: &mut [Request]) -> Result<Vec<usize>> {
         if requests.is_empty() {
             return Ok(vec![]);
@@ -225,7 +244,7 @@ impl Request {
         let mut outcount: i64 = 0;
         let (ret, completed) = with_handles(
             requests,
-            |r| r.handle,
+            |r| if r.completed { -1 } else { r.handle },
             |handles| {
                 with_index_buf(len, |indices| {
                     // SAFETY: with_handles / with_index_buf supply valid,
@@ -267,8 +286,11 @@ impl Request {
     /// Returns `Ok(Some(idx))` if a request completed, `Ok(None)` if no request
     /// has completed yet or all requests were already null.
     ///
-    /// The completed `Request` is marked `completed = true` in place. Removing it
-    /// from the vector is the caller's responsibility.
+    /// An entry already marked completed is passed to the C layer as a null
+    /// sentinel and skipped, so calling `test_any` again after every entry
+    /// has completed keeps returning `Ok(None)` rather than erroring. The
+    /// completed `Request` is marked `completed = true` in place. Removing it
+    /// from the vector is optional, not required for correctness.
     pub fn test_any(requests: &mut [Request]) -> Result<Option<usize>> {
         if requests.is_empty() {
             return Ok(None);
@@ -280,7 +302,7 @@ impl Request {
         // stack-allocated i32 output parameters.
         let ret = with_handles(
             requests,
-            |r| r.handle,
+            |r| if r.completed { -1 } else { r.handle },
             |handles| unsafe {
                 ffi::ferrompi_testany(
                     handles.len() as i64,
@@ -308,8 +330,10 @@ impl Request {
     /// Returns the indices of all requests that have completed at the moment of
     /// the call. Returns `Ok(vec![])` when none have completed or all were null.
     ///
-    /// The completed `Request`s are marked `completed = true` in place. Removing
-    /// them from the vector is the caller's responsibility.
+    /// An entry already marked completed is passed to the C layer as a null
+    /// sentinel and skipped. The completed `Request`s are marked
+    /// `completed = true` in place. Removing them from the vector is
+    /// optional, not required for correctness.
     pub fn test_some(requests: &mut [Request]) -> Result<Vec<usize>> {
         if requests.is_empty() {
             return Ok(vec![]);
@@ -318,7 +342,7 @@ impl Request {
         let mut outcount: i64 = 0;
         let (ret, completed) = with_handles(
             requests,
-            |r| r.handle,
+            |r| if r.completed { -1 } else { r.handle },
             |handles| {
                 with_index_buf(len, |indices| {
                     // SAFETY: with_handles / with_index_buf supply valid,
@@ -427,7 +451,7 @@ impl Request {
         // handles whose length we pass as count.
         let ret = with_handles(
             requests,
-            |r| r.handle,
+            |r| if r.completed { -1 } else { r.handle },
             |handles| unsafe { ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr()) },
         );
 

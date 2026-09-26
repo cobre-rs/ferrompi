@@ -83,13 +83,24 @@ static atomic_int next_comm_hint;
 
 // Request table
 // Occupancy is a bitmap of 64-bit words (request_bits): bit b of word w marks
-// slot w*64+b as in use.  alloc_request claims a free bit with an acq_rel
-// fetch_or, free_request clears it with a release fetch_and, and
-// get_request_ptr tests it with an acquire load.  next_request_hint is an
-// advisory *word* index (0..REQUEST_BITS_WORDS-1) so scans start near the last
-// success.  See docs/adr/0002-handle-tables.md for the full rationale.
+// slot w*64+b as in use.  A request handle is (generation << 32) | slot: the
+// per-slot generation in request_gen is bumped by free_request each time a
+// slot is freed, so a handle left over from a slot's prior occupant fails the
+// generation check in request_slot instead of aliasing whatever now occupies
+// the reused slot.  alloc_request claims a free bit with an acq_rel fetch_or,
+// free_request clears it with a release fetch_and, and request_slot tests it
+// with an acquire load.  next_request_hint is an advisory *word* index
+// (0..REQUEST_BITS_WORDS-1) so scans start near the last success.  See
+// docs/adr/0002-handle-tables.md for the full rationale.
 static MPI_Request request_table[MAX_REQUESTS];
 static _Atomic(uint64_t) request_bits[REQUEST_BITS_WORDS];  // bit set => slot in use
+// Per-slot generation counter, masked to 31 bits so (generation << 32) | slot
+// never sets the sign bit of the int64_t handle. Written only by
+// free_request (relaxed store, sequenced-before its release fetch_and below);
+// read by alloc_request (to mint the next handle) and request_slot (to
+// validate one).
+static _Atomic(uint32_t) request_gen[MAX_REQUESTS];
+#define REQUEST_GEN_MASK 0x7fffffffu
 static atomic_int next_request_hint;  // advisory start word for the next scan
 
 // Window table
@@ -176,6 +187,7 @@ static void init_tables(void) {
     atomic_init(&next_comm_hint, 1);  // Start scanning from slot 1 (slot 0 is COMM_WORLD)
     for (int i = 0; i < MAX_REQUESTS; i++) {
         request_table[i] = MPI_REQUEST_NULL;
+        atomic_init(&request_gen[i], (uint32_t)0);
     }
     for (int w = 0; w < REQUEST_BITS_WORDS; w++) {
         atomic_init(&request_bits[w], (uint64_t)0);
@@ -297,9 +309,16 @@ static int64_t alloc_request(MPI_Request req) {
             if ((old & mask) == 0) {
                 int64_t idx = (int64_t)widx * 64 + bit;
                 request_table[idx] = req;
+                // Relaxed: sequenced after the acq_rel fetch_or above, whose
+                // acquire component already synchronizes-with the release
+                // fetch_and of whichever free_request last vacated this slot,
+                // so this read observes that free's generation bump without
+                // needing its own ordering.
+                uint32_t gen = atomic_load_explicit(&request_gen[idx],
+                                                    memory_order_relaxed);
                 atomic_store_explicit(&next_request_hint, (int)widx,
                                       memory_order_relaxed);
-                return idx;
+                return ((int64_t)gen << 32) | idx;
             }
             cur = old;  // lost the race for that bit; retry the next free one
         }
@@ -307,34 +326,64 @@ static int64_t alloc_request(MPI_Request req) {
     return -1;  /* No space */
 }
 
-// Get MPI_Request pointer from handle (thread-safe: the acquire load of the
-// occupancy bit pairs with the release fetch_and in free_request, ensuring the
-// request_table value written by the allocating thread is visible here).
-static MPI_Request* get_request_ptr(int64_t handle) {
-    if (handle < 0 || handle >= MAX_REQUESTS) {
-        return NULL;
+// Resolve a handle to its slot index (thread-safe: the acquire load of the
+// occupancy bit pairs with the release fetch_and in free_request). Returns -1
+// for a handle that is negative, out of range, names a currently-free slot,
+// or carries a generation that does not match the slot's current occupant
+// (a stale handle from before the slot was last freed and reused).
+static int64_t request_slot(int64_t handle) {
+    if (handle < 0) {
+        return -1;
     }
-    unsigned widx = (unsigned)(handle / 64);
-    uint64_t mask = (uint64_t)1 << (handle % 64);
+    uint64_t slot = (uint64_t)handle & 0xffffffffu;
+    if (slot >= (uint64_t)MAX_REQUESTS) {
+        return -1;
+    }
+    unsigned widx = (unsigned)(slot / 64);
+    uint64_t mask = (uint64_t)1 << (slot % 64);
     if ((atomic_load_explicit(&request_bits[widx], memory_order_acquire)
             & mask) == 0) {
-        return NULL;
+        return -1;
     }
-    return &request_table[handle];
+    // Relaxed: sequenced after the acquire load above, whose happens-before
+    // already covers this read (see request_gen's declaration comment).
+    uint32_t gen = atomic_load_explicit(&request_gen[slot], memory_order_relaxed);
+    if (gen != (uint32_t)((uint64_t)handle >> 32)) {
+        return -1;
+    }
+    return (int64_t)slot;
 }
 
-// Free a request handle (thread-safe: the plain store to request_table
-// happens-before the release fetch_and that clears the occupancy bit, pairing
-// with the acquire load in get_request_ptr so any subsequent acquirer observes
-// the null value).
-static void free_request(int64_t handle) {
-    if (handle >= 0 && handle < MAX_REQUESTS) {
-        request_table[handle] = MPI_REQUEST_NULL;
-        unsigned widx = (unsigned)(handle / 64);
-        uint64_t mask = (uint64_t)1 << (handle % 64);
-        atomic_fetch_and_explicit(&request_bits[widx], ~mask,
-                                  memory_order_release);
+// Get MPI_Request pointer from handle. Thin wrapper over request_slot's
+// generation-checked lookup.
+static MPI_Request* get_request_ptr(int64_t handle) {
+    int64_t slot = request_slot(handle);
+    if (slot < 0) {
+        return NULL;
     }
+    return &request_table[slot];
+}
+
+// Free a request handle (thread-safe: the plain store to request_table and
+// the generation bump both happen-before the release fetch_and that clears
+// the occupancy bit, pairing with the acquire load in request_slot so any
+// subsequent acquirer observes the null value and the bumped generation).
+static void free_request(int64_t handle) {
+    int64_t slot = request_slot(handle);
+    if (slot < 0) {
+        return;
+    }
+    request_table[slot] = MPI_REQUEST_NULL;
+    // Relaxed: sequenced-before the release fetch_and below, whose release
+    // covers every write (atomic or not) sequenced before it in this thread,
+    // same as the plain request_table store above — no stronger order needed.
+    uint32_t gen = atomic_load_explicit(&request_gen[slot], memory_order_relaxed);
+    atomic_store_explicit(&request_gen[slot], (gen + 1) & REQUEST_GEN_MASK,
+                          memory_order_relaxed);
+    unsigned widx = (unsigned)(slot / 64);
+    uint64_t mask = (uint64_t)1 << (slot % 64);
+    atomic_fetch_and_explicit(&request_bits[widx], ~mask,
+                              memory_order_release);
 }
 
 /* Tear down an ACTIVE MPI request that could not be registered in the request
@@ -3082,11 +3131,17 @@ int ferrompi_test(int64_t request_handle, int32_t* flag) {
     if (!req) {
         return MPI_ERR_REQUEST;
     }
-    int f;
+    int f = 0;
     int ret = MPI_Test(req, &f, MPI_STATUS_IGNORE);
-    *flag = f;
-    if (f && *req == MPI_REQUEST_NULL) {
+    // MPI frees a nonblocking request that completes whether or not MPI_Test
+    // itself reports an error (e.g. a truncated receive still nulls the
+    // request), so free the slot and report completion on that condition
+    // rather than on ret == MPI_SUCCESS.
+    if (*req == MPI_REQUEST_NULL) {
         free_request(request_handle);
+        *flag = 1;
+    } else {
+        *flag = f;
     }
     return ret;
 }
@@ -3103,6 +3158,10 @@ int ferrompi_waitall(int64_t count, int64_t* request_handles) {
     if (!reqs) return MPI_ERR_OTHER;
 
     for (int64_t i = 0; i < count; i++) {
+        if (request_handles[i] == -1) {
+            reqs[i] = MPI_REQUEST_NULL;
+            continue;
+        }
         MPI_Request* req = get_request_ptr(request_handles[i]);
         if (!req) {
             if (reqs != stack_reqs) free(reqs);
@@ -3206,6 +3265,10 @@ int ferrompi_waitany(int64_t count, int64_t* request_handles, int32_t* index) {
         : (MPI_Request*)malloc((size_t)count * sizeof(MPI_Request));
     if (!reqs) return MPI_ERR_NO_MEM;
     for (int64_t i = 0; i < count; i++) {
+        if (request_handles[i] == -1) {
+            reqs[i] = MPI_REQUEST_NULL;
+            continue;
+        }
         MPI_Request* req = get_request_ptr(request_handles[i]);
         if (!req) { if (reqs != stack_reqs) free(reqs); return MPI_ERR_REQUEST; }
         reqs[i] = *req;
@@ -3243,6 +3306,10 @@ int ferrompi_waitsome(int64_t count, int64_t* request_handles,
         : (int*)malloc((size_t)count * sizeof(int));
     if (!tmp_indices) { if (reqs != stack_reqs) free(reqs); return MPI_ERR_NO_MEM; }
     for (int64_t i = 0; i < count; i++) {
+        if (request_handles[i] == -1) {
+            reqs[i] = MPI_REQUEST_NULL;
+            continue;
+        }
         MPI_Request* req = get_request_ptr(request_handles[i]);
         if (!req) {
             if (tmp_indices != stack_idx) free(tmp_indices);
@@ -3287,6 +3354,10 @@ int ferrompi_testany(int64_t count, int64_t* request_handles,
         : (MPI_Request*)malloc((size_t)count * sizeof(MPI_Request));
     if (!reqs) return MPI_ERR_NO_MEM;
     for (int64_t i = 0; i < count; i++) {
+        if (request_handles[i] == -1) {
+            reqs[i] = MPI_REQUEST_NULL;
+            continue;
+        }
         MPI_Request* req = get_request_ptr(request_handles[i]);
         if (!req) { if (reqs != stack_reqs) free(reqs); return MPI_ERR_REQUEST; }
         reqs[i] = *req;
@@ -3328,6 +3399,10 @@ int ferrompi_testsome(int64_t count, int64_t* request_handles,
         : (int*)malloc((size_t)count * sizeof(int));
     if (!tmp_indices) { if (reqs != stack_reqs) free(reqs); return MPI_ERR_NO_MEM; }
     for (int64_t i = 0; i < count; i++) {
+        if (request_handles[i] == -1) {
+            reqs[i] = MPI_REQUEST_NULL;
+            continue;
+        }
         MPI_Request* req = get_request_ptr(request_handles[i]);
         if (!req) {
             if (tmp_indices != stack_idx) free(tmp_indices);
