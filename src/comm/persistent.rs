@@ -1,6 +1,6 @@
 //! Persistent point-to-point (MPI 1.1+) and persistent collective operations (MPI 4.0+).
 
-use crate::comm::Communicator;
+use crate::comm::{check_rank_slots, Communicator};
 use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -468,21 +468,29 @@ impl Communicator {
     /// Initialize a persistent gather operation.
     ///
     /// Requires MPI 4.0+.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidBuffer`] if this rank is `root` and `recv.len() < send.len() *
+    /// size()`.
     pub fn gather_init<T: MpiDatatype>(
         &self,
         send: &[T],
         recv: &mut [T],
         root: i32,
     ) -> Result<PersistentRequest> {
+        if self.rank == root {
+            check_rank_slots(recv.len(), send.len(), self.size)?;
+        }
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]); recv is ignored by MPI at
         // non-root. The root-side receive-length relation (recv.len() >= send.len() * size)
-        // is not checked by this function. The returned PersistentRequest records both
-        // pointers until the request is freed and does not borrow either slice; keeping both
-        // alive and untouched between start() and completion is the caller's documented
-        // obligation, which this signature does not enforce.
+        // is checked above. The returned PersistentRequest records both pointers until the
+        // request is freed and does not borrow either slice; keeping both alive and
+        // untouched between start() and completion is the caller's documented obligation,
+        // which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_gather_init(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
@@ -500,6 +508,11 @@ impl Communicator {
     /// * `send` - Send buffer (significant only at root)
     /// * `recv` - Receive buffer
     /// * `root` - Rank of the root process
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidBuffer`] if this rank is `root` and `send.len() < recv.len() *
+    /// size()`.
     ///
     /// # Example
     ///
@@ -521,15 +534,18 @@ impl Communicator {
         recv: &mut [T],
         root: i32,
     ) -> Result<PersistentRequest> {
+        if self.rank == root {
+            check_rank_slots(send.len(), recv.len(), self.size)?;
+        }
         let mut request_handle: i64 = 0;
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
         // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
         // &mut [T]). The root-side send-length relation (send.len() >= recv.len() * size)
-        // is not checked by this function. The returned PersistentRequest records both
-        // pointers until the request is freed and does not borrow either slice; keeping both
-        // alive and untouched between start() and completion is the caller's documented
-        // obligation, which this signature does not enforce.
+        // is checked above. The returned PersistentRequest records both pointers until the
+        // request is freed and does not borrow either slice; keeping both alive and
+        // untouched between start() and completion is the caller's documented obligation,
+        // which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_scatter_init(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
@@ -545,7 +561,11 @@ impl Communicator {
     /// # Arguments
     ///
     /// * `send` - Send buffer (each rank sends `send.len()` elements)
-    /// * `recv` - Receive buffer (must hold `send.len() * size` elements)
+    /// * `recv` - Receive buffer (must hold at least `send.len() * size` elements)
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidBuffer`] if `recv.len() < send.len() * size()`.
     ///
     /// # Example
     ///
@@ -566,15 +586,16 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
     ) -> Result<PersistentRequest> {
+        check_rank_slots(recv.len(), send.len(), self.size)?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). The every-rank
-        // receive-length relation (recv.len() >= send.len() * size) is not checked by this
-        // function. The returned PersistentRequest records both pointers until the request
-        // is freed and does not borrow either slice; keeping both alive and untouched
-        // between start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        // receive-length relation (recv.len() >= send.len() * size) is checked above. The
+        // returned PersistentRequest records both pointers until the request is freed and
+        // does not borrow either slice; keeping both alive and untouched between start()
+        // and completion is the caller's documented obligation, which this signature does
+        // not enforce.
         let ret = unsafe {
             ffi::ferrompi_allgather_init(sp, n, rp, n, dt, self.handle, &mut request_handle)
         };

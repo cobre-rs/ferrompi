@@ -1,6 +1,6 @@
 //! Nonblocking collective operations: ibroadcast, iallreduce, ireduce, igather, etc.
 
-use crate::comm::Communicator;
+use crate::comm::{check_rank_slots, Communicator};
 use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -148,6 +148,11 @@ impl Communicator {
     /// * `recv` - Buffer for received data (only significant at root)
     /// * `root` - Rank of the root process
     ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidBuffer`] if this rank is `root` and `recv.len() < send.len() *
+    /// size()`.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -165,14 +170,17 @@ impl Communicator {
         recv: &mut [T],
         root: i32,
     ) -> Result<Request> {
+        if self.rank == root {
+            check_rank_slots(recv.len(), send.len(), self.size)?;
+        }
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]); at non-root, recv is
         // ignored by MPI. The root-side receive-length relation (recv.len() >= send.len()
-        // * size) is not checked by this function. The returned Request does not borrow
-        // either slice; keeping both alive and untouched until the request completes is
-        // the caller's documented obligation, which this signature does not enforce.
+        // * size) is checked above. The returned Request does not borrow either slice;
+        // keeping both alive and untouched until the request completes is the caller's
+        // documented obligation, which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_igather(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
@@ -186,6 +194,10 @@ impl Communicator {
     /// [`Request`] handle. Each process sends `send.len()` elements and
     /// receives from all.
     ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidBuffer`] if `recv.len() < send.len() * size()`.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -198,14 +210,15 @@ impl Communicator {
     /// req.wait().unwrap();
     /// ```
     pub fn iallgather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<Request> {
+        check_rank_slots(recv.len(), send.len(), self.size)?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). The every-rank
-        // receive-length relation (recv.len() >= send.len() * size) is not checked by
-        // this function. The returned Request does not borrow either slice; keeping both
-        // alive and untouched until the request completes is the caller's documented
-        // obligation, which this signature does not enforce.
+        // receive-length relation (recv.len() >= send.len() * size) is checked above.
+        // The returned Request does not borrow either slice; keeping both alive and
+        // untouched until the request completes is the caller's documented obligation,
+        // which this signature does not enforce.
         let ret =
             unsafe { ffi::ferrompi_iallgather(sp, n, rp, n, dt, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "iallgather")?;
@@ -217,6 +230,11 @@ impl Communicator {
     /// Initiates a scatter operation and returns immediately with a [`Request`]
     /// handle. Root sends `recv.len() * size` elements total, each process
     /// receives `recv.len()` elements.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidBuffer`] if this rank is `root` and `send.len() < recv.len() *
+    /// size()`.
     ///
     /// # Example
     ///
@@ -235,14 +253,17 @@ impl Communicator {
         recv: &mut [T],
         root: i32,
     ) -> Result<Request> {
+        if self.rank == root {
+            check_rank_slots(send.len(), recv.len(), self.size)?;
+        }
         let mut request_handle: i64 = 0;
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
         // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
         // &mut [T]). The root-side send-length relation (send.len() >= recv.len() * size)
-        // is not checked by this function. The returned Request does not borrow either
-        // slice; keeping both alive and untouched until the request completes is the
-        // caller's documented obligation, which this signature does not enforce.
+        // is checked above. The returned Request does not borrow either slice; keeping
+        // both alive and untouched until the request completes is the caller's
+        // documented obligation, which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_iscatter(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };

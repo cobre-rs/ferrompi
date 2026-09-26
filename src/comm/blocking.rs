@@ -1,6 +1,6 @@
 //! Blocking collective operations: barrier, broadcast, reduce, allreduce, scan, gather, scatter, alltoall.
 
-use crate::comm::Communicator;
+use crate::comm::{check_rank_slots, Communicator};
 use crate::datatype::{buf, buf_mut, BytePermutable, DatatypeTag, MpiDatatype, MpiIndexedDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -609,9 +609,14 @@ impl Communicator {
     /// # Arguments
     ///
     /// * `send` - Data to send from this process
-    /// * `recv` - Buffer for received data (only significant at root, must be
-    ///   `send.len() * size` elements)
+    /// * `recv` - Buffer for received data (only significant at root, must be at
+    ///   least `send.len() * size` elements)
     /// * `root` - Rank of the root process
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidBuffer`] if this rank is `root` and `recv.len() < send.len() *
+    /// size()`.
     ///
     /// # Example
     ///
@@ -624,16 +629,23 @@ impl Communicator {
     /// world.gather(&send, &mut recv, 0).unwrap();
     /// ```
     pub fn gather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], root: i32) -> Result<()> {
+        if self.rank == root {
+            check_rank_slots(recv.len(), send.len(), self.size)?;
+        }
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]); at non-root, recv is ignored by
-        // MPI. The root-side receive-length relation (recv.len() >= send.len() * size) is not
-        // checked by this function.
+        // MPI. The root-side receive-length relation (recv.len() >= send.len() * size) is
+        // checked above.
         let ret = unsafe { ffi::ferrompi_gather(sp, n, rp, n, dt, root, self.handle) };
         Error::check_with_op(ret, "gather")
     }
 
     /// All-gather values (gather and broadcast to all).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidBuffer`] if `recv.len() < send.len() * size()`.
     ///
     /// # Example
     ///
@@ -646,10 +658,11 @@ impl Communicator {
     /// world.allgather(&send, &mut recv).unwrap();
     /// ```
     pub fn allgather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<()> {
+        check_rank_slots(recv.len(), send.len(), self.size)?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). The every-rank receive-length
-        // relation (recv.len() >= send.len() * size) is not checked by this function.
+        // relation (recv.len() >= send.len() * size) is checked above.
         let ret = unsafe { ffi::ferrompi_allgather(sp, n, rp, n, dt, self.handle) };
         Error::check_with_op(ret, "allgather")
     }
@@ -866,6 +879,11 @@ impl Communicator {
     /// Root sends `recv.len() * size` elements total, each process receives
     /// `recv.len()` elements.
     ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidBuffer`] if this rank is `root` and `send.len() < recv.len() *
+    /// size()`.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -877,11 +895,14 @@ impl Communicator {
     /// world.scatter(&send, &mut recv, 0).unwrap();
     /// ```
     pub fn scatter<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], root: i32) -> Result<()> {
+        if self.rank == root {
+            check_rank_slots(send.len(), recv.len(), self.size)?;
+        }
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
         // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
         // &mut [T]). The root-side send-length relation (send.len() >= recv.len() * size) is
-        // not checked by this function.
+        // checked above.
         let ret = unsafe { ffi::ferrompi_scatter(sp, n, rp, n, dt, root, self.handle) };
         Error::check_with_op(ret, "scatter")
     }

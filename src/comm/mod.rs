@@ -14,6 +14,19 @@ mod p2p;
 mod persistent;
 mod v_collective;
 
+/// Checks that a buffer of `whole` elements holds one `block`-element slot per
+/// rank of a `size`-rank communicator (`whole >= block * size`, with the product
+/// computed by checked arithmetic).
+fn check_rank_slots(whole: usize, block: usize, size: i32) -> Result<()> {
+    let needed = block
+        .checked_mul(size as usize)
+        .ok_or(Error::InvalidBuffer)?;
+    if whole < needed {
+        return Err(Error::InvalidBuffer);
+    }
+    Ok(())
+}
+
 /// Split types for [`Communicator::split_type`].
 ///
 /// These constants map to MPI communicator split type values. Currently only
@@ -48,6 +61,12 @@ pub enum SplitType {
 /// [`ThreadLevel::Funneled`](crate::ThreadLevel::Funneled) (master thread
 /// makes MPI calls) or [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized)
 /// (any thread, but only one at a time).
+///
+/// # Argument validation
+///
+/// Collective methods that document an [`Error::InvalidBuffer`] condition check it
+/// on the calling rank before any MPI call. The check is local: ranks that already
+/// entered the collective are not told about the failure and may block.
 ///
 /// # Example
 ///
@@ -158,11 +177,27 @@ impl Drop for Communicator {
 
 #[cfg(test)]
 mod tests {
-    use crate::comm::SplitType;
+    use crate::comm::{check_rank_slots, SplitType};
+    use crate::error::Error;
 
     #[test]
     fn split_type_repr_value() {
         // SplitType::Shared has repr value 0
         assert_eq!(SplitType::Shared as i32, 0);
+    }
+
+    #[test]
+    fn check_rank_slots_boundaries() {
+        assert!(check_rank_slots(8, 2, 4).is_ok());
+        assert!(matches!(
+            check_rank_slots(7, 2, 4),
+            Err(Error::InvalidBuffer)
+        ));
+        assert!(check_rank_slots(9, 2, 4).is_ok());
+        assert!(check_rank_slots(0, 0, 4).is_ok());
+        assert!(matches!(
+            check_rank_slots(usize::MAX, usize::MAX / 2 + 1, 2),
+            Err(Error::InvalidBuffer)
+        ));
     }
 }
