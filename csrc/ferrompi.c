@@ -3765,7 +3765,8 @@ int ferrompi_type_create_struct(int32_t count,
                                 const int64_t* displacements,
                                 const int32_t* basetype_tags,
                                 int32_t* newtype_handle) {
-    if (count < 0) return MPI_ERR_ARG;
+    /* Reject an empty field list before the stack arrays are filled. */
+    if (count <= 0) return MPI_ERR_ARG;
     MPI_Aint stack_disp[32];
     MPI_Datatype stack_types[32];
     MPI_Aint* disp = stack_disp;

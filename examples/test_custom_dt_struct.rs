@@ -4,8 +4,8 @@
 //! - Successful construction of a `{ f64, i32 }` struct type (8-byte f64 at
 //!   offset 0, i32 at offset 8) and `raw_handle() >= 0`
 //! - Indexed-basetype rejection returns `Error::InvalidOp` before any FFI call
-//! - Empty `fields` slice returns an MPI error (implementation-defined class:
-//!   `MpiErrorClass::Arg` or `MpiErrorClass::Count` are both accepted)
+//! - Empty `fields` slice returns `Err(Error::Mpi { .. })` without calling into
+//!   MPI (exact class asserted once error-class decoding is fixed)
 //! - Drop frees the underlying MPI handle (no double-free on exit)
 //!
 //! All assertions are protected by a sentinel allreduce(Min) before any
@@ -14,7 +14,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_custom_dt_struct
 // mpi-test: np=2
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, MpiErrorClass, StructField};
+use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, StructField};
 
 mod common;
 
@@ -94,53 +94,26 @@ fn main() {
     }
 
     // ========================================================================
-    // Test 3: create_struct(&[]) returns an Err or a zero-size type.
+    // Test 3: create_struct(&[]) returns Err(Error::Mpi { .. }).
     //
-    // MPI_Type_create_struct with count=0 is rejected by most implementations
-    // with MPI_ERR_ARG or MPI_ERR_COUNT (both accepted). However, some
-    // implementations (e.g. Open MPI >= 5.0) accept count=0 and produce a
-    // valid zero-size datatype — this is also accepted as conforming.
-    // The C shim forwards count=0 directly to MPI (no early return) so the
-    // exact outcome is implementation-defined.
+    // The C shim rejects an empty field list before the stack arrays are
+    // filled, returning MPI_ERR_ARG without calling into MPI, on every MPI
+    // implementation. The exact class will be asserted here once error-class
+    // decoding is fixed; for now any Mpi class is accepted.
     // ========================================================================
     {
         match CustomDatatype::create_struct(&[]) {
-            Err(Error::Mpi { class, .. }) => {
-                let accepted = matches!(class, MpiErrorClass::Arg | MpiErrorClass::Count);
-                if accepted {
-                    if rank == 0 {
-                        println!(
-                            "PASS: Test 3 — create_struct(&[]) returned Err({class:?}) \
-                             (implementation-defined Arg or Count)"
-                        );
-                    }
-                } else {
-                    // Some MPI implementations may return other error classes
-                    // for count=0. Accept any MPI error as conforming.
-                    if rank == 0 {
-                        println!(
-                            "NOTE: Test 3 — create_struct(&[]) returned Err({class:?}) \
-                             (non-standard class, still an error — accepted)"
-                        );
-                    }
+            Err(Error::Mpi { .. }) => {
+                if rank == 0 {
+                    println!("PASS: Test 3 — create_struct(&[]) returned Err(Mpi)");
                 }
             }
-            Err(e) => {
-                // Any error is acceptable for an empty slice.
-                if rank == 0 {
-                    println!("PASS: Test 3 — create_struct(&[]) returned Err: {e}");
-                }
-            }
-            Ok(s) => {
-                // Some MPI implementations accept count=0 and produce a valid
-                // zero-size datatype. This is conforming; accept it with a note.
-                if rank == 0 {
-                    println!(
-                        "NOTE: Test 3 — create_struct(&[]) succeeded (raw_handle={}) — \
-                         MPI implementation accepts count=0 (conforming)",
-                        s.raw_handle()
-                    );
-                }
+            other => {
+                eprintln!(
+                    "rank {rank}: FAIL Test 3 — expected Err(Mpi {{ .. }}), got: {:?}",
+                    other
+                );
+                local_ok = false;
             }
         }
     }

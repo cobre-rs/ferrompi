@@ -250,18 +250,19 @@ impl CustomDatatype {
     ///
     /// # Arguments
     ///
-    /// * `fields` — slice of [`StructField`] descriptors. Must be non-empty for
-    ///   success (MPI requires `count >= 1`). Each field's `basetype` must be one
-    ///   of the primitive types (`F32`, `F64`, `I32`, `I64`, `U8`, `U32`, `U64`,
-    ///   `Byte`). Passing an indexed type (`FloatInt`, `DoubleInt`, etc.) returns
-    ///   [`Error::InvalidOp`] before invoking MPI.
+    /// * `fields` — slice of [`StructField`] descriptors. Must be non-empty:
+    ///   an empty slice returns [`Error::Mpi`] with class
+    ///   [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg) without calling MPI.
+    ///   Each field's `basetype` must be one of the primitive types (`F32`,
+    ///   `F64`, `I32`, `I64`, `U8`, `U32`, `U64`, `Byte`). Passing an indexed
+    ///   type (`FloatInt`, `DoubleInt`, etc.) returns [`Error::InvalidOp`]
+    ///   before invoking MPI.
     ///
     /// # Errors
     ///
     /// - [`Error::InvalidOp`] — any field has an indexed paired basetype.
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg)
-    ///   or [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) — `fields` is
-    ///   empty (MPI requires at least one field).
+    ///   — `fields` is empty.
     /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
     ///   — the internal datatype table is full (max 64 concurrent custom datatypes).
     ///
