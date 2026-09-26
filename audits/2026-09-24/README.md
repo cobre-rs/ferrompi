@@ -161,7 +161,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | ARC-07 | Ops and datatypes not parameters | major | one-way | 0.6 | open |
 | ARC-08 | Error model misleads and loses context | major | one-way | 0.6 | open |
 | ARC-09 | `Status` always discarded | major | one-way | 0.6 | open |
-| ARC-10 | Copy-pasted families drifted (root of SND-06) | major | two-way | 0.5.x (validators) | planned (ferrompi-0.5.x-hardening) |
+| ARC-10 | Copy-pasted families drifted (root of SND-06) | major | two-way | 0.5.x (validators) | fixed (c402d59) |
 | ARC-11 | Capability gaps (in-place nonblocking, mprobe, HW_GUIDED…) | minor | additive | 0.6+ | open |
 | ARC-12 | `Info` public but unused | minor | one-way | 0.6 (D-4) | open |
 | ARC-13 | `SharedWindow` duplicates `Win`; `WinKind` dead | minor | one-way | 0.6 (D-5) | open |
