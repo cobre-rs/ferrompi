@@ -189,7 +189,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | ID | Title | Sev | Verified | Target | Status |
 |---|---|---|---|---|---|
 | PRF-01 | Request table: ~14 ns / 2 locked RMWs per request (+58%/+33% small nonblocking p2p) | major | measured | 0.7 (D-2); no 0.5.x stop-gap | open |
-| PRF-02 | Bitmap concentrates contention; ADR/comment claim the opposite | minor | measured | 0.5.x docs / 0.7 | planned (ferrompi-0.5.x-hardening: docs); table change open (0.7) |
+| PRF-02 | Bitmap concentrates contention; ADR/comment claim the opposite | minor | measured | 0.5.x docs / 0.7 | fixed (01866f1): shim comment; ADR-0002 planned (ferrompi-0.5.x-hardening); table change open (0.7) |
 | PRF-03 | `ffi_overhead` bench cannot measure FFI overhead | minor | measured | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | PRF-04 | "Persistent 10–30% faster" refuted as stated; bench at 1 MiB only | minor | measured | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | PRF-05 | `start_all`/`wait_all` zero 512 B scratch per call | nit | measured | — | wont-fix (adds `unsafe` for ~8 ns; rejected in 0.5.x planning) |
@@ -240,7 +240,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | DOC-12 | CHANGELOG internal IDs / restated rustdoc | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-13 | `benches/README.md` claims | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-14 | Missing docs: lifecycle, error reporting, runtime lib path, Open MPI build | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
-| DOC-15 | Wrong C comments | nit | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| DOC-15 | Wrong C comments | nit | 0.5.x | fixed (01866f1) |
 
 ### Build / CI / tests — [08](findings/08-build-ci-tests.md)
 
