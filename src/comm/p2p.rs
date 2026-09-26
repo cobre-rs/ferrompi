@@ -336,11 +336,9 @@ impl Communicator {
     /// Send a slice of values to another process using a committed custom datatype.
     ///
     /// This is the custom-datatype counterpart of [`send`](Self::send). The element
-    /// type `T` must satisfy the [`PlainData`](crate::PlainData) bound; the caller
-    /// is still responsible for ensuring that `buf` has the layout expected by
-    /// `datatype`. A mismatch produces a
-    /// well-defined `MPI_ERR_TRUNCATE` error (or another `MPI` error class),
-    /// not memory unsafety, provided `buf` is a valid `&[T]`.
+    /// type `T` must satisfy the [`PlainData`](crate::PlainData) bound. `datatype`'s
+    /// extent must equal `size_of::<T>()` and its data must lie within one `T`,
+    /// otherwise the call returns [`Error::InvalidBuffer`] without calling MPI.
     ///
     /// # Arguments
     ///
@@ -348,6 +346,13 @@ impl Communicator {
     /// * `datatype` - Committed custom datatype describing each element
     /// * `dest`     - Destination rank
     /// * `tag`      - Message tag
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
+    ///   locally before any MPI call. If a peer already posted the matching
+    ///   receive, that peer operation is not cancelled.
     ///
     /// # Example
     ///
@@ -374,8 +379,10 @@ impl Communicator {
         dest: i32,
         tag: i32,
     ) -> Result<()> {
+        datatype.check_layout::<T>()?;
         // SAFETY: buf.as_ptr() is valid for buf.len() elements; datatype.handle is an owned,
-        // committed CustomDatatype; the buffer outlives this blocking call.
+        // committed CustomDatatype; the buffer outlives this blocking call; check_layout above
+        // guarantees each element's data lies within its T, so MPI touches only buf.
         let ret = unsafe {
             ffi::ferrompi_send_custom(
                 buf.as_ptr().cast::<std::ffi::c_void>(),
@@ -392,11 +399,9 @@ impl Communicator {
     /// Receive a slice of values from another process using a committed custom datatype.
     ///
     /// This is the custom-datatype counterpart of [`recv`](Self::recv). The element
-    /// type `T` must satisfy the [`PlainData`](crate::PlainData) bound; the caller
-    /// is still responsible for ensuring that `buf` has the layout expected by
-    /// `datatype`. A mismatch produces a
-    /// well-defined `MPI_ERR_TRUNCATE` error (or another `MPI` error class),
-    /// not memory unsafety, provided `buf` is a valid `&mut [T]`.
+    /// type `T` must satisfy the [`PlainData`](crate::PlainData) bound. `datatype`'s
+    /// extent must equal `size_of::<T>()` and its data must lie within one `T`,
+    /// otherwise the call returns [`Error::InvalidBuffer`] without calling MPI.
     ///
     /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
     ///
@@ -406,6 +411,13 @@ impl Communicator {
     /// * `datatype` - Committed custom datatype describing each element
     /// * `source`   - Source rank (or -1 for any source)
     /// * `tag`      - Message tag (or -1 for any tag)
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
+    ///   locally before any MPI call. If a peer already posted the matching
+    ///   send, that peer operation is not cancelled.
     ///
     /// # Example
     ///
@@ -433,13 +445,15 @@ impl Communicator {
         source: i32,
         tag: i32,
     ) -> Result<Status> {
+        datatype.check_layout::<T>()?;
         let mut actual_source: i32 = 0;
         let mut actual_tag: i32 = 0;
         let mut actual_count: i64 = 0;
 
         // SAFETY: buf.as_mut_ptr() is exclusively writable for buf.len() elements; datatype.handle
         // is an owned, committed CustomDatatype; the buffer outlives this blocking call; the
-        // PlainData bound on T makes any bytes MPI writes a valid T.
+        // PlainData bound on T makes any bytes MPI writes a valid T, and check_layout above
+        // guarantees each element's data lies within its T, so MPI touches only buf.
         let ret = unsafe {
             ffi::ferrompi_recv_custom(
                 buf.as_mut_ptr().cast::<std::ffi::c_void>(),
@@ -467,9 +481,10 @@ impl Communicator {
     /// send buffer **must not be modified** until the request is completed via
     /// [`Request::wait()`] or [`Request::test()`].
     ///
-    /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound;
-    /// the caller is still responsible for ensuring that `buf` has the layout
-    /// expected by `datatype`.
+    /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound.
+    /// `datatype`'s extent must equal `size_of::<T>()` and its data must lie
+    /// within one `T`, otherwise the call returns [`Error::InvalidBuffer`]
+    /// without calling MPI.
     ///
     /// # Arguments
     ///
@@ -477,6 +492,13 @@ impl Communicator {
     /// * `datatype` - Committed custom datatype describing each element
     /// * `dest`     - Destination rank
     /// * `tag`      - Message tag
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
+    ///   locally before any MPI call. If a peer already posted the matching
+    ///   receive, that peer operation is not cancelled.
     ///
     /// # Example
     ///
@@ -504,9 +526,11 @@ impl Communicator {
         dest: i32,
         tag: i32,
     ) -> Result<Request> {
+        datatype.check_layout::<T>()?;
         let mut request_handle: i64 = 0;
         // SAFETY: buf.as_ptr() is valid for buf.len() elements; datatype.handle is an owned,
-        // committed CustomDatatype; the caller must keep the buffer alive until Request completion.
+        // committed CustomDatatype; the caller must keep the buffer alive until Request completion;
+        // check_layout above guarantees each element's data lies within its T, so MPI touches only buf.
         let ret = unsafe {
             ffi::ferrompi_isend_custom(
                 buf.as_ptr().cast::<std::ffi::c_void>(),
@@ -530,9 +554,10 @@ impl Communicator {
     ///
     /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
     ///
-    /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound;
-    /// the caller is still responsible for ensuring that `buf` has the layout
-    /// expected by `datatype`.
+    /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound.
+    /// `datatype`'s extent must equal `size_of::<T>()` and its data must lie
+    /// within one `T`, otherwise the call returns [`Error::InvalidBuffer`]
+    /// without calling MPI.
     ///
     /// # Arguments
     ///
@@ -540,6 +565,13 @@ impl Communicator {
     /// * `datatype` - Committed custom datatype describing each element
     /// * `source`   - Source rank (or -1 for any source)
     /// * `tag`      - Message tag (or -1 for any tag)
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
+    ///   locally before any MPI call. If a peer already posted the matching
+    ///   send, that peer operation is not cancelled.
     ///
     /// # Example
     ///
@@ -567,10 +599,12 @@ impl Communicator {
         source: i32,
         tag: i32,
     ) -> Result<Request> {
+        datatype.check_layout::<T>()?;
         let mut request_handle: i64 = 0;
         // SAFETY: buf.as_mut_ptr() is exclusively writable for buf.len() elements; datatype.handle
         // is an owned, committed CustomDatatype; the caller must not read the buffer until
-        // Request completion; the PlainData bound on T makes any bytes MPI writes a valid T.
+        // Request completion; the PlainData bound on T makes any bytes MPI writes a valid T, and
+        // check_layout above guarantees each element's data lies within its T, so MPI touches only buf.
         let ret = unsafe {
             ffi::ferrompi_irecv_custom(
                 buf.as_mut_ptr().cast::<std::ffi::c_void>(),

@@ -3828,6 +3828,22 @@ int ferrompi_type_create_resized(int32_t old_h, int64_t lb,
     return MPI_SUCCESS;
 }
 
+int ferrompi_type_get_extents(int32_t type_handle, int64_t* extent,
+                              int64_t* true_lb, int64_t* true_extent) {
+    MPI_Datatype dt = get_datatype_committed(type_handle);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Aint lb, ext;
+    int ret = MPI_Type_get_extent(dt, &lb, &ext);
+    if (ret != MPI_SUCCESS) return ret;
+    MPI_Aint tlb, text;
+    ret = MPI_Type_get_true_extent(dt, &tlb, &text);
+    if (ret != MPI_SUCCESS) return ret;
+    *extent = (int64_t)ext;
+    *true_lb = (int64_t)tlb;
+    *true_extent = (int64_t)text;
+    return MPI_SUCCESS;
+}
+
 int ferrompi_type_free(int32_t type_handle) {
     if (type_handle < 0 || type_handle >= MAX_DATATYPES) return MPI_ERR_ARG;
     if (!atomic_load_explicit(&datatype_used[type_handle],

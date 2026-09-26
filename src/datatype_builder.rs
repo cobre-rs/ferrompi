@@ -69,6 +69,14 @@ pub struct StructField {
 /// via one of the constructor methods. The underlying MPI handle is freed
 /// automatically when the `CustomDatatype` is dropped.
 ///
+/// # Extent and True Bounds
+///
+/// Each constructor records the datatype's extent and true lower bound/extent
+/// at commit time (`MPI_Type_get_extent` / `MPI_Type_get_true_extent`). The
+/// custom point-to-point methods in [`Communicator`](crate::Communicator)
+/// (`send_custom`, `recv_custom`, `isend_custom`, `irecv_custom`) check these
+/// cached values against the element type before issuing any MPI call.
+///
 /// # No `Clone`
 ///
 /// Cloning is intentionally not supported: each `CustomDatatype` owns its
@@ -85,6 +93,12 @@ pub struct StructField {
 pub struct CustomDatatype {
     /// Index into the C-side `datatype_table`.
     pub(crate) handle: i32,
+    /// `MPI_Type_get_extent` extent, in bytes, recorded at commit.
+    extent: i64,
+    /// `MPI_Type_get_true_extent` true lower bound, in bytes, recorded at commit.
+    true_lb: i64,
+    /// `MPI_Type_get_true_extent` true extent, in bytes, recorded at commit.
+    true_extent: i64,
 }
 
 // SAFETY: CustomDatatype holds an integer handle into a C-side table.
@@ -147,7 +161,7 @@ impl CustomDatatype {
     /// - [`Error::InvalidOp`] — `basetype` is an indexed paired type.
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count)
     ///   or [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg) — `count` is non-positive.
-    /// - [`Error::Mpi`] with class [`MpiErrorClass::Other`](crate::MpiErrorClass::Other)
+    /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
     ///   — the internal datatype table is full (max 64 concurrent custom datatypes).
     ///
     /// # Example
@@ -166,7 +180,7 @@ impl CustomDatatype {
         // SAFETY: all arguments are scalar integers; no pointer or lifetime invariant at stake.
         let ret = unsafe { ffi::ferrompi_type_contiguous(count, basetype as i32, &mut handle) };
         Error::check_with_op(ret, "type_contiguous")?;
-        Ok(CustomDatatype { handle })
+        Self::from_committed(handle)
     }
 
     /// Build a strided datatype with `count` blocks of `blocklength` base
@@ -195,7 +209,7 @@ impl CustomDatatype {
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count)
     ///   or [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg) — `count` is
     ///   zero or negative.
-    /// - [`Error::Mpi`] with class [`MpiErrorClass::Other`](crate::MpiErrorClass::Other)
+    /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
     ///   — the internal datatype table is full (max 64 concurrent custom datatypes).
     ///
     /// # Example
@@ -224,7 +238,7 @@ impl CustomDatatype {
             ffi::ferrompi_type_vector(count, blocklength, stride, basetype as i32, &mut handle)
         };
         Error::check_with_op(ret, "type_vector")?;
-        Ok(CustomDatatype { handle })
+        Self::from_committed(handle)
     }
 
     /// Build a heterogeneous struct derived datatype from a slice of field descriptors.
@@ -248,7 +262,7 @@ impl CustomDatatype {
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg)
     ///   or [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) — `fields` is
     ///   empty (MPI requires at least one field).
-    /// - [`Error::Mpi`] with class [`MpiErrorClass::Other`](crate::MpiErrorClass::Other)
+    /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
     ///   — the internal datatype table is full (max 64 concurrent custom datatypes).
     ///
     /// # Example
@@ -289,7 +303,7 @@ impl CustomDatatype {
             )
         };
         Error::check_with_op(ret, "type_create_struct")?;
-        Ok(CustomDatatype { handle: h })
+        Self::from_committed(h)
     }
 
     /// Build a new datatype with the same payload as `self` but with the
@@ -318,7 +332,7 @@ impl CustomDatatype {
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg)
     ///   — `extent` is negative (implementation-defined; some MPI stacks may
     ///   return a different class).
-    /// - [`Error::Mpi`] with class [`MpiErrorClass::Other`](crate::MpiErrorClass::Other)
+    /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
     ///   — the internal datatype table is full (max 64 concurrent custom datatypes).
     ///
     /// # Example
@@ -343,7 +357,7 @@ impl CustomDatatype {
         // SAFETY: self.handle is owned and committed; lb and extent are scalar integers.
         let ret = unsafe { ffi::ferrompi_type_create_resized(self.handle, lb, extent, &mut h) };
         Error::check_with_op(ret, "type_create_resized")?;
-        Ok(CustomDatatype { handle: h })
+        Self::from_committed(h)
     }
 
     /// Return the raw integer handle for this datatype.
@@ -352,6 +366,51 @@ impl CustomDatatype {
     /// `>= 0` for a successfully constructed `CustomDatatype`.
     pub fn raw_handle(&self) -> i32 {
         self.handle
+    }
+
+    /// Build a `CustomDatatype` from a just-committed handle, caching its
+    /// extent and true bounds via `ferrompi_type_get_extents`.
+    ///
+    /// On failure, the zero-extent value built first is dropped, freeing
+    /// `handle` through [`Drop`].
+    fn from_committed(handle: i32) -> Result<Self> {
+        let mut dt = CustomDatatype {
+            handle,
+            extent: 0,
+            true_lb: 0,
+            true_extent: 0,
+        };
+        // SAFETY: handle was just committed by the caller; extent/true_lb/true_extent
+        // are exclusive stack locations valid for the duration of this call.
+        let ret = unsafe {
+            ffi::ferrompi_type_get_extents(
+                handle,
+                &mut dt.extent,
+                &mut dt.true_lb,
+                &mut dt.true_extent,
+            )
+        };
+        Error::check_with_op(ret, "type_get_extents")?;
+        Ok(dt)
+    }
+
+    /// Check that this datatype's extent equals `size_of::<T>()` and that its
+    /// true bounds lie within one `T`.
+    ///
+    /// Returns [`Error::InvalidBuffer`] otherwise.
+    pub(crate) fn check_layout<T>(&self) -> Result<()> {
+        let size = std::mem::size_of::<T>() as i64;
+        if self.extent != size || self.true_lb < 0 {
+            return Err(Error::InvalidBuffer);
+        }
+        let end = self
+            .true_lb
+            .checked_add(self.true_extent)
+            .ok_or(Error::InvalidBuffer)?;
+        if end > size {
+            return Err(Error::InvalidBuffer);
+        }
+        Ok(())
     }
 }
 
@@ -418,5 +477,33 @@ mod tests {
             "expected Err(Error::InvalidOp), got: {:?}",
             result
         );
+    }
+
+    /// `check_layout` boundaries against a 16-byte `#[repr(C)]` type, using
+    /// inert (`handle: -1`) `CustomDatatype` values that need no MPI runtime.
+    #[test]
+    fn check_layout_boundaries() {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Sample {
+            v: f64,
+            i: i32,
+        }
+        assert_eq!(std::mem::size_of::<Sample>(), 16);
+
+        let dt = |extent: i64, true_lb: i64, true_extent: i64| CustomDatatype {
+            handle: -1,
+            extent,
+            true_lb,
+            true_extent,
+        };
+
+        assert!(dt(16, 0, 12).check_layout::<Sample>().is_ok());
+        assert!(dt(16, 0, 16).check_layout::<Sample>().is_ok());
+        assert!(dt(12, 0, 12).check_layout::<Sample>().is_err());
+        assert!(dt(32, 0, 12).check_layout::<Sample>().is_err());
+        assert!(dt(16, -1, 12).check_layout::<Sample>().is_err());
+        assert!(dt(16, 8, 12).check_layout::<Sample>().is_err());
+        assert!(dt(16, i64::MAX, 1).check_layout::<Sample>().is_err());
     }
 }

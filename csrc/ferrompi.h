@@ -634,6 +634,14 @@ int ferrompi_type_create_resized(int32_t old_handle,
                                  int64_t extent,
                                  int32_t* newtype_handle);
 
+/**
+ * Query the extent and true extent of a committed custom datatype
+ * (MPI_Type_get_extent + MPI_Type_get_true_extent). Writes the three
+ * outputs only on success.
+ */
+int ferrompi_type_get_extents(int32_t type_handle, int64_t* extent,
+                              int64_t* true_lb, int64_t* true_extent);
+
 int ferrompi_type_free(int32_t type_handle);
 
 /* ============================================================

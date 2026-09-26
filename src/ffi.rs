@@ -916,6 +916,13 @@ guarded_extern! {
         newtype_handle: *mut int32_t,
     ) -> c_int;
 
+    pub fn ferrompi_type_get_extents(
+        type_handle: int32_t,
+        extent: *mut int64_t,
+        true_lb: *mut int64_t,
+        true_extent: *mut int64_t,
+    ) -> c_int;
+
     // ============================================================
     // Custom-Datatype Point-to-Point
     // ============================================================
