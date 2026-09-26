@@ -110,6 +110,19 @@ static _Atomic(uint32_t) request_gen[MAX_REQUESTS];
 #define REQUEST_GEN_MASK 0x7fffffffu
 static atomic_int next_request_hint;  // advisory start word for the next scan
 
+// Per-slot request-kind/activity state, written only by the owning thread
+// (as request_table itself is): REQUEST_PERSISTENT marks a slot registered
+// by a persistent initiator; REQUEST_ACTIVE marks a persistent request
+// active from a successful start until MPI reports it complete. A
+// registered nonblocking (non-persistent) request is always active and
+// carries no REQUEST_ACTIVE bit of its own. Plain bytes, not atomics:
+// distinct slots are distinct objects, and ferrompi_finalize — the one
+// reader outside the owning thread's own calls — runs after every other
+// MPI call.
+static uint8_t request_state[MAX_REQUESTS];
+#define REQUEST_PERSISTENT 1
+#define REQUEST_ACTIVE     2
+
 // Window table
 // win_used uses C11 atomics to eliminate data races under MPI_THREAD_MULTIPLE.
 // alloc_win uses a CAS loop; free_win uses atomic_store (release); readers use
@@ -301,7 +314,7 @@ static int32_t alloc_comm(MPI_Comm comm) {
 // its own happens-before via the transfer mechanism (channel, Arc, etc.).
 // Within that same-thread/transfer-aware contract the implementation is
 // correct on x86, ARM64, and POWER.  See docs/adr/0002-handle-tables.md.
-static int64_t alloc_request(MPI_Request req) {
+static int64_t alloc_request(MPI_Request req, int persistent) {
     unsigned hint = (unsigned)atomic_load_explicit(&next_request_hint,
                                                     memory_order_relaxed);
     for (int w = 0; w < REQUEST_BITS_WORDS; w++) {
@@ -316,6 +329,7 @@ static int64_t alloc_request(MPI_Request req) {
             if ((old & mask) == 0) {
                 int64_t idx = (int64_t)widx * 64 + bit;
                 request_table[idx] = req;
+                request_state[idx] = persistent ? REQUEST_PERSISTENT : 0;
                 // Relaxed: sequenced after the acq_rel fetch_or above, whose
                 // acquire component already synchronizes-with the release
                 // fetch_and of whichever free_request last vacated this slot,
@@ -393,6 +407,16 @@ static void free_request(int64_t handle) {
     uint64_t mask = (uint64_t)1 << (slot % 64);
     atomic_fetch_and_explicit(&request_bits[widx], ~mask,
                               memory_order_release);
+}
+
+// Clear a persistent request's REQUEST_ACTIVE bit on completion. A stale
+// or already-freed handle resolves to no slot, so this is a no-op.
+static void mark_inactive(int64_t handle) {
+    int64_t slot = request_slot(handle);
+    if (slot < 0) {
+        return;
+    }
+    request_state[slot] &= (uint8_t)~REQUEST_ACTIVE;
 }
 
 /* Tear down an ACTIVE MPI request that could not be registered in the request
@@ -743,22 +767,36 @@ int ferrompi_init_thread(int required, int* provided) {
     return ret;
 }
 
-int ferrompi_finalize(void) {
+int ferrompi_finalize(int32_t* active_requests) {
     // Clean up requests first (they may reference communicators).
     // Acquire/release here is defensive: MPI_Finalize is called after all
     // concurrent MPI operations are complete, but the consistent access
     // pattern avoids spurious TSan warnings in the finalizer check.
+    //
+    // Only an inactive persistent request is freed here. MPI_Request_free
+    // does not cancel an active operation (MPI-3 §3.7.3), so freeing an
+    // active request — a nonblocking operation still in flight, or a
+    // persistent one started but not yet waited — would let MPI keep
+    // touching the caller's buffer after MPI_Finalize returns. Every other
+    // occupied slot is left for MPI to tear down on its own and counted
+    // instead, so the caller can report it.
+    int32_t active = 0;
     for (int i = 0; i < MAX_REQUESTS; i++) {
         unsigned widx = (unsigned)(i / 64);
         uint64_t mask = (uint64_t)1 << (i % 64);
         if ((atomic_load_explicit(&request_bits[widx], memory_order_acquire) & mask) &&
                 request_table[i] != MPI_REQUEST_NULL) {
-            MPI_Request_free(&request_table[i]);
+            if (request_state[i] == REQUEST_PERSISTENT) {
+                MPI_Request_free(&request_table[i]);
+            } else {
+                active++;
+            }
         }
     }
     for (int w = 0; w < REQUEST_BITS_WORDS; w++) {
         atomic_store_explicit(&request_bits[w], (uint64_t)0, memory_order_release);
     }
+    *active_requests = active;
 
     // Free every live user op: frees the MPI op and drops the Rust closure
     // through the same path as UserOp's Drop; a failed MPI_Op_free keeps both.
@@ -1081,7 +1119,7 @@ int ferrompi_isend(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1119,7 +1157,7 @@ int ferrompi_irecv(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1549,7 +1587,7 @@ int ferrompi_ibcast(
     }
     
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1585,7 +1623,7 @@ int ferrompi_iallreduce(
     }
     
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1622,7 +1660,7 @@ int ferrompi_ireduce(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1663,7 +1701,7 @@ int ferrompi_igather(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1703,7 +1741,7 @@ int ferrompi_iallgather(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1744,7 +1782,7 @@ int ferrompi_iscatter(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1763,7 +1801,7 @@ int ferrompi_ibarrier(
     int ret = MPI_Ibarrier(comm, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1799,7 +1837,7 @@ int ferrompi_iscan(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1835,7 +1873,7 @@ int ferrompi_iexscan(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1873,7 +1911,7 @@ int ferrompi_ialltoall(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1899,7 +1937,7 @@ int ferrompi_igatherv(
                            root, comm, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1925,7 +1963,7 @@ int ferrompi_iscatterv(
                             root, comm, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1951,7 +1989,7 @@ int ferrompi_iallgatherv(
                               comm, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -1977,7 +2015,7 @@ int ferrompi_ialltoallv(
                              comm, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2013,7 +2051,7 @@ int ferrompi_ireduce_scatter_block(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2047,7 +2085,7 @@ int ferrompi_send_init(
     int ret = MPI_Send_init(buf, (int)count, dt, dest, tag, comm, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2080,7 +2118,7 @@ int ferrompi_recv_init(
     int ret = MPI_Recv_init(buf, (int)count, dt, mpi_source, mpi_tag, comm, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2110,7 +2148,7 @@ int ferrompi_rsend_init(
     int ret = MPI_Rsend_init(buf, (int)count, dt, dest, tag, comm, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2140,7 +2178,7 @@ int ferrompi_ssend_init(
     int ret = MPI_Ssend_init(buf, (int)count, dt, dest, tag, comm, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2210,7 +2248,7 @@ int ferrompi_bsend_init(
     int ret = MPI_Bsend_init(buf, (int)count, dt, dest, tag, comm, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2245,7 +2283,7 @@ int ferrompi_bcast_init(
     int ret = MPI_Bcast_init(buf, (int)count, dt, root, comm, MPI_INFO_NULL, &req);
     
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2278,7 +2316,7 @@ int ferrompi_allreduce_init(
                                   mpi_op, comm, MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2312,7 +2350,7 @@ int ferrompi_gather_init(
                               root, comm, MPI_INFO_NULL, &req);
     
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2345,7 +2383,7 @@ int ferrompi_reduce_init(
                               MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2379,7 +2417,7 @@ int ferrompi_scatter_init(
                                root, comm, MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2412,7 +2450,7 @@ int ferrompi_allgather_init(
                                  comm, MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2444,7 +2482,7 @@ int ferrompi_scan_init(
                             MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2476,7 +2514,7 @@ int ferrompi_exscan_init(
                               MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2509,7 +2547,7 @@ int ferrompi_alltoall_init(
                                 comm, MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2543,7 +2581,7 @@ int ferrompi_gatherv_init(
                                root, comm, MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2577,7 +2615,7 @@ int ferrompi_scatterv_init(
                                 root, comm, MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2610,7 +2648,7 @@ int ferrompi_allgatherv_init(
                                   comm, MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2641,7 +2679,7 @@ int ferrompi_alltoallv_init(
                                  comm, MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -2673,7 +2711,7 @@ int ferrompi_reduce_scatter_block_init(
                                             MPI_INFO_NULL, &req);
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 1);
         if (*request_handle < 0) {
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -3123,8 +3161,9 @@ int32_t ferrompi_error_class_index(int error_class) {
 // slot when MPI nulled it there, marking done[i]. The caller has already set
 // done[i] for the requests the call itself reported complete — this is what
 // covers persistent requests, since MPI leaves those inactive rather than
-// null on completion. A handle that does not resolve through
-// get_request_ptr (the -1 sentinel, or a stale/bad handle) is skipped.
+// null on completion; for one of those, this also clears its REQUEST_ACTIVE
+// bit. A handle that does not resolve through get_request_ptr (the -1
+// sentinel, or a stale/bad handle) is skipped.
 static void write_back(int64_t count, const int64_t* handles,
                         const MPI_Request* reqs, uint8_t* done) {
     for (int64_t i = 0; i < count; i++) {
@@ -3134,6 +3173,8 @@ static void write_back(int64_t count, const int64_t* handles,
         if (*req == MPI_REQUEST_NULL) {
             free_request(handles[i]);
             done[i] = 1;
+        } else if (done[i]) {
+            mark_inactive(handles[i]);
         }
     }
 }
@@ -3147,6 +3188,8 @@ int ferrompi_wait(int64_t request_handle) {
     // Don't free persistent requests automatically
     if (*req == MPI_REQUEST_NULL) {
         free_request(request_handle);
+    } else if (ret == MPI_SUCCESS) {
+        mark_inactive(request_handle);
     }
     return ret;
 }
@@ -3167,6 +3210,9 @@ int ferrompi_test(int64_t request_handle, int32_t* flag) {
         *flag = 1;
     } else {
         *flag = (ret == MPI_SUCCESS) ? f : 0;
+        if (f && ret == MPI_SUCCESS) {
+            mark_inactive(request_handle);
+        }
     }
     return ret;
 }
@@ -3243,7 +3289,14 @@ int ferrompi_waitall(int64_t count, const int64_t* request_handles, uint8_t* don
 int ferrompi_start(int64_t request_handle) {
     MPI_Request* req = get_request_ptr(request_handle);
     if (!req) return MPI_ERR_REQUEST;
-    return MPI_Start(req);
+    int ret = MPI_Start(req);
+    if (ret == MPI_SUCCESS) {
+        int64_t slot = request_slot(request_handle);
+        if (slot >= 0) {
+            request_state[slot] |= REQUEST_ACTIVE;
+        }
+    }
+    return ret;
 }
 
 int ferrompi_startall(int64_t count, const int64_t* request_handles) {
@@ -3272,6 +3325,12 @@ int ferrompi_startall(int64_t count, const int64_t* request_handles) {
         MPI_Request* req = get_request_ptr(request_handles[i]);
         if (req) {
             *req = reqs[i];
+            if (ret == MPI_SUCCESS) {
+                int64_t slot = request_slot(request_handles[i]);
+                if (slot >= 0) {
+                    request_state[slot] |= REQUEST_ACTIVE;
+                }
+            }
         }
     }
 
@@ -3735,7 +3794,7 @@ int ferrompi_rput(const void* origin, int64_t origin_count, int32_t origin_dt_ta
                        target_rank, (MPI_Aint)target_disp, (int)target_count,
                        target_dt, win, &req);
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -3772,7 +3831,7 @@ int ferrompi_rget(void* origin, int64_t origin_count, int32_t origin_dt_tag,
                        target_rank, (MPI_Aint)target_disp, (int)target_count,
                        target_dt, win, &req);
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -3814,7 +3873,7 @@ int ferrompi_raccumulate(const void* origin, int64_t origin_count, int32_t origi
                               target_rank, (MPI_Aint)target_disp, (int)target_count,
                               target_dt, mpi_op, win, &req);
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -4144,7 +4203,7 @@ int ferrompi_isend_custom(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
@@ -4182,7 +4241,7 @@ int ferrompi_irecv_custom(
     }
 
     if (ret == MPI_SUCCESS) {
-        *request_handle = alloc_request(req);
+        *request_handle = alloc_request(req, 0);
         if (*request_handle < 0) {
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;

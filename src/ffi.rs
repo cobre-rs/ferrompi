@@ -22,7 +22,7 @@ pub const FERROMPI_LOCK_SHARED: int32_t = 1;
 // the `crate::rt` lifecycle guard.
 extern "C" {
     pub fn ferrompi_init_thread(required: c_int, provided: *mut c_int) -> c_int;
-    pub fn ferrompi_finalize() -> c_int;
+    pub fn ferrompi_finalize(active_requests: *mut int32_t) -> c_int;
     pub fn ferrompi_initialized(flag: *mut c_int) -> c_int;
     pub fn ferrompi_finalized(flag: *mut c_int) -> c_int;
     pub fn ferrompi_comm_world() -> int32_t;

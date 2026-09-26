@@ -193,7 +193,6 @@
 // with a justification comment) rather than crate-wide.
 
 use std::ffi::{c_char, CString};
-#[cfg(feature = "rma")]
 use std::io::Write;
 
 mod comm;
@@ -772,19 +771,28 @@ impl Drop for Mpi {
             {
                 let live = window::live_windows();
                 if live > 0 {
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "ferrompi: MPI_Finalize skipped: {live} window(s) still alive; their memory stays valid until the process exits"
+                    // A single write so concurrent ranks' output cannot interleave mid-line.
+                    let msg = format!(
+                        "ferrompi: MPI_Finalize skipped: {live} window(s) still alive; their memory stays valid until the process exits\n"
                     );
+                    let _ = std::io::stderr().write_all(msg.as_bytes());
                     return;
                 }
             }
-            // SAFETY: ferrompi_finalize takes no arguments. rt::finalize()
-            // just returned true, so state was Active — MPI_Init(_thread)
-            // succeeded and MPI_Finalize has not yet been called for this
-            // process.
+            let mut active: i32 = 0;
+            // SAFETY: `active` is a valid local out-parameter that
+            // ferrompi_finalize writes the unfreed-active-request count
+            // into. rt::finalize() just returned true, so state was Active —
+            // MPI_Init(_thread) succeeded and MPI_Finalize has not yet been
+            // called for this process.
             unsafe {
-                ffi::ferrompi_finalize();
+                ffi::ferrompi_finalize(&mut active);
+            }
+            if cfg!(debug_assertions) && active > 0 {
+                // A single write so concurrent ranks' output cannot interleave mid-line.
+                let msg =
+                    format!("ferrompi: MPI_Finalize leaves {active} active request(s) unfreed\n");
+                let _ = std::io::stderr().write_all(msg.as_bytes());
             }
         }
     }

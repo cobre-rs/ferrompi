@@ -61,7 +61,7 @@ extern "C" {
 
 int ferrompi_init_thread(int required, int* provided);
 
-int ferrompi_finalize(void);
+int ferrompi_finalize(int32_t* active_requests);
 
 int ferrompi_initialized(int* flag);
 
