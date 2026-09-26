@@ -36,7 +36,6 @@ mpiexec -n <N> target/release/<program>
 Building the C programs:
 
 ```bash
-mpicc c-shim/c/errhandler_group_incl.c -o eh   && mpiexec -n 1 ./eh
 mpicc c-shim/c/pair_type_extents.c    -o ext  && mpiexec -n 1 ./ext
 mpicc c-shim/c/gfree.c                -o gfree && mpiexec -n 1 ./gfree
 clang --target=aarch64-apple-darwin -c c-shim/c/ldi.c -o ldi.o && llvm-nm -S ldi.o   # symbol sizes = sizeof/_Alignof
@@ -81,7 +80,6 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 
 | Program | Finding | What it does | How to run | Observed on v0.5.0 | Expected after fix |
 |---|---|---|---|---|---|
-| `c-shim/src/bin/t1_group_err.rs` | COR-06 | `group.include(&[999])`: a group error with no communicator involved | np=1 | MPICH 4.2.3 returns `Err` and the program survives, because MPICH falls back to the `COMM_WORLD` error handler. Under MPI-4 rules (`MPI_COMM_SELF`) it would abort; that is not verified here (no Open MPI 5 available) | `Err` on every implementation (`MPI_ERRORS_RETURN` set on `MPI_COMM_SELF`) |
 | `c-shim/src/bin/t3_waitany_stale.rs` | COR-02 | `wait_any`, then a new `irecv` C (it reuses slot 0), then `wait_any` again on the original slice | np=1 | The second `wait_any` acts on C through the stale handle; `C.wait()` gives `Err "Invalid MPI_Request"` | Once fixed, the second `wait_any` waits on `b`, whose send is posted later, so **this program deadlocks by design**. To make it a regression test, post `send(&sb…)` before the second call; then expect `Some(1)` and `C.wait()` → `Ok` |
 | `c-shim/src/bin/t3b_waitany_null.rs` | COR-02 | The standard MPI idiom: loop `wait_any` until `None` without removing completed entries | np=1 | The first call returns `Some(i)`. The next call, with the completed entry still in the slice, returns `Err "Invalid MPI_Request"`; `Ok(None)` is never reached | `Some`, `Some`, then `Ok(None)` |
 | `c-shim/src/bin/t4_waitall_err.rs` | COR-03, COR-04, COR-01 | `wait_all` with one truncating receive, then a new `irecv`, then drop of the old requests | np=1 | `evidence/t4.log`: `wait_all -> Err("… See the MPI_ERROR field in MPI_Status … (class=ERR_INTERN, code=17)")`, `fresh handle 2`, then it hangs at `dropping reqs` | The error names the truncation and has the correct class; drop does nothing; `fresh.wait` returns `Ok`; prints `SURVIVED` |
@@ -99,7 +97,6 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 | `c-shim/src/bin/t14_send_neg1.rs` | COR-09 | `send(dest = -1)` | np=1 | Returns `Ok` and does nothing: `-1 == MPI_PROC_NULL` on MPICH. On Open MPI the same call is an invalid-rank error | Portable, explicit semantics (typed ProcNull/Any, normalised in C) |
 | `c-shim/src/bin/t15_err_after_finalize.rs` | VER (late request drop, error string after finalize) | An `irecv` request outlives `Mpi`; `wait()` is called after finalize | np=1 | Returns `Err` with a readable message and prints `SURVIVED`. The table sweep makes late request use harmless, and `MPI_Error_class`/`Error_string` work after finalize on MPICH | Unchanged, or a clearer "finalized" error once COR-07 lands |
 | `c-shim/src/bin/t16_cancel_coll.rs` | COR-10 | `cancel()` on an `iallreduce` request | np=2 | rank 0: `Err "Attempt to cancel an unknown type of request"` from MPICH | ferrompi refuses cancel on non-point-to-point requests with a typed error, without calling MPI |
-| `c-shim/c/errhandler_group_incl.c` | COR-06 (C baseline) | Plain C: `MPI_ERRORS_RETURN` on `COMM_WORLD` only, then `MPI_Group_incl` with rank 999 and `MPI_Type_contiguous(-1)` | `mpicc`; np=1 | Output not archived. Written to show that MPICH 4.2.3 returns the error code here (consistent with t1) | Reference only |
 | `c-shim/c/pair_type_extents.c` | VER (pair layouts), COR-11 baseline | Prints lb, extent and size of the MPI value+index pair types (`MPI_FLOAT_INT` … `MPI_LONG_DOUBLE_INT`) | `mpicc`; np=1 | x86_64 Linux MPICH: FLOAT_INT 8, DOUBLE_INT 16, LONG_INT 16, 2INT 8, SHORT_INT 8, LONG_DOUBLE_INT 32. All match the Rust `#[repr(C)]` sizes in `src/datatype.rs` | Unchanged on Linux |
 | `c-shim/c/ldi.c` | COR-11 | Compile-only layout probe: symbol sizes equal `sizeof`/`_Alignof` of `{long double; int}` and `{long; int}` | `clang --target=aarch64-apple-darwin -c` (also `x86_64-pc-windows-msvc`), then `llvm-nm -S` | aarch64-apple-darwin: `{long double;int}` is 16 bytes, 8-byte aligned, versus Rust `LongDoubleInt` at 32 bytes, 16-byte aligned. MSVC: `long` is 4 bytes, so `LongInt` differs too | Per-target Rust layouts, or C `_Static_assert` size checks |
 | `c-shim/c/gfree.c` | VER | `MPI_Group_free(MPI_GROUP_EMPTY)` in plain C | `mpicc`; np=1 | MPICH accepts it (rc=0) | Reference only |

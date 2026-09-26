@@ -136,7 +136,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-03 | No request write-back on error in wait/test-many | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-04 | `MPI_STATUSES_IGNORE` loses per-request error | minor | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-05 | Counts > `INT_MAX` silently truncated | critical | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
-| COR-06 | `MPI_ERRORS_RETURN` not on `MPI_COMM_SELF` | major | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| COR-06 | `MPI_ERRORS_RETURN` not on `MPI_COMM_SELF` | major | reading | 0.5.x | fixed (19daebb) |
 | COR-07 | Finalize/re-init lifecycle aborts; `UserOp` drop after finalize | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-08 | Finalize sweep frees active requests / collectively frees windows | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-09 | `-1` = PROC_NULL (MPICH) vs ANY_SOURCE (Open MPI) | minor | repro | 0.6 | open |
