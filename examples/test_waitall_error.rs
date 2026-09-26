@@ -28,7 +28,7 @@ fn class_of<T>(result: &ferrompi::Result<T>) -> Option<MpiErrorClass> {
     }
 }
 
-fn part1_and_1b(world: &Communicator, rank: i32, open_mpi: bool) {
+fn part1_and_1b(world: &Communicator, rank: i32, mpich: bool) {
     let mut small = [0i32; 1];
     let mut big = [0i32; 4];
 
@@ -42,8 +42,10 @@ fn part1_and_1b(world: &Communicator, rank: i32, open_mpi: bool) {
         let mut ok = true;
         let result = Request::wait_all(&mut reqs);
         ok &= class_of(&result) == Some(MpiErrorClass::InStatus);
-        let completed: Vec<bool> = reqs.iter().map(Request::is_completed).collect();
-        ok &= completed == [true, open_mpi];
+        ok &= reqs[0].is_completed();
+        if mpich {
+            ok &= !reqs[1].is_completed();
+        }
 
         ok &= Request::wait_all(&mut reqs).is_ok();
         ok &= reqs.iter().all(Request::is_completed);
@@ -265,7 +267,7 @@ fn part5_test_some_in_status(world: &Communicator, rank: i32) {
     }
 }
 
-fn part6_persistent_wait_all(world: &Communicator, rank: i32) {
+fn part6_persistent_wait_all(world: &Communicator, rank: i32, mpich: bool) {
     let mut small = [0i32; 1];
     let mut big = [0i32; 4];
 
@@ -283,13 +285,25 @@ fn part6_persistent_wait_all(world: &Communicator, rank: i32) {
 
         let mut ok = true;
         let result = PersistentRequest::wait_all(&mut reqs);
-        ok &= class_of(&result) == Some(MpiErrorClass::InStatus);
+        ok &= if mpich {
+            class_of(&result) == Some(MpiErrorClass::InStatus)
+        } else {
+            result.is_ok() || class_of(&result) == Some(MpiErrorClass::InStatus)
+        };
         ok &= !reqs[0].is_active();
 
-        // Open MPI frees a persistent request that completes with an error in
-        // MPI_Waitall instead of leaving it inactive, so it cannot be
-        // restarted; restart with fresh recv_init requests instead.
+        if mpich {
+            ok &= reqs[1].is_active();
+            ok &= PersistentRequest::wait_all(&mut reqs).is_ok();
+            ok &= !reqs[1].is_active();
+        }
+
+        // MPICH reports the unfinished request as pending and it stays active.
+        // Open MPI may report it pending too, or return success when both had
+        // finished. Open MPI frees an errored persistent request, so the
+        // restart uses fresh requests.
         drop(reqs);
+        ok &= !mpich || big == PAYLOAD;
 
         let mut fresh_small = [0i32; 1];
         let mut fresh_big = [0i32; 4];
@@ -346,16 +360,16 @@ fn main() {
         "test_waitall_error requires exactly 2 processes, got {size}"
     );
 
-    let open_mpi = Mpi::library_version()
+    let mpich = Mpi::library_version()
         .expect("library_version failed")
-        .contains("Open MPI");
+        .contains("MPICH");
 
-    part1_and_1b(&world, rank, open_mpi);
+    part1_and_1b(&world, rank, mpich);
     part2_wait_any_truncate(&world, rank);
     part3_wait_some_in_status(&world, rank);
     part4_test_any_truncate(&world, rank);
     part5_test_some_in_status(&world, rank);
-    part6_persistent_wait_all(&world, rank);
+    part6_persistent_wait_all(&world, rank, mpich);
 
     if rank == 0 {
         println!("\n========================================");

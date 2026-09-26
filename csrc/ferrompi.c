@@ -3191,6 +3191,8 @@ int ferrompi_waitall(int64_t count, const int64_t* request_handles, uint8_t* don
 
     for (int64_t i = 0; i < count; i++) {
         done[i] = 0;
+        // Insurance: MPI_ERR_PENDING if a library leaves this status unfilled.
+        sts[i].MPI_ERROR = MPI_ERR_PENDING;
         if (request_handles[i] == -1) {
             reqs[i] = MPI_REQUEST_NULL;
             continue;
