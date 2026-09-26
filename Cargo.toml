@@ -65,6 +65,10 @@ path = "examples/test_rma_win_create.rs"
 required-features = ["rma"]
 
 [[example]]
+name = "test_window_create_at_finalize"
+required-features = ["rma"]
+
+[[example]]
 name = "test_rma_win_fence"
 path = "examples/test_rma_win_fence.rs"
 required-features = ["rma"]
