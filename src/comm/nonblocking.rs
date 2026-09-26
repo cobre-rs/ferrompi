@@ -1,6 +1,6 @@
 //! Nonblocking collective operations: ibroadcast, iallreduce, ireduce, igather, etc.
 
-use crate::comm::{check_rank_slots, Communicator};
+use crate::comm::{check_rank_slots, check_same_len, rank_block, Communicator};
 use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -63,9 +63,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<Request> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -110,9 +108,7 @@ impl Communicator {
         op: ReduceOp,
         root: i32,
     ) -> Result<Request> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -323,9 +319,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<Request> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -371,9 +365,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<Request> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -411,11 +403,8 @@ impl Communicator {
     /// req.wait().unwrap();
     /// ```
     pub fn ialltoall<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<Request> {
-        let size = self.size() as usize;
-        if send.len() != recv.len() || send.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let count = (send.len() / size) as i64;
+        check_same_len(send.len(), recv.len())?;
+        let count = rank_block(send.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -460,10 +449,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<Request> {
-        let size = self.size() as usize;
-        if send.len() != recv.len() * size {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(rank_block(send.len(), self.size)?, recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
@@ -517,20 +503,17 @@ impl Communicator {
         if self.rank() != root {
             return Err(Error::InvalidOp);
         }
-        let size = self.size() as usize;
-        if size == 0 || data.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let recvcount = (data.len() / size) as i64;
+        let recvcount = rank_block(data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
         // this NULL is unambiguous); ferrompi_igather maps it to MPI_IN_PLACE, so data
-        // serves as both root's send contribution and the receive buffer. data.len() %
-        // size == 0 is checked above, and the guard above guarantees self.rank() == root,
-        // the only rank MPI_IN_PLACE is valid for in MPI_Igather. The returned Request
-        // does not borrow data; keeping it alive and untouched until the request completes
-        // is the caller's documented obligation, which this signature does not enforce.
+        // serves as both root's send contribution and the receive buffer. recvcount is
+        // checked to evenly divide data.len() above, and the guard above guarantees
+        // self.rank() == root, the only rank MPI_IN_PLACE is valid for in MPI_Igather. The
+        // returned Request does not borrow data; keeping it alive and untouched until the
+        // request completes is the caller's documented obligation, which this signature does
+        // not enforce.
         let ret = unsafe {
             ffi::ferrompi_igather(
                 std::ptr::null(),
@@ -573,17 +556,13 @@ impl Communicator {
     /// req.wait().unwrap();
     /// ```
     pub fn iallgather_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<Request> {
-        let size = self.size() as usize;
-        if size == 0 || data.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let recvcount = (data.len() / size) as i64;
+        let recvcount = rank_block(data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
-        // this NULL is unambiguous); ferrompi_iallgather maps it to MPI_IN_PLACE.
-        // data.len() % size == 0 is checked above; each rank's slot must be pre-written by
-        // the caller before this call. The returned Request does not borrow data; keeping
+        // this NULL is unambiguous); ferrompi_iallgather maps it to MPI_IN_PLACE. recvcount
+        // is checked to evenly divide data.len() above; each rank's slot must be pre-written
+        // by the caller before this call. The returned Request does not borrow data; keeping
         // it alive and untouched until the request completes is the caller's documented
         // obligation, which this signature does not enforce.
         let ret = unsafe {
@@ -633,12 +612,8 @@ impl Communicator {
     /// ```
     pub fn iscatter_inplace<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<Request> {
         let is_root = self.rank() == root;
-        let size = self.size() as usize;
         let (sendbuf, sendcount, recvbuf, recvcount, dt) = if is_root {
-            if size == 0 || data.len() % size != 0 {
-                return Err(Error::InvalidBuffer);
-            }
-            let per = (data.len() / size) as i64;
+            let per = rank_block(data.len(), self.size)? as i64;
             let (sp, _, dt) = buf(data);
             (sp, per, std::ptr::null_mut::<std::ffi::c_void>(), 0i64, dt)
         } else {
@@ -648,7 +623,7 @@ impl Communicator {
         let mut request_handle: i64 = 0;
         // SAFETY: at root, recvbuf is NULL, the in-place marker (buf's pointer is never
         // null, so this NULL is unambiguous); ferrompi_iscatter maps it to MPI_IN_PLACE so
-        // root's own slot is retained. data.len() % size == 0 is checked above. At
+        // root's own slot is retained. per is checked to evenly divide data.len() above. At
         // non-root, sendbuf is null, which the MPI standard ignores on non-root scatter.
         // The returned Request does not borrow data; keeping it alive and untouched until
         // the request completes is the caller's documented obligation, which this
@@ -699,19 +674,15 @@ impl Communicator {
     /// req.wait().unwrap();
     /// ```
     pub fn ialltoall_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<Request> {
-        let size = self.size() as usize;
-        if size == 0 || data.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let recvcount = (data.len() / size) as i64;
+        let recvcount = rank_block(data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
-        // this NULL is unambiguous); ferrompi_ialltoall maps it to MPI_IN_PLACE. data.len()
-        // % size == 0 is checked above; the caller must pre-write each slot before calling
-        // this method. The returned Request does not borrow data; keeping it alive and
-        // untouched until the request completes is the caller's documented obligation,
-        // which this signature does not enforce.
+        // this NULL is unambiguous); ferrompi_ialltoall maps it to MPI_IN_PLACE. recvcount
+        // is checked to evenly divide data.len() above; the caller must pre-write each slot
+        // before calling this method. The returned Request does not borrow data; keeping it
+        // alive and untouched until the request completes is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_ialltoall(
                 std::ptr::null(),

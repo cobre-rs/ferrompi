@@ -1,6 +1,6 @@
 //! Blocking collective operations: barrier, broadcast, reduce, allreduce, scan, gather, scatter, alltoall.
 
-use crate::comm::{check_rank_slots, Communicator};
+use crate::comm::{check_rank_slots, check_same_len, rank_block, Communicator};
 use crate::datatype::{buf, buf_mut, BytePermutable, DatatypeTag, MpiDatatype, MpiIndexedDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -82,9 +82,7 @@ impl Communicator {
         op: ReduceOp,
         root: i32,
     ) -> Result<()> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
@@ -197,9 +195,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<()> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
@@ -291,9 +287,7 @@ impl Communicator {
         recv: &mut [T],
         op: &UserOp<T>,
     ) -> Result<()> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
@@ -360,9 +354,7 @@ impl Communicator {
         if !matches!(op, ReduceOp::MaxLoc | ReduceOp::MinLoc) {
             return Err(Error::InvalidOp);
         }
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T
         // (T: MpiIndexedDatatype — one of the six predefined MPI paired types). They cannot
         // alias (Rust borrow rules). send.len() == recv.len() verified above. op has been
@@ -438,9 +430,7 @@ impl Communicator {
         ) {
             return Err(Error::InvalidOp);
         }
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let byte_count = send
             .len()
             .checked_mul(std::mem::size_of::<T>())
@@ -497,9 +487,7 @@ impl Communicator {
     /// // On rank i, recv[j] == (i + 1) * send[j]
     /// ```
     pub fn scan<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], op: ReduceOp) -> Result<()> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
@@ -542,9 +530,7 @@ impl Communicator {
     /// // On rank 0, recv is undefined per the MPI standard.
     /// ```
     pub fn exscan<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], op: ReduceOp) -> Result<()> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
@@ -704,16 +690,12 @@ impl Communicator {
         if self.rank() != root {
             return Err(Error::InvalidOp);
         }
-        let size = self.size() as usize;
-        if size == 0 || data.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let recvcount = (data.len() / size) as i64;
+        let recvcount = rank_block(data.len(), self.size)? as i64;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
         // NULL is unambiguous); ferrompi_gather maps it to MPI_IN_PLACE, so data serves as both
         // root's send contribution (at offset rank*recvcount) and the receive buffer.
-        // data.len() % size == 0 is checked above, and the guard above guarantees
+        // recvcount is checked to evenly divide data.len() above, and the guard above guarantees
         // self.rank() == root, the only rank MPI_IN_PLACE is valid for in MPI_Gather.
         let ret = unsafe {
             ffi::ferrompi_gather(std::ptr::null(), 0, p, recvcount, dt, root, self.handle)
@@ -748,16 +730,12 @@ impl Communicator {
     /// // data[r] == r * 10 for all r, on every rank
     /// ```
     pub fn allgather_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<()> {
-        let size = self.size() as usize;
-        if size == 0 || data.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let recvcount = (data.len() / size) as i64;
+        let recvcount = rank_block(data.len(), self.size)? as i64;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
-        // NULL is unambiguous); ferrompi_allgather maps it to MPI_IN_PLACE. data.len() % size
-        // == 0 is checked above; each rank's slot must be pre-written by the caller before this
-        // call.
+        // NULL is unambiguous); ferrompi_allgather maps it to MPI_IN_PLACE. recvcount is checked
+        // to evenly divide data.len() above; each rank's slot must be pre-written by the caller
+        // before this call.
         let ret =
             unsafe { ffi::ferrompi_allgather(std::ptr::null(), 0, p, recvcount, dt, self.handle) };
         Error::check_with_op(ret, "allgather_inplace")
@@ -797,12 +775,8 @@ impl Communicator {
     /// ```
     pub fn scatter_inplace<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<()> {
         let is_root = self.rank() == root;
-        let size = self.size() as usize;
         let (sendbuf, sendcount, recvbuf, recvcount, dt) = if is_root {
-            if size == 0 || data.len() % size != 0 {
-                return Err(Error::InvalidBuffer);
-            }
-            let per = (data.len() / size) as i64;
+            let per = rank_block(data.len(), self.size)? as i64;
             let (sp, _, dt) = buf(data);
             (sp, per, std::ptr::null_mut::<std::ffi::c_void>(), 0i64, dt)
         } else {
@@ -811,8 +785,8 @@ impl Communicator {
         };
         // SAFETY: at root, recvbuf is NULL, the in-place marker (buf's pointer is never null,
         // so this NULL is unambiguous); ferrompi_scatter maps it to MPI_IN_PLACE so root's own
-        // slot is retained. data.len() % size == 0 is checked above. At non-root, sendbuf is
-        // null, which the MPI standard ignores on non-root scatter.
+        // slot is retained. per is checked to evenly divide data.len() above. At non-root,
+        // sendbuf is null, which the MPI standard ignores on non-root scatter.
         let ret = unsafe {
             ffi::ferrompi_scatter(
                 sendbuf,
@@ -860,15 +834,12 @@ impl Communicator {
     /// }
     /// ```
     pub fn alltoall_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<()> {
-        let size = self.size() as usize;
-        if size == 0 || data.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let recvcount = (data.len() / size) as i64;
+        let recvcount = rank_block(data.len(), self.size)? as i64;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
-        // NULL is unambiguous); ferrompi_alltoall maps it to MPI_IN_PLACE. data.len() % size ==
-        // 0 is checked above; the caller must pre-write each slot before calling this method.
+        // NULL is unambiguous); ferrompi_alltoall maps it to MPI_IN_PLACE. recvcount is checked
+        // to evenly divide data.len() above; the caller must pre-write each slot before calling
+        // this method.
         let ret =
             unsafe { ffi::ferrompi_alltoall(std::ptr::null(), 0, p, recvcount, dt, self.handle) };
         Error::check_with_op(ret, "alltoall_inplace")
@@ -933,11 +904,8 @@ impl Communicator {
     /// world.alltoall(&send, &mut recv).unwrap();
     /// ```
     pub fn alltoall<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<()> {
-        let size = self.size() as usize;
-        if send.len() != recv.len() || send.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let count = (send.len() / size) as i64;
+        check_same_len(send.len(), recv.len())?;
+        let count = rank_block(send.len(), self.size)? as i64;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len() and
@@ -977,10 +945,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<()> {
-        let size = self.size() as usize;
-        if send.len() != recv.len() * size {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(rank_block(send.len(), self.size)?, recv.len())?;
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len() * size

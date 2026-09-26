@@ -27,6 +27,28 @@ fn check_rank_slots(whole: usize, block: usize, size: i32) -> Result<()> {
     Ok(())
 }
 
+/// Checks that two buffers hold the same number of elements.
+fn check_same_len(a: usize, b: usize) -> Result<()> {
+    if a != b {
+        return Err(Error::InvalidBuffer);
+    }
+    Ok(())
+}
+
+/// Returns the per-rank block count of a buffer of `whole` elements split
+/// evenly across a `size`-rank communicator; Err when `size <= 0` or
+/// `whole % size != 0`.
+fn rank_block(whole: usize, size: i32) -> Result<usize> {
+    if size <= 0 {
+        return Err(Error::InvalidBuffer);
+    }
+    let size = size as usize;
+    if whole % size != 0 {
+        return Err(Error::InvalidBuffer);
+    }
+    Ok(whole / size)
+}
+
 /// Split types for [`Communicator::split_type`].
 ///
 /// These constants map to MPI communicator split type values. Currently only
@@ -177,7 +199,7 @@ impl Drop for Communicator {
 
 #[cfg(test)]
 mod tests {
-    use crate::comm::{check_rank_slots, SplitType};
+    use crate::comm::{check_rank_slots, check_same_len, rank_block, SplitType};
     use crate::error::Error;
 
     #[test]
@@ -199,5 +221,21 @@ mod tests {
             check_rank_slots(usize::MAX, usize::MAX / 2 + 1, 2),
             Err(Error::InvalidBuffer)
         ));
+    }
+
+    #[test]
+    fn check_same_len_boundaries() {
+        assert!(check_same_len(5, 5).is_ok());
+        assert!(matches!(check_same_len(5, 4), Err(Error::InvalidBuffer)));
+        assert!(check_same_len(0, 0).is_ok());
+    }
+
+    #[test]
+    fn rank_block_boundaries() {
+        assert_eq!(rank_block(8, 4).unwrap(), 2);
+        assert!(matches!(rank_block(7, 4), Err(Error::InvalidBuffer)));
+        assert_eq!(rank_block(0, 4).unwrap(), 0);
+        assert!(matches!(rank_block(8, 0), Err(Error::InvalidBuffer)));
+        assert!(matches!(rank_block(8, -1), Err(Error::InvalidBuffer)));
     }
 }

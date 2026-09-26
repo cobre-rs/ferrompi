@@ -1,6 +1,6 @@
 //! Persistent point-to-point (MPI 1.1+) and persistent collective operations (MPI 4.0+).
 
-use crate::comm::{check_rank_slots, Communicator};
+use crate::comm::{check_rank_slots, check_same_len, rank_block, Communicator};
 use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -355,9 +355,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<PersistentRequest> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -437,9 +435,7 @@ impl Communicator {
         op: ReduceOp,
         root: i32,
     ) -> Result<PersistentRequest> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -634,9 +630,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<PersistentRequest> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -683,9 +677,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<PersistentRequest> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -732,14 +724,8 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
     ) -> Result<PersistentRequest> {
-        if send.len() != recv.len() {
-            return Err(Error::InvalidBuffer);
-        }
-        let size = self.size() as usize;
-        if size == 0 || send.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let count_per_rank = (send.len() / size) as i64;
+        check_same_len(send.len(), recv.len())?;
+        let count_per_rank = rank_block(send.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -795,10 +781,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<PersistentRequest> {
-        let size = self.size() as usize;
-        if size == 0 || send.len() != recv.len() * size {
-            return Err(Error::InvalidBuffer);
-        }
+        check_same_len(rank_block(send.len(), self.size)?, recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
@@ -862,21 +845,18 @@ impl Communicator {
         if self.rank() != root {
             return Err(Error::InvalidOp);
         }
-        let size = self.size() as usize;
-        if size == 0 || data.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let recvcount = (data.len() / size) as i64;
+        let recvcount = rank_block(data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
         // this NULL is unambiguous); ferrompi_gather_init maps it to MPI_IN_PLACE, so data
-        // serves as both root's send contribution and the receive buffer. data.len() % size
-        // == 0 is checked above, and the guard above guarantees self.rank() == root, the
-        // only rank MPI_IN_PLACE is valid for in MPI_Gather_init. The returned
-        // PersistentRequest records `data`'s pointer until the request is freed and does not
-        // borrow it; keeping it alive and untouched between start() and completion is the
-        // caller's documented obligation, which this signature does not enforce.
+        // serves as both root's send contribution and the receive buffer. recvcount is
+        // checked to evenly divide data.len() above, and the guard above guarantees
+        // self.rank() == root, the only rank MPI_IN_PLACE is valid for in MPI_Gather_init.
+        // The returned PersistentRequest records `data`'s pointer until the request is freed
+        // and does not borrow it; keeping it alive and untouched between start() and
+        // completion is the caller's documented obligation, which this signature does not
+        // enforce.
         let ret = unsafe {
             ffi::ferrompi_gather_init(
                 std::ptr::null(),
@@ -929,17 +909,13 @@ impl Communicator {
         &self,
         data: &mut [T],
     ) -> Result<PersistentRequest> {
-        let size = self.size() as usize;
-        if size == 0 || data.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let recvcount = (data.len() / size) as i64;
+        let recvcount = rank_block(data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
         // this NULL is unambiguous); ferrompi_allgather_init maps it to MPI_IN_PLACE.
-        // data.len() % size == 0 is checked above; each rank's slot (at offset
-        // rank*recvcount) must be pre-written by the caller before each start(). The
+        // recvcount is checked to evenly divide data.len() above; each rank's slot (at
+        // offset rank*recvcount) must be pre-written by the caller before each start(). The
         // returned PersistentRequest records `data`'s pointer until the request is freed and
         // does not borrow it; keeping it alive and untouched between start() and completion
         // is the caller's documented obligation, which this signature does not enforce.
@@ -1003,12 +979,8 @@ impl Communicator {
         root: i32,
     ) -> Result<PersistentRequest> {
         let is_root = self.rank() == root;
-        let size = self.size() as usize;
         let (sendbuf, sendcount, recvbuf, recvcount, dt) = if is_root {
-            if size == 0 || data.len() % size != 0 {
-                return Err(Error::InvalidBuffer);
-            }
-            let per = (data.len() / size) as i64;
+            let per = rank_block(data.len(), self.size)? as i64;
             let (sp, _, dt) = buf(data);
             (sp, per, std::ptr::null_mut::<std::ffi::c_void>(), 0i64, dt)
         } else {
@@ -1018,11 +990,11 @@ impl Communicator {
         let mut request_handle: i64 = 0;
         // SAFETY: at root, recvbuf is NULL, the in-place marker (buf's pointer is never null,
         // so this NULL is unambiguous); ferrompi_scatter_init maps it to MPI_IN_PLACE so
-        // root's own slot is retained. data.len() % size == 0 is checked above. At non-root,
-        // sendbuf is null, which the MPI standard ignores on non-root scatter. The returned
-        // PersistentRequest records `data`'s pointer until the request is freed and does not
-        // borrow it; keeping it alive and untouched between start() and completion is the
-        // caller's documented obligation, which this signature does not enforce.
+        // root's own slot is retained. per is checked to evenly divide data.len() above. At
+        // non-root, sendbuf is null, which the MPI standard ignores on non-root scatter. The
+        // returned PersistentRequest records `data`'s pointer until the request is freed and
+        // does not borrow it; keeping it alive and untouched between start() and completion
+        // is the caller's documented obligation, which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_scatter_init(
                 sendbuf,
@@ -1078,20 +1050,16 @@ impl Communicator {
         &self,
         data: &mut [T],
     ) -> Result<PersistentRequest> {
-        let size = self.size() as usize;
-        if size == 0 || data.len() % size != 0 {
-            return Err(Error::InvalidBuffer);
-        }
-        let recvcount = (data.len() / size) as i64;
+        let recvcount = rank_block(data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
         // this NULL is unambiguous); ferrompi_alltoall_init maps it to MPI_IN_PLACE.
-        // data.len() % size == 0 is checked above; the caller must pre-write each slot
-        // before each start() call. The returned PersistentRequest records `data`'s pointer
-        // until the request is freed and does not borrow it; keeping it alive and untouched
-        // between start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        // recvcount is checked to evenly divide data.len() above; the caller must pre-write
+        // each slot before each start() call. The returned PersistentRequest records
+        // `data`'s pointer until the request is freed and does not borrow it; keeping it
+        // alive and untouched between start() and completion is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_alltoall_init(
                 std::ptr::null(),
