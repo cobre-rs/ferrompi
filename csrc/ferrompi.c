@@ -3287,14 +3287,12 @@ int ferrompi_waitall(int64_t count, const int64_t* request_handles, uint8_t* don
 }
 
 int ferrompi_start(int64_t request_handle) {
-    MPI_Request* req = get_request_ptr(request_handle);
-    if (!req) return MPI_ERR_REQUEST;
+    int64_t slot = request_slot(request_handle);
+    if (slot < 0) return MPI_ERR_REQUEST;
+    MPI_Request* req = &request_table[slot];
     int ret = MPI_Start(req);
     if (ret == MPI_SUCCESS) {
-        int64_t slot = request_slot(request_handle);
-        if (slot >= 0) {
-            request_state[slot] |= REQUEST_ACTIVE;
-        }
+        request_state[slot] |= REQUEST_ACTIVE;
     }
     return ret;
 }
