@@ -24,6 +24,7 @@
 
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::rt;
 use crate::Communicator;
 
 /// Outcome of [`Group::compare`].
@@ -571,6 +572,9 @@ impl Drop for Group {
     fn drop(&mut self) {
         // Slot 0 is reserved for MPI_GROUP_EMPTY and must not be freed.
         if self.handle > 0 {
+            if !rt::drop_guard("Group") {
+                return;
+            }
             // SAFETY: self.handle is owned and valid; Drop runs exactly once, so no double-free.
             unsafe { ffi::ferrompi_group_free(self.handle) };
         }

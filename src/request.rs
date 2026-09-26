@@ -130,6 +130,10 @@ impl Request {
     ///
     /// Blocks until the operation is finished. After this returns successfully,
     /// the associated buffers can be safely accessed.
+    ///
+    /// On a thread the active thread level does not allow, the wait is
+    /// rejected and this call drops the still-in-flight `self` before
+    /// returning, which aborts the process (see the `Drop` impl below).
     #[inline]
     pub fn wait(mut self) -> Result<()> {
         if self.completed {
@@ -454,16 +458,22 @@ impl Drop for Request {
     /// is the only guard that prevents a double-wait here. Any refactoring of
     /// `wait()` must preserve that assignment, or this `Drop` impl becomes
     /// unsound (double-freeing the request handle).
+    ///
+    /// After `Mpi` is dropped this does nothing; below `Serialized` on a
+    /// non-init thread it aborts the process.
     fn drop(&mut self) {
         if !self.completed {
+            if !rt::drop_guard("Request") {
+                return;
+            }
             // SAFETY: self.handle is a valid MPI request handle registered in the
             // C-side request table by the nonblocking constructor (e.g., iallreduce).
             // The handle has not been freed because self.completed is false, meaning
             // wait() was never called. ferrompi_wait calls MPI_Wait which frees the
             // handle on success; the completed flag guards against a double-free.
-            // Calls the unguarded raw wrapper (not the lifecycle-guarded one) so
-            // Drop always attempts the wait; a future rt::drop_guard is a
-            // separate concern from the FFI lifecycle check.
+            // Calls the unguarded raw wrapper (not the lifecycle-guarded one):
+            // rt::drop_guard above already handles the FFI lifecycle check, so
+            // this call must still attempt the wait once reached.
             unsafe { ffi::raw::ferrompi_wait(self.handle) };
         }
     }

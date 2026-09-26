@@ -57,6 +57,7 @@ use crate::error::{Error, Result};
 use crate::ffi;
 use crate::group::Group;
 use crate::request::Request;
+use crate::rt;
 use crate::Communicator;
 use crate::MpiDatatype;
 use crate::ReduceOp;
@@ -671,6 +672,9 @@ impl<T: MpiDatatype> SharedWindow<T> {
 
 impl<T: MpiDatatype> Drop for SharedWindow<T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("SharedWindow") {
+            return;
+        }
         // SAFETY: win_handle is a valid MPI window handle that was allocated
         // by ferrompi_win_allocate_shared. It has not been freed yet because
         // Drop is only called once, and we don't expose a manual free method.
@@ -2528,6 +2532,9 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
 
 impl<T: MpiDatatype> Drop for Win<'_, T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("Win") {
+            return;
+        }
         // SAFETY: `win_handle` is a valid MPI window handle allocated by
         // ferrompi_win_create or ferrompi_win_allocate. It has not been freed
         // yet because Drop is only called once. MPI_Win_free leaves the user
@@ -2585,6 +2592,9 @@ impl<T: MpiDatatype> LockGuard<'_, T> {
 
 impl<T: MpiDatatype> Drop for LockGuard<'_, T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("LockGuard") {
+            return;
+        }
         // SAFETY: The window handle is valid (borrowed from SharedWindow)
         // and the rank was locked in the constructor. This unlock matches
         // the lock call that created this guard.
@@ -2652,6 +2662,9 @@ impl<T: MpiDatatype> LockAllGuard<'_, T> {
 
 impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("LockAllGuard") {
+            return;
+        }
         // SAFETY: The window handle is valid (borrowed from SharedWindow)
         // and all ranks were locked in the constructor. This unlock_all
         // matches the lock_all call that created this guard.
@@ -2713,6 +2726,9 @@ impl<T: MpiDatatype> WinLockGuard<'_, '_, T> {
 
 impl<T: MpiDatatype> Drop for WinLockGuard<'_, '_, T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("WinLockGuard") {
+            return;
+        }
         // SAFETY: `window.win_handle` is valid — it is borrowed from a live
         // `Win`. The rank was locked in `Win::lock`; this unlock matches that
         // lock call. Drop is only called once.
@@ -2793,6 +2809,9 @@ impl<T: MpiDatatype> WinLockAllGuard<'_, '_, T> {
 
 impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, '_, T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("WinLockAllGuard") {
+            return;
+        }
         // SAFETY: `window.win_handle` is valid — it is borrowed from a live
         // `Win`. All ranks were locked in `Win::lock_all`; this unlock_all
         // matches that call. Drop is only called once.

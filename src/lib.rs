@@ -355,6 +355,10 @@ pub enum ReduceOp {
 /// handle is dropped, every MPI-calling method returns
 /// `Err(`[`Error::Finalized`]`)` without calling MPI.
 ///
+/// At [`ThreadLevel::Serialized`]/[`ThreadLevel::Multiple`], dropping this
+/// handle while another thread is still inside an MPI call through this
+/// crate is a program error that `ferrompi` does not detect.
+///
 /// # Example
 ///
 /// ```no_run

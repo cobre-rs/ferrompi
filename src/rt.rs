@@ -3,9 +3,13 @@
 //! [`enter`] is called by every guarded extern wrapper in [`crate::ffi`] and
 //! rejects the call once state is `Finalized`, or once state is
 //! `Active(Single)`/`Active(Funneled)` and the caller is not the thread that
-//! called `activate`, without touching MPI.
+//! called `activate`, without touching MPI. [`drop_guard`] is the equivalent
+//! check for a `Drop` impl, which cannot return `Err`: it skips the MPI call
+//! silently after finalize, and aborts the process on a wrong-thread drop
+//! below `Serialized`.
 
 use std::cell::Cell;
+use std::io::Write;
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -50,8 +54,10 @@ pub(crate) fn finalize() -> bool {
         // Relaxed: no ordering on this store closes the window where a
         // concurrent `enter()` on another thread reads `Active` just before
         // this store and then calls MPI just after `ferrompi_finalize` runs
-        // below — that TOCTOU gap needs a lock or epoch (rt::drop_guard),
-        // not a stronger store ordering here.
+        // below. No ordering on `STATE` can close that gap; until this crate
+        // tracks in-flight calls, it is instead a caller contract: `Mpi`
+        // must not be dropped while another thread is inside an MPI call
+        // through this crate.
         STATE.store(FINALIZED, Ordering::Relaxed);
         true
     } else {
@@ -76,4 +82,44 @@ pub(crate) fn enter() -> c_int {
         return FERROMPI_ERR_THREAD_LEVEL;
     }
     0
+}
+
+/// Called at the top of a `Drop` impl's MPI-calling path, in place of
+/// [`enter`] (a `Drop` impl cannot propagate an `Err`). Returns `false` once
+/// state is `Finalized`, so the caller skips its MPI call silently. Once
+/// state is `Active(Single)`/`Active(Funneled)` and the caller is not the
+/// init thread, this never returns: see [`drop_abort`]. Otherwise returns
+/// `true`.
+pub(crate) fn drop_guard(type_name: &'static str) -> bool {
+    // Relaxed: see `enter`'s comment — visibility of an `Active`/`Finalized`
+    // state set on another thread is carried by that thread's own handle
+    // hand-off, not by this load's ordering.
+    let state = STATE.load(Ordering::Relaxed);
+    if state == FINALIZED {
+        return false;
+    }
+    if (state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED) && !ON_INIT_THREAD.with(Cell::get) {
+        drop_abort(type_name);
+    }
+    true
+}
+
+/// Prints `ferrompi: <type_name> dropped on thread <label>` to stderr and
+/// aborts the process. Split out of [`drop_guard`] and marked `#[cold]` so
+/// the wrong-thread path does not bloat the common-case branch.
+#[cold]
+fn drop_abort(type_name: &'static str) -> ! {
+    let current = std::thread::current();
+    let label = match current.name() {
+        Some(name) => name.to_string(),
+        None => format!("{:?}", current.id()),
+    };
+    // eprintln! panics on a closed stderr, and a panic inside `Drop` during
+    // unwinding aborts without printing this message, so the write result
+    // is ignored instead.
+    let _ = writeln!(
+        std::io::stderr(),
+        "ferrompi: {type_name} dropped on thread {label}"
+    );
+    std::process::abort();
 }

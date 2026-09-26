@@ -139,3 +139,11 @@ Severity legend: **critical** = safe code → UB / memory corruption / data race
 - **Defect:** the result pointer MPI writes through is obtained by casting away constness from `result_box.as_ref()`, a shared reference. A write through a pointer derived from a shared borrow is undefined behaviour in Rust, independent of whether the write happens to work in practice.
 - **Fix direction:** `PendingFetchResult.result` becomes a raw-owned `NonNull<MaybeUninit<T>>` obtained from `Box::into_raw`, never derived from a reference; that pointer, unchanged, is what MPI receives. A `Drop` impl frees the allocation exactly once, on the `resolve` path, the drop-without-resolve path, and the FFI error path.
 - **Acceptance:** no cast from a shared borrow feeds a write pointer in `window.rs`; a non-MPI unit test constructs `PendingFetchResult` values, resolves one and drops another unresolved, with no double free; `PendingFetchResult`'s `Send`/`Sync` auto traits are unchanged.
+
+### SND-16 — `Mpi` drop racing a concurrent guarded call at `Serialized`/`Multiple` reaches MPI after finalize
+
+- **Severity:** major · **Verified:** reading · **Target:** 0.6
+- **Locations:** `src/rt.rs:61` (`finalize`'s `STATE` store to `FINALIZED`), `:77` (`enter`'s `STATE` load), `:97` (`drop_guard`'s `STATE` load).
+- **Defect:** at `Serialized`/`Multiple`, a worker thread's guarded call (through `enter` or `drop_guard`) can read `Active` from `STATE` just before the init thread's `Mpi::drop` stores `FINALIZED`, then reach MPI just after `ferrompi_finalize` runs. No ordering on `STATE` closes this window; it is currently a caller contract (`Mpi` must not be dropped while another thread is inside an MPI call) that `ferrompi` does not enforce.
+- **Fix direction:** in-flight call tracking in `rt::enter`/its matching exit (an epoch or counter), with `finalize` waiting for it to reach zero before calling `MPI_Finalize`; needs an ADR-033 amendment and an R29 re-measurement of the fast-path overhead under `Multiple`.
+- **Acceptance:** a concurrent-finalize stress repro no longer reaches MPI after `MPI_Finalize` returns, at both `Serialized` and `Multiple`.

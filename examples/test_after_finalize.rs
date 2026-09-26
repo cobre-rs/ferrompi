@@ -13,6 +13,10 @@ fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
     let dup = world.duplicate().expect("duplicate before finalize failed");
+    let op = UserOp::<f64>::new(|a: &[f64], b: &mut [f64]| {
+        b[0] += a[0];
+    })
+    .expect("UserOp::new before finalize failed");
     drop(mpi);
 
     assert!(
@@ -81,6 +85,11 @@ fn main() {
             "UserOp::new after finalize must return Err(Finalized) on call {i}"
         );
     }
+
+    // Both handles outlived `Mpi`; their `Drop` must be a silent no-op
+    // rather than calling MPI after finalize.
+    drop(op);
+    drop(dup);
 
     println!("test_after_finalize: PASS");
 }

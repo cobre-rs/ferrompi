@@ -5,6 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::rt;
 
 mod blocking;
 mod mgmt;
@@ -143,6 +144,9 @@ impl Drop for Communicator {
     fn drop(&mut self) {
         // Don't free COMM_WORLD (handle 0)
         if self.handle != 0 {
+            if !rt::drop_guard("Communicator") {
+                return;
+            }
             // SAFETY: self.handle is a valid, non-zero communicator handle
             // registered in the C-side comm table (checked above); Drop takes
             // &mut self and runs at most once per value, so this cannot

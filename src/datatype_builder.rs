@@ -30,6 +30,7 @@
 use crate::datatype::DatatypeTag;
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::rt;
 
 /// One field of a struct-type passed to [`CustomDatatype::create_struct`].
 ///
@@ -357,6 +358,9 @@ impl CustomDatatype {
 impl Drop for CustomDatatype {
     fn drop(&mut self) {
         if self.handle >= 0 {
+            if !rt::drop_guard("CustomDatatype") {
+                return;
+            }
             // SAFETY: handle is a valid index allocated by ferrompi_type_contiguous
             // (or a future constructor). We only free non-negative handles and do
             // not use the handle after this point. The return value is intentionally

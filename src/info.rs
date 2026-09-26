@@ -16,6 +16,7 @@
 
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::rt;
 use std::ffi::{CStr, CString};
 
 /// Maximum buffer size for retrieving info values from MPI.
@@ -211,6 +212,9 @@ impl Info {
 impl Drop for Info {
     fn drop(&mut self) {
         if !self.is_null && self.handle >= 0 {
+            if !rt::drop_guard("Info") {
+                return;
+            }
             // SAFETY: handle is valid — it was allocated by ferrompi_info_create
             // and has not been freed yet. We only free non-null info objects.
             unsafe { ffi::ferrompi_info_free(self.handle) };

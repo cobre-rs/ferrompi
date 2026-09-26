@@ -48,6 +48,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use crate::datatype::MpiDatatype;
 use crate::error::{Error, MpiErrorClass, Result};
 use crate::ffi;
+use crate::rt;
 
 // ============================================================================
 // Slot count — must match MAX_OPS in csrc/ferrompi.c
@@ -381,6 +382,9 @@ impl<T: MpiDatatype> UserOp<T> {
 
 impl<T: MpiDatatype> Drop for UserOp<T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("UserOp") {
+            return;
+        }
         // Drop ordering (ADR-0005 Decision 3):
         //   1. ferrompi_op_free → MPI_Op_free (MPI will not invoke the
         //      trampoline after this returns).

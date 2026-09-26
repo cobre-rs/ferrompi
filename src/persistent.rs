@@ -227,6 +227,9 @@ impl Drop for PersistentRequest {
     ///
     /// See ADR-0004 §"Drop behavior: wait before free" for the full rationale.
     fn drop(&mut self) {
+        if !rt::drop_guard("PersistentRequest") {
+            return;
+        }
         // If active, wait for completion first
         if self.active {
             // SAFETY: self.handle is a valid MPI request handle registered in the
@@ -234,9 +237,9 @@ impl Drop for PersistentRequest {
             // so start() was called and MPI holds an in-flight operation on this
             // handle. ferrompi_wait calls MPI_Wait which completes the operation
             // and releases the handle's active state before request_free below.
-            // Calls the unguarded raw wrapper (not the lifecycle-guarded one) so
-            // Drop always attempts the wait; a future rt::drop_guard is a
-            // separate concern from the FFI lifecycle check.
+            // Calls the unguarded raw wrapper (not the lifecycle-guarded one):
+            // rt::drop_guard above already handles the FFI lifecycle check, so
+            // this call must still attempt the wait once reached.
             unsafe { ffi::raw::ferrompi_wait(self.handle) };
         }
         // Free the persistent request
