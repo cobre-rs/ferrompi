@@ -263,7 +263,9 @@ pub enum Error {
     #[error("Invalid reduction operation for this method")]
     InvalidOp,
 
-    /// Operation not supported (e.g., MPI 4.0 persistent collectives on older MPI).
+    /// Operation not supported (e.g., MPI 4.0 persistent collectives on older
+    /// MPI, or [`Request::cancel`](crate::Request::cancel) on a nonblocking
+    /// collective or RMA request).
     #[error("Operation not supported: {0}")]
     NotSupported(String),
 

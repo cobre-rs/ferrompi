@@ -6,7 +6,7 @@ use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::persistent::PersistentRequest;
-use crate::request::Request;
+use crate::request::{Request, RequestKind};
 
 /// Checks one counts/displacements pair that MPI reads on this rank: each array
 /// holds exactly `size` entries, every count is non-negative, and every block
@@ -387,7 +387,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "igatherv")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking scatter variable amounts of data from root.
@@ -463,7 +463,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "iscatterv")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-gather variable amounts of data.
@@ -533,7 +533,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "iallgatherv")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-to-all with variable counts.
@@ -609,7 +609,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "ialltoallv")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     // ========================================================================

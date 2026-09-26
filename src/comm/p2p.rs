@@ -5,7 +5,7 @@ use crate::datatype::{buf, buf_mut, MpiDatatype, PlainData};
 use crate::datatype_builder::CustomDatatype;
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::request::Request;
+use crate::request::{Request, RequestKind};
 use crate::status::Status;
 
 impl Communicator {
@@ -108,7 +108,7 @@ impl Communicator {
         let ret =
             unsafe { ffi::ferrompi_isend(p, n, dt, dest, tag, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "isend")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::PointToPoint))
     }
 
     /// Nonblocking receive.
@@ -144,7 +144,7 @@ impl Communicator {
         let ret =
             unsafe { ffi::ferrompi_irecv(p, n, dt, source, tag, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "irecv")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::PointToPoint))
     }
 
     /// Blocking send-receive.
@@ -543,7 +543,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "isend_custom")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::PointToPoint))
     }
 
     /// Nonblocking receive using a committed custom datatype.
@@ -617,6 +617,6 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "irecv_custom")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::PointToPoint))
     }
 }

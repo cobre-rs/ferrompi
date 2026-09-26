@@ -57,7 +57,7 @@ use crate::datatype::{buf, buf_mut};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::group::Group;
-use crate::request::Request;
+use crate::request::{Request, RequestKind};
 use crate::rt;
 use crate::Communicator;
 use crate::MpiDatatype;
@@ -1746,7 +1746,7 @@ impl<T: MpiDatatype> Win<'_, T> {
             )
         };
         Error::check_with_op(ret, "rput")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Rma))
     }
 
     /// One-sided read: copy data from a remote rank's window memory into
@@ -1936,7 +1936,7 @@ impl<T: MpiDatatype> Win<'_, T> {
             )
         };
         Error::check_with_op(ret, "rget")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Rma))
     }
 
     /// One-sided reduce-accumulate: combine data from a local origin buffer
@@ -2150,7 +2150,7 @@ impl<T: MpiDatatype> Win<'_, T> {
             )
         };
         Error::check_with_op(ret, "raccumulate")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Rma))
     }
 
     /// Atomic read-modify-write: fetch the pre-update remote value into

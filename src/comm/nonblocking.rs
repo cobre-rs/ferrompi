@@ -4,7 +4,7 @@ use crate::comm::{check_rank_slots, check_same_len, rank_block, Communicator};
 use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::request::Request;
+use crate::request::{Request, RequestKind};
 use crate::ReduceOp;
 
 impl Communicator {
@@ -39,7 +39,7 @@ impl Communicator {
         // which this signature does not enforce.
         let ret = unsafe { ffi::ferrompi_ibcast(p, n, dt, root, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "ibcast")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-reduce.
@@ -75,7 +75,7 @@ impl Communicator {
             ffi::ferrompi_iallreduce(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "iallreduce")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking reduce to root.
@@ -129,7 +129,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "ireduce")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking gather to root.
@@ -181,7 +181,7 @@ impl Communicator {
             ffi::ferrompi_igather(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "igather")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-gather.
@@ -218,7 +218,7 @@ impl Communicator {
         let ret =
             unsafe { ffi::ferrompi_iallgather(sp, n, rp, n, dt, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "iallgather")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking scatter from root.
@@ -264,7 +264,7 @@ impl Communicator {
             ffi::ferrompi_iscatter(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "iscatter")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking barrier.
@@ -289,7 +289,7 @@ impl Communicator {
         // obligation.
         let ret = unsafe { ffi::ferrompi_ibarrier(self.handle, &mut request_handle) };
         Error::check_with_op(ret, "ibarrier")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking inclusive prefix reduction (scan).
@@ -331,7 +331,7 @@ impl Communicator {
             ffi::ferrompi_iscan(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "iscan")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking exclusive prefix reduction (exscan).
@@ -377,7 +377,7 @@ impl Communicator {
             ffi::ferrompi_iexscan(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "iexscan")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-to-all personalized communication.
@@ -417,7 +417,7 @@ impl Communicator {
             ffi::ferrompi_ialltoall(sp, count, rp, count, dt, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "ialltoall")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking reduce-scatter with uniform block size.
@@ -469,7 +469,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "ireduce_scatter_block")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking in-place gather at root. Non-root ranks must use
@@ -527,7 +527,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "igather_inplace")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking in-place all-gather. Every rank's `data` is both send
@@ -577,7 +577,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "iallgather_inplace")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking in-place scatter. At root, `data` is the `sendcount * size()`
@@ -641,7 +641,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "iscatter_inplace")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking in-place all-to-all personalized communication. `data` is
@@ -695,7 +695,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "ialltoall_inplace")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 }
 

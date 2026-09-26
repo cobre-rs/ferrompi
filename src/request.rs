@@ -88,6 +88,15 @@ pub(crate) fn check_batch(ret: i32, operation: &'static str, failed: i64) -> Res
     }
 }
 
+/// The operation family a [`Request`] came from; only point-to-point
+/// requests can be cancelled.
+pub(crate) enum RequestKind {
+    PointToPoint,
+    Collective,
+    #[cfg(feature = "rma")]
+    Rma,
+}
+
 /// A handle to a nonblocking MPI operation.
 ///
 /// This type represents an in-flight MPI operation. You must call `wait()` or
@@ -146,14 +155,16 @@ pub(crate) fn check_batch(ret: i32, operation: &'static str, failed: i64) -> Res
 pub struct Request {
     handle: i64,
     completed: bool,
+    kind: RequestKind,
 }
 
 impl Request {
     /// Create a new request from a raw handle.
-    pub(crate) fn new(handle: i64) -> Self {
+    pub(crate) fn new(handle: i64, kind: RequestKind) -> Self {
         Request {
             handle,
             completed: false,
+            kind,
         }
     }
 
@@ -456,7 +467,15 @@ impl Request {
         Ok(flag != 0)
     }
 
-    /// Request cancellation of a pending nonblocking operation.
+    /// Request cancellation of a pending point-to-point operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotSupported`] without calling into MPI when `self`
+    /// is a nonblocking-collective or RMA request: the MPI standard defines
+    /// `MPI_Cancel` only for point-to-point requests, and both MPICH and
+    /// Open MPI reject it for other request kinds. The request is left
+    /// pending; follow up with [`wait`](Request::wait) as usual.
     ///
     /// # Portability
     ///
@@ -482,6 +501,18 @@ impl Request {
     /// # Ok(()) }
     /// ```
     pub fn cancel(&mut self) -> Result<()> {
+        match self.kind {
+            RequestKind::PointToPoint => {}
+            RequestKind::Collective => {
+                return Err(Error::NotSupported(
+                    "cancel of a nonblocking collective request".into(),
+                ));
+            }
+            #[cfg(feature = "rma")]
+            RequestKind::Rma => {
+                return Err(Error::NotSupported("cancel of an RMA request".into()));
+            }
+        }
         if self.completed {
             return Ok(());
         }
@@ -566,7 +597,8 @@ impl Drop for Request {
 
 #[cfg(test)]
 mod tests {
-    use super::{with_handles, Request, HANDLE_STACK_CAP};
+    use super::{with_handles, Request, RequestKind, HANDLE_STACK_CAP};
+    use crate::error::Error;
     use std::mem::forget;
 
     #[test]
@@ -574,6 +606,7 @@ mod tests {
         let mut req = Request {
             handle: 0,
             completed: true,
+            kind: RequestKind::PointToPoint,
         };
         let result = req.test();
         assert!(matches!(result, Ok(true)));
@@ -588,6 +621,7 @@ mod tests {
         let req = Request {
             handle: 0,
             completed: true,
+            kind: RequestKind::PointToPoint,
         };
         let result = req.wait();
         assert!(result.is_ok());
@@ -673,6 +707,7 @@ mod tests {
         let req = Request {
             handle: 0,
             completed: true,
+            kind: RequestKind::PointToPoint,
         };
         let result = req.get_status();
         assert!(matches!(result, Ok(true)));
@@ -684,9 +719,32 @@ mod tests {
         let mut req = Request {
             handle: 0,
             completed: true,
+            kind: RequestKind::PointToPoint,
         };
         let result = req.cancel();
         assert!(matches!(result, Ok(())));
         forget(req);
+    }
+
+    fn assert_cancel_not_supported(kind: RequestKind) {
+        let mut req = Request {
+            handle: 0,
+            completed: false,
+            kind,
+        };
+        let result = req.cancel();
+        assert!(matches!(result, Err(Error::NotSupported(_))));
+        forget(req);
+    }
+
+    #[test]
+    fn cancel_on_collective_request_returns_not_supported_without_ffi() {
+        assert_cancel_not_supported(RequestKind::Collective);
+    }
+
+    #[cfg(feature = "rma")]
+    #[test]
+    fn cancel_on_rma_request_returns_not_supported_without_ffi() {
+        assert_cancel_not_supported(RequestKind::Rma);
     }
 }
