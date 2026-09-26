@@ -15,6 +15,8 @@
 use std::cell::Cell;
 use std::io::Write;
 use std::os::raw::c_int;
+#[cfg(debug_assertions)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::error::{Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL};
@@ -120,6 +122,62 @@ pub(crate) fn enter() -> c_int {
     0
 }
 
+/// Set for the duration of one guarded FFI call while `STATE` is
+/// `Active(Serialized)`, to detect two such calls overlapping. Debug-only:
+/// `Serialized` requires the caller to serialize its own MPI calls, so this
+/// is a diagnostic, not a correctness mechanism release builds must pay for.
+#[cfg(debug_assertions)]
+static SERIALIZED_IN_CALL: AtomicBool = AtomicBool::new(false);
+
+/// Attempts to take [`SERIALIZED_IN_CALL`]. Returns `true` on success.
+#[cfg(debug_assertions)]
+fn take_in_call_flag() -> bool {
+    // Acquire/Relaxed: a successful exchange must synchronize-with the
+    // matching `release_in_call_flag`'s Release store, so the guarded FFI
+    // call this thread is about to make cannot be reordered ahead of the
+    // previous holder's; a failed exchange holds nothing and needs no
+    // ordering.
+    SERIALIZED_IN_CALL
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+}
+
+/// Releases [`SERIALIZED_IN_CALL`].
+#[cfg(debug_assertions)]
+fn release_in_call_flag() {
+    // Release: pairs with `take_in_call_flag`'s Acquire, so this thread's
+    // guarded FFI call happens-before the next thread's that takes the flag.
+    SERIALIZED_IN_CALL.store(false, Ordering::Release);
+}
+
+/// Called at the top of a guarded extern wrapper, after [`enter`] passes. At
+/// `Active(Serialized)`, takes [`SERIALIZED_IN_CALL`] and returns `Ok(true)`,
+/// or `Err(FERROMPI_ERR_THREAD_LEVEL)` if another call already holds it. In
+/// every other state, returns `Ok(false)` without touching the flag.
+#[cfg(debug_assertions)]
+pub(crate) fn begin_call() -> std::result::Result<bool, c_int> {
+    // Relaxed: see `enter`'s comment — visibility of the `Active` state set
+    // on another thread is carried by that thread's own handle hand-off,
+    // not by this load's ordering.
+    if STATE.load(Ordering::Relaxed) == 1 + ThreadLevel::Serialized as u8 {
+        if take_in_call_flag() {
+            Ok(true)
+        } else {
+            Err(FERROMPI_ERR_THREAD_LEVEL)
+        }
+    } else {
+        Ok(false)
+    }
+}
+
+/// Releases the flag taken by [`begin_call`], when `held` is `true`.
+#[cfg(debug_assertions)]
+pub(crate) fn end_call(held: bool) {
+    if held {
+        release_in_call_flag();
+    }
+}
+
 /// Called at the top of a `Drop` impl's MPI-calling path, in place of
 /// [`enter`] (a `Drop` impl cannot propagate an `Err`). Returns `false` once
 /// state is `Finalized`, so the caller skips its MPI call silently. Once
@@ -158,4 +216,36 @@ fn drop_abort(type_name: &'static str) -> ! {
         "ferrompi: {type_name} dropped on thread {label}"
     );
     std::process::abort();
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use super::{release_in_call_flag, take_in_call_flag};
+
+    #[test]
+    fn in_call_flag_rejects_a_second_thread() {
+        assert!(take_in_call_flag(), "first take must succeed");
+
+        let overlapping_took = std::thread::scope(|s| {
+            s.spawn(take_in_call_flag)
+                .join()
+                .expect("overlap thread panicked")
+        });
+        assert!(!overlapping_took, "overlapping take must be rejected");
+
+        release_in_call_flag();
+
+        let next_took = std::thread::scope(|s| {
+            s.spawn(|| {
+                let took = take_in_call_flag();
+                if took {
+                    release_in_call_flag();
+                }
+                took
+            })
+            .join()
+            .expect("next thread panicked")
+        });
+        assert!(next_took, "take after release must succeed");
+    }
 }

@@ -98,9 +98,17 @@ macro_rules! guarded_extern {
                 if guard != 0 {
                     return guard;
                 }
+                #[cfg(debug_assertions)]
+                let held = match crate::rt::begin_call() {
+                    Ok(held) => held,
+                    Err(code) => return code,
+                };
                 // SAFETY: the wrapper forwards the caller's arguments unchanged;
                 // the caller upholds the C function's contract.
-                unsafe { raw::$name($($arg),*) }
+                let result = unsafe { raw::$name($($arg),*) };
+                #[cfg(debug_assertions)]
+                crate::rt::end_call(held);
+                result
             }
         )*
     };
