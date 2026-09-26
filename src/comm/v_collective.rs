@@ -8,6 +8,25 @@ use crate::ffi;
 use crate::persistent::PersistentRequest;
 use crate::request::Request;
 
+/// Checks one counts/displacements pair that MPI reads on this rank: each array
+/// holds exactly `size` entries, every count is non-negative, and every block
+/// with a positive count lies inside a `buf_len`-element buffer (computed in i64).
+fn check_v_args(counts: &[i32], displs: &[i32], size: i32, buf_len: usize) -> Result<()> {
+    if counts.len() != size as usize || displs.len() != size as usize {
+        return Err(Error::InvalidBuffer);
+    }
+    let buf_len = buf_len as i64;
+    for (&count, &displ) in counts.iter().zip(displs) {
+        if count < 0 {
+            return Err(Error::InvalidBuffer);
+        }
+        if count > 0 && (displ < 0 || i64::from(displ) + i64::from(count) > buf_len) {
+            return Err(Error::InvalidBuffer);
+        }
+    }
+    Ok(())
+}
+
 impl Communicator {
     // ========================================================================
     // Generic V-Collectives (variable-count)
@@ -30,7 +49,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `recvcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -59,14 +80,15 @@ impl Communicator {
         displs: &[i32],
         root: i32,
     ) -> Result<()> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(recvcounts, displs, self.size, recv.len())?;
         }
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
-        // checked to have equal length above; their length against the communicator size,
-        // their signs, and the extent they address inside recv are not checked.
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). At root, recvcounts and
+        // displs are checked above to have size() entries, non-negative counts, and each
+        // positive-count block inside recv; at non-root MPI does not read recvcounts or
+        // displs, so they are unchecked here.
         let ret = unsafe {
             ffi::ferrompi_gatherv(
                 sp,
@@ -99,7 +121,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `sendcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `send`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -127,15 +151,15 @@ impl Communicator {
         recv: &mut [T],
         root: i32,
     ) -> Result<()> {
-        if sendcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(sendcounts, displs, self.size, send.len())?;
         }
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
         // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
-        // &mut [T]). sendcounts and displs are checked to have equal length above; their
-        // length against the communicator size, their signs, and the extent they address
-        // inside send are not checked.
+        // &mut [T]). At root, sendcounts and displs are checked above to have size()
+        // entries, non-negative counts, and each positive-count block inside send; at
+        // non-root MPI does not read sendcounts or displs, so they are unchecked here.
         let ret = unsafe {
             ffi::ferrompi_scatterv(
                 sp,
@@ -167,7 +191,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `recvcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -194,14 +220,12 @@ impl Communicator {
         recvcounts: &[i32],
         displs: &[i32],
     ) -> Result<()> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_v_args(recvcounts, displs, self.size, recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
-        // checked to have equal length above; their length against the communicator size,
-        // their signs, and the extent they address inside recv are not checked.
+        // checked above, on every rank, to have size() entries, non-negative counts, and
+        // each positive-count block inside recv.
         let ret = unsafe {
             ffi::ferrompi_allgatherv(
                 sp,
@@ -234,8 +258,10 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `sendcounts.len() != sdispls.len()` or
-    ///   `recvcounts.len() != rdispls.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts`/`sdispls`
+    ///   or `recvcounts`/`rdispls` does not have `size()` entries, a count is negative, or a
+    ///   block with a positive count starts at a negative displacement or ends past the end
+    ///   of `send`/`recv` respectively.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -262,15 +288,13 @@ impl Communicator {
         recvcounts: &[i32],
         rdispls: &[i32],
     ) -> Result<()> {
-        if sendcounts.len() != sdispls.len() || recvcounts.len() != rdispls.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_v_args(sendcounts, sdispls, self.size, send.len())?;
+        check_v_args(recvcounts, rdispls, self.size, recv.len())?;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). sendcounts/sdispls and
-        // recvcounts/rdispls are each checked to have equal length above; their length
-        // against the communicator size, their signs, and the extent they address inside
-        // send/recv are not checked.
+        // recvcounts/rdispls are each checked above, on every rank, to have size() entries,
+        // non-negative counts, and each positive-count block inside send/recv respectively.
         let ret = unsafe {
             ffi::ferrompi_alltoallv(
                 sp,
@@ -305,7 +329,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `recvcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -334,18 +360,19 @@ impl Communicator {
         displs: &[i32],
         root: i32,
     ) -> Result<Request> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(recvcounts, displs, self.size, recv.len())?;
         }
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
-        // checked to have equal length above; their length against the communicator size,
-        // their signs, and the extent they address inside recv are not checked. The
-        // returned Request does not borrow send, recv, recvcounts or displs; keeping all
-        // four alive and untouched until the request completes is the caller's documented
-        // obligation, which this signature does not enforce.
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). At root, recvcounts and
+        // displs are checked above to have size() entries, non-negative counts, and each
+        // positive-count block inside recv; at non-root MPI does not read recvcounts or
+        // displs, so they are unchecked here. The returned Request does not borrow send,
+        // recv, recvcounts or displs; keeping all four alive and untouched until the
+        // request completes is the caller's documented obligation, which this signature
+        // does not enforce.
         let ret = unsafe {
             ffi::ferrompi_igatherv(
                 sp,
@@ -378,7 +405,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `sendcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `send`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -407,19 +436,19 @@ impl Communicator {
         displs: &[i32],
         root: i32,
     ) -> Result<Request> {
-        if sendcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(sendcounts, displs, self.size, send.len())?;
         }
         let mut request_handle: i64 = 0;
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
         // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
-        // &mut [T]). sendcounts and displs are checked to have equal length above; their
-        // length against the communicator size, their signs, and the extent they address
-        // inside send are not checked. The returned Request does not borrow send, recv,
-        // sendcounts or displs; keeping all four alive and untouched until the request
-        // completes is the caller's documented obligation, which this signature does not
-        // enforce.
+        // &mut [T]). At root, sendcounts and displs are checked above to have size()
+        // entries, non-negative counts, and each positive-count block inside send; at
+        // non-root MPI does not read sendcounts or displs, so they are unchecked here. The
+        // returned Request does not borrow send, recv, sendcounts or displs; keeping all
+        // four alive and untouched until the request completes is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_iscatterv(
                 sp,
@@ -451,7 +480,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `recvcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -479,18 +510,16 @@ impl Communicator {
         recvcounts: &[i32],
         displs: &[i32],
     ) -> Result<Request> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_v_args(recvcounts, displs, self.size, recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
-        // checked to have equal length above; their length against the communicator size,
-        // their signs, and the extent they address inside recv are not checked. The
-        // returned Request does not borrow send, recv, recvcounts or displs; keeping all
-        // four alive and untouched until the request completes is the caller's documented
-        // obligation, which this signature does not enforce.
+        // checked above, on every rank, to have size() entries, non-negative counts, and
+        // each positive-count block inside recv. The returned Request does not borrow
+        // send, recv, recvcounts or displs; keeping all four alive and untouched until the
+        // request completes is the caller's documented obligation, which this signature
+        // does not enforce.
         let ret = unsafe {
             ffi::ferrompi_iallgatherv(
                 sp,
@@ -523,8 +552,10 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `sendcounts.len() != sdispls.len()` or
-    ///   `recvcounts.len() != rdispls.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts`/`sdispls`
+    ///   or `recvcounts`/`rdispls` does not have `size()` entries, a count is negative, or a
+    ///   block with a positive count starts at a negative displacement or ends past the end
+    ///   of `send`/`recv` respectively.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -552,19 +583,18 @@ impl Communicator {
         recvcounts: &[i32],
         rdispls: &[i32],
     ) -> Result<Request> {
-        if sendcounts.len() != sdispls.len() || recvcounts.len() != rdispls.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_v_args(sendcounts, sdispls, self.size, send.len())?;
+        check_v_args(recvcounts, rdispls, self.size, recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). sendcounts/sdispls and
-        // recvcounts/rdispls are each checked to have equal length above; their length
-        // against the communicator size, their signs, and the extent they address inside
-        // send/recv are not checked. The returned Request does not borrow send, recv, or
-        // any of the four count/displacement arrays; keeping all of them alive and
-        // untouched until the request completes is the caller's documented obligation,
-        // which this signature does not enforce.
+        // recvcounts/rdispls are each checked above, on every rank, to have size() entries,
+        // non-negative counts, and each positive-count block inside send/recv respectively.
+        // The returned Request does not borrow send, recv, or any of the four
+        // count/displacement arrays; keeping all of them alive and untouched until the
+        // request completes is the caller's documented obligation, which this signature
+        // does not enforce.
         let ret = unsafe {
             ffi::ferrompi_ialltoallv(
                 sp,
@@ -599,6 +629,13 @@ impl Communicator {
     /// * `displs` - Displacement for each rank in the receive buffer
     /// * `root` - Rank of the root process
     ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
+    /// - [`Error::Mpi`] if the underlying MPI call fails.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -623,18 +660,19 @@ impl Communicator {
         displs: &[i32],
         root: i32,
     ) -> Result<PersistentRequest> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(recvcounts, displs, self.size, recv.len())?;
         }
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
-        // checked to have equal length above; their length against the communicator size,
-        // their signs, and the extent they address inside recv are not checked. The
-        // returned PersistentRequest does not borrow send, recv, recvcounts or displs;
-        // keeping all four alive and untouched until the request is freed is the caller's
-        // documented obligation, which this signature does not enforce.
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). At root, recvcounts and
+        // displs are checked above to have size() entries, non-negative counts, and each
+        // positive-count block inside recv; at non-root MPI does not read recvcounts or
+        // displs, so they are unchecked here. The returned PersistentRequest does not
+        // borrow send, recv, recvcounts or displs; keeping all four alive and untouched
+        // until the request is freed is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_gatherv_init(
                 sp,
@@ -665,6 +703,13 @@ impl Communicator {
     /// * `recv` - Receive buffer
     /// * `root` - Rank of the root process
     ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `send`.
+    /// - [`Error::Mpi`] if the underlying MPI call fails.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -689,19 +734,19 @@ impl Communicator {
         recv: &mut [T],
         root: i32,
     ) -> Result<PersistentRequest> {
-        if sendcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(sendcounts, displs, self.size, send.len())?;
         }
         let mut request_handle: i64 = 0;
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
         // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
-        // &mut [T]). sendcounts and displs are checked to have equal length above; their
-        // length against the communicator size, their signs, and the extent they address
-        // inside send are not checked. The returned PersistentRequest does not borrow
-        // send, recv, sendcounts or displs; keeping all four alive and untouched until the
-        // request is freed is the caller's documented obligation, which this signature
-        // does not enforce.
+        // &mut [T]). At root, sendcounts and displs are checked above to have size()
+        // entries, non-negative counts, and each positive-count block inside send; at
+        // non-root MPI does not read sendcounts or displs, so they are unchecked here. The
+        // returned PersistentRequest does not borrow send, recv, sendcounts or displs;
+        // keeping all four alive and untouched until the request is freed is the caller's
+        // documented obligation, which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_scatterv_init(
                 sp,
@@ -731,6 +776,13 @@ impl Communicator {
     /// * `recvcounts` - Number of elements to receive from each rank
     /// * `displs` - Displacement for each rank in the receive buffer
     ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
+    /// - [`Error::Mpi`] if the underlying MPI call fails.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -754,18 +806,16 @@ impl Communicator {
         recvcounts: &[i32],
         displs: &[i32],
     ) -> Result<PersistentRequest> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_v_args(recvcounts, displs, self.size, recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
-        // checked to have equal length above; their length against the communicator size,
-        // their signs, and the extent they address inside recv are not checked. The
-        // returned PersistentRequest does not borrow send, recv, recvcounts or displs;
-        // keeping all four alive and untouched until the request is freed is the caller's
-        // documented obligation, which this signature does not enforce.
+        // checked above, on every rank, to have size() entries, non-negative counts, and
+        // each positive-count block inside recv. The returned PersistentRequest does not
+        // borrow send, recv, recvcounts or displs; keeping all four alive and untouched
+        // until the request is freed is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_allgatherv_init(
                 sp,
@@ -795,6 +845,14 @@ impl Communicator {
     /// * `recv` - Receive buffer
     /// * `recvcounts` - Number of elements to receive from each rank
     /// * `rdispls` - Receive displacement for each rank
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts`/`sdispls`
+    ///   or `recvcounts`/`rdispls` does not have `size()` entries, a count is negative, or a
+    ///   block with a positive count starts at a negative displacement or ends past the end
+    ///   of `send`/`recv` respectively.
+    /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
     ///
@@ -826,19 +884,18 @@ impl Communicator {
         recvcounts: &[i32],
         rdispls: &[i32],
     ) -> Result<PersistentRequest> {
-        if sendcounts.len() != sdispls.len() || recvcounts.len() != rdispls.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_v_args(sendcounts, sdispls, self.size, send.len())?;
+        check_v_args(recvcounts, rdispls, self.size, recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). sendcounts/sdispls and
-        // recvcounts/rdispls are each checked to have equal length above; their length
-        // against the communicator size, their signs, and the extent they address inside
-        // send/recv are not checked. The returned PersistentRequest does not borrow send,
-        // recv, or any of the four count/displacement arrays; keeping all of them alive
-        // and untouched until the request is freed is the caller's documented obligation,
-        // which this signature does not enforce.
+        // recvcounts/rdispls are each checked above, on every rank, to have size() entries,
+        // non-negative counts, and each positive-count block inside send/recv respectively.
+        // The returned PersistentRequest does not borrow send, recv, or any of the four
+        // count/displacement arrays; keeping all of them alive and untouched until the
+        // request is freed is the caller's documented obligation, which this signature
+        // does not enforce.
         let ret = unsafe {
             ffi::ferrompi_alltoallv_init(
                 sp,
@@ -859,6 +916,7 @@ impl Communicator {
 
 #[cfg(test)]
 mod tests {
+    use super::check_v_args;
     use crate::comm::Communicator;
     use crate::error::Error;
 
@@ -868,6 +926,44 @@ mod tests {
             rank: 0,
             size: 1,
         }
+    }
+
+    #[test]
+    fn check_v_args_boundaries() {
+        // exact fit
+        assert!(check_v_args(&[2, 2], &[0, 2], 2, 4).is_ok());
+        // one element past the end
+        assert!(matches!(
+            check_v_args(&[2, 2], &[0, 2], 2, 3),
+            Err(Error::InvalidBuffer)
+        ));
+        // counts.len() != size
+        assert!(matches!(
+            check_v_args(&[2, 2, 2], &[0, 2, 4], 2, 6),
+            Err(Error::InvalidBuffer)
+        ));
+        // displs.len() != size
+        assert!(matches!(
+            check_v_args(&[2, 2], &[0, 2, 4], 2, 6),
+            Err(Error::InvalidBuffer)
+        ));
+        // negative count
+        assert!(matches!(
+            check_v_args(&[-1, 2], &[0, 2], 2, 4),
+            Err(Error::InvalidBuffer)
+        ));
+        // negative displacement with count > 0
+        assert!(matches!(
+            check_v_args(&[2, 2], &[-1, 2], 2, 4),
+            Err(Error::InvalidBuffer)
+        ));
+        // negative displacement with count 0
+        assert!(check_v_args(&[0, 2], &[-1, 0], 2, 2).is_ok());
+        // i32 arithmetic would wrap: i32::MAX + 1 overflows i32 but not i64
+        assert!(matches!(
+            check_v_args(&[1], &[i32::MAX], 1, i32::MAX as usize),
+            Err(Error::InvalidBuffer)
+        ));
     }
 
     #[test]
