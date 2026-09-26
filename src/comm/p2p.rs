@@ -407,6 +407,9 @@ impl Communicator {
     ///
     /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
     ///
+    /// Returns a [`Status`] whose `count` is the number of `T` elements
+    /// received; `count` is `-1` when the message is not a whole number of `T`.
+    ///
     /// # Arguments
     ///
     /// * `buf`      - Receive buffer; MPI count is `buf.len()`

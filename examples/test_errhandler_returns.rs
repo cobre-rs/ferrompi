@@ -9,7 +9,7 @@
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_errhandler_returns
 // mpi-test: np=2..
 
-use ferrompi::{Error, Mpi, MpiErrorClass, ReduceOp};
+use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, ReduceOp};
 
 mod common;
 
@@ -26,6 +26,16 @@ fn expect_class<T>(result: Result<T, Error>, expected: MpiErrorClass) -> bool {
             println!("expected class {expected:?}, got Ok");
             false
         }
+    }
+}
+
+/// Runs `common::check`, then prints `PASS: {name}` from rank 0. Shared by
+/// every test block below, each of which otherwise repeats this same
+/// check-then-announce sequence.
+fn report(world: &Communicator, rank: i32, ok: bool, name: &str) {
+    common::check(world, ok, name);
+    if rank == 0 {
+        println!("PASS: {name}");
     }
 }
 
@@ -46,10 +56,7 @@ fn main() {
     {
         let mut data = vec![0.0f64; 10];
         let ok = expect_class(world.broadcast(&mut data, 999), MpiErrorClass::Root);
-        common::check(&world, ok, "broadcast root=999 -> Root");
-        if rank == 0 {
-            println!("PASS: broadcast root=999 -> Root");
-        }
+        report(&world, rank, ok, "broadcast root=999 -> Root");
     }
 
     // ========================================================================
@@ -66,10 +73,7 @@ fn main() {
         } else {
             true
         };
-        common::check(&world, ok, "send dest=size -> Rank");
-        if rank == 0 {
-            println!("PASS: send dest=size -> Rank");
-        }
+        report(&world, rank, ok, "send dest=size -> Rank");
     }
 
     // ========================================================================
@@ -82,10 +86,7 @@ fn main() {
         let dup = world.duplicate().expect("comm_dup failed");
         let mut data = vec![0.0f64; 10];
         let ok = expect_class(dup.broadcast(&mut data, 999), MpiErrorClass::Root);
-        common::check(&world, ok, "dup broadcast root=999 -> Root");
-        if rank == 0 {
-            println!("PASS: dup broadcast root=999 -> Root");
-        }
+        report(&world, rank, ok, "dup broadcast root=999 -> Root");
     }
 
     // ========================================================================
@@ -102,10 +103,7 @@ fn main() {
 
         let mut data = vec![0.0f64; 10];
         let ok = expect_class(split_comm.broadcast(&mut data, 999), MpiErrorClass::Root);
-        common::check(&world, ok, "split broadcast root=999 -> Root");
-        if rank == 0 {
-            println!("PASS: split broadcast root=999 -> Root");
-        }
+        report(&world, rank, ok, "split broadcast root=999 -> Root");
     }
 
     // ========================================================================
@@ -119,10 +117,7 @@ fn main() {
     {
         let group = world.group().expect("group failed");
         let ok = expect_class(group.include(&[999]), MpiErrorClass::Rank);
-        common::check(&world, ok, "group include rank=999 -> Rank");
-        if rank == 0 {
-            println!("PASS: group include rank=999 -> Rank");
-        }
+        report(&world, rank, ok, "group include rank=999 -> Rank");
     }
 
     // ========================================================================
@@ -136,10 +131,7 @@ fn main() {
             world.allreduce(&send, &mut recv, ReduceOp::BitwiseOr),
             MpiErrorClass::Op,
         );
-        common::check(&world, ok, "allreduce f64 BitwiseOr -> Op");
-        if rank == 0 {
-            println!("PASS: allreduce f64 BitwiseOr -> Op");
-        }
+        report(&world, rank, ok, "allreduce f64 BitwiseOr -> Op");
     }
 
     // ========================================================================
@@ -156,10 +148,7 @@ fn main() {
         let mut incoming = [0i32; 1];
         let ok = expect_class(world.recv(&mut incoming, rank, 7), MpiErrorClass::Truncate);
         req.wait().expect("wait failed");
-        common::check(&world, ok, "recv truncate -> Truncate");
-        if rank == 0 {
-            println!("PASS: recv truncate -> Truncate");
-        }
+        report(&world, rank, ok, "recv truncate -> Truncate");
     }
 
     world.barrier().expect("final barrier failed");

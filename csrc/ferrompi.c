@@ -3326,15 +3326,12 @@ int ferrompi_startall(int64_t count, const int64_t* request_handles) {
 
     // Update handles with post-start state
     for (int64_t i = 0; i < count; i++) {
-        MPI_Request* req = get_request_ptr(request_handles[i]);
-        if (req) {
-            *req = reqs[i];
-            if (ret == MPI_SUCCESS) {
-                int64_t slot = request_slot(request_handles[i]);
-                if (slot >= 0) {
-                    request_state[slot] |= REQUEST_ACTIVE;
-                }
-            }
+        int64_t slot = request_slot(request_handles[i]);
+        if (slot < 0) continue;
+        MPI_Request* req = &request_table[slot];
+        *req = reqs[i];
+        if (ret == MPI_SUCCESS) {
+            request_state[slot] |= REQUEST_ACTIVE;
         }
     }
 

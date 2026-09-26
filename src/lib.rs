@@ -752,8 +752,7 @@ impl Mpi {
         }
         // Reclaim the Box from the static; this is the same allocation MPI just
         // released. We take() here so the static is cleared atomically.
-        let buf = guard.take().expect("guard was Some; take() must succeed");
-        Ok(buf)
+        Ok(guard.take().expect("guard was Some; take() must succeed"))
     }
 }
 

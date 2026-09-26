@@ -45,7 +45,7 @@ fn main() {
     if common::mpi_major() < 4 {
         let ok = matches!(
             mpi.create_from_group(&world_group, "ferrompi-test"),
-            Err(Error::NotSupported(_))
+            Err(Error::NotSupported(op)) if op == "MPI_Comm_create_from_group"
         );
         common::check(&world, ok, "create_from_group refuses below MPI 4");
         return;

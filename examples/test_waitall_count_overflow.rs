@@ -82,8 +82,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let err = Error::from_code(raw_ret);
-    match err {
+    match Error::from_code(raw_ret) {
         Error::Mpi {
             class: MpiErrorClass::Count,
             ..

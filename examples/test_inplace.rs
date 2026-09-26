@@ -329,9 +329,11 @@ fn scatter_init(world: &Communicator) -> Result<()> {
 
 /// Below MPI 4.0, asserts that the four persistent in-place collectives
 /// refuse with `Error::NotSupported` naming themselves, instead of running.
-/// `gather_init_inplace`/`scatter_init_inplace` are root-only calls, so only
-/// rank 0 exercises them; every rank exercises `allgather_init_inplace` and
-/// `alltoall_init_inplace`.
+/// `gather_init_inplace` is root-only: it returns `Error::InvalidOp` on
+/// non-root regardless of MPI version, so only rank 0 exercises its
+/// `NotSupported` refusal. `scatter_init_inplace` has no such guard and
+/// reaches the FFI shim on every rank, so it is exercised on every rank, as
+/// are `allgather_init_inplace` and `alltoall_init_inplace`.
 fn assert_persistent_inplace_not_supported(world: &Communicator) -> Result<()> {
     let rank = world.rank();
     let size = world.size() as usize;
@@ -347,15 +349,11 @@ fn assert_persistent_inplace_not_supported(world: &Communicator) -> Result<()> {
     };
     common::check(world, gather_ok, "gather_init_inplace refuses below MPI 4");
 
-    let scatter_ok = if rank == 0 {
-        let mut data = vec![0i32; size];
-        matches!(
-            world.scatter_init_inplace(&mut data, 0),
-            Err(Error::NotSupported(op)) if op == "scatter_init_inplace"
-        )
-    } else {
-        true
-    };
+    let mut data = vec![0i32; if rank == 0 { size } else { 1 }];
+    let scatter_ok = matches!(
+        world.scatter_init_inplace(&mut data, 0),
+        Err(Error::NotSupported(op)) if op == "scatter_init_inplace"
+    );
     common::check(
         world,
         scatter_ok,

@@ -103,6 +103,14 @@ fn verify_data<T: TestValue>(recv_data: &[T], partner: i32, rank: i32, op_name: 
     }
 }
 
+/// Increment `test_counter` and, on rank 0, print a "PASS: {label}" line.
+fn record_pass(rank: i32, test_counter: &mut i32, label: &str) {
+    *test_counter += 1;
+    if rank == 0 {
+        println!("PASS: {label}");
+    }
+}
+
 /// Test 1: Blocking send/recv with even/odd pairing to avoid deadlock.
 ///
 /// Even ranks send first then receive; odd ranks receive first then send.
@@ -274,26 +282,29 @@ fn run_type_tests<T: ferrompi::MpiDatatype + TestValue>(
     // Test: blocking send/recv
     test_send_recv::<T>(world, rank, size, tag_offset + 10);
     world.barrier().expect("barrier after send/recv failed");
-    *test_counter += 1;
-    if rank == 0 {
-        println!("PASS: send/recv <{}>", T::type_name());
-    }
+    record_pass(
+        rank,
+        test_counter,
+        &format!("send/recv <{}>", T::type_name()),
+    );
 
     // Test: sendrecv
     test_sendrecv::<T>(world, rank, size, tag_offset + 20);
     world.barrier().expect("barrier after sendrecv failed");
-    *test_counter += 1;
-    if rank == 0 {
-        println!("PASS: sendrecv <{}>", T::type_name());
-    }
+    record_pass(
+        rank,
+        test_counter,
+        &format!("sendrecv <{}>", T::type_name()),
+    );
 
     // Test: isend/irecv
     test_isend_irecv::<T>(world, rank, size, tag_offset + 30);
     world.barrier().expect("barrier after isend/irecv failed");
-    *test_counter += 1;
-    if rank == 0 {
-        println!("PASS: isend/irecv <{}>", T::type_name());
-    }
+    record_pass(
+        rank,
+        test_counter,
+        &format!("isend/irecv <{}>", T::type_name()),
+    );
 }
 
 fn main() {
@@ -358,10 +369,7 @@ fn main() {
             );
         }
         world.barrier().expect("barrier after probe::<i32> failed");
-        test_count += 1;
-        if rank == 0 {
-            println!("PASS: probe::<i32>");
-        }
+        record_pass(rank, &mut test_count, "probe::<i32>");
     }
 
     // ========================================================================
@@ -398,10 +406,7 @@ fn main() {
             );
         }
         world.barrier().expect("barrier after iprobe::<i32> failed");
-        test_count += 1;
-        if rank == 0 {
-            println!("PASS: iprobe::<i32>");
-        }
+        record_pass(rank, &mut test_count, "iprobe::<i32>");
     }
 
     // ========================================================================
@@ -445,10 +450,11 @@ fn main() {
         world
             .barrier()
             .expect("barrier after partial element count test failed");
-        test_count += 1;
-        if rank == 0 {
-            println!("PASS: probe of a partial element count reports -1");
-        }
+        record_pass(
+            rank,
+            &mut test_count,
+            "probe of a partial element count reports -1",
+        );
     }
 
     // ========================================================================

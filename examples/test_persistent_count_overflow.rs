@@ -30,7 +30,6 @@ mod common;
 //   - request_handle points to a valid i64 on the stack.
 //   - count = i64::MAX triggers the guard and returns MPI_ERR_COUNT before any
 //     MPI function is called, so no MPI state is modified.
-#[allow(dead_code)]
 extern "C" {
     fn ferrompi_allreduce_init(
         sendbuf: *const std::ffi::c_void,

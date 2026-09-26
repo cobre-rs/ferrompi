@@ -1882,8 +1882,11 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Cancellation
     ///
-    /// Calling `request.cancel()` on an `Rget` request is undefined behavior
-    /// in MPI. The MPI standard discourages cancelling RMA requests.
+    /// Calling [`Request::cancel`] on the returned request returns
+    /// [`Error::NotSupported`] without calling into MPI: `MPI_Cancel` is
+    /// defined by the standard only for point-to-point requests, and both
+    /// MPICH and Open MPI reject it for RMA requests. The request is left
+    /// pending; follow up with [`Request::wait`] as usual.
     ///
     /// # Example
     ///
