@@ -36,12 +36,13 @@ _Static_assert(MAX_REQUESTS % 64 == 0,
 
 // Element count at or below which the batch wait/test/start helpers
 // (ferrompi_waitall/startall/waitany/waitsome/testany/testsome) use an
-// on-stack MPI_Request / index scratch buffer instead of malloc, eliminating
-// per-call heap traffic on the hot completion path. Batches larger
-// than this fall back to a heap allocation. 64 covers the overwhelming
-// majority of real request sets (halo exchange, ping-pong, neighbour
-// collectives) while keeping the worst-case stack footprint small
-// (64 * sizeof(MPI_Request) plus, for waitsome/testsome, 64 * sizeof(int)).
+// on-stack MPI_Request / index / status scratch buffer instead of malloc,
+// eliminating per-call heap traffic on the hot completion path. Batches
+// larger than this fall back to a heap allocation. 64 covers the
+// overwhelming majority of real request sets (halo exchange, ping-pong,
+// neighbour collectives) while keeping the worst-case stack footprint small
+// (64 * sizeof(MPI_Request) plus, for waitall, 64 * sizeof(MPI_Status), and
+// for waitsome/testsome, 64 * sizeof(int)).
 #define FERROMPI_REQ_STACK 64
 
 // Internal resource-exhaustion sentinels, returned when a fixed-size handle
@@ -3115,6 +3116,26 @@ int32_t ferrompi_error_class_index(int error_class) {
  * Request Management
  * ============================================================ */
 
+// Copies each request's post-call MPI_Request value back into its handle's
+// request-table slot, whatever the batch call's return code, and frees the
+// slot when MPI nulled it there, marking done[i]. The caller has already set
+// done[i] for the requests the call itself reported complete — this is what
+// covers persistent requests, since MPI leaves those inactive rather than
+// null on completion. A handle that does not resolve through
+// get_request_ptr (the -1 sentinel, or a stale/bad handle) is skipped.
+static void write_back(int64_t count, const int64_t* handles,
+                        const MPI_Request* reqs, uint8_t* done) {
+    for (int64_t i = 0; i < count; i++) {
+        MPI_Request* req = get_request_ptr(handles[i]);
+        if (!req) continue;
+        *req = reqs[i];
+        if (*req == MPI_REQUEST_NULL) {
+            free_request(handles[i]);
+            done[i] = 1;
+        }
+    }
+}
+
 int ferrompi_wait(int64_t request_handle) {
     MPI_Request* req = get_request_ptr(request_handle);
     if (!req) {
@@ -3148,7 +3169,7 @@ int ferrompi_test(int64_t request_handle, int32_t* flag) {
     return ret;
 }
 
-int ferrompi_waitall(int64_t count, int64_t* request_handles) {
+int ferrompi_waitall(int64_t count, const int64_t* request_handles, uint8_t* done) {
     if (count <= 0) return MPI_SUCCESS;
     if (count > INT_MAX) return MPI_ERR_COUNT;
 
@@ -3157,36 +3178,45 @@ int ferrompi_waitall(int64_t count, int64_t* request_handles) {
     MPI_Request* reqs = (count <= FERROMPI_REQ_STACK)
         ? stack_reqs
         : (MPI_Request*)malloc((size_t)count * sizeof(MPI_Request));
-    if (!reqs) return MPI_ERR_OTHER;
+    if (!reqs) return MPI_ERR_NO_MEM;
+
+    MPI_Status stack_sts[FERROMPI_REQ_STACK];
+    MPI_Status* sts = (count <= FERROMPI_REQ_STACK)
+        ? stack_sts
+        : (MPI_Status*)malloc((size_t)count * sizeof(MPI_Status));
+    if (!sts) {
+        if (reqs != stack_reqs) free(reqs);
+        return MPI_ERR_NO_MEM;
+    }
 
     for (int64_t i = 0; i < count; i++) {
+        done[i] = 0;
         if (request_handles[i] == -1) {
             reqs[i] = MPI_REQUEST_NULL;
             continue;
         }
         MPI_Request* req = get_request_ptr(request_handles[i]);
         if (!req) {
+            if (sts != stack_sts) free(sts);
             if (reqs != stack_reqs) free(reqs);
             return MPI_ERR_REQUEST;
         }
         reqs[i] = *req;
     }
 
-    int ret = MPI_Waitall((int)count, reqs, MPI_STATUSES_IGNORE);
+    int ret = MPI_Waitall((int)count, reqs, sts);
 
-    // Only update handles and free slots on success
-    if (ret == MPI_SUCCESS) {
-        for (int64_t i = 0; i < count; i++) {
-            MPI_Request* req = get_request_ptr(request_handles[i]);
-            if (req) {
-                *req = reqs[i];
-                if (*req == MPI_REQUEST_NULL) {
-                    free_request(request_handles[i]);
-                }
-            }
-        }
+    // Whatever ret is, mark done[i] for every request MPI completed: all of
+    // them on success, or on MPI_ERR_IN_STATUS the ones whose own status
+    // error is not MPI_ERR_PENDING (MPICH stops at the first failure and
+    // reports the rest pending; Open MPI completes them all).
+    for (int64_t i = 0; i < count; i++) {
+        done[i] = (ret == MPI_SUCCESS)
+            || (ret == MPI_ERR_IN_STATUS && sts[i].MPI_ERROR != MPI_ERR_PENDING);
     }
+    write_back(count, request_handles, reqs, done);
 
+    if (sts != stack_sts) free(sts);
     if (reqs != stack_reqs) free(reqs);
     return ret;
 }
@@ -3197,7 +3227,7 @@ int ferrompi_start(int64_t request_handle) {
     return MPI_Start(req);
 }
 
-int ferrompi_startall(int64_t count, int64_t* request_handles) {
+int ferrompi_startall(int64_t count, const int64_t* request_handles) {
     if (count <= 0) return MPI_SUCCESS;
     if (count > INT_MAX) return MPI_ERR_COUNT;
 
@@ -3258,7 +3288,8 @@ int ferrompi_cancel(int64_t request_handle) {
     return MPI_Cancel(req);
 }
 
-int ferrompi_waitany(int64_t count, int64_t* request_handles, int32_t* index) {
+int ferrompi_waitany(int64_t count, const int64_t* request_handles,
+                     int32_t* index, uint8_t* done) {
     if (count <= 0) { *index = -1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
@@ -3267,6 +3298,7 @@ int ferrompi_waitany(int64_t count, int64_t* request_handles, int32_t* index) {
         : (MPI_Request*)malloc((size_t)count * sizeof(MPI_Request));
     if (!reqs) return MPI_ERR_NO_MEM;
     for (int64_t i = 0; i < count; i++) {
+        done[i] = 0;
         if (request_handles[i] == -1) {
             reqs[i] = MPI_REQUEST_NULL;
             continue;
@@ -3275,26 +3307,19 @@ int ferrompi_waitany(int64_t count, int64_t* request_handles, int32_t* index) {
         if (!req) { if (reqs != stack_reqs) free(reqs); return MPI_ERR_REQUEST; }
         reqs[i] = *req;
     }
-    int idx;
+    int idx = MPI_UNDEFINED;
     int ret = MPI_Waitany((int)count, reqs, &idx, MPI_STATUS_IGNORE);
-    if (ret == MPI_SUCCESS) {
-        for (int64_t i = 0; i < count; i++) {
-            MPI_Request* req = get_request_ptr(request_handles[i]);
-            if (req) {
-                *req = reqs[i];
-                if (*req == MPI_REQUEST_NULL) {
-                    free_request(request_handles[i]);
-                }
-            }
-        }
-        *index = (idx == MPI_UNDEFINED) ? -1 : (int32_t)idx;
+    if (idx != MPI_UNDEFINED) {
+        done[idx] = 1;
     }
+    *index = (idx == MPI_UNDEFINED) ? -1 : (int32_t)idx;
+    write_back(count, request_handles, reqs, done);
     if (reqs != stack_reqs) free(reqs);
     return ret;
 }
 
-int ferrompi_waitsome(int64_t count, int64_t* request_handles,
-                      int64_t* outcount, int32_t* indices) {
+int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
+                      int64_t* outcount, int32_t* indices, uint8_t* done) {
     if (count <= 0) { *outcount = -1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
@@ -3308,6 +3333,7 @@ int ferrompi_waitsome(int64_t count, int64_t* request_handles,
         : (int*)malloc((size_t)count * sizeof(int));
     if (!tmp_indices) { if (reqs != stack_reqs) free(reqs); return MPI_ERR_NO_MEM; }
     for (int64_t i = 0; i < count; i++) {
+        done[i] = 0;
         if (request_handles[i] == -1) {
             reqs[i] = MPI_REQUEST_NULL;
             continue;
@@ -3320,34 +3346,25 @@ int ferrompi_waitsome(int64_t count, int64_t* request_handles,
         }
         reqs[i] = *req;
     }
-    int out;
+    int out = MPI_UNDEFINED;
     int ret = MPI_Waitsome((int)count, reqs, &out, tmp_indices, MPI_STATUSES_IGNORE);
-    if (ret == MPI_SUCCESS) {
-        if (out == MPI_UNDEFINED) {
-            *outcount = -1;
-        } else {
-            *outcount = (int64_t)out;
-            for (int i = 0; i < out; i++) {
-                indices[i] = (int32_t)tmp_indices[i];
-            }
-        }
-        for (int64_t i = 0; i < count; i++) {
-            MPI_Request* req = get_request_ptr(request_handles[i]);
-            if (req) {
-                *req = reqs[i];
-                if (*req == MPI_REQUEST_NULL) {
-                    free_request(request_handles[i]);
-                }
-            }
+    if (out == MPI_UNDEFINED) {
+        *outcount = -1;
+    } else {
+        *outcount = (int64_t)out;
+        for (int i = 0; i < out; i++) {
+            indices[i] = (int32_t)tmp_indices[i];
+            done[tmp_indices[i]] = 1;
         }
     }
+    write_back(count, request_handles, reqs, done);
     if (tmp_indices != stack_idx) free(tmp_indices);
     if (reqs != stack_reqs) free(reqs);
     return ret;
 }
 
-int ferrompi_testany(int64_t count, int64_t* request_handles,
-                     int32_t* index, int32_t* flag) {
+int ferrompi_testany(int64_t count, const int64_t* request_handles,
+                     int32_t* index, int32_t* flag, uint8_t* done) {
     if (count <= 0) { *flag = 1; *index = -1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
@@ -3356,6 +3373,7 @@ int ferrompi_testany(int64_t count, int64_t* request_handles,
         : (MPI_Request*)malloc((size_t)count * sizeof(MPI_Request));
     if (!reqs) return MPI_ERR_NO_MEM;
     for (int64_t i = 0; i < count; i++) {
+        done[i] = 0;
         if (request_handles[i] == -1) {
             reqs[i] = MPI_REQUEST_NULL;
             continue;
@@ -3364,30 +3382,21 @@ int ferrompi_testany(int64_t count, int64_t* request_handles,
         if (!req) { if (reqs != stack_reqs) free(reqs); return MPI_ERR_REQUEST; }
         reqs[i] = *req;
     }
-    int idx;
-    int f;
+    int idx = MPI_UNDEFINED;
+    int f = 0;
     int ret = MPI_Testany((int)count, reqs, &idx, &f, MPI_STATUS_IGNORE);
-    if (ret == MPI_SUCCESS) {
-        *flag = (int32_t)f;
-        if (f) {
-            for (int64_t i = 0; i < count; i++) {
-                MPI_Request* req = get_request_ptr(request_handles[i]);
-                if (req) {
-                    *req = reqs[i];
-                    if (*req == MPI_REQUEST_NULL) {
-                        free_request(request_handles[i]);
-                    }
-                }
-            }
-            *index = (idx == MPI_UNDEFINED) ? -1 : (int32_t)idx;
-        }
+    if (f && idx != MPI_UNDEFINED) {
+        done[idx] = 1;
     }
+    *flag = (int32_t)f;
+    *index = (idx == MPI_UNDEFINED) ? -1 : (int32_t)idx;
+    write_back(count, request_handles, reqs, done);
     if (reqs != stack_reqs) free(reqs);
     return ret;
 }
 
-int ferrompi_testsome(int64_t count, int64_t* request_handles,
-                      int64_t* outcount, int32_t* indices) {
+int ferrompi_testsome(int64_t count, const int64_t* request_handles,
+                      int64_t* outcount, int32_t* indices, uint8_t* done) {
     if (count <= 0) { *outcount = -1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
@@ -3401,6 +3410,7 @@ int ferrompi_testsome(int64_t count, int64_t* request_handles,
         : (int*)malloc((size_t)count * sizeof(int));
     if (!tmp_indices) { if (reqs != stack_reqs) free(reqs); return MPI_ERR_NO_MEM; }
     for (int64_t i = 0; i < count; i++) {
+        done[i] = 0;
         if (request_handles[i] == -1) {
             reqs[i] = MPI_REQUEST_NULL;
             continue;
@@ -3413,27 +3423,18 @@ int ferrompi_testsome(int64_t count, int64_t* request_handles,
         }
         reqs[i] = *req;
     }
-    int out;
+    int out = MPI_UNDEFINED;
     int ret = MPI_Testsome((int)count, reqs, &out, tmp_indices, MPI_STATUSES_IGNORE);
-    if (ret == MPI_SUCCESS) {
-        if (out == MPI_UNDEFINED) {
-            *outcount = -1;
-        } else {
-            *outcount = (int64_t)out;
-            for (int i = 0; i < out; i++) {
-                indices[i] = (int32_t)tmp_indices[i];
-            }
-        }
-        for (int64_t i = 0; i < count; i++) {
-            MPI_Request* req = get_request_ptr(request_handles[i]);
-            if (req) {
-                *req = reqs[i];
-                if (*req == MPI_REQUEST_NULL) {
-                    free_request(request_handles[i]);
-                }
-            }
+    if (out == MPI_UNDEFINED) {
+        *outcount = -1;
+    } else {
+        *outcount = (int64_t)out;
+        for (int i = 0; i < out; i++) {
+            indices[i] = (int32_t)tmp_indices[i];
+            done[tmp_indices[i]] = 1;
         }
     }
+    write_back(count, request_handles, reqs, done);
     if (tmp_indices != stack_idx) free(tmp_indices);
     if (reqs != stack_reqs) free(reqs);
     return ret;

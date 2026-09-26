@@ -178,7 +178,10 @@ impl PersistentRequest {
         let ret = crate::request::with_handles(
             requests,
             |r| r.handle,
-            |handles| unsafe { ffi::ferrompi_startall(handles.len() as i64, handles.as_mut_ptr()) },
+            |handles, _done| unsafe {
+                ffi::ferrompi_startall(handles.len() as i64, handles.as_ptr())
+            },
+            |_| {},
         );
         Error::check_with_op(ret, "startall")?;
 
@@ -191,25 +194,25 @@ impl PersistentRequest {
     }
 
     /// Wait for all persistent operations to complete.
+    ///
+    /// Whatever the result, every request MPI completed is marked inactive
+    /// in place; the others stay active. This is the same policy
+    /// [`Request::wait_all`](crate::Request::wait_all) applies.
     pub fn wait_all(requests: &mut [PersistentRequest]) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
         }
-        Error::check_with_op(rt::enter(), "waitall")?;
 
-        // Mark all inactive BEFORE the FFI call: MPI_Waitall consumes every
-        // request handle regardless of whether it reports an error, so Drop
-        // must not attempt a second MPI_Wait on any of them. (Marking inactive
-        // first does not change the handle values read below.)
-        for req in requests.iter_mut() {
-            req.active = false;
-        }
         // SAFETY: with_handles provides a valid, contiguous [i64] of the
-        // persistent-request handles whose length we pass as count.
+        // persistent-request handles and a same-length [u8] done buffer, both
+        // sized to the count we pass.
         let ret = crate::request::with_handles(
             requests,
             |r| r.handle,
-            |handles| unsafe { ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr()) },
+            |handles, done| unsafe {
+                ffi::ferrompi_waitall(handles.len() as i64, handles.as_ptr(), done.as_mut_ptr())
+            },
+            |r| r.active = false,
         );
         Error::check_with_op(ret, "waitall")
     }

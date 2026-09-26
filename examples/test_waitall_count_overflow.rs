@@ -22,11 +22,13 @@ use ferrompi::{Error, Mpi, MpiErrorClass};
 // SAFETY invariants for the call below:
 //   - request_handles may point to a stack i64 when count is rejected before
 //     the loop body; the guard returns before dereferencing the array.
+//   - done may point to a stack u8 for the same reason; the guard returns
+//     before the array is zeroed.
 //   - count = i64::MAX triggers the guard and returns MPI_ERR_COUNT before any
 //     MPI function or malloc is called, so no MPI state is modified.
 #[allow(dead_code)]
 extern "C" {
-    fn ferrompi_waitall(count: i64, request_handles: *mut i64) -> std::ffi::c_int;
+    fn ferrompi_waitall(count: i64, request_handles: *const i64, done: *mut u8) -> std::ffi::c_int;
 }
 
 fn main() {
@@ -48,15 +50,17 @@ fn main() {
     // request handle is needed.
     // ========================================================================
 
-    // A stack i64 as a dummy request_handles pointer; the guard returns before
-    // the loop body ever dereferences it.
-    let mut dummy_handle: i64 = -1;
+    // A stack i64 as a dummy request_handles pointer, and a stack u8 as a
+    // dummy done pointer; the guard returns before either is dereferenced.
+    let dummy_handle: i64 = -1;
+    let mut dummy_done: u8 = 0;
 
     let raw_ret = unsafe {
         // SAFETY: see the invariant comment on the extern "C" block above.
         ferrompi_waitall(
             i64::MAX, // count >> INT_MAX — must be rejected by the C guard
-            std::ptr::addr_of_mut!(dummy_handle),
+            std::ptr::addr_of!(dummy_handle),
+            std::ptr::addr_of_mut!(dummy_done),
         )
     };
 
