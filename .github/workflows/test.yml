@@ -83,6 +83,9 @@ jobs:
             echo "OMPI_ALLOW_RUN_AS_ROOT=1"
             echo "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
             echo "OMPI_MCA_btl=self,tcp"
+            # The runner's docker0 + NAT rule gives Open MPI 4.1's TCP BTL a second,
+            # misrouted path to same-host peers; persistent sends then hang.
+            echo "OMPI_MCA_btl_tcp_if_include=lo"
           } >> "$GITHUB_ENV"
 
       - name: Check formatting
