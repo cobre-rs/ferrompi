@@ -141,7 +141,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-08 | Finalize sweep frees active requests / collectively frees windows | minor | reading | 0.5.x | fixed (8c8bf37) for the window sweep; request sweep planned (ferrompi-0.5.x-hardening) |
 | COR-09 | `-1` = PROC_NULL (MPICH) vs ANY_SOURCE (Open MPI) | minor | repro | 0.6 | open |
 | COR-10 | `cancel()` allowed on collective/RMA requests | minor | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
-| COR-11 | `LongDoubleInt`/`LongInt` layout wrong on macOS arm64 / Windows | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening: target gating); per-target layouts open (0.6) |
+| COR-11 | `LongDoubleInt`/`LongInt` layout wrong on macOS arm64 / Windows | minor | reading | 0.5.x | fixed (3a01966): target gating; per-target layouts open (0.6) |
 | COR-12 | Pre-MPI-4 stubs never yield `NotSupported`; 3 contradicting docs | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-13 | `Win::sync` rustdoc wrong; example fails on MPICH | minor | repro | 0.5.x docs / 0.6 API | planned (ferrompi-0.5.x-hardening: docs); sync on lock guards open (0.6) |
 | COR-14 | `MPI_UNDEFINED` from `MPI_Get_count` leaks; rc ignored | nit | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |

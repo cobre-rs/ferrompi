@@ -38,7 +38,6 @@ Building the C programs:
 ```bash
 mpicc c-shim/c/pair_type_extents.c    -o ext  && mpiexec -n 1 ./ext
 mpicc c-shim/c/gfree.c                -o gfree && mpiexec -n 1 ./gfree
-clang --target=aarch64-apple-darwin -c c-shim/c/ldi.c -o ldi.o && llvm-nm -S ldi.o   # symbol sizes = sizeof/_Alignof
 cc -std=gnu11 -O2 -pthread perf/c/request_table_bench.c -o tab          # current bitmap table
 cc -std=gnu11 -O2 -pthread -DPLAIN perf/c/request_table_bench.c -o tabp # plain stores (single-thread levels)
 cc -std=gnu11 -O2 -pthread -DDENSE perf/c/request_table_bench.c -o tabd # pre-v0.4 dense CAS table
@@ -90,7 +89,6 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 | `c-shim/src/bin/t15_err_after_finalize.rs` | VER (late request drop, error string after finalize) | An `irecv` request outlives `Mpi`; `wait()` is called after finalize | np=1 | Returns `Err` with a readable message and prints `SURVIVED`. The table sweep makes late request use harmless, and `MPI_Error_class`/`Error_string` work after finalize on MPICH | Unchanged, or a clearer "finalized" error once COR-07 lands |
 | `c-shim/src/bin/t16_cancel_coll.rs` | COR-10 | `cancel()` on an `iallreduce` request | np=2 | rank 0: `Err "Attempt to cancel an unknown type of request"` from MPICH | ferrompi refuses cancel on non-point-to-point requests with a typed error, without calling MPI |
 | `c-shim/c/pair_type_extents.c` | VER (pair layouts), COR-11 baseline | Prints lb, extent and size of the MPI value+index pair types (`MPI_FLOAT_INT` … `MPI_LONG_DOUBLE_INT`) | `mpicc`; np=1 | x86_64 Linux MPICH: FLOAT_INT 8, DOUBLE_INT 16, LONG_INT 16, 2INT 8, SHORT_INT 8, LONG_DOUBLE_INT 32. All match the Rust `#[repr(C)]` sizes in `src/datatype.rs` | Unchanged on Linux |
-| `c-shim/c/ldi.c` | COR-11 | Compile-only layout probe: symbol sizes equal `sizeof`/`_Alignof` of `{long double; int}` and `{long; int}` | `clang --target=aarch64-apple-darwin -c` (also `x86_64-pc-windows-msvc`), then `llvm-nm -S` | aarch64-apple-darwin: `{long double;int}` is 16 bytes, 8-byte aligned, versus Rust `LongDoubleInt` at 32 bytes, 16-byte aligned. MSVC: `long` is 4 bytes, so `LongInt` differs too | Per-target Rust layouts, or C `_Static_assert` size checks |
 | `c-shim/c/gfree.c` | VER | `MPI_Group_free(MPI_GROUP_EMPTY)` in plain C | `mpicc`; np=1 | MPICH accepts it (rc=0) | Reference only |
 
 ### requests/: request-slot reuse and error classes (default features)
