@@ -813,50 +813,29 @@ mod tests {
 
     // ── Mpi::buffer_attach / buffer_detach unit tests ─────────────────────
 
-    /// Calling buffer_attach twice (without a detach in between) must return
-    /// Err(Error::InvalidOp).  We test against the static ATTACHED_BUFFER
-    /// directly by calling the method twice with a stub Mpi.  The first call
-    /// will reach MPI (and may fail for various reasons in a non-MPI test
-    /// environment), so we only rely on the second call returning InvalidOp.
-    /// To avoid touching MPI at all we seed the static manually.
+    /// Both guard paths of the attached-buffer static in one test, so no other
+    /// test can interleave with the shared state: detach with nothing attached
+    /// and attach while a buffer is attached both return `Err(InvalidOp)`
+    /// without reaching MPI (the static is seeded directly).
     #[test]
-    fn buffer_attach_double_attach_returns_invalid_op() {
-        // Seed the static to simulate an already-attached buffer.
-        {
-            let mut g = ATTACHED_BUFFER.lock().unwrap();
-            if g.is_none() {
-                *g = Some(vec![0u8; 4].into_boxed_slice());
-            }
-        }
-
+    fn buffer_attach_detach_guards_return_invalid_op() {
         let mpi = stub_mpi();
-        let buf2 = vec![0u8; 8].into_boxed_slice();
-        let result = mpi.buffer_attach(buf2);
-        assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "expected Err(InvalidOp) on double attach, got: {result:?}"
-        );
 
-        // Clean up: remove the seeded entry so other tests are unaffected.
-        ATTACHED_BUFFER.lock().unwrap().take();
-    }
-
-    /// Calling buffer_detach with no buffer attached must return
-    /// Err(Error::InvalidOp).
-    #[test]
-    fn buffer_detach_without_attach_returns_invalid_op() {
-        // Ensure the static is empty.
-        {
-            let mut g = ATTACHED_BUFFER.lock().unwrap();
-            *g = None;
-        }
-
-        let mpi = stub_mpi();
+        *ATTACHED_BUFFER.lock().unwrap() = None;
         let result = mpi.buffer_detach();
         assert!(
             matches!(result, Err(Error::InvalidOp)),
             "expected Err(InvalidOp) on detach without attach, got: {result:?}"
         );
+
+        *ATTACHED_BUFFER.lock().unwrap() = Some(vec![0u8; 4].into_boxed_slice());
+        let result = mpi.buffer_attach(vec![0u8; 8].into_boxed_slice());
+        assert!(
+            matches!(result, Err(Error::InvalidOp)),
+            "expected Err(InvalidOp) on double attach, got: {result:?}"
+        );
+
+        ATTACHED_BUFFER.lock().unwrap().take();
     }
 
     // ── Mpi::create_from_group unit tests ─────────────────────────────────
