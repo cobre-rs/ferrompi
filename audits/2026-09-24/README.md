@@ -119,7 +119,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | SND-07 | V-collectives don't validate counts/displs vs size and buffer | critical | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | SND-08 | `*_custom` p2p: unbounded `T`, unchecked extent | critical | repro | 0.5.x (D-7) | planned (ferrompi-0.5.x-hardening) |
 | SND-09 | RMA target range / origin count unvalidated (remote OOB write) | critical | repro | 0.5.x (D-11) | planned (ferrompi-0.5.x-hardening) |
-| SND-10 | Window memory used after finalize | critical | repro | 0.5.x (D-8) | planned (ferrompi-0.5.x-hardening) |
+| SND-10 | Window memory used after finalize | critical | repro | 0.5.x (D-8) | fixed (90d9544) |
 | SND-11 | `Communicator` Send+Sync regardless of thread level | critical | repro | 0.5.x (D-3, D-9) | fixed (49cb30c) |
 | SND-12 | Uninitialised window memory exposed as `&[T]` | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | SND-13 | `SharedWindow` slices over concurrently-written memory (observed miscompile) | critical | repro | 0.6 (D-5); 0.5.x doc warning | planned (ferrompi-0.5.x-hardening: doc warning); API fix open (0.6) |
@@ -155,7 +155,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | ARC-01 | C handle tables are the root cause of ABA, per-request cost, caps, sweep | major | two-way (large) | 0.7 (D-2) | open |
 | ARC-02 | Non-additive `rma` feature; no `#[non_exhaustive]` anywhere | major | one-way | 0.6 | planned (ferrompi-0.5.x-hardening: #[non_exhaustive] on Error); rest open (0.6) |
 | ARC-03 | Shim representation in public API (`raw_handle`, discriminant contract, pub `from_code`) | major | one-way | 0.6 | open |
-| ARC-04 | Handles not tied to `Mpi` lifetime | major | mixed | 0.5.x guards / 0.6 | planned (ferrompi-0.5.x-hardening: runtime guards); lifetime parameter open (0.6) |
+| ARC-04 | Handles not tied to `Mpi` lifetime | major | mixed | 0.5.x guards / 0.6 | fixed (90d9544): runtime guards; lifetime parameter open (0.6) |
 | ARC-05 | Thread-safety model inconsistent | major | mixed | 0.5.x (D-3) | fixed (49cb30c) |
 | ARC-06 | Buffer-safety model (umbrella SND-01…05) | critical | one-way | 0.6 (D-1) | open |
 | ARC-07 | Ops and datatypes not parameters | major | one-way | 0.6 | open |
