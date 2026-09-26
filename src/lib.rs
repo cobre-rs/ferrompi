@@ -220,7 +220,7 @@ pub use comm::{Communicator, SplitType};
 pub use datatype::AtomicMpiDatatype;
 pub use datatype::{
     BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, LongDoubleInt, LongInt, MpiDatatype,
-    MpiIndexedDatatype, ShortInt,
+    MpiIndexedDatatype, PlainData, ShortInt,
 };
 pub use datatype_builder::{CustomDatatype, StructField};
 pub use error::{Error, MpiErrorClass, ResourceKind, Result};

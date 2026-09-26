@@ -1,7 +1,7 @@
 //! Point-to-point communication: send, recv, isend, irecv, sendrecv, probe, iprobe.
 
 use crate::comm::Communicator;
-use crate::datatype::{buf, buf_mut, MpiDatatype};
+use crate::datatype::{buf, buf_mut, MpiDatatype, PlainData};
 use crate::datatype_builder::CustomDatatype;
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -336,8 +336,9 @@ impl Communicator {
     /// Send a slice of values to another process using a committed custom datatype.
     ///
     /// This is the custom-datatype counterpart of [`send`](Self::send). The element
-    /// type `T` is unbounded — the caller is responsible for ensuring that
-    /// `buf` has the layout expected by `datatype`. A mismatch produces a
+    /// type `T` must satisfy the [`PlainData`](crate::PlainData) bound; the caller
+    /// is still responsible for ensuring that `buf` has the layout expected by
+    /// `datatype`. A mismatch produces a
     /// well-defined `MPI_ERR_TRUNCATE` error (or another `MPI` error class),
     /// not memory unsafety, provided `buf` is a valid `&[T]`.
     ///
@@ -355,7 +356,10 @@ impl Communicator {
     /// # let _mpi = Mpi::init().unwrap();
     /// # let world = _mpi.world();
     /// #[repr(C)]
+    /// #[derive(Clone, Copy)]
     /// struct Pair { v: f64, i: i32 }
+    /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
+    /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
     ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
     ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
@@ -363,7 +367,7 @@ impl Communicator {
     /// let buf = [Pair { v: 1.23456789, i: 42 }];
     /// world.send_custom(&buf, &dt, 1, 0).unwrap();
     /// ```
-    pub fn send_custom<T>(
+    pub fn send_custom<T: PlainData>(
         &self,
         buf: &[T],
         datatype: &CustomDatatype,
@@ -388,8 +392,9 @@ impl Communicator {
     /// Receive a slice of values from another process using a committed custom datatype.
     ///
     /// This is the custom-datatype counterpart of [`recv`](Self::recv). The element
-    /// type `T` is unbounded — the caller is responsible for ensuring that
-    /// `buf` has the layout expected by `datatype`. A mismatch produces a
+    /// type `T` must satisfy the [`PlainData`](crate::PlainData) bound; the caller
+    /// is still responsible for ensuring that `buf` has the layout expected by
+    /// `datatype`. A mismatch produces a
     /// well-defined `MPI_ERR_TRUNCATE` error (or another `MPI` error class),
     /// not memory unsafety, provided `buf` is a valid `&mut [T]`.
     ///
@@ -411,6 +416,8 @@ impl Communicator {
     /// #[repr(C)]
     /// #[derive(Clone, Copy)]
     /// struct Pair { v: f64, i: i32 }
+    /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
+    /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
     ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
     ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
@@ -419,7 +426,7 @@ impl Communicator {
     /// let status = world.recv_custom(&mut buf, &dt, 0, 0).unwrap();
     /// assert_eq!(status.count, 1);
     /// ```
-    pub fn recv_custom<T>(
+    pub fn recv_custom<T: PlainData>(
         &self,
         buf: &mut [T],
         datatype: &CustomDatatype,
@@ -431,7 +438,8 @@ impl Communicator {
         let mut actual_count: i64 = 0;
 
         // SAFETY: buf.as_mut_ptr() is exclusively writable for buf.len() elements; datatype.handle
-        // is an owned, committed CustomDatatype; the buffer outlives this blocking call.
+        // is an owned, committed CustomDatatype; the buffer outlives this blocking call; the
+        // PlainData bound on T makes any bytes MPI writes a valid T.
         let ret = unsafe {
             ffi::ferrompi_recv_custom(
                 buf.as_mut_ptr().cast::<std::ffi::c_void>(),
@@ -459,8 +467,9 @@ impl Communicator {
     /// send buffer **must not be modified** until the request is completed via
     /// [`Request::wait()`] or [`Request::test()`].
     ///
-    /// The element type `T` is unbounded — the caller is responsible for
-    /// ensuring that `buf` has the layout expected by `datatype`.
+    /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound;
+    /// the caller is still responsible for ensuring that `buf` has the layout
+    /// expected by `datatype`.
     ///
     /// # Arguments
     ///
@@ -476,7 +485,10 @@ impl Communicator {
     /// # let _mpi = Mpi::init().unwrap();
     /// # let world = _mpi.world();
     /// #[repr(C)]
+    /// #[derive(Clone, Copy)]
     /// struct Pair { v: f64, i: i32 }
+    /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
+    /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
     ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
     ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
@@ -485,7 +497,7 @@ impl Communicator {
     /// let req = world.isend_custom(&buf, &dt, 1, 0).unwrap();
     /// req.wait().unwrap();
     /// ```
-    pub fn isend_custom<T>(
+    pub fn isend_custom<T: PlainData>(
         &self,
         buf: &[T],
         datatype: &CustomDatatype,
@@ -518,8 +530,9 @@ impl Communicator {
     ///
     /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
     ///
-    /// The element type `T` is unbounded — the caller is responsible for
-    /// ensuring that `buf` has the layout expected by `datatype`.
+    /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound;
+    /// the caller is still responsible for ensuring that `buf` has the layout
+    /// expected by `datatype`.
     ///
     /// # Arguments
     ///
@@ -537,6 +550,8 @@ impl Communicator {
     /// #[repr(C)]
     /// #[derive(Clone, Copy)]
     /// struct Pair { v: f64, i: i32 }
+    /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
+    /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
     ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
     ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
@@ -545,7 +560,7 @@ impl Communicator {
     /// let req = world.irecv_custom(&mut buf, &dt, 0, 0).unwrap();
     /// req.wait().unwrap();
     /// ```
-    pub fn irecv_custom<T>(
+    pub fn irecv_custom<T: PlainData>(
         &self,
         buf: &mut [T],
         datatype: &CustomDatatype,
@@ -555,7 +570,7 @@ impl Communicator {
         let mut request_handle: i64 = 0;
         // SAFETY: buf.as_mut_ptr() is exclusively writable for buf.len() elements; datatype.handle
         // is an owned, committed CustomDatatype; the caller must not read the buffer until
-        // Request completion.
+        // Request completion; the PlainData bound on T makes any bytes MPI writes a valid T.
         let ret = unsafe {
             ffi::ferrompi_irecv_custom(
                 buf.as_mut_ptr().cast::<std::ffi::c_void>(),

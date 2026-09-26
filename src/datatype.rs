@@ -137,6 +137,53 @@ pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {
     const TAG: DatatypeTag;
 }
 
+/// Bound for the element type of the custom-datatype point-to-point methods
+/// ([`Communicator::send_custom`](crate::Communicator::send_custom),
+/// [`recv_custom`](crate::Communicator::recv_custom),
+/// [`isend_custom`](crate::Communicator::isend_custom) and
+/// [`irecv_custom`](crate::Communicator::irecv_custom)).
+///
+/// # Safety
+///
+/// Implementors guarantee that every bit pattern of `size_of::<Self>()`
+/// bytes is a valid `Self`. The type must therefore have no references, no
+/// raw pointers that MPI's write could invalidate, no `Box`, `Vec`, `bool`,
+/// `char`, enum, or `NonZero*` fields. Padding bytes are allowed. The type
+/// should be `#[repr(C)]` so its layout matches the datatype built for it.
+///
+/// This trait is blanket-implemented for every [`MpiDatatype`] and for
+/// fixed-size arrays `[T; N]` of any `PlainData` type.
+///
+/// # Example
+///
+/// ```compile_fail
+/// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi};
+/// # let _mpi = Mpi::init().unwrap();
+/// # let world = _mpi.world();
+/// let dt8 = CustomDatatype::contiguous(8, DatatypeTag::U8).unwrap();
+/// let mut boxes: [Box<u64>; 1] = [Box::new(5)];
+/// world.recv_custom(&mut boxes, &dt8, 0, 2).unwrap();
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, PlainData};
+/// #[repr(C)]
+/// #[derive(Clone, Copy)]
+/// struct Pair { v: f64, i: i32 }
+/// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
+/// unsafe impl PlainData for Pair {}
+/// # let _mpi = Mpi::init().unwrap();
+/// # let world = _mpi.world();
+/// let dt8 = CustomDatatype::contiguous(8, DatatypeTag::U8).unwrap();
+/// let mut boxes: [Pair; 1] = [Pair { v: 0.0, i: 0 }];
+/// world.recv_custom(&mut boxes, &dt8, 0, 2).unwrap();
+/// ```
+pub unsafe trait PlainData: Copy + 'static {}
+// SAFETY: every MpiDatatype is a primitive integer or float, and any bit pattern of its size is a valid value.
+unsafe impl<T: MpiDatatype> PlainData for T {}
+// SAFETY: an array of plain data is plain data — its bytes are exactly N back-to-back elements, each valid for any bit pattern.
+unsafe impl<T: PlainData, const N: usize> PlainData for [T; N] {}
+
 /// Describes a typed slice for MPI FFI as `(pointer, count, tag)`.
 ///
 /// The pointer is valid for `s.len()` elements of `T` for as long as the
@@ -446,7 +493,7 @@ mod tests {
     use super::AtomicMpiDatatype;
     use super::{
         BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, LongDoubleInt, LongInt,
-        MpiDatatype, MpiIndexedDatatype, ShortInt,
+        MpiDatatype, MpiIndexedDatatype, PlainData, ShortInt,
     };
 
     #[test]
@@ -493,6 +540,20 @@ mod tests {
         assert_byte_permutable::<i32>();
         assert_byte_permutable::<i64>();
         assert_byte_permutable::<[u64; 4]>();
+    }
+
+    #[test]
+    fn plain_data_implemented_for_mpi_datatypes() {
+        fn assert_plain<T: PlainData>() {}
+        assert_plain::<f32>();
+        assert_plain::<f64>();
+        assert_plain::<i32>();
+        assert_plain::<i64>();
+        assert_plain::<u8>();
+        assert_plain::<u32>();
+        assert_plain::<u64>();
+        assert_plain::<[f64; 3]>();
+        assert_plain::<[[i32; 2]; 4]>();
     }
 
     #[test]

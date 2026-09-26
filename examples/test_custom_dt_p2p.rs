@@ -13,7 +13,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_custom_dt_p2p
 // mpi-test: np=2
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, StructField};
+use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, PlainData, StructField};
 
 mod common;
 
@@ -27,6 +27,9 @@ struct Pair {
     v: f64,
     i: i32,
 }
+
+// SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
+unsafe impl PlainData for Pair {}
 
 /// Build the custom datatype for `Pair`.
 fn make_pair_datatype() -> CustomDatatype {
