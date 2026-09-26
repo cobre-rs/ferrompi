@@ -3028,6 +3028,38 @@ int ferrompi_error_info(int code, int32_t* error_class, char* message, int32_t* 
     return MPI_SUCCESS;
 }
 
+/* Error class VALUES are not fixed by the MPI standard (only MPI_SUCCESS = 0
+ * is); MPICH-derived and Open MPI libraries number the rest differently.
+ * This compares `error_class` against the linked library's own MPI_ERR_*
+ * constants and returns a ferrompi-stable index in MpiErrorClass's Rust
+ * declaration order, or -1 if unrecognized. It makes no MPI call. */
+int32_t ferrompi_error_class_index(int error_class) {
+    if (error_class == MPI_SUCCESS) return 0;
+    if (error_class == MPI_ERR_BUFFER) return 1;
+    if (error_class == MPI_ERR_COUNT) return 2;
+    if (error_class == MPI_ERR_TYPE) return 3;
+    if (error_class == MPI_ERR_TAG) return 4;
+    if (error_class == MPI_ERR_COMM) return 5;
+    if (error_class == MPI_ERR_RANK) return 6;
+    if (error_class == MPI_ERR_REQUEST) return 7;
+    if (error_class == MPI_ERR_ROOT) return 8;
+    if (error_class == MPI_ERR_GROUP) return 9;
+    if (error_class == MPI_ERR_OP) return 10;
+    if (error_class == MPI_ERR_TOPOLOGY) return 11;
+    if (error_class == MPI_ERR_DIMS) return 12;
+    if (error_class == MPI_ERR_ARG) return 13;
+    if (error_class == MPI_ERR_UNKNOWN) return 14;
+    if (error_class == MPI_ERR_TRUNCATE) return 15;
+    if (error_class == MPI_ERR_OTHER) return 16;
+    if (error_class == MPI_ERR_INTERN) return 17;
+    if (error_class == MPI_ERR_IN_STATUS) return 18;
+    if (error_class == MPI_ERR_PENDING) return 19;
+    if (error_class == MPI_ERR_WIN) return 20;
+    if (error_class == MPI_ERR_INFO) return 21;
+    if (error_class == MPI_ERR_FILE) return 22;
+    return -1;
+}
+
 /* ============================================================
  * Request Management
  * ============================================================ */
@@ -4204,10 +4236,3 @@ int ferrompi_allreduce_user_op(
     return MPI_Allreduce(sendbuf, recvbuf, (int)count, dt, op, comm);
 }
 
-/* ============================================================
- * Error Class Constants
- * ============================================================ */
-
-int32_t ferrompi_err_file(void)  { return MPI_ERR_FILE; }
-int32_t ferrompi_err_info(void)  { return MPI_ERR_INFO; }
-int32_t ferrompi_err_win(void)   { return MPI_ERR_WIN; }

@@ -3,25 +3,7 @@
 //! This module provides structured MPI error handling with error class
 //! categorization and human-readable messages obtained from the MPI runtime.
 
-use std::sync::OnceLock;
-
 use crate::ffi;
-
-/// Cached implementation-specific MPI error class values.
-/// Returns (MPI_ERR_FILE, MPI_ERR_INFO, MPI_ERR_WIN) from the C layer.
-fn impl_error_classes() -> (i32, i32, i32) {
-    static CLASSES: OnceLock<(i32, i32, i32)> = OnceLock::new();
-    // SAFETY: these three functions take no arguments and return a compile-time
-    // MPI_ERR_* constant; there is no pointer, buffer, or initialization
-    // precondition to uphold.
-    *CLASSES.get_or_init(|| unsafe {
-        (
-            ffi::ferrompi_err_file(),
-            ffi::ferrompi_err_info(),
-            ffi::ferrompi_err_win(),
-        )
-    })
-}
 
 /// Result type for MPI operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -95,8 +77,9 @@ impl ResourceKind {
 
 /// MPI error class, categorizing the type of MPI error.
 ///
-/// These correspond to the standard MPI error classes defined by the MPI specification.
-/// The C layer calls `MPI_Error_class` to map an error code to one of these classes.
+/// The named variants correspond to the MPI error classes, compared against
+/// the linked MPI library's own `MPI_ERR_*` constants (see [`Self::from_raw`]).
+/// [`Self::Raw`] carries a class value this enum does not name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 pub enum MpiErrorClass {
     /// `MPI_SUCCESS` — no error
@@ -174,19 +157,21 @@ pub enum MpiErrorClass {
 }
 
 impl MpiErrorClass {
-    /// Map a raw MPI error class integer to the enum variant.
+    /// Map a class value of the linked MPI library (as returned by
+    /// `MPI_Error_class`) to the enum variant.
     ///
-    /// Standard MPI error class values (MPI-3.1 Table 9.4):
-    /// 0=SUCCESS, 1=BUFFER, 2=COUNT, 3=TYPE, 4=TAG, 5=COMM,
-    /// 6=RANK, 7=REQUEST, 8=ROOT, 9=GROUP, 10=OP, 11=TOPOLOGY,
-    /// 12=DIMS, 13=ARG, 14=UNKNOWN, 15=TRUNCATE, 16=OTHER,
-    /// 17=INTERN, 18=IN_STATUS, 19=PENDING, plus implementation-
-    /// specific classes for WIN (45), INFO (28), FILE (27).
+    /// Only `MPI_SUCCESS = 0` is fixed by the MPI standard; every other class
+    /// value is implementation-defined and differs between MPI libraries
+    /// (e.g. MPICH numbers `MPI_ERR_ROOT` 7, Open MPI numbers it 8). This
+    /// delegates to the C layer, which compares `class` against the linked
+    /// library's own `MPI_ERR_*` constants, so the mapping is correct on
+    /// MPICH-derived libraries, Open MPI and the MPI 5 standard ABI.
     pub fn from_raw(class: i32) -> Self {
-        // Standard MPI error classes (0-19) have fixed values per the MPI spec.
-        // Implementation-specific classes (File, Info, Win) are queried from
-        // the C layer to support both MPICH and Open MPI.
-        match class {
+        // SAFETY: ferrompi_error_class_index only compares its argument
+        // against compile-time MPI_ERR_* constants; there is no pointer,
+        // buffer, or initialization precondition to uphold.
+        let index = unsafe { ffi::ferrompi_error_class_index(class) };
+        match index {
             0 => MpiErrorClass::Success,
             1 => MpiErrorClass::Buffer,
             2 => MpiErrorClass::Count,
@@ -207,19 +192,10 @@ impl MpiErrorClass {
             17 => MpiErrorClass::Intern,
             18 => MpiErrorClass::InStatus,
             19 => MpiErrorClass::Pending,
-            other => {
-                // Query implementation-specific error class values from C layer
-                let (err_file, err_info, err_win) = impl_error_classes();
-                if other == err_file {
-                    MpiErrorClass::File
-                } else if other == err_info {
-                    MpiErrorClass::Info
-                } else if other == err_win {
-                    MpiErrorClass::Win
-                } else {
-                    MpiErrorClass::Raw(other)
-                }
-            }
+            20 => MpiErrorClass::Win,
+            21 => MpiErrorClass::Info,
+            22 => MpiErrorClass::File,
+            _ => MpiErrorClass::Raw(class),
         }
     }
 }
@@ -477,28 +453,8 @@ mod tests {
     }
 
     #[test]
-    fn error_class_from_known_values() {
+    fn error_class_success_is_zero() {
         assert_eq!(MpiErrorClass::from_raw(0), MpiErrorClass::Success);
-        assert_eq!(MpiErrorClass::from_raw(1), MpiErrorClass::Buffer);
-        assert_eq!(MpiErrorClass::from_raw(2), MpiErrorClass::Count);
-        assert_eq!(MpiErrorClass::from_raw(3), MpiErrorClass::Type);
-        assert_eq!(MpiErrorClass::from_raw(4), MpiErrorClass::Tag);
-        assert_eq!(MpiErrorClass::from_raw(5), MpiErrorClass::Comm);
-        assert_eq!(MpiErrorClass::from_raw(6), MpiErrorClass::Rank);
-        assert_eq!(MpiErrorClass::from_raw(7), MpiErrorClass::Request);
-        assert_eq!(MpiErrorClass::from_raw(8), MpiErrorClass::Root);
-        assert_eq!(MpiErrorClass::from_raw(9), MpiErrorClass::Group);
-        assert_eq!(MpiErrorClass::from_raw(10), MpiErrorClass::Op);
-        assert_eq!(MpiErrorClass::from_raw(11), MpiErrorClass::Topology);
-        assert_eq!(MpiErrorClass::from_raw(12), MpiErrorClass::Dims);
-        assert_eq!(MpiErrorClass::from_raw(13), MpiErrorClass::Arg);
-        assert_eq!(MpiErrorClass::from_raw(14), MpiErrorClass::Unknown);
-        assert_eq!(MpiErrorClass::from_raw(15), MpiErrorClass::Truncate);
-        assert_eq!(MpiErrorClass::from_raw(16), MpiErrorClass::Other);
-        assert_eq!(MpiErrorClass::from_raw(17), MpiErrorClass::Intern);
-        assert_eq!(MpiErrorClass::from_raw(18), MpiErrorClass::InStatus);
-        assert_eq!(MpiErrorClass::from_raw(19), MpiErrorClass::Pending);
-        // File, Info, Win are implementation-specific — cannot test without MPI runtime
     }
 
     #[test]

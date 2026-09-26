@@ -425,6 +425,13 @@ int ferrompi_info_get(int32_t info_handle, const char* key, char* value, int32_t
 
 int ferrompi_error_info(int code, int32_t* error_class, char* message, int32_t* msg_len);
 
+/* Error class VALUES are not fixed by the MPI standard (only MPI_SUCCESS = 0
+ * is); MPICH-derived and Open MPI libraries number the rest differently.
+ * This compares `error_class` against the linked library's own MPI_ERR_*
+ * constants and returns a ferrompi-stable index in MpiErrorClass's Rust
+ * declaration order, or -1 if unrecognized. It makes no MPI call. */
+int32_t ferrompi_error_class_index(int error_class);
+
 /* ============================================================
  * Request Management
  * ============================================================ */
@@ -711,14 +718,6 @@ int ferrompi_allreduce_user_op(
     int32_t op_handle,
     int32_t comm
 );
-
-/* ============================================================
- * Error Class Constants
- * ============================================================ */
-
-int32_t ferrompi_err_file(void);
-int32_t ferrompi_err_info(void);
-int32_t ferrompi_err_win(void);
 
 #ifdef __cplusplus
 }

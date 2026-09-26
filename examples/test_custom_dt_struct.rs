@@ -4,8 +4,8 @@
 //! - Successful construction of a `{ f64, i32 }` struct type (8-byte f64 at
 //!   offset 0, i32 at offset 8) and `raw_handle() >= 0`
 //! - Indexed-basetype rejection returns `Error::InvalidOp` before any FFI call
-//! - Empty `fields` slice returns `Err(Error::Mpi { .. })` without calling into
-//!   MPI (exact class asserted once error-class decoding is fixed)
+//! - Empty `fields` slice returns `Err` with class `Arg` without calling into
+//!   MPI
 //! - Drop frees the underlying MPI handle (no double-free on exit)
 //!
 //! All assertions are protected by a sentinel allreduce(Min) before any
@@ -14,7 +14,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_custom_dt_struct
 // mpi-test: np=2
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, StructField};
+use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, MpiErrorClass, StructField};
 
 mod common;
 
@@ -91,23 +91,25 @@ fn main() {
     }
 
     // ========================================================================
-    // Test 3: create_struct(&[]) returns Err(Error::Mpi { .. }).
+    // Test 3: create_struct(&[]) returns Err with class Arg.
     //
     // The C shim rejects an empty field list before the stack arrays are
     // filled, returning MPI_ERR_ARG without calling into MPI, on every MPI
-    // implementation. The exact class will be asserted here once error-class
-    // decoding is fixed; for now any Mpi class is accepted.
+    // implementation.
     // ========================================================================
     {
         match CustomDatatype::create_struct(&[]) {
-            Err(Error::Mpi { .. }) => {
+            Err(Error::Mpi {
+                class: MpiErrorClass::Arg,
+                ..
+            }) => {
                 if rank == 0 {
-                    println!("PASS: Test 3 — create_struct(&[]) returned Err(Mpi)");
+                    println!("PASS: Test 3 — create_struct(&[]) returned Err(class: Arg)");
                 }
             }
             other => {
                 eprintln!(
-                    "rank {rank}: FAIL Test 3 — expected Err(Mpi {{ .. }}), got: {:?}",
+                    "rank {rank}: FAIL Test 3 — expected Err(class: Arg), got: {:?}",
                     other
                 );
                 local_ok = false;

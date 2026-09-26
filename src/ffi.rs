@@ -54,9 +54,10 @@ extern "C" {
     /// invoke `ferrompi_op_drop_closure` — the caller must have already
     /// dropped the closure before calling this.
     pub fn ferrompi_op_free_slot_only(handle: int32_t) -> c_int;
-    pub fn ferrompi_err_file() -> int32_t;
-    pub fn ferrompi_err_info() -> int32_t;
-    pub fn ferrompi_err_win() -> int32_t;
+    /// Compare `error_class` against the linked MPI library's own
+    /// `MPI_ERR_*` constants and return a ferrompi-stable index in
+    /// `MpiErrorClass`'s declaration order, or -1 if unrecognized.
+    pub fn ferrompi_error_class_index(error_class: c_int) -> int32_t;
 }
 
 // RMA counterpart of the block above: a non-status return with no MPI call

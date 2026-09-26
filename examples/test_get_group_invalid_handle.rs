@@ -3,7 +3,7 @@
 //! Calls `ferrompi_group_size` directly via `extern "C"` with an out-of-range
 //! group handle (999), which must NOT return `MPI_SUCCESS`. An out-of-range
 //! handle yields `MPI_GROUP_NULL`, so `MPI_Group_size` returns a non-zero
-//! error code that maps to `MpiErrorClass::Group` or `MpiErrorClass::Arg`.
+//! error code that maps to `MpiErrorClass::Group`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_get_group_invalid_handle
 // mpi-test: np=2
@@ -33,11 +33,12 @@ fn main() {
     );
 
     // ========================================================================
-    // Test: ferrompi_group_size with an out-of-range handle returns an error
+    // Test: ferrompi_group_size with an out-of-range handle returns
+    //       Err(class: Group)
     //
     // Handle 999 is well past MAX_GROUPS (64), so get_group returns
     // MPI_GROUP_NULL for this input, and MPI_Group_size returns
-    // MPI_ERR_GROUP (or similar implementation-specific error).
+    // MPI_ERR_GROUP.
     // ========================================================================
 
     let mut out_size: i32 = 0;
@@ -54,29 +55,18 @@ fn main() {
         std::process::exit(1);
     }
 
-    let err = Error::from_code(raw_ret);
-    match err {
+    match Error::from_code(raw_ret) {
         Error::Mpi {
             class: MpiErrorClass::Group,
             ..
-        }
-        | Error::Mpi {
-            class: MpiErrorClass::Arg,
-            ..
         } => {
             if rank == 0 {
-                println!(
-                    "PASS: group_size with handle=999 returns non-SUCCESS error class: {err:?}"
-                );
+                println!("PASS: group_size with handle=999 returns Err(class: Group)");
             }
         }
         other => {
-            // Any non-SUCCESS error is acceptable here — different MPI
-            // implementations may return different classes when passed
-            // MPI_GROUP_NULL.  Log but do not fail.
-            if rank == 0 {
-                println!("PASS (non-MPI_SUCCESS): group_size with handle=999 returned: {other:?}");
-            }
+            eprintln!("rank {rank}: FAIL: group_size with handle=999 returned {other:?}");
+            std::process::exit(1);
         }
     }
 
