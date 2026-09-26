@@ -95,9 +95,9 @@ static atomic_int next_comm_hint;
 static MPI_Request request_table[MAX_REQUESTS];
 static _Atomic(uint64_t) request_bits[REQUEST_BITS_WORDS];  // bit set => slot in use
 // Per-slot generation counter, masked to 31 bits so (generation << 32) | slot
-// never sets the sign bit of the int64_t handle. Written only by
-// free_request (relaxed store, sequenced-before its release fetch_and below);
-// read by alloc_request (to mint the next handle) and request_slot (to
+// never sets the sign bit of the int64_t handle. Initialised by
+// init_tables; bumped only by free_request, before its release fetch_and.
+// Read by alloc_request (to mint the next handle) and request_slot (to
 // validate one).
 static _Atomic(uint32_t) request_gen[MAX_REQUESTS];
 #define REQUEST_GEN_MASK 0x7fffffffu
@@ -327,10 +327,12 @@ static int64_t alloc_request(MPI_Request req) {
 }
 
 // Resolve a handle to its slot index (thread-safe: the acquire load of the
-// occupancy bit pairs with the release fetch_and in free_request). Returns -1
-// for a handle that is negative, out of range, names a currently-free slot,
-// or carries a generation that does not match the slot's current occupant
-// (a stale handle from before the slot was last freed and reused).
+// occupancy bit pairs with the release fetch_and in free_request, so this
+// holds for any handle whose free happens-before this lookup, whether on the
+// same thread or transferred to it — see alloc_request). Returns -1 for a
+// handle that is negative, out of range, names a currently-free slot, or
+// carries a generation that does not match the slot's current occupant (a
+// stale handle from before the slot was last freed and reused).
 static int64_t request_slot(int64_t handle) {
     if (handle < 0) {
         return -1;
@@ -3141,7 +3143,7 @@ int ferrompi_test(int64_t request_handle, int32_t* flag) {
         free_request(request_handle);
         *flag = 1;
     } else {
-        *flag = f;
+        *flag = (ret == MPI_SUCCESS) ? f : 0;
     }
     return ret;
 }

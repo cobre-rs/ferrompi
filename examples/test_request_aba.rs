@@ -226,6 +226,12 @@ fn part5_stale_raw_handle(world: &Communicator, rank: i32) {
         a.wait().expect("part5: wait a");
 
         let b = world.irecv(&mut b_buf, 1, 32).expect("part5: irecv b");
+        common::check(
+            world,
+            (b.raw_handle() & 0xffff_ffff) == (stale_handle & 0xffff_ffff)
+                && b.raw_handle() != stale_handle,
+            "part 5 precondition: slot reused with a new generation",
+        );
         world.barrier().expect("part5: barrier after posting b");
 
         let mut flag: i32 = 0;
@@ -247,6 +253,11 @@ fn part5_stale_raw_handle(world: &Communicator, rank: i32) {
     } else {
         world.barrier().expect("part5: barrier after posting a");
         world.send(&[31u8; 4], 0, 31).expect("part5: send tag31");
+        common::check(
+            world,
+            true,
+            "part 5 precondition: slot reused with a new generation",
+        );
         world.barrier().expect("part5: barrier after posting b");
         world.send(&[32u8; 4], 0, 32).expect("part5: send tag32");
     }
