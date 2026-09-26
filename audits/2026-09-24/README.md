@@ -131,7 +131,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 
 | ID | Title | Sev | Verified | Target | Status |
 |---|---|---|---|---|---|
-| COR-01 | Error classes decoded with Open MPI numbering (wrong on MPICH) | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| COR-01 | Error classes decoded with Open MPI numbering (wrong on MPICH) | major | repro | 0.5.x | fixed (ea3cff2) |
 | COR-02 | Stale request handles act on unrelated requests (ABA) | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-03 | No request write-back on error in wait/test-many | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-04 | `MPI_STATUSES_IGNORE` loses per-request error | minor | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
@@ -257,7 +257,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | INF-10 | Odd-np deadlocks; CI np=4 only | minor | repro | 0.5.x | fixed (6ee2c4e) |
 | INF-11 | No large-count integration test | major | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | INF-12 | Public APIs untested; examples never run | minor | reading | 0.5.x | fixed (da87ce5) |
-| INF-13 | Error-class assertions accept any class | major | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| INF-13 | Error-class assertions accept any class | major | reading | 0.5.x | fixed (ea3cff2) |
 | INF-14 | Release notes extraction yields empty bodies | minor | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | INF-15 | CI coverage gaps (numa clippy, sanitizers, coverage 11/73) | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | INF-16 | MPICH hotfix: unchecked downloads, copy-pasted ×4 | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
