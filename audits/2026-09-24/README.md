@@ -115,7 +115,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | SND-03 | RMA origin buffers not tied to the epoch; 4 rustdoc examples are UB | critical | reading | 0.6 (D-1) | open |
 | SND-04 | `PendingFetchResult` dropped before epoch close → write into freed heap | critical | repro | 0.6 (D-1) | open |
 | SND-05 | `mem::forget(Win::create)` leaves MPI aliasing a released buffer | critical | repro | 0.6 (D-1) | open |
-| SND-06 | gather/allgather/scatter never validate buffer sizes (9 methods) | critical | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| SND-06 | gather/allgather/scatter never validate buffer sizes (9 methods) | critical | repro | 0.5.x | fixed (3637ae5) |
 | SND-07 | V-collectives don't validate counts/displs vs size and buffer | critical | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | SND-08 | `*_custom` p2p: unbounded `T`, unchecked extent | critical | repro | 0.5.x (D-7) | planned (ferrompi-0.5.x-hardening) |
 | SND-09 | RMA target range / origin count unvalidated (remote OOB write) | critical | repro | 0.5.x (D-11) | planned (ferrompi-0.5.x-hardening) |
