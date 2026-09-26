@@ -1,4 +1,4 @@
-//! Regression for a live `Win::create` window at finalize (ADR-005).
+//! Regression for a live `Win::create` window at finalize.
 //!
 //! `MPI_Win_free` is collective, so the finalize sweep must not call it on a
 //! window ranks may have leaked inconsistently; it skips the free instead,
