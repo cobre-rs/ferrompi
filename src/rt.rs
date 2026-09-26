@@ -104,8 +104,8 @@ pub(crate) fn finalize() -> bool {
 }
 
 /// Returns `true` once state is `Finalized`. `Mpi::is_finalized()` uses this
-/// so it still reports `true` after a skipped `MPI_Finalize` (a live
-/// MPI-allocated window kept `Mpi::drop` from calling it): `finalize()`
+/// so it still reports `true` after a skipped `MPI_Finalize` (a live window
+/// kept `Mpi::drop` from calling it): `finalize()`
 /// already moved `STATE` to `Finalized` before that skip decision runs.
 pub(crate) fn is_finalized() -> bool {
     // Relaxed: see `enter`'s comment — visibility of the `Finalized` state

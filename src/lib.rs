@@ -350,8 +350,12 @@ pub enum ReduceOp {
 ///
 /// This type represents an initialized MPI environment. There can only be one
 /// instance of this type at a time. When dropped, it finalizes MPI. After the
-/// handle is dropped, every MPI-calling method returns
-/// `Err(`[`Error::Finalized`]`)` without calling MPI.
+/// handle is dropped, every method that calls MPI through a communicator,
+/// group, request, window, datatype, info or user op returns
+/// `Err(`[`Error::Finalized`]`)` without calling MPI. The queries the MPI
+/// standard allows at any time ([`Mpi::version`], [`Mpi::library_version`],
+/// [`Mpi::wtime`], [`Mpi::is_initialized`], [`Mpi::is_finalized`]) still
+/// answer.
 ///
 /// If any window (feature `rma`) is still alive when this handle is
 /// dropped, `MPI_Finalize` is skipped instead — with a stderr warning —

@@ -60,7 +60,10 @@ fn main() {
                 CustomDatatype::contiguous(2, DatatypeTag::F64),
                 Err(Error::ThreadLevelViolation)
             );
-            for _ in 0..17 {
+            // One more than the op table's 16 slots: a rejected create must
+            // not leak a slot, or the last attempt would fail differently.
+            const OP_SLOTS_PLUS_ONE: usize = 17;
+            for _ in 0..OP_SLOTS_PLUS_ONE {
                 let r = UserOp::<f64>::new(|a: &[f64], b: &mut [f64]| {
                     b[0] += a[0];
                 });

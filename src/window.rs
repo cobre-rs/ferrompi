@@ -398,6 +398,16 @@ pub(crate) fn live_windows() -> usize {
     LIVE_WINDOWS.load(Ordering::Acquire)
 }
 
+/// Marks a newly constructed window (`SharedWindow::allocate`, `Win::create`,
+/// or `Win::allocate`) as live in [`LIVE_WINDOWS`].
+fn mark_window_alive() {
+    // Relaxed: the caller contract that `Mpi` is not dropped while another
+    // thread is inside an MPI call through this crate already orders this
+    // construction before any `Mpi::drop` that reads the counter; the store
+    // itself needs no ordering beyond the counter's own modification order.
+    LIVE_WINDOWS.fetch_add(1, Ordering::Relaxed);
+}
+
 impl<T: MpiDatatype> SharedWindow<T> {
     /// Allocate a shared memory window.
     ///
@@ -448,12 +458,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
         let local_ptr = NonNull::new(baseptr.cast::<T>())
             .ok_or_else(|| Error::Internal("Win_allocate_shared returned null".into()))?;
 
-        // Relaxed: the caller contract that `Mpi` is not dropped while
-        // another thread is inside an MPI call through this crate already
-        // orders this construction before any `Mpi::drop` that reads the
-        // counter; the store itself needs no ordering beyond the counter's
-        // own modification order.
-        LIVE_WINDOWS.fetch_add(1, Ordering::Relaxed);
+        mark_window_alive();
 
         Ok(SharedWindow {
             win_handle,
@@ -966,10 +971,7 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
             unsafe { NonNull::new_unchecked(buf.as_mut_ptr()) }
         };
 
-        // Relaxed: see `SharedWindow::allocate`'s identical comment — the
-        // existing caller contract already orders this construction before
-        // any `Mpi::drop` that reads the counter.
-        LIVE_WINDOWS.fetch_add(1, Ordering::Relaxed);
+        mark_window_alive();
 
         Ok(Win {
             win_handle,
@@ -1045,10 +1047,7 @@ impl<T: MpiDatatype> Win<'static, T> {
             })?
         };
 
-        // Relaxed: see `SharedWindow::allocate`'s identical comment — the
-        // existing caller contract already orders this construction before
-        // any `Mpi::drop` that reads the counter.
-        LIVE_WINDOWS.fetch_add(1, Ordering::Relaxed);
+        mark_window_alive();
 
         Ok(Win {
             win_handle,
