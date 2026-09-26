@@ -1,15 +1,12 @@
 //! Regression for a live `Win::create` window at finalize.
 //!
-//! `MPI_Win_free` is collective, so the finalize sweep must not call it on a
-//! window ranks may have leaked inconsistently; it skips the free instead,
-//! leaking the window's MPI-side state while leaving the caller's buffer
-//! untouched. `Mpi::drop` still runs `MPI_Finalize` for a `Win::create`
-//! window (caller-owned memory; unlike `Win::allocate`/`SharedWindow`, Open
-//! MPI does not free it inside `MPI_Finalize` itself).
+//! `Mpi::drop` skips `MPI_Finalize` while the `Win::create` window below is
+//! still alive, so the caller-supplied buffer is left untouched: the window
+//! is never freed and `MPI_Finalize` is never called for this process.
 //!
 //! Run with: mpiexec -n 1 ./target/debug/examples/test_window_create_at_finalize
-// mpi-test: np=1 skip-ok=openmpi-4
-// mpi-test-stderr: MPI_Win_free skipped for 1 window
+// mpi-test: np=1 expect=unfinalized skip-ok=openmpi-4
+// mpi-test-stderr: MPI_Finalize skipped
 
 use ferrompi::{Error, Mpi, MpiErrorClass, Win};
 

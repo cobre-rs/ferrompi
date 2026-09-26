@@ -721,22 +721,10 @@ int ferrompi_finalize(void) {
         atomic_store_explicit(&datatype_used[i], 0, memory_order_release);
     }
 
-    // MPI_Win_free is collective, so calling it here would deadlock when
-    // ranks leaked different windows, and would release memory a live
-    // window still exposes through local_slice(). Count instead and warn.
-    int win_leaked = 0;
+    // Mpi skips MPI_Finalize while any window is alive, so this point is
+    // never reached with a live window; just reset the table.
     for (int i = 0; i < MAX_WINDOWS; i++) {
-        if (atomic_load_explicit(&win_used[i], memory_order_acquire) &&
-                win_table[i] != MPI_WIN_NULL) {
-            win_leaked++;
-        }
         atomic_store_explicit(&win_used[i], 0, memory_order_release);
-    }
-    if (win_leaked > 0) {
-        fprintf(stderr,
-                "ferrompi: MPI_Win_free skipped for %d window(s) still alive at finalize; "
-                "their memory is not freed\n",
-                win_leaked);
     }
 
     // Clean up any remaining communicators (skip slot 0, which is MPI_COMM_WORLD)

@@ -1,9 +1,11 @@
-//! Regression for `Win::allocate`/`SharedWindow` memory outliving `Mpi`.
+//! Regression for window memory outliving `Mpi`.
 //!
-//! Some MPI implementations free an MPI-allocated window's memory inside
-//! `MPI_Finalize` itself, so `Mpi::drop` skips `MPI_Finalize` while such a
-//! window is still alive: the memory stays valid, but `MPI_Finalize` is
-//! never called for this process.
+//! `Mpi::drop` skips `MPI_Finalize` while any window is still alive — a
+//! `Win::allocate` window and a `SharedWindow` here — because some MPI
+//! implementations free MPI-allocated window memory inside `MPI_Finalize`
+//! itself, and some abort while tearing down internal state that still
+//! tracks a live window's buffer. Either way, the memory stays valid, but
+//! `MPI_Finalize` is never called for this process.
 //!
 //! Run with: mpiexec -n 1 ./target/debug/examples/test_window_after_finalize
 // mpi-test: np=1 expect=unfinalized valgrind

@@ -353,10 +353,11 @@ pub enum ReduceOp {
 /// handle is dropped, every MPI-calling method returns
 /// `Err(`[`Error::Finalized`]`)` without calling MPI.
 ///
-/// If a `Win::allocate` or `SharedWindow` window (feature `rma`) is still
-/// alive when this handle is dropped, `MPI_Finalize` is skipped instead —
-/// with a stderr warning — because some MPI implementations free that
-/// window's memory inside `MPI_Finalize` itself.
+/// If any window (feature `rma`) is still alive when this handle is
+/// dropped, `MPI_Finalize` is skipped instead — with a stderr warning —
+/// because some MPI implementations free MPI-allocated window memory inside
+/// `MPI_Finalize` itself, and some abort while tearing down internal state
+/// that still tracks a live window.
 ///
 /// At [`ThreadLevel::Serialized`]/[`ThreadLevel::Multiple`], dropping this
 /// handle while another thread is still inside an MPI call through this
@@ -525,8 +526,7 @@ impl Mpi {
     /// Check if MPI has been finalized.
     ///
     /// Returns `true` once the `Mpi` handle has been dropped, including when
-    /// `MPI_Finalize` itself was skipped because an MPI-allocated window was
-    /// still alive.
+    /// `MPI_Finalize` itself was skipped because a window was still alive.
     pub fn is_finalized() -> bool {
         if rt::is_finalized() {
             return true;
@@ -757,11 +757,11 @@ impl Drop for Mpi {
         if rt::finalize() {
             #[cfg(feature = "rma")]
             {
-                let live = window::live_mpi_allocated_windows();
+                let live = window::live_windows();
                 if live > 0 {
                     let _ = writeln!(
                         std::io::stderr(),
-                        "ferrompi: MPI_Finalize skipped: {live} window(s) from Win::allocate or SharedWindow still alive; their memory stays valid until the process exits"
+                        "ferrompi: MPI_Finalize skipped: {live} window(s) still alive; their memory stays valid until the process exits"
                     );
                     return;
                 }
