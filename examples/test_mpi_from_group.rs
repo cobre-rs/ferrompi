@@ -6,17 +6,17 @@
 //! - On MPI 4.0+: every rank that calls `mpi.create_from_group(&g, tag)`
 //!   with the same world group and the same tag receives an `Ok(comm)` with
 //!   `comm.size() == world.size()`.
-//! - On MPI < 4.0: the example prints `SKIP` and exits 0 before calling
-//!   `create_from_group`, so an `Err` from that call on MPI >= 4 fails.
+//! - On MPI < 4.0: `create_from_group` returns `Err(Error::NotSupported(_))`
+//!   instead of calling into the (unbuilt) MPI 4.0 shim.
 //!
 //! All assertions are guarded by a sentinel `allreduce_scalar(Min)` before
 //! any `process::exit` so that no rank exits while others are still inside
 //! MPI collective calls.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_mpi_from_group
-// mpi-test: np=4 skip-ok=openmpi
+// mpi-test: np=4
 
-use ferrompi::{Mpi, ReduceOp};
+use ferrompi::{Error, Mpi, ReduceOp};
 
 mod common;
 
@@ -31,18 +31,6 @@ fn main() {
         "test_mpi_from_group requires exactly 4 processes, got {size}"
     );
 
-    // ========================================================================
-    // Version check — skip on MPI < 4.0.
-    // ========================================================================
-    if common::mpi_major() < 4 {
-        let version = Mpi::version().expect("Mpi::version() failed");
-        common::skip(
-            &world,
-            &format!("create_from_group needs MPI 4 ({version})"),
-        );
-        return;
-    }
-
     // local_ok tracks whether this rank passed all its assertions.
     let mut local_ok = true;
 
@@ -50,6 +38,18 @@ fn main() {
     // Build the world group — all ranks participate with the same tag.
     // ========================================================================
     let world_group = world.group().expect("world.group() failed");
+
+    // ========================================================================
+    // Version check — below MPI 4.0, create_from_group refuses.
+    // ========================================================================
+    if common::mpi_major() < 4 {
+        let ok = matches!(
+            mpi.create_from_group(&world_group, "ferrompi-test"),
+            Err(Error::NotSupported(_))
+        );
+        common::check(&world, ok, "create_from_group refuses below MPI 4");
+        return;
+    }
 
     // ========================================================================
     // Test 1: create_from_group returns Ok(comm).

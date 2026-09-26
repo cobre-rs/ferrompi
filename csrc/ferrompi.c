@@ -57,6 +57,12 @@ _Static_assert(MAX_REQUESTS % 64 == 0,
 #define FERROMPI_ERR_GROUPS_FULL     (-7006)
 #define FERROMPI_ERR_INFOS_FULL      (-7007)
 
+// Returned by the persistent-collective and comm_create_from_group stubs
+// compiled when MPI_VERSION < 4 (the underlying MPI 4.0 operation does not
+// exist). src/error.rs maps it to Error::NotSupported. This MUST stay in
+// sync with the mirrored const in src/error.rs.
+#define FERROMPI_ERR_NOT_SUPPORTED   (-7008)
+
 // Split type constants (must match Rust SplitType enum and header defines)
 #define FERROMPI_COMM_TYPE_SHARED 0
 
@@ -969,7 +975,7 @@ int ferrompi_comm_create_from_group(int32_t group_h,
     return MPI_SUCCESS;
 #else
     (void)group_h; (void)stringtag; (void)out_h;
-    return MPI_ERR_OTHER;  /* MPI 4.0+ required */
+    return FERROMPI_ERR_NOT_SUPPORTED;  /* MPI 4.0+ required */
 #endif
 }
 
@@ -2686,62 +2692,62 @@ int ferrompi_reduce_scatter_block_init(
 int ferrompi_bcast_init(void* buf, int64_t count, int32_t datatype_tag, int32_t root,
                         int32_t comm_handle, int64_t* request_handle) {
     (void)buf; (void)count; (void)datatype_tag; (void)root; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_allreduce_init(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag,
                             int32_t op, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)recvbuf; (void)count; (void)datatype_tag; (void)op; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_gather_init(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount,
                          int32_t datatype_tag, int32_t root, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)sendcount; (void)recvbuf; (void)recvcount;
     (void)datatype_tag; (void)root; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_reduce_init(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag,
                          int32_t op, int32_t root, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)recvbuf; (void)count; (void)datatype_tag;
     (void)op; (void)root; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_scatter_init(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount,
                           int32_t datatype_tag, int32_t root, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)sendcount; (void)recvbuf; (void)recvcount;
     (void)datatype_tag; (void)root; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_allgather_init(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount,
                             int32_t datatype_tag, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)sendcount; (void)recvbuf; (void)recvcount;
     (void)datatype_tag; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_scan_init(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag,
                        int32_t op, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)recvbuf; (void)count; (void)datatype_tag;
     (void)op; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_exscan_init(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag,
                          int32_t op, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)recvbuf; (void)count; (void)datatype_tag;
     (void)op; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_alltoall_init(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount,
                            int32_t datatype_tag, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)sendcount; (void)recvbuf; (void)recvcount;
     (void)datatype_tag; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_gatherv_init(const void* sendbuf, int64_t sendcount, void* recvbuf,
@@ -2749,7 +2755,7 @@ int ferrompi_gatherv_init(const void* sendbuf, int64_t sendcount, void* recvbuf,
                           int32_t datatype_tag, int32_t root, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)sendcount; (void)recvbuf; (void)recvcounts; (void)displs;
     (void)datatype_tag; (void)root; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_scatterv_init(const void* sendbuf, const int32_t* sendcounts, const int32_t* displs,
@@ -2757,7 +2763,7 @@ int ferrompi_scatterv_init(const void* sendbuf, const int32_t* sendcounts, const
                            int32_t datatype_tag, int32_t root, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)sendcounts; (void)displs; (void)recvbuf; (void)recvcount;
     (void)datatype_tag; (void)root; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_allgatherv_init(const void* sendbuf, int64_t sendcount, void* recvbuf,
@@ -2765,7 +2771,7 @@ int ferrompi_allgatherv_init(const void* sendbuf, int64_t sendcount, void* recvb
                              int32_t datatype_tag, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)sendcount; (void)recvbuf; (void)recvcounts; (void)displs;
     (void)datatype_tag; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_alltoallv_init(const void* sendbuf, const int32_t* sendcounts, const int32_t* sdispls,
@@ -2773,7 +2779,7 @@ int ferrompi_alltoallv_init(const void* sendbuf, const int32_t* sendcounts, cons
                             int32_t datatype_tag, int32_t comm_handle, int64_t* request_handle) {
     (void)sendbuf; (void)sendcounts; (void)sdispls; (void)recvbuf; (void)recvcounts; (void)rdispls;
     (void)datatype_tag; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 int ferrompi_reduce_scatter_block_init(const void* sendbuf, void* recvbuf, int64_t recvcount,
@@ -2781,7 +2787,7 @@ int ferrompi_reduce_scatter_block_init(const void* sendbuf, void* recvbuf, int64
                                        int64_t* request_handle) {
     (void)sendbuf; (void)recvbuf; (void)recvcount; (void)datatype_tag;
     (void)op; (void)comm_handle; (void)request_handle;
-    return MPI_ERR_OTHER;
+    return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
 #endif /* MPI_VERSION >= 4 */

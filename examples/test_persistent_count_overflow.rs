@@ -2,11 +2,13 @@
 //!
 //! Calls `ferrompi_allreduce_init` directly via a private `extern "C"` declaration
 //! with a synthetic count of `i64::MAX`, bypassing the Rust-level type system so
-//! that no real buffer allocation is required. Both ranks must observe
-//! `MPI_ERR_COUNT` (mapped to `MpiErrorClass::Count`) and exit 0.
+//! that no real buffer allocation is required. From MPI 4.0 on, both ranks must
+//! observe `MPI_ERR_COUNT` (mapped to `MpiErrorClass::Count`); below MPI 4.0 the
+//! stub answers before the count guard runs, so both ranks observe
+//! `Error::NotSupported` instead. Either way, both ranks exit 0.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_count_overflow
-// mpi-test: np=2 skip-ok=openmpi
+// mpi-test: np=2
 
 use ferrompi::{Error, Mpi, MpiErrorClass};
 
@@ -52,26 +54,16 @@ fn main() {
         "test_persistent_count_overflow requires exactly 2 processes, got {size}"
     );
 
-    // Persistent collectives are MPI 4.0+.  On older runtimes (e.g.,
-    // OpenMPI 4.x reports MPI_VERSION = 3) the C-side shim is a stub
-    // that always returns MPI_ERR_OTHER, so the count guard is never
-    // reached.  Skip gracefully — the count guard is still in place
-    // for MPI >= 4 runtimes (covered by MPICH 4.2.x in the CI matrix).
-    if common::mpi_major() < 4 {
-        let version = Mpi::version().expect("Mpi::version() failed");
-        common::skip(
-            &world,
-            &format!("ferrompi_allreduce_init needs MPI 4 ({version})"),
-        );
-        return;
-    }
-
     // ========================================================================
-    // Test: ferrompi_allreduce_init with count > INT_MAX returns MPI_ERR_COUNT
+    // Test: ferrompi_allreduce_init with count > INT_MAX.
     //
-    // We use i64::MAX as the synthetic count. The C guard fires immediately
-    // after the get_datatype/get_op lookups and before MPI_Allreduce_init is
-    // called, so no real communication occurs and no real buffer is needed.
+    // From MPI 4.0 on, the C guard fires immediately after the
+    // get_datatype/get_op lookups and before MPI_Allreduce_init is called, so
+    // no real communication occurs and no real buffer is needed. Below MPI
+    // 4.0 the shim is an unconditional stub that returns
+    // FERROMPI_ERR_NOT_SUPPORTED before the count guard runs at all — the
+    // call below still exercises it, just with a different expected error
+    // (checked after the call).
     // ========================================================================
 
     // Dummy send/recv buffers; the guard returns before touching them.
@@ -109,21 +101,42 @@ fn main() {
     }
 
     let err = Error::from_code(raw_ret);
-    match err {
-        Error::Mpi {
-            class: MpiErrorClass::Count,
-            ..
-        } => {
-            if rank == 0 {
-                println!("PASS: allreduce_init with count=i64::MAX returns MpiErrorClass::Count");
+    if common::mpi_major() < 4 {
+        match err {
+            Error::NotSupported(_) => {
+                if rank == 0 {
+                    println!(
+                        "PASS: allreduce_init with count=i64::MAX returns Error::NotSupported below MPI 4"
+                    );
+                }
+            }
+            other => {
+                eprintln!(
+                    "rank {rank}: FAIL: allreduce_init below MPI 4 returned \
+                     unexpected error: {other:?}"
+                );
+                std::process::exit(1);
             }
         }
-        other => {
-            eprintln!(
-                "rank {rank}: FAIL: allreduce_init with overflow count returned \
-                 unexpected error class: {other:?}"
-            );
-            std::process::exit(1);
+    } else {
+        match err {
+            Error::Mpi {
+                class: MpiErrorClass::Count,
+                ..
+            } => {
+                if rank == 0 {
+                    println!(
+                        "PASS: allreduce_init with count=i64::MAX returns MpiErrorClass::Count"
+                    );
+                }
+            }
+            other => {
+                eprintln!(
+                    "rank {rank}: FAIL: allreduce_init with overflow count returned \
+                     unexpected error class: {other:?}"
+                );
+                std::process::exit(1);
+            }
         }
     }
 

@@ -6,11 +6,12 @@
 //! non-`MPI_SUCCESS` return code (previously they would receive a corrupt
 //! handle because the NULL guard was missing).
 //!
-//! The test is skipped gracefully when MPI_VERSION < 4 (the underlying
-//! `MPI_Comm_create_from_group` is not available on older MPI runtimes).
+//! Below MPI_VERSION 4, the shim is an unconditional stub: the raw call
+//! returns the `FERROMPI_ERR_NOT_SUPPORTED` sentinel (`Error::NotSupported`)
+//! and leaves the output handle untouched.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_create_from_group_null_handle
-// mpi-test: np=2 skip-ok=openmpi
+// mpi-test: np=2
 
 use ferrompi::{Error, Mpi, ReduceOp};
 
@@ -26,8 +27,8 @@ mod common;
 //   - group_h is a valid ferrompi group handle obtained from the Rust API.
 //   - stringtag is a valid null-terminated C string on the stack.
 //   - out_h points to a valid i32 on the stack.
-//   - The caller gates on `common::mpi_major() >= 4` before calling this
-//     shim, so MPI < 4's MPI_ERR_OTHER stub path is never reached here.
+//   - Below MPI 4, the shim is an unconditional stub that reads none of its
+//     arguments and never writes through out_h.
 #[allow(dead_code)]
 extern "C" {
     fn ferrompi_comm_create_from_group(
@@ -48,11 +49,25 @@ fn main() {
         "test_create_from_group_null_handle requires exactly 2 processes, got {size}"
     );
 
+    let world_group = world.group().expect("world.group() failed");
+
     if common::mpi_major() < 4 {
-        let version = Mpi::version().expect("Mpi::version() failed");
-        common::skip(
+        let group_h = world_group.raw_handle();
+        let tag = b"test_null_guard\0";
+        let mut out_h: i32 = -2;
+        let raw_ret = unsafe {
+            // SAFETY: see the invariant comment on the extern "C" block above.
+            ferrompi_comm_create_from_group(
+                group_h,
+                tag.as_ptr().cast::<std::ffi::c_char>(),
+                std::ptr::addr_of_mut!(out_h),
+            )
+        };
+        let ok = matches!(Error::from_code(raw_ret), Error::NotSupported(_)) && out_h == -2;
+        common::check(
             &world,
-            &format!("ferrompi_comm_create_from_group needs MPI 4 ({version})"),
+            ok,
+            "ferrompi_comm_create_from_group refuses below MPI 4",
         );
         return;
     }
@@ -61,7 +76,6 @@ fn main() {
     // Build a group containing only rank 0.  Rank 1 is excluded and will
     // receive MPI_COMM_NULL from MPI_Comm_create_from_group.
     // ========================================================================
-    let world_group = world.group().expect("world.group() failed");
     let rank0_group = world_group
         .include(&[0])
         .expect("group.include(&[0]) failed");

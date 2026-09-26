@@ -5,10 +5,11 @@
 //!
 //! Run with: mpiexec -n 4 cargo run --example persistent_bcast
 //!
-//! Note: This example requires MPICH 4.0+ or OpenMPI 5.0+ with MPI 4.0 support.
-// mpi-test: np=2.. skip-ok=openmpi
+//! Note: below MPI 4.0, `bcast_init` refuses with `Error::NotSupported`
+//! instead of running the persistent-collectives demo.
+// mpi-test: np=2..
 
-use ferrompi::{Mpi, ReduceOp, Result};
+use ferrompi::{Error, Mpi, ReduceOp, Result};
 
 mod common;
 
@@ -139,7 +140,12 @@ fn main() -> Result<()> {
             println!("  ✓ Throughput: {:.1} all-reduces/second", throughput);
         }
     } else {
-        common::skip(&world, "persistent collectives need MPI 4");
+        let mut buf = vec![0.0f64; 1];
+        let ok = matches!(
+            world.bcast_init(&mut buf, 0),
+            Err(Error::NotSupported(op)) if op == "bcast_init"
+        );
+        common::check(&world, ok, "bcast_init refuses below MPI 4");
     }
 
     world.barrier()?;

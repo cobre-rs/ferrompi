@@ -21,6 +21,13 @@ const FERROMPI_ERR_WINDOWS_FULL: i32 = -7005;
 const FERROMPI_ERR_GROUPS_FULL: i32 = -7006;
 const FERROMPI_ERR_INFOS_FULL: i32 = -7007;
 
+// Returned by the persistent-collective and comm_create_from_group stubs
+// compiled when MPI_VERSION < 4 (the underlying MPI 4.0 operation does not
+// exist). Intercepted in [`Error::from_code`]/[`Error::from_code_with_op`]
+// and mapped to [`Error::NotSupported`]. This MUST match
+// `FERROMPI_ERR_NOT_SUPPORTED` in `csrc/ferrompi.c`.
+const FERROMPI_ERR_NOT_SUPPORTED: i32 = -7008;
+
 // Rust-only lifecycle-guard sentinels. Produced only by the Rust lifecycle
 // guard (never returned by the C layer), and outside the -7001..-7099 range
 // the C sentinels above use.
@@ -263,9 +270,14 @@ pub enum Error {
     #[error("Invalid reduction operation for this method")]
     InvalidOp,
 
-    /// Operation not supported (e.g., MPI 4.0 persistent collectives on older
-    /// MPI, or [`Request::cancel`](crate::Request::cancel) on a nonblocking
-    /// collective or RMA request).
+    /// Operation not supported. Two sources:
+    /// - an MPI 4.0 operation (a persistent collective or
+    ///   [`Mpi::create_from_group`](crate::Mpi::create_from_group)) when
+    ///   ferrompi was built against an MPI older than 4.0;
+    /// - [`Request::cancel`](crate::Request::cancel) on a nonblocking-collective
+    ///   or RMA request.
+    ///
+    /// The string names the operation.
     #[error("Operation not supported: {0}")]
     NotSupported(String),
 
@@ -322,6 +334,9 @@ impl Error {
         }
         if code == FERROMPI_ERR_THREAD_LEVEL {
             return Error::ThreadLevelViolation;
+        }
+        if code == FERROMPI_ERR_NOT_SUPPORTED {
+            return Error::NotSupported("MPI 4.0 operation".into());
         }
 
         let mut class: i32 = 0;
@@ -390,6 +405,9 @@ impl Error {
     #[cold]
     #[inline(never)]
     pub fn from_code_with_op(code: i32, operation: &'static str) -> Self {
+        if code == FERROMPI_ERR_NOT_SUPPORTED {
+            return Error::NotSupported(operation.into());
+        }
         match Error::from_code(code) {
             Error::Mpi {
                 class,
@@ -446,7 +464,8 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        Error, MpiErrorClass, ResourceKind, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL,
+        Error, MpiErrorClass, ResourceKind, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_NOT_SUPPORTED,
+        FERROMPI_ERR_THREAD_LEVEL,
     };
 
     #[test]
@@ -589,6 +608,20 @@ mod tests {
         match Error::from_code_with_op(FERROMPI_ERR_THREAD_LEVEL, "barrier") {
             Error::ThreadLevelViolation => {}
             other => panic!("expected Error::ThreadLevelViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_code_maps_not_supported_sentinel() {
+        // The sentinel is intercepted before any MPI FFI call, so this is
+        // safe to run without an initialized MPI runtime.
+        match Error::from_code(FERROMPI_ERR_NOT_SUPPORTED) {
+            Error::NotSupported(_) => {}
+            other => panic!("expected Error::NotSupported, got {other:?}"),
+        }
+        match Error::from_code_with_op(FERROMPI_ERR_NOT_SUPPORTED, "bcast_init") {
+            Error::NotSupported(op) => assert_eq!(op, "bcast_init"),
+            other => panic!("expected Error::NotSupported, got {other:?}"),
         }
     }
 

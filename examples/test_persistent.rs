@@ -1,7 +1,8 @@
 //! Integration test for ALL persistent collective operations (MPI 4.0+).
 //!
 //! Tests the full PersistentRequest lifecycle: init, start, wait, test,
-//! start_all, wait_all, and drop. Gracefully skips if MPI < 4.0.
+//! start_all, wait_all, and drop. Below MPI 4.0, asserts that bcast_init
+//! refuses with Error::NotSupported instead of running the suite.
 //!
 //! Exercises all 15 persistent collective `_init` methods in `Comm`:
 //! bcast_init, allreduce_init, allreduce_init_inplace, gather_init,
@@ -14,9 +15,9 @@
 //! (active path) for full Drop coverage.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_persistent
-// mpi-test: np=2.. skip-ok=openmpi
+// mpi-test: np=2..
 
-use ferrompi::{Mpi, PersistentRequest, ReduceOp};
+use ferrompi::{Error, Mpi, PersistentRequest, ReduceOp};
 
 mod common;
 
@@ -32,8 +33,10 @@ fn main() {
     );
 
     if common::mpi_major() < 4 {
-        let version = Mpi::version().expect("Mpi::version() failed");
-        common::skip(&world, &format!("bcast_init needs MPI 4 ({version})"));
+        let mut data = vec![0.0f64; 10];
+        let result = world.bcast_init(&mut data, 0);
+        let ok = matches!(&result, Err(Error::NotSupported(op)) if op == "bcast_init");
+        common::check(&world, ok, "bcast_init refuses below MPI 4");
         return;
     }
 
