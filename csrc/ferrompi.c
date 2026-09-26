@@ -597,7 +597,10 @@ static MPI_Datatype get_datatype(int32_t tag) {
 /* Install MPI_ERRORS_RETURN on the given communicator so that MPI
  * errors are returned as codes to ferrompi rather than aborting the
  * process via MPI_ERRORS_ARE_FATAL. Called from every site that
- * creates or adopts an MPI_Comm before handing it to Rust. */
+ * creates or adopts an MPI_Comm before handing it to Rust, and also on
+ * MPI_COMM_SELF at init, since MPI 4 delivers errors that are not
+ * associated with any object (e.g. group construction) through
+ * MPI_COMM_SELF's handler. */
 static int install_errors_return(MPI_Comm comm) {
     return MPI_Comm_set_errhandler(comm, MPI_ERRORS_RETURN);
 }
@@ -643,6 +646,10 @@ int ferrompi_init_thread(int required, int* provided) {
         comm_table[0] = MPI_COMM_WORLD;
         atomic_store_explicit(&comm_used[0], 1, memory_order_release);
         int eh_ret = install_errors_return(MPI_COMM_WORLD);
+        if (eh_ret != MPI_SUCCESS) {
+            return eh_ret;
+        }
+        eh_ret = install_errors_return(MPI_COMM_SELF);
         if (eh_ret != MPI_SUCCESS) {
             return eh_ret;
         }

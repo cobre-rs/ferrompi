@@ -1,13 +1,17 @@
 //! Integration test for MPI_ERRORS_RETURN error handler installation.
 //!
-//! Verifies that MPI errors on COMM_WORLD and derived communicators return
-//! as `Err(Error::Mpi { .. })` rather than aborting the process via the
-//! default `MPI_ERRORS_ARE_FATAL` handler.
+//! Verifies that MPI errors on COMM_WORLD, derived communicators, and
+//! MPI_COMM_SELF (the handler MPI uses for errors not associated with any
+//! communicator, such as group construction) return as `Err(Error::Mpi {
+//! .. })` rather than aborting the process via the default
+//! `MPI_ERRORS_ARE_FATAL` handler.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_errhandler_returns
 // mpi-test: np=2..
 
 use ferrompi::{Error, Mpi, MpiErrorClass};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -196,10 +200,35 @@ fn main() {
         }
     }
 
+    // ========================================================================
+    // Test 5: group construction is not associated with any communicator
+    //
+    // MPI_Group_incl takes no communicator argument. Since MPI 4.0, an error
+    // raised by such a call is delivered through MPI_COMM_SELF's error
+    // handler, whose default is MPI_ERRORS_ARE_FATAL. Rank 999 is out of
+    // range for every group size used in this test suite.
+    // ========================================================================
+    {
+        let group = world.group().expect("group failed");
+        let result = group.include(&[999]);
+
+        let ok = matches!(
+            result,
+            Err(Error::Mpi {
+                class: MpiErrorClass::Rank,
+                ..
+            })
+        );
+        common::check(&world, ok, "group include with rank 999 returns Err(Rank)");
+        if rank == 0 {
+            println!("PASS: group include with rank 999 returns Err(MpiErrorClass::Rank)");
+        }
+    }
+
     world.barrier().expect("final barrier failed");
     if rank == 0 {
         println!("\n========================================");
-        println!("All errhandler tests passed! (4 tests)");
+        println!("All errhandler tests passed! (5 tests)");
         println!("========================================");
     }
 }
