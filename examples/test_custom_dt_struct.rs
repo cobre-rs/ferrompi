@@ -23,7 +23,6 @@ fn main() {
     let world = mpi.world();
     let rank = world.rank();
 
-    // local_ok tracks whether this rank passed all its assertions.
     let mut local_ok = true;
 
     // ========================================================================
@@ -46,13 +45,11 @@ fn main() {
         match CustomDatatype::create_struct(&fields) {
             Ok(s) => {
                 let h = s.raw_handle();
-                if h >= 0 {
-                    if rank == 0 {
-                        println!("PASS: Test 1 — create_struct({{f64,i32}}) raw_handle = {h}");
-                    }
-                } else {
+                if h < 0 {
                     eprintln!("rank {rank}: FAIL Test 1 — raw_handle = {h}, expected >= 0");
                     local_ok = false;
+                } else if rank == 0 {
+                    println!("PASS: Test 1 — create_struct({{f64,i32}}) raw_handle = {h}");
                 }
                 // s drops here, freeing the MPI handle
             }
