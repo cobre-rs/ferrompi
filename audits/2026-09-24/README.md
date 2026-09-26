@@ -138,7 +138,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-05 | Counts > `INT_MAX` silently truncated | critical | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-06 | `MPI_ERRORS_RETURN` not on `MPI_COMM_SELF` | major | reading | 0.5.x | fixed (19daebb) |
 | COR-07 | Finalize/re-init lifecycle aborts; `UserOp` drop after finalize | major | repro | 0.5.x | fixed (e1c123c) |
-| COR-08 | Finalize sweep frees active requests / collectively frees windows | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| COR-08 | Finalize sweep frees active requests / collectively frees windows | minor | reading | 0.5.x | fixed (b28b960) for the window sweep; request sweep planned (ferrompi-0.5.x-hardening) |
 | COR-09 | `-1` = PROC_NULL (MPICH) vs ANY_SOURCE (Open MPI) | minor | repro | 0.6 | open |
 | COR-10 | `cancel()` allowed on collective/RMA requests | minor | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-11 | `LongDoubleInt`/`LongInt` layout wrong on macOS arm64 / Windows | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening: target gating); per-target layouts open (0.6) |
