@@ -7,17 +7,28 @@
 //! Run with: mpiexec -n 1 ./target/debug/examples/test_after_finalize
 // mpi-test: np=1
 
+use std::sync::Arc;
+
 use ferrompi::{CustomDatatype, DatatypeTag, Error, Info, Mpi, ReduceOp, ThreadLevel, UserOp};
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
     let dup = world.duplicate().expect("duplicate before finalize failed");
-    let op = UserOp::<f64>::new(|a: &[f64], b: &mut [f64]| {
+    let token = Arc::new(());
+    let op_token = Arc::clone(&token);
+    let op = UserOp::<f64>::new(move |a: &[f64], b: &mut [f64]| {
+        let _keep_alive = &op_token;
         b[0] += a[0];
     })
     .expect("UserOp::new before finalize failed");
     drop(mpi);
+
+    assert_eq!(
+        Arc::strong_count(&token),
+        1,
+        "finalize sweep must free the live op and drop its closure"
+    );
 
     assert!(
         matches!(world.barrier(), Err(Error::Finalized)),
@@ -90,6 +101,12 @@ fn main() {
     // rather than calling MPI after finalize.
     drop(op);
     drop(dup);
+
+    assert_eq!(
+        Arc::strong_count(&token),
+        1,
+        "dropping UserOp after finalize must not touch the closure the sweep already dropped"
+    );
 
     assert!(
         matches!(Mpi::init(), Err(Error::Finalized)),

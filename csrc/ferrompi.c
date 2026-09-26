@@ -130,7 +130,8 @@ static atomic_int next_datatype_hint;
 //       atomic_store_explicit(release) after MPI_Op_create.
 //   - WRITER free_op_slot:
 //       atomic_store_explicit(release) of MPI_OP_NULL.
-//   - WRITER ferrompi_op_free:
+//   - WRITER ferrompi_op_free (also called per-slot by the ferrompi_finalize
+//     sweep):
 //       stages through a local; loads (acquire), invokes MPI_Op_free
 //       on the local, stores (release) the result back.
 //   - READER ferrompi_allreduce_user_op:
@@ -683,6 +684,14 @@ int ferrompi_finalize(void) {
     }
     for (int w = 0; w < REQUEST_BITS_WORDS; w++) {
         atomic_store_explicit(&request_bits[w], (uint64_t)0, memory_order_release);
+    }
+
+    // Free every live user op: frees the MPI op and drops the Rust closure
+    // through the same path as UserOp's Drop; a failed MPI_Op_free keeps both.
+    for (int i = 0; i < MAX_OPS; i++) {
+        if (atomic_load_explicit(&op_used[i], memory_order_acquire)) {
+            ferrompi_op_free(i);
+        }
     }
 
     // Clean up any remaining group objects (skip slot 0, which is MPI_GROUP_EMPTY)
@@ -4103,6 +4112,7 @@ int ferrompi_op_create_user(int32_t slot, int32_t commute, int32_t* out_handle) 
  * clear the slot.  Drop ordering: MPI_Op_free first (ADR-0005 Decision 3). */
 int ferrompi_op_free(int32_t handle) {
     if (handle < 0 || handle >= MAX_OPS) return MPI_ERR_ARG;
+    if (!atomic_load_explicit(&op_used[handle], memory_order_acquire)) return MPI_SUCCESS;  /* already freed */
     /* Step 1: MPI_Op_free — MPI will not invoke the trampoline after this.
      * Stage through a local because MPI_Op_free takes a non-atomic MPI_Op*;
      * after it returns, tmp == MPI_OP_NULL, which we store back atomically. */

@@ -150,8 +150,9 @@ pub unsafe extern "C" fn rust_user_op_invoke(
     }
 }
 
-/// Called by `ferrompi_op_free` (in C) after `MPI_Op_free` returns, and by
-/// `UserOp::new_impl`'s rollback path when `MPI_Op_create` fails.
+/// Called by `ferrompi_op_free` (in C) after `MPI_Op_free` returns — including
+/// when the `ferrompi_finalize` sweep invokes `ferrompi_op_free` on a still-used
+/// slot — and by `UserOp::new_impl`'s rollback path when `MPI_Op_create` fails.
 ///
 /// Swaps the slot to null and, if it held a pointer, drops the boxed
 /// closure.  Idempotent: a second call on the same slot is a no-op — this is
@@ -212,6 +213,9 @@ pub unsafe extern "C" fn ferrompi_op_drop_closure(slot: i32) {
 /// # Slot-table limit
 ///
 /// At most 16 `UserOp` instances may be live concurrently per process.
+///
+/// If a `UserOp` outlives the `Mpi` handle, finalizing MPI frees its op and
+/// drops its closure, and dropping the `UserOp` afterwards does nothing.
 ///
 /// # Examples
 ///
@@ -428,5 +432,18 @@ mod tests {
         let ret = unsafe { ffi::ferrompi_op_create_user(0, 1, &mut handle) };
         assert_ne!(ret, 0, "must reject a slot that was never allocated");
         assert_eq!(handle, -1, "handle must be untouched on rejection");
+    }
+
+    /// `ferrompi_op_free` on a slot that was never allocated must return
+    /// MPI_SUCCESS without calling MPI. Needs no MPI runtime: slot 5's
+    /// `op_used` entry is zero-initialised static storage, and this test
+    /// never calls `ferrompi_op_alloc_slot`.
+    #[test]
+    fn op_free_on_unused_slot_skips_mpi() {
+        // SAFETY: slot 5 is in range and has not been allocated in this
+        // process, so the op_used check must return MPI_SUCCESS before any
+        // MPI call is made.
+        let ret = unsafe { ffi::ferrompi_op_free(5) };
+        assert_eq!(ret, 0, "must skip MPI_Op_free on an unused slot");
     }
 }
