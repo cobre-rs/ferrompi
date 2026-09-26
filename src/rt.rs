@@ -103,6 +103,17 @@ pub(crate) fn finalize() -> bool {
     }
 }
 
+/// Returns `true` once state is `Finalized`. `Mpi::is_finalized()` uses this
+/// so it still reports `true` after a skipped `MPI_Finalize` (a live
+/// MPI-allocated window kept `Mpi::drop` from calling it): `finalize()`
+/// already moved `STATE` to `Finalized` before that skip decision runs.
+pub(crate) fn is_finalized() -> bool {
+    // Relaxed: see `enter`'s comment — visibility of the `Finalized` state
+    // set on another thread is carried by that thread's own handle hand-off,
+    // not by this load's ordering.
+    STATE.load(Ordering::Relaxed) == FINALIZED
+}
+
 /// Called at the top of every guarded extern wrapper. Returns
 /// `FERROMPI_ERR_FINALIZED` once state is `Finalized`;
 /// `FERROMPI_ERR_THREAD_LEVEL` once state is `Active(Single)` or

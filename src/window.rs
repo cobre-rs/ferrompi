@@ -50,6 +50,7 @@
 
 use std::ops::{BitOr, BitOrAssign};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use crate::datatype::{buf, buf_mut};
@@ -322,6 +323,9 @@ pub enum LockType {
 ///
 /// The underlying MPI window is freed automatically when the `SharedWindow`
 /// is dropped. The shared memory region becomes invalid after the window is freed.
+/// If a `SharedWindow` outlives the [`Mpi`](crate::Mpi) handle, `MPI_Finalize`
+/// is skipped instead: the shared memory stays valid until the process exits
+/// and is never freed.
 ///
 /// # Thread Safety
 ///
@@ -376,6 +380,23 @@ fn win_size_and_disp_unit<T>(count: usize) -> Result<(i64, i32)> {
     Ok((size, disp_unit))
 }
 
+/// Count of live windows whose local memory MPI itself allocated
+/// (`Win::allocate`, `SharedWindow::allocate`). `Mpi::drop` reads this
+/// through [`live_mpi_allocated_windows`] to decide whether `MPI_Finalize` is
+/// safe to call: some MPI implementations free this memory inside
+/// `MPI_Finalize` itself, which would leave a still-live window pointing at
+/// freed memory.
+static LIVE_MPI_ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of `Win::allocate`/`SharedWindow` windows currently alive.
+pub(crate) fn live_mpi_allocated_windows() -> usize {
+    // Acquire: pairs with the Release decrement in `Drop for Win`/`Drop for
+    // SharedWindow`, so a zero read here cannot precede a window's in-flight
+    // teardown; the existing caller contract on `Mpi::drop` (no thread may be
+    // mid-MPI-call through this crate when `Mpi` is dropped) covers the rest.
+    LIVE_MPI_ALLOCATED.load(Ordering::Acquire)
+}
+
 impl<T: MpiDatatype> SharedWindow<T> {
     /// Allocate a shared memory window.
     ///
@@ -425,6 +446,13 @@ impl<T: MpiDatatype> SharedWindow<T> {
 
         let local_ptr = NonNull::new(baseptr.cast::<T>())
             .ok_or_else(|| Error::Internal("Win_allocate_shared returned null".into()))?;
+
+        // Relaxed: the caller contract that `Mpi` is not dropped while
+        // another thread is inside an MPI call through this crate already
+        // orders this construction before any `Mpi::drop` that reads the
+        // counter; the store itself needs no ordering beyond the counter's
+        // own modification order.
+        LIVE_MPI_ALLOCATED.fetch_add(1, Ordering::Relaxed);
 
         Ok(SharedWindow {
             win_handle,
@@ -675,6 +703,10 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
         if !rt::drop_guard("SharedWindow") {
             return;
         }
+        // Release: pairs with `live_mpi_allocated_windows`'s Acquire load, so
+        // `Mpi::drop` cannot observe this window as gone before its teardown
+        // here has actually run.
+        LIVE_MPI_ALLOCATED.fetch_sub(1, Ordering::Release);
         // SAFETY: win_handle is a valid MPI window handle that was allocated
         // by ferrompi_win_allocate_shared. It has not been freed yet because
         // Drop is only called once, and we don't expose a manual free method.
@@ -828,7 +860,10 @@ pub enum WinKind {
 /// # RAII Lifecycle
 ///
 /// `MPI_Win_free` is called automatically when the `Win` is dropped. For
-/// `Win::allocate`, this also releases the MPI-managed buffer.
+/// `Win::allocate`, this also releases the MPI-managed buffer. If a
+/// `Win::allocate` window outlives the [`Mpi`](crate::Mpi) handle,
+/// `MPI_Finalize` is skipped instead: its memory stays valid until the
+/// process exits and is never freed.
 ///
 /// # Thread Safety
 ///
@@ -862,6 +897,10 @@ pub struct Win<'a, T: MpiDatatype> {
     local_len: usize,
     /// Number of processes in the window's communicator.
     comm_size: i32,
+    /// Whether the local buffer is caller-owned (`Win::create`) or
+    /// MPI-allocated (`Win::allocate`); `Drop` decrements the live-window
+    /// counter only for `Allocated`.
+    kind: WinKind,
     /// Captures the `'a` lifetime so the borrow checker enforces that a
     /// caller-supplied buffer outlives the `Win`. For `Win::allocate` (which
     /// uses `'static`) this is a zero-sized phantom that imposes no constraint.
@@ -935,6 +974,7 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
             local_ptr,
             local_len: buf.len(),
             comm_size: comm.size(),
+            kind: WinKind::Created,
             _marker: std::marker::PhantomData,
         })
     }
@@ -1004,11 +1044,17 @@ impl<T: MpiDatatype> Win<'static, T> {
             })?
         };
 
+        // Relaxed: see `SharedWindow::allocate`'s identical comment — the
+        // existing caller contract already orders this construction before
+        // any `Mpi::drop` that reads the counter.
+        LIVE_MPI_ALLOCATED.fetch_add(1, Ordering::Relaxed);
+
         Ok(Win {
             win_handle,
             local_ptr,
             local_len: local_count,
             comm_size: comm.size(),
+            kind: WinKind::Allocated,
             _marker: std::marker::PhantomData,
         })
     }
@@ -2534,6 +2580,10 @@ impl<T: MpiDatatype> Drop for Win<'_, T> {
     fn drop(&mut self) {
         if !rt::drop_guard("Win") {
             return;
+        }
+        if self.kind == WinKind::Allocated {
+            // Release: see `Drop for SharedWindow`'s identical comment.
+            LIVE_MPI_ALLOCATED.fetch_sub(1, Ordering::Release);
         }
         // SAFETY: `win_handle` is a valid MPI window handle allocated by
         // ferrompi_win_create or ferrompi_win_allocate. It has not been freed

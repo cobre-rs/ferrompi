@@ -193,6 +193,8 @@
 // with a justification comment) rather than crate-wide.
 
 use std::ffi::{c_char, CString};
+#[cfg(feature = "rma")]
+use std::io::Write;
 
 mod comm;
 mod datatype;
@@ -350,6 +352,11 @@ pub enum ReduceOp {
 /// instance of this type at a time. When dropped, it finalizes MPI. After the
 /// handle is dropped, every MPI-calling method returns
 /// `Err(`[`Error::Finalized`]`)` without calling MPI.
+///
+/// If a `Win::allocate` or `SharedWindow` window (feature `rma`) is still
+/// alive when this handle is dropped, `MPI_Finalize` is skipped instead —
+/// with a stderr warning — because some MPI implementations free that
+/// window's memory inside `MPI_Finalize` itself.
 ///
 /// At [`ThreadLevel::Serialized`]/[`ThreadLevel::Multiple`], dropping this
 /// handle while another thread is still inside an MPI call through this
@@ -516,7 +523,14 @@ impl Mpi {
     }
 
     /// Check if MPI has been finalized.
+    ///
+    /// Returns `true` once the `Mpi` handle has been dropped, including when
+    /// `MPI_Finalize` itself was skipped because an MPI-allocated window was
+    /// still alive.
     pub fn is_finalized() -> bool {
+        if rt::is_finalized() {
+            return true;
+        }
         let mut flag: i32 = 0;
         // SAFETY: flag is a local out-parameter that ferrompi_finalized writes
         // before this function reads it below.
@@ -741,6 +755,17 @@ impl Drop for Mpi {
         // second call on an already-finalized state, so this branch runs
         // ferrompi_finalize at most once.
         if rt::finalize() {
+            #[cfg(feature = "rma")]
+            {
+                let live = window::live_mpi_allocated_windows();
+                if live > 0 {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "ferrompi: MPI_Finalize skipped: {live} window(s) from Win::allocate or SharedWindow still alive; their memory stays valid until the process exits"
+                    );
+                    return;
+                }
+            }
             // SAFETY: ferrompi_finalize takes no arguments. rt::finalize()
             // just returned true, so state was Active — MPI_Init(_thread)
             // succeeded and MPI_Finalize has not yet been called for this
