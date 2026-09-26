@@ -25,12 +25,12 @@ They are meant to become regression tests during the 0.5.x plan. Once a finding 
 Every crate is a standalone Cargo package with its own empty `[workspace]`. Each depends on the ferrompi working tree through a relative path (`../../../..`), so it always builds against the current code.
 
 ```bash
-cd audits/2026-09-24/repros/<crate>      # soundness | c-shim | requests | win-sync | perf
+cd audits/2026-09-24/repros/<crate>      # soundness | c-shim | win-sync | perf
 cargo build --release
 mpiexec -n <N> target/release/<program>
 ```
 
-- `soundness`, `c-shim`, `win-sync` and `perf` enable `ferrompi/rma`. `requests` uses default features.
+- `soundness`, `c-shim`, `win-sync` and `perf` enable `ferrompi/rma`.
 - Some fixes will make a repro stop compiling on purpose. The SND-01, SND-02, SND-05 and SND-08 (case B) repros rely on APIs that the fix removes. A compile error is then the expected "after fix" result, and the repro should be replaced by a `compile_fail` doctest.
 
 Building the C programs:
@@ -67,7 +67,6 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 | `soundness/src/bin/r8_forget_win.rs` | SND-05 | `mem::forget(Win::create(&mut buf))`, `drop(buf)`, victim `Vec` reuses the memory, then rank 1 does a locked `put` | np=2 | `victim[0..4] = 0x5555555555555555…`: the remote `put` writes into the freed and reused allocation | Does not compile, or `Win::create` owns the buffer so forgetting it leaks the buffer instead of freeing it |
 | `soundness/src/bin/r9_waitall_err.rs` | COR-03 (also COR-02, COR-01) | One truncating `irecv` makes `wait_all` fail; a new `irecv` is posted; then the old requests are dropped | np=2 | `evidence/r9.out`: `wait_all -> Err(class: Intern, code: 17 …)` (17 is `IN_STATUS` on MPICH, see COR-01). The drop then hangs and is killed with SIGTERM | `wait_all` error writes the request state back; drop does nothing; `r3.wait()` returns `Ok`; prints `done` |
 | `soundness/src/bin/r9b_waitall_err_nor3.rs` | COR-03 (control) | Same as r9 without posting a new request | np=2 | `evidence/r9b.out`: `dropped OK`. This isolates reuse of freed MPI request objects as the trigger for r9 | Unchanged, with class `InStatus` |
-| `soundness/src/bin/r10_waitany_aba.rs` | COR-02 | `wait_any` twice on the same slice, with an unrelated `irecv` posted in between (it takes the freed slot) | np=2 | The second `wait_any` returns `Some(0)` and completes and frees `other`; `other.wait()` gives `Err "Invalid MPI_Request"` while `other.is_completed()==false` | The second `wait_any` ignores the completed entry; `other.wait()` returns `Ok` |
 | `soundness/src/bin/r11_shm_race.rs` | SND-13 | Rank 1 spins on `remote_slice(0)[0]` (a `&[u64]`) while rank 0 sets the flag through its own slice | np=2 (same node) | `evidence/r11.out`: rank 0 printed `flag set`/`exiting` 3 s apart; rank 1 never printed `observed flag`. The release build hoisted the load out of the loop: the disassembly is a single `cmpq $0x0,(%rcx)` followed by a jump to itself, so the loop never ends. The miscompilation is observed, not just theoretical | No plain `&[T]` over memory another process writes; the access API forces an atomic or volatile read, and the loop sees the flag |
 | `soundness/src/bin/r13_persistent_realloc.rs` | SND-02 | `recv_init(&mut data)`, then `data.reserve(4096)` reallocates the buffer, then `start`/`send`/`wait` | np=2 | Heap corruption: SIGSEGV inside `MPI_Finalize` (gdb: `unlink_chunk`/`_int_malloc` under `Mpi::drop`) | Does not compile: the persistent request owns its buffer |
 
@@ -75,12 +74,9 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 
 | Program | Finding | What it does | How to run | Observed on v0.5.0 | Expected after fix |
 |---|---|---|---|---|---|
-| `c-shim/src/bin/t3_waitany_stale.rs` | COR-02 | `wait_any`, then a new `irecv` C (it reuses slot 0), then `wait_any` again on the original slice | np=1 | The second `wait_any` acts on C through the stale handle; `C.wait()` gives `Err "Invalid MPI_Request"` | Once fixed, the second `wait_any` waits on `b`, whose send is posted later, so **this program deadlocks by design**. To make it a regression test, post `send(&sb…)` before the second call; then expect `Some(1)` and `C.wait()` → `Ok` |
-| `c-shim/src/bin/t3b_waitany_null.rs` | COR-02 | The standard MPI idiom: loop `wait_any` until `None` without removing completed entries | np=1 | The first call returns `Some(i)`. The next call, with the completed entry still in the slice, returns `Err "Invalid MPI_Request"`; `Ok(None)` is never reached | `Some`, `Some`, then `Ok(None)` |
 | `c-shim/src/bin/t4_waitall_err.rs` | COR-03, COR-04, COR-01 | `wait_all` with one truncating receive, then a new `irecv`, then drop of the old requests | np=1 | `evidence/t4.log`: `wait_all -> Err("… See the MPI_ERROR field in MPI_Status … (class=ERR_INTERN, code=17)")`, `fresh handle 2`, then it hangs at `dropping reqs` | The error names the truncation and has the correct class; drop does nothing; `fresh.wait` returns `Ok`; prints `SURVIVED` |
 | `c-shim/src/bin/t4b_waitall_err_nofresh.rs` | COR-03 | After the failed `wait_all`, calls `test()` on each request | np=1 | MPICH `INTERNAL ERROR: unexpected value in case statement`: `test` runs on already-freed MPI request objects | `test` reports the requests as completed; prints `SURVIVED` |
 | `c-shim/src/bin/t4c_waitany_err.rs` | COR-03 | `wait_any` returns a truncation error; then `test()` on the failed entry | np=1 | Same failure class as t4b: the table keeps a freed MPI request | The failed entry is marked completed; prints `SURVIVED` |
-| `c-shim/src/bin/t9_test_err_aba.rs` | COR-02 | `A.test()` fails with truncation, so C frees slot 0 while `A.is_completed()==false`. B then takes slot 0, and `drop(A)` waits on it | np=1 | `drop(A)` consumes B's request; `B.wait()` gives `Err "Invalid MPI_Request"` | `B.wait()` returns `Ok`, `bbuf=[42]` |
 | `c-shim/src/bin/t10_group_empty.rs` | VER (GROUP_EMPTY slot) | Creates and drops empty groups (`include(&[])`, `difference(self)`) 3 times | np=1 | Works and prints `SURVIVED`; slot 0 (`MPI_GROUP_EMPTY`) is never handed out or freed | Unchanged |
 | `c-shim/src/bin/t12_reduce_inplace.rs` | VER (in-place semantics) | `reduce_inplace` Sum to root 0 | np=2 | Correct result on MPICH; the in-place alias check passes | Unchanged |
 | `c-shim/src/bin/t13_rma_trunc.rs` | COR-05, SND-12 | `put` with `target_count = 2^32+4` into a `Win::allocate` window, then prints the window | np=1 | `put -> Ok` but only 4 elements are transferred, because `(int)` truncates the count. Untouched elements show uninitialised memory (e.g. `1.012e-320`, `2e-323`) | `put` → `Err` (MPI_ERR_COUNT, or `_c` dispatch); the window starts zero-filled |
@@ -89,12 +85,6 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 | `c-shim/src/bin/t16_cancel_coll.rs` | COR-10 | `cancel()` on an `iallreduce` request | np=2 | rank 0: `Err "Attempt to cancel an unknown type of request"` from MPICH | ferrompi refuses cancel on non-point-to-point requests with a typed error, without calling MPI |
 | `c-shim/c/pair_type_extents.c` | VER (pair layouts), COR-11 baseline | Prints lb, extent and size of the MPI value+index pair types (`MPI_FLOAT_INT` … `MPI_LONG_DOUBLE_INT`) | `mpicc`; np=1 | x86_64 Linux MPICH: FLOAT_INT 8, DOUBLE_INT 16, LONG_INT 16, 2INT 8, SHORT_INT 8, LONG_DOUBLE_INT 32. All match the Rust `#[repr(C)]` sizes in `src/datatype.rs` | Unchanged on Linux |
 | `c-shim/c/gfree.c` | VER | `MPI_Group_free(MPI_GROUP_EMPTY)` in plain C | `mpicc`; np=1 | MPICH accepts it (rc=0) | Reference only |
-
-### requests/: request-slot reuse and error classes (default features)
-
-| Program | Finding | What it does | How to run | Observed on v0.5.0 | Expected after fix |
-|---|---|---|---|---|---|
-| `requests/src/main.rs` (bin `ferrompi-audit-requests`) | COR-02, COR-01 | Two self-requests completed with `test()`; two new requests reuse slots 0 and 1; then `wait_all` on the old slice; plus the standard `wait_any` loop | np=1 | `old handles: 0 1`, `new handles: 0 1`, `wait_all(old) -> Ok(())`. Then `new_recv.wait()` and `new_send.wait()` both give `Err(Mpi { class: Pending, code: 19, "Invalid MPI_Request" })`: the new requests were silently completed and freed, and code 19 (`MPI_ERR_REQUEST` on MPICH) is decoded as `Pending`. `wait_any #1 -> Some(0)`, `wait_any #2 -> Err(… "Invalid MPI_Request")` | `wait_all(old)` does nothing; both new waits return `Ok`; `wait_any #2` returns `Some(1)` |
 
 ### win-sync/: `Win::sync` rustdoc example
 

@@ -132,7 +132,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | ID | Title | Sev | Verified | Target | Status |
 |---|---|---|---|---|---|
 | COR-01 | Error classes decoded with Open MPI numbering (wrong on MPICH) | major | repro | 0.5.x | fixed (ea3cff2) |
-| COR-02 | Stale request handles act on unrelated requests (ABA) | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| COR-02 | Stale request handles act on unrelated requests (ABA) | major | repro | 0.5.x | fixed (a33d65b) |
 | COR-03 | No request write-back on error in wait/test-many | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-04 | `MPI_STATUSES_IGNORE` loses per-request error | minor | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | COR-05 | Counts > `INT_MAX` silently truncated | critical | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
