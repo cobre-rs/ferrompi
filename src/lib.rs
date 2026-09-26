@@ -238,11 +238,7 @@ pub use window::{
 };
 
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-
-/// Global flag tracking whether MPI has been initialized
-static MPI_INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// Process-wide buffer attached for buffered sends (`MPI_Buffer_attach`).
 ///
@@ -381,7 +377,10 @@ impl Mpi {
     ///
     /// # Errors
     ///
-    /// Returns an error if MPI is already initialized or if initialization fails.
+    /// Returns `Err(`[`Error::AlreadyInitialized`]`)` while an `Mpi` handle
+    /// exists or another thread is initializing, `Err(`[`Error::Finalized`]`)`
+    /// once MPI has been finalized, or `Err(`[`Error::Mpi`]`)` if
+    /// `MPI_Init_thread` itself fails.
     pub fn init() -> Result<Self> {
         Self::init_thread(ThreadLevel::Single)
     }
@@ -399,21 +398,33 @@ impl Mpi {
     ///
     /// # Errors
     ///
-    /// Returns an error if MPI is already initialized or if initialization fails.
+    /// Returns `Err(`[`Error::AlreadyInitialized`]`)` while an `Mpi` handle
+    /// exists or another thread is initializing, `Err(`[`Error::Finalized`]`)`
+    /// once MPI has been finalized, or `Err(`[`Error::Mpi`]`)` if
+    /// `MPI_Init_thread` itself fails.
     pub fn init_thread(required: ThreadLevel) -> Result<Self> {
-        // Check if already initialized
-        if MPI_INITIALIZED.swap(true, Ordering::SeqCst) {
-            return Err(Error::AlreadyInitialized);
+        rt::begin_init()?;
+
+        let mut already_finalized: i32 = 0;
+        // SAFETY: already_finalized is a local out-parameter that
+        // ferrompi_finalized writes before this reads it below;
+        // ferrompi_finalized is legal to call at any point in the process
+        // lifecycle, including before MPI_Init_thread.
+        unsafe { ffi::ferrompi_finalized(&mut already_finalized) };
+        if already_finalized != 0 {
+            rt::abandon_init();
+            return Err(Error::Finalized);
         }
 
         let mut provided: i32 = 0;
         // SAFETY: provided is a local out-parameter written by MPI_Init_thread;
-        // the CAS swap above guarantees this is the only call to MPI_Init_thread
-        // in the process, so there is no concurrent or repeated initialization.
+        // rt::begin_init's compare-exchange above guarantees this is the only
+        // MPI_Init_thread call in the process at a time, and the finalized
+        // check above guarantees MPI has not already been finalized.
         let ret = unsafe { ffi::ferrompi_init_thread(required as i32, &mut provided) };
 
         if ret != 0 {
-            MPI_INITIALIZED.store(false, Ordering::SeqCst);
+            rt::abandon_init();
             return Err(Error::Mpi {
                 class: MpiErrorClass::Raw(ret),
                 code: ret,
@@ -737,7 +748,6 @@ impl Drop for Mpi {
             unsafe {
                 ffi::ferrompi_finalize();
             }
-            MPI_INITIALIZED.store(false, Ordering::SeqCst);
         }
     }
 }

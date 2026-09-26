@@ -7,7 +7,7 @@
 //! Run with: mpiexec -n 1 ./target/debug/examples/test_after_finalize
 // mpi-test: np=1
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Info, Mpi, ReduceOp, UserOp};
+use ferrompi::{CustomDatatype, DatatypeTag, Error, Info, Mpi, ReduceOp, ThreadLevel, UserOp};
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -90,6 +90,18 @@ fn main() {
     // rather than calling MPI after finalize.
     drop(op);
     drop(dup);
+
+    assert!(
+        matches!(Mpi::init(), Err(Error::Finalized)),
+        "Mpi::init after finalize must return Err(Finalized) without calling MPI_Init"
+    );
+    assert!(
+        matches!(
+            Mpi::init_thread(ThreadLevel::Multiple),
+            Err(Error::Finalized)
+        ),
+        "Mpi::init_thread after finalize must return Err(Finalized) without calling MPI_Init_thread"
+    );
 
     println!("test_after_finalize: PASS");
 }

@@ -87,7 +87,6 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 | `c-shim/src/bin/t4_waitall_err.rs` | COR-03, COR-04, COR-01 | `wait_all` with one truncating receive, then a new `irecv`, then drop of the old requests | np=1 | `evidence/t4.log`: `wait_all -> Err("… See the MPI_ERROR field in MPI_Status … (class=ERR_INTERN, code=17)")`, `fresh handle 2`, then it hangs at `dropping reqs` | The error names the truncation and has the correct class; drop does nothing; `fresh.wait` returns `Ok`; prints `SURVIVED` |
 | `c-shim/src/bin/t4b_waitall_err_nofresh.rs` | COR-03 | After the failed `wait_all`, calls `test()` on each request | np=1 | MPICH `INTERNAL ERROR: unexpected value in case statement`: `test` runs on already-freed MPI request objects | `test` reports the requests as completed; prints `SURVIVED` |
 | `c-shim/src/bin/t4c_waitany_err.rs` | COR-03 | `wait_any` returns a truncation error; then `test()` on the failed entry | np=1 | Same failure class as t4b: the table keeps a freed MPI request | The failed entry is marked completed; prints `SURVIVED` |
-| `c-shim/src/bin/t5_reinit.rs` | COR-07 | `Mpi::init()` again after the first `Mpi` was dropped | np=1 | MPICH abort: `Cannot call MPI_INIT or MPI_INIT_THREAD more than once` (exit 15) | `re-init is_err=true`, `SURVIVED` |
 | `c-shim/src/bin/t7_errclass.rs` | COR-01 | `broadcast` with root 999, and a truncating receive | np=1 | `class=ERR_REQUEST` for the invalid root; `class=ERR_UNKNOWN` for the truncation | `ERR_ROOT`, `ERR_TRUNCATE` |
 | `c-shim/src/bin/t8_gatherv_overflow.rs` | SND-07 | `gatherv` of 64 elements into a 1-element `recv` | np=1, valgrind | valgrind: `Invalid write of size 8 … 0 bytes after a block of size 8` in `ferrompi_gatherv` | `Err` before FFI; valgrind clean |
 | `c-shim/src/bin/t8b_gatherv_short_counts.rs` | SND-07 | `gatherv` with counts/displs of length 1 on 2 ranks | np=2, valgrind | valgrind: invalid read past the counts array | `Err` (array length must equal the communicator size) |
@@ -118,7 +117,7 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 |---|---|---|---|---|---|
 | `win-sync/src/main.rs` | Docs finding: `Win::sync` rustdoc (see `../findings/`) | Runs the rustdoc example as written: a bare `win.sync()` outside any epoch | np=1 or 2 | `bare Win::sync outside epoch -> Err: MPI error in win_sync: Wrong synchronization of RMA calls` | The rustdoc is corrected (or `sync` moves onto the lock guards), and this call is documented as an error |
 
-Note: the scratchpad crate this came from was named `reinit`, but it contains only the `Win::sync` check. The re-initialisation repro is `c-shim/src/bin/t5_reinit.rs`.
+Note: the scratchpad crate this came from was named `reinit`, but it contains only the `Win::sync` check.
 
 ### perf/: overhead measurements (MPICH only; release profile uses thin LTO, cgu=1)
 

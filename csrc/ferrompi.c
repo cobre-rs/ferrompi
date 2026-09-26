@@ -154,8 +154,7 @@ static atomic_int next_op_hint;
 // observable state.  If any future revision ever writes a non-zero value
 // in the init loop, a release fence (e.g. atomic_thread_fence(release))
 // must be inserted before the CAS, or the non-zero init must move into
-// each call site of get_*.  Reset to 0 by ferrompi_finalize via a release
-// store so a subsequent re-init (e.g. test harness) sees a clean zero.
+// each call site of get_*.
 static atomic_int tables_initialized;
 
 static void init_tables(void) {
@@ -724,7 +723,6 @@ int ferrompi_finalize(void) {
         }
     }
     
-    atomic_store_explicit(&tables_initialized, 0, memory_order_release);
     return MPI_Finalize();
 }
 
