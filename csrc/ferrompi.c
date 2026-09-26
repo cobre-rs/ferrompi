@@ -41,8 +41,8 @@ _Static_assert(MAX_REQUESTS % 64 == 0,
 // larger than this fall back to a heap allocation. 64 covers the
 // overwhelming majority of real request sets (halo exchange, ping-pong,
 // neighbour collectives) while keeping the worst-case stack footprint small
-// (64 * sizeof(MPI_Request) plus, for waitall, 64 * sizeof(MPI_Status), and
-// for waitsome/testsome, 64 * sizeof(int)).
+// (64 * sizeof(MPI_Request) plus, for waitall, waitsome and testsome,
+// 64 * sizeof(MPI_Status), and for waitsome/testsome, 64 * sizeof(int)).
 #define FERROMPI_REQ_STACK 64
 
 // Internal resource-exhaustion sentinels, returned when a fixed-size handle
@@ -3169,7 +3169,9 @@ int ferrompi_test(int64_t request_handle, int32_t* flag) {
     return ret;
 }
 
-int ferrompi_waitall(int64_t count, const int64_t* request_handles, uint8_t* done) {
+int ferrompi_waitall(int64_t count, const int64_t* request_handles, uint8_t* done,
+                      int64_t* failed_index) {
+    *failed_index = -1;
     if (count <= 0) return MPI_SUCCESS;
     if (count > INT_MAX) return MPI_ERR_COUNT;
 
@@ -3217,6 +3219,19 @@ int ferrompi_waitall(int64_t count, const int64_t* request_handles, uint8_t* don
             || (ret == MPI_ERR_IN_STATUS && sts[i].MPI_ERROR != MPI_ERR_PENDING);
     }
     write_back(count, request_handles, reqs, done);
+
+    // Report the first request whose own status carries the real error, so
+    // the caller sees that request's class/code instead of the opaque
+    // MPI_ERR_IN_STATUS wrapper.
+    if (ret == MPI_ERR_IN_STATUS) {
+        for (int64_t i = 0; i < count; i++) {
+            if (sts[i].MPI_ERROR != MPI_SUCCESS && sts[i].MPI_ERROR != MPI_ERR_PENDING) {
+                *failed_index = i;
+                ret = sts[i].MPI_ERROR;
+                break;
+            }
+        }
+    }
 
     if (sts != stack_sts) free(sts);
     if (reqs != stack_reqs) free(reqs);
@@ -3321,11 +3336,14 @@ int ferrompi_waitany(int64_t count, const int64_t* request_handles,
 }
 
 int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
-                      int64_t* outcount, int32_t* indices, uint8_t* done) {
+                      int64_t* outcount, int32_t* indices, uint8_t* done,
+                      int64_t* failed_index) {
+    *failed_index = -1;
     if (count <= 0) { *outcount = -1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
     int stack_idx[FERROMPI_REQ_STACK];
+    MPI_Status stack_sts[FERROMPI_REQ_STACK];
     MPI_Request* reqs = (count <= FERROMPI_REQ_STACK)
         ? stack_reqs
         : (MPI_Request*)malloc((size_t)count * sizeof(MPI_Request));
@@ -3334,6 +3352,14 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
         ? stack_idx
         : (int*)malloc((size_t)count * sizeof(int));
     if (!tmp_indices) { if (reqs != stack_reqs) free(reqs); return MPI_ERR_NO_MEM; }
+    MPI_Status* sts = (count <= FERROMPI_REQ_STACK)
+        ? stack_sts
+        : (MPI_Status*)malloc((size_t)count * sizeof(MPI_Status));
+    if (!sts) {
+        if (tmp_indices != stack_idx) free(tmp_indices);
+        if (reqs != stack_reqs) free(reqs);
+        return MPI_ERR_NO_MEM;
+    }
     for (int64_t i = 0; i < count; i++) {
         done[i] = 0;
         if (request_handles[i] == -1) {
@@ -3342,6 +3368,7 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
         }
         MPI_Request* req = get_request_ptr(request_handles[i]);
         if (!req) {
+            if (sts != stack_sts) free(sts);
             if (tmp_indices != stack_idx) free(tmp_indices);
             if (reqs != stack_reqs) free(reqs);
             return MPI_ERR_REQUEST;
@@ -3349,7 +3376,7 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
         reqs[i] = *req;
     }
     int out = MPI_UNDEFINED;
-    int ret = MPI_Waitsome((int)count, reqs, &out, tmp_indices, MPI_STATUSES_IGNORE);
+    int ret = MPI_Waitsome((int)count, reqs, &out, tmp_indices, sts);
     if (out == MPI_UNDEFINED) {
         *outcount = -1;
     } else {
@@ -3360,6 +3387,20 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
         }
     }
     write_back(count, request_handles, reqs, done);
+
+    // statuses[k] belongs to request indices[k] (completion order, not
+    // caller order); report the caller's index of the first real failure.
+    if (ret == MPI_ERR_IN_STATUS) {
+        for (int i = 0; i < out; i++) {
+            if (sts[i].MPI_ERROR != MPI_SUCCESS && sts[i].MPI_ERROR != MPI_ERR_PENDING) {
+                *failed_index = tmp_indices[i];
+                ret = sts[i].MPI_ERROR;
+                break;
+            }
+        }
+    }
+
+    if (sts != stack_sts) free(sts);
     if (tmp_indices != stack_idx) free(tmp_indices);
     if (reqs != stack_reqs) free(reqs);
     return ret;
@@ -3398,11 +3439,14 @@ int ferrompi_testany(int64_t count, const int64_t* request_handles,
 }
 
 int ferrompi_testsome(int64_t count, const int64_t* request_handles,
-                      int64_t* outcount, int32_t* indices, uint8_t* done) {
+                      int64_t* outcount, int32_t* indices, uint8_t* done,
+                      int64_t* failed_index) {
+    *failed_index = -1;
     if (count <= 0) { *outcount = -1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
     int stack_idx[FERROMPI_REQ_STACK];
+    MPI_Status stack_sts[FERROMPI_REQ_STACK];
     MPI_Request* reqs = (count <= FERROMPI_REQ_STACK)
         ? stack_reqs
         : (MPI_Request*)malloc((size_t)count * sizeof(MPI_Request));
@@ -3411,6 +3455,14 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
         ? stack_idx
         : (int*)malloc((size_t)count * sizeof(int));
     if (!tmp_indices) { if (reqs != stack_reqs) free(reqs); return MPI_ERR_NO_MEM; }
+    MPI_Status* sts = (count <= FERROMPI_REQ_STACK)
+        ? stack_sts
+        : (MPI_Status*)malloc((size_t)count * sizeof(MPI_Status));
+    if (!sts) {
+        if (tmp_indices != stack_idx) free(tmp_indices);
+        if (reqs != stack_reqs) free(reqs);
+        return MPI_ERR_NO_MEM;
+    }
     for (int64_t i = 0; i < count; i++) {
         done[i] = 0;
         if (request_handles[i] == -1) {
@@ -3419,6 +3471,7 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
         }
         MPI_Request* req = get_request_ptr(request_handles[i]);
         if (!req) {
+            if (sts != stack_sts) free(sts);
             if (tmp_indices != stack_idx) free(tmp_indices);
             if (reqs != stack_reqs) free(reqs);
             return MPI_ERR_REQUEST;
@@ -3426,7 +3479,7 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
         reqs[i] = *req;
     }
     int out = MPI_UNDEFINED;
-    int ret = MPI_Testsome((int)count, reqs, &out, tmp_indices, MPI_STATUSES_IGNORE);
+    int ret = MPI_Testsome((int)count, reqs, &out, tmp_indices, sts);
     if (out == MPI_UNDEFINED) {
         *outcount = -1;
     } else {
@@ -3437,6 +3490,20 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
         }
     }
     write_back(count, request_handles, reqs, done);
+
+    // statuses[k] belongs to request indices[k] (completion order, not
+    // caller order); report the caller's index of the first real failure.
+    if (ret == MPI_ERR_IN_STATUS) {
+        for (int i = 0; i < out; i++) {
+            if (sts[i].MPI_ERROR != MPI_SUCCESS && sts[i].MPI_ERROR != MPI_ERR_PENDING) {
+                *failed_index = tmp_indices[i];
+                ret = sts[i].MPI_ERROR;
+                break;
+            }
+        }
+    }
+
+    if (sts != stack_sts) free(sts);
     if (tmp_indices != stack_idx) free(tmp_indices);
     if (reqs != stack_reqs) free(reqs);
     return ret;

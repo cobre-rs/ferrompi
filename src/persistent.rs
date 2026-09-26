@@ -198,23 +198,34 @@ impl PersistentRequest {
     /// Whatever the result, every request MPI completed is marked inactive
     /// in place; the others stay active. This is the same policy
     /// [`Request::wait_all`](crate::Request::wait_all) applies.
+    ///
+    /// On a failed request, the returned error carries that request's own
+    /// class and code, and its message ends with `(request N)`, `N` being
+    /// its index in `requests`.
     pub fn wait_all(requests: &mut [PersistentRequest]) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
         }
 
+        let mut failed: i64 = -1;
         // SAFETY: with_handles provides a valid, contiguous [i64] of the
         // persistent-request handles and a same-length [u8] done buffer, both
-        // sized to the count we pass.
+        // sized to the count we pass; failed is a valid stack-allocated i64
+        // output parameter.
         let ret = crate::request::with_handles(
             requests,
             |r| r.handle,
             |handles, done| unsafe {
-                ffi::ferrompi_waitall(handles.len() as i64, handles.as_ptr(), done.as_mut_ptr())
+                ffi::ferrompi_waitall(
+                    handles.len() as i64,
+                    handles.as_ptr(),
+                    done.as_mut_ptr(),
+                    &mut failed,
+                )
             },
             |r| r.active = false,
         );
-        Error::check_with_op(ret, "waitall")
+        crate::request::check_batch(ret, "waitall", failed)
     }
 }
 

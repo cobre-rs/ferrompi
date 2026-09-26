@@ -22,7 +22,7 @@ extern "C" {
         comm: i32,
         req: *mut i64,
     ) -> i32;
-    fn ferrompi_waitall(count: i64, reqs: *mut i64, done: *mut u8) -> i32;
+    fn ferrompi_waitall(count: i64, reqs: *mut i64, done: *mut u8, failed_index: *mut i64) -> i32;
     fn ferrompi_wait(req: i64) -> i32;
 }
 const F64_TAG: i32 = 1;
@@ -90,6 +90,7 @@ fn main() {
     let shim = |sb: &[f64], rb: &mut [f64]| unsafe {
         let mut q = [0i64; 128];
         let mut done = [0u8; 128];
+        let mut failed_index: i64 = -1;
         for i in 0..k {
             ferrompi_irecv(
                 rb.as_mut_ptr().add(i).cast(),
@@ -112,7 +113,12 @@ fn main() {
                 &mut q[k + i],
             );
         }
-        ferrompi_waitall((2 * k) as i64, q.as_mut_ptr(), done.as_mut_ptr());
+        ferrompi_waitall(
+            (2 * k) as i64,
+            q.as_mut_ptr(),
+            done.as_mut_ptr(),
+            &mut failed_index,
+        );
     };
     let mut reqs: Vec<Request> = Vec::with_capacity(2 * k);
     let mut rust = |sb: &[f64], rb: &mut [f64], reqs: &mut Vec<Request>| {

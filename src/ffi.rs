@@ -842,7 +842,12 @@ guarded_extern! {
 
     pub fn ferrompi_test(request: int64_t, flag: *mut int32_t) -> c_int;
 
-    pub fn ferrompi_waitall(count: int64_t, requests: *const int64_t, done: *mut u8) -> c_int;
+    pub fn ferrompi_waitall(
+        count: int64_t,
+        requests: *const int64_t,
+        done: *mut u8,
+        failed_index: *mut int64_t,
+    ) -> c_int;
 
     pub fn ferrompi_request_get_status(request: int64_t, flag: *mut int32_t) -> c_int;
 
@@ -861,6 +866,7 @@ guarded_extern! {
         outcount: *mut int64_t,
         indices: *mut int32_t,
         done: *mut u8,
+        failed_index: *mut int64_t,
     ) -> c_int;
 
     pub fn ferrompi_testany(
@@ -877,6 +883,7 @@ guarded_extern! {
         outcount: *mut int64_t,
         indices: *mut int32_t,
         done: *mut u8,
+        failed_index: *mut int64_t,
     ) -> c_int;
 
     // ============================================================

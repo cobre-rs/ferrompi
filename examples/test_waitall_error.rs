@@ -28,6 +28,19 @@ fn class_of<T>(result: &ferrompi::Result<T>) -> Option<MpiErrorClass> {
     }
 }
 
+/// True iff `result` is a `Truncate` error whose message names `index` as the
+/// failing request's position in the caller's slice.
+fn truncated_at<T>(result: &ferrompi::Result<T>, index: usize) -> bool {
+    match result {
+        Err(Error::Mpi {
+            class: MpiErrorClass::Truncate,
+            message,
+            ..
+        }) => message.ends_with(&format!("(request {index})")),
+        _ => false,
+    }
+}
+
 fn part1_and_1b(world: &Communicator, rank: i32, mpich: bool) {
     let mut small = [0i32; 1];
     let mut big = [0i32; 4];
@@ -41,7 +54,7 @@ fn part1_and_1b(world: &Communicator, rank: i32, mpich: bool) {
 
         let mut ok = true;
         let result = Request::wait_all(&mut reqs);
-        ok &= class_of(&result) == Some(MpiErrorClass::InStatus);
+        ok &= truncated_at(&result, 0);
         ok &= reqs[0].is_completed();
         if mpich {
             ok &= !reqs[1].is_completed();
@@ -149,7 +162,7 @@ fn part3_wait_some_in_status(world: &Communicator, rank: i32) {
         world.barrier().expect("part3: barrier after posting");
 
         let result = Request::wait_some(&mut reqs);
-        let mut ok = class_of(&result) == Some(MpiErrorClass::InStatus);
+        let mut ok = truncated_at(&result, 1);
         ok &= reqs[1].is_completed() && !reqs[0].is_completed();
 
         world.barrier().expect("part3: barrier before other send");
@@ -239,7 +252,7 @@ fn part5_test_some_in_status(world: &Communicator, rank: i32) {
                 other => break other,
             }
         };
-        let mut ok = class_of(&result) == Some(MpiErrorClass::InStatus);
+        let mut ok = truncated_at(&result, 1);
         ok &= reqs[1].is_completed() && !reqs[0].is_completed();
 
         world.barrier().expect("part5: barrier before other send");
@@ -286,9 +299,9 @@ fn part6_persistent_wait_all(world: &Communicator, rank: i32, mpich: bool) {
         let mut ok = true;
         let result = PersistentRequest::wait_all(&mut reqs);
         ok &= if mpich {
-            class_of(&result) == Some(MpiErrorClass::InStatus)
+            truncated_at(&result, 0)
         } else {
-            result.is_ok() || class_of(&result) == Some(MpiErrorClass::InStatus)
+            result.is_ok() || truncated_at(&result, 0)
         };
         ok &= !reqs[0].is_active();
 

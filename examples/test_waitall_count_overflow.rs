@@ -24,11 +24,18 @@ use ferrompi::{Error, Mpi, MpiErrorClass};
 //     the loop body; the guard returns before dereferencing the array.
 //   - done may point to a stack u8 for the same reason; the guard returns
 //     before the array is zeroed.
+//   - failed_index points to a stack i64; the guard writes -1 to it before
+//     the count check, so it is always a valid write target.
 //   - count = i64::MAX triggers the guard and returns MPI_ERR_COUNT before any
 //     MPI function or malloc is called, so no MPI state is modified.
 #[allow(dead_code)]
 extern "C" {
-    fn ferrompi_waitall(count: i64, request_handles: *const i64, done: *mut u8) -> std::ffi::c_int;
+    fn ferrompi_waitall(
+        count: i64,
+        request_handles: *const i64,
+        done: *mut u8,
+        failed_index: *mut i64,
+    ) -> std::ffi::c_int;
 }
 
 fn main() {
@@ -54,6 +61,7 @@ fn main() {
     // dummy done pointer; the guard returns before either is dereferenced.
     let dummy_handle: i64 = -1;
     let mut dummy_done: u8 = 0;
+    let mut dummy_failed_index: i64 = -1;
 
     let raw_ret = unsafe {
         // SAFETY: see the invariant comment on the extern "C" block above.
@@ -61,6 +69,7 @@ fn main() {
             i64::MAX, // count >> INT_MAX — must be rejected by the C guard
             std::ptr::addr_of!(dummy_handle),
             std::ptr::addr_of_mut!(dummy_done),
+            std::ptr::addr_of_mut!(dummy_failed_index),
         )
     };
 

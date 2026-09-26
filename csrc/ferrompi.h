@@ -440,7 +440,8 @@ int ferrompi_wait(int64_t request);
 
 int ferrompi_test(int64_t request, int32_t* flag);
 
-int ferrompi_waitall(int64_t count, const int64_t* requests, uint8_t* done);
+int ferrompi_waitall(int64_t count, const int64_t* requests, uint8_t* done,
+                      int64_t* failed_index);
 
 int ferrompi_request_free(int64_t request);
 
@@ -453,13 +454,13 @@ int ferrompi_cancel(int64_t request);
 int ferrompi_waitany(int64_t count, const int64_t* requests, int32_t* index, uint8_t* done);
 
 int ferrompi_waitsome(int64_t count, const int64_t* requests, int64_t* outcount,
-                       int32_t* indices, uint8_t* done);
+                       int32_t* indices, uint8_t* done, int64_t* failed_index);
 
 int ferrompi_testany(int64_t count, const int64_t* requests, int32_t* index,
                       int32_t* flag, uint8_t* done);
 
 int ferrompi_testsome(int64_t count, const int64_t* requests, int64_t* outcount,
-                       int32_t* indices, uint8_t* done);
+                       int32_t* indices, uint8_t* done, int64_t* failed_index);
 
 int ferrompi_start(int64_t request);
 
