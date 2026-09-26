@@ -405,6 +405,53 @@ fn main() {
     }
 
     // ========================================================================
+    // Test: probe::<i32>/iprobe::<i32> of a message that is not a whole
+    // number of i32 elements (MPI_Get_count reports MPI_UNDEFINED)
+    // ========================================================================
+    // Rank 0 sends 3 bytes to rank 1; rank 1 probes it as i32 before
+    // receiving it as u8.
+    {
+        let tag = 2200;
+        if rank == 0 && size >= 2 {
+            let data = [1u8, 2, 3];
+            world
+                .send(&data, 1, tag)
+                .expect("partial element count test: send failed");
+        } else if rank == 1 {
+            let status = world
+                .probe::<i32>(0, tag)
+                .expect("probe::<i32> of partial message failed");
+            assert_eq!(
+                status.count, -1,
+                "probe::<i32> of 3 bytes must report count -1"
+            );
+
+            let status = world
+                .iprobe::<i32>(0, tag)
+                .expect("iprobe::<i32> of partial message failed")
+                .expect("iprobe::<i32>: message still queued but not found");
+            assert_eq!(
+                status.count, -1,
+                "iprobe::<i32> of 3 bytes must report count -1"
+            );
+
+            let mut buf = [0u8; 3];
+            let (_, _, count) = world
+                .recv(&mut buf, 0, tag)
+                .expect("recv of partial-count message failed");
+            assert_eq!(count, 3, "recv of 3-byte message count mismatch");
+            assert_eq!(buf, [1, 2, 3], "recv of 3-byte message payload mismatch");
+        }
+        world
+            .barrier()
+            .expect("barrier after partial element count test failed");
+        test_count += 1;
+        if rank == 0 {
+            println!("PASS: probe of a partial element count reports -1");
+        }
+    }
+
+    // ========================================================================
     // Final barrier and summary
     // ========================================================================
     world.barrier().expect("final barrier failed");

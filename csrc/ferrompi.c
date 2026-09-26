@@ -1045,13 +1045,12 @@ int ferrompi_recv(
         *actual_tag = status.MPI_TAG;
 #if MPI_VERSION >= 4
         MPI_Count cnt;
-        MPI_Get_count_c(&status, dt, &cnt);
-        *actual_count = (int64_t)cnt;
+        ret = MPI_Get_count_c(&status, dt, &cnt);
 #else
         int cnt;
-        MPI_Get_count(&status, dt, &cnt);
-        *actual_count = (int64_t)cnt;
+        ret = MPI_Get_count(&status, dt, &cnt);
 #endif
+        *actual_count = (cnt == MPI_UNDEFINED) ? -1 : (int64_t)cnt;
     }
 
     return ret;
@@ -1174,13 +1173,12 @@ int ferrompi_sendrecv(
         *actual_tag = status.MPI_TAG;
 #if MPI_VERSION >= 4
         MPI_Count cnt;
-        MPI_Get_count_c(&status, recv_dt, &cnt);
-        *actual_count = (int64_t)cnt;
+        ret = MPI_Get_count_c(&status, recv_dt, &cnt);
 #else
         int cnt;
-        MPI_Get_count(&status, recv_dt, &cnt);
-        *actual_count = (int64_t)cnt;
+        ret = MPI_Get_count(&status, recv_dt, &cnt);
 #endif
+        *actual_count = (cnt == MPI_UNDEFINED) ? -1 : (int64_t)cnt;
     }
 
     return ret;
@@ -1207,13 +1205,12 @@ int ferrompi_probe(int32_t source, int32_t tag, int32_t comm_handle,
         *actual_tag = status.MPI_TAG;
 #if MPI_VERSION >= 4
         MPI_Count cnt;
-        MPI_Get_count_c(&status, dt, &cnt);
-        *count = (int64_t)cnt;
+        ret = MPI_Get_count_c(&status, dt, &cnt);
 #else
         int cnt;
-        MPI_Get_count(&status, dt, &cnt);
-        *count = (int64_t)cnt;
+        ret = MPI_Get_count(&status, dt, &cnt);
 #endif
+        *count = (cnt == MPI_UNDEFINED) ? -1 : (int64_t)cnt;
     }
     return ret;
 }
@@ -1238,13 +1235,12 @@ int ferrompi_iprobe(int32_t source, int32_t tag, int32_t comm_handle,
             *actual_tag = status.MPI_TAG;
 #if MPI_VERSION >= 4
             MPI_Count cnt;
-            MPI_Get_count_c(&status, dt, &cnt);
-            *count = (int64_t)cnt;
+            ret = MPI_Get_count_c(&status, dt, &cnt);
 #else
             int cnt;
-            MPI_Get_count(&status, dt, &cnt);
-            *count = (int64_t)cnt;
+            ret = MPI_Get_count(&status, dt, &cnt);
 #endif
+            *count = (cnt == MPI_UNDEFINED) ? -1 : (int64_t)cnt;
         }
     }
     return ret;
@@ -4112,13 +4108,12 @@ int ferrompi_recv_custom(
         *actual_tag = status.MPI_TAG;
 #if MPI_VERSION >= 4
         MPI_Count cnt;
-        MPI_Get_count_c(&status, dt, &cnt);
-        *actual_count = (int64_t)cnt;
+        ret = MPI_Get_count_c(&status, dt, &cnt);
 #else
         int cnt;
-        MPI_Get_count(&status, dt, &cnt);
-        *actual_count = (int64_t)cnt;
+        ret = MPI_Get_count(&status, dt, &cnt);
 #endif
+        *actual_count = (cnt == MPI_UNDEFINED) ? -1 : (int64_t)cnt;
     }
 
     return ret;

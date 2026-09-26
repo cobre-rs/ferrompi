@@ -27,6 +27,8 @@ pub struct Status {
     pub source: i32,
     /// Tag of the message.
     pub tag: i32,
-    /// Number of elements in the message (determined via `MPI_Get_count`).
+    /// Number of elements of the probed type in the message, from `MPI_Get_count`;
+    /// `-1` when the message is not a whole number of elements (MPI reports
+    /// `MPI_UNDEFINED`).
     pub count: i64,
 }

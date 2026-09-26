@@ -37,7 +37,8 @@ impl Communicator {
     ///
     /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
     ///
-    /// Returns `(actual_source, actual_tag, actual_count)`.
+    /// Returns `(actual_source, actual_tag, actual_count)`; `actual_count` is
+    /// `-1` when the message is not a whole number of `T`.
     ///
     /// # Example
     ///
@@ -155,7 +156,8 @@ impl Communicator {
     ///
     /// Use `source = -1` for `MPI_ANY_SOURCE` and `recvtag = -1` for `MPI_ANY_TAG`.
     ///
-    /// Returns `(actual_source, actual_tag, actual_count)`.
+    /// Returns `(actual_source, actual_tag, actual_count)`; `actual_count` is
+    /// `-1` when the message is not a whole number of `T`.
     ///
     /// # Arguments
     ///
@@ -243,8 +245,8 @@ impl Communicator {
     /// # let world = mpi.world();
     /// // Probe for any incoming f64 message
     /// let status = world.probe::<f64>(-1, -1).unwrap();
-    /// // Allocate a buffer of exactly the right size (count may be negative on error)
-    /// assert!(status.count >= 0, "MPI_Get_count returned MPI_UNDEFINED");
+    /// // Allocate a buffer of exactly the right size
+    /// assert!(status.count >= 0, "message is not a whole number of f64");
     /// let mut buf = vec![0.0f64; status.count as usize];
     /// world.recv(&mut buf, status.source, status.tag).unwrap();
     /// ```
@@ -297,7 +299,7 @@ impl Communicator {
     /// # let world = mpi.world();
     /// // Poll for an incoming f64 message without blocking
     /// if let Some(status) = world.iprobe::<f64>(-1, -1).unwrap() {
-    ///     assert!(status.count >= 0, "MPI_Get_count returned MPI_UNDEFINED");
+    ///     assert!(status.count >= 0, "message is not a whole number of f64");
     ///     let mut buf = vec![0.0f64; status.count as usize];
     ///     world.recv(&mut buf, status.source, status.tag).unwrap();
     /// }
