@@ -219,9 +219,18 @@ pub use comm::{Communicator, SplitType};
 #[cfg(feature = "rma")]
 pub use datatype::AtomicMpiDatatype;
 pub use datatype::{
-    BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, LongDoubleInt, LongInt, MpiDatatype,
-    MpiIndexedDatatype, PlainData, ShortInt,
+    BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, MpiDatatype, MpiIndexedDatatype,
+    PlainData, ShortInt,
 };
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
+pub use datatype::{LongDoubleInt, LongInt};
 pub use datatype_builder::{CustomDatatype, StructField};
 pub use error::{Error, MpiErrorClass, ResourceKind, Result};
 pub use group::{Group, GroupComparison, RankRange};

@@ -570,6 +570,18 @@ static MPI_Op get_op(int32_t op) {
     }
 }
 
+// MPI_LONG_INT / MPI_LONG_DOUBLE_INT are exposed only where their C layout is
+// verified against the Rust LongInt / LongDoubleInt structs.
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__) || (defined(__powerpc64__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__))
+#define FERROMPI_LONG_PAIRS_VERIFIED 1
+_Static_assert(sizeof(struct { long v; int i; }) == 16 &&
+               _Alignof(struct { long v; int i; }) == 8,
+               "MPI_LONG_INT pair layout differs from the Rust LongInt");
+_Static_assert(sizeof(struct { long double v; int i; }) == 32 &&
+               _Alignof(struct { long double v; int i; }) == 16,
+               "MPI_LONG_DOUBLE_INT pair layout differs from the Rust LongDoubleInt");
+#endif
+
 // Map datatype tag to MPI_Datatype
 static MPI_Datatype get_datatype(int32_t tag) {
     switch (tag) {
@@ -582,10 +594,14 @@ static MPI_Datatype get_datatype(int32_t tag) {
         case FERROMPI_U64:             return MPI_UINT64_T;
         case FERROMPI_FLOAT_INT:       return MPI_FLOAT_INT;
         case FERROMPI_DOUBLE_INT:      return MPI_DOUBLE_INT;
+#ifdef FERROMPI_LONG_PAIRS_VERIFIED
         case FERROMPI_LONG_INT:        return MPI_LONG_INT;
+#endif
         case FERROMPI_2INT:            return MPI_2INT;
         case FERROMPI_SHORT_INT:       return MPI_SHORT_INT;
+#ifdef FERROMPI_LONG_PAIRS_VERIFIED
         case FERROMPI_LONG_DOUBLE_INT: return MPI_LONG_DOUBLE_INT;
+#endif
         case FERROMPI_BYTE:            return MPI_BYTE;
         default:                       return MPI_DATATYPE_NULL;
     }

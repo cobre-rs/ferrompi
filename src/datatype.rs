@@ -27,10 +27,10 @@
 //! |------------------|-----------------------|-----------|
 //! | [`FloatInt`]     | `MPI_FLOAT_INT`       | 7         |
 //! | [`DoubleInt`]    | `MPI_DOUBLE_INT`      | 8         |
-//! | [`LongInt`]      | `MPI_LONG_INT`        | 9         |
+//! | [`LongInt`] (Linux x86_64/aarch64/ppc64le only) | `MPI_LONG_INT` | 9 |
 //! | [`Int2`]         | `MPI_2INT`            | 10        |
 //! | [`ShortInt`]     | `MPI_SHORT_INT`       | 11        |
-//! | [`LongDoubleInt`]| `MPI_LONG_DOUBLE_INT` | 12        |
+//! | [`LongDoubleInt`] (Linux x86_64/aarch64/ppc64le only) | `MPI_LONG_DOUBLE_INT` | 12 |
 //!
 //! # Byte-Permutable Types (`BytePermutable`)
 //!
@@ -93,6 +93,8 @@ pub enum DatatypeTag {
     DoubleInt = 8,
     /// Paired `{ i64 value; i32 index }` for `MPI_LONG_INT` (MAXLOC/MINLOC).
     /// Note: on most 64-bit platforms `long` is 8 bytes, matching `i64`.
+    /// The matching `LongInt` struct exists only on Linux x86_64, aarch64
+    /// and little-endian powerpc64.
     LongInt = 9,
     /// Paired `{ i32 value; i32 index }` for `MPI_2INT` (MAXLOC/MINLOC)
     Int2 = 10,
@@ -101,6 +103,8 @@ pub enum DatatypeTag {
     /// Paired `{ f128-equivalent value; i32 index }` for `MPI_LONG_DOUBLE_INT`
     /// (MAXLOC/MINLOC). Uses `[u8; 16]` on x86_64 where `long double` is 80-bit
     /// extended precision stored in 16 bytes.
+    /// The matching `LongDoubleInt` struct exists only on Linux x86_64,
+    /// aarch64 and little-endian powerpc64.
     LongDoubleInt = 12,
     /// Opaque 1-byte unit (`MPI_BYTE`) for type-erased bitwise reductions.
     ///
@@ -303,7 +307,17 @@ pub struct DoubleInt {
 /// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
 /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
 ///
-/// Layout on 64-bit Linux: `sizeof == 16`, `alignof == 8`.
+/// This type is available only on Linux x86_64, aarch64 and little-endian
+/// powerpc64, where its layout matches the C `{ long; int }` struct. Other
+/// targets are not supported in this release.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct LongInt {
@@ -358,13 +372,17 @@ pub struct ShortInt {
 /// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
 /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
 ///
-/// Layout on x86_64 Linux: `sizeof == 32`, `alignof == 16`.
-/// Layout on aarch64 Linux: `sizeof == 32`, `alignof == 16`
-/// (128-bit quad-precision `long double`, 16 bytes value + 4-byte index +
-/// 12 bytes trailing padding).
-/// On x86_64 Linux, `long double` has 16-byte alignment; use `repr(C, align(16))`
-/// so that the Rust struct layout matches the C struct layout exactly.
-/// On other platforms this over-aligns harmlessly (MPI will still accept it).
+/// This type is available only on Linux x86_64, aarch64 and little-endian
+/// powerpc64, where its layout matches the C `{ long double; int }` struct.
+/// Other targets are not supported in this release.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C, align(16))]
 pub struct LongDoubleInt {
@@ -385,10 +403,46 @@ macro_rules! impl_mpi_indexed_datatype {
 
 impl_mpi_indexed_datatype!(FloatInt, DatatypeTag::FloatInt);
 impl_mpi_indexed_datatype!(DoubleInt, DatatypeTag::DoubleInt);
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
 impl_mpi_indexed_datatype!(LongInt, DatatypeTag::LongInt);
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
+const _: () = assert!(std::mem::size_of::<LongInt>() == 16 && std::mem::align_of::<LongInt>() == 8);
 impl_mpi_indexed_datatype!(Int2, DatatypeTag::Int2);
 impl_mpi_indexed_datatype!(ShortInt, DatatypeTag::ShortInt);
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
 impl_mpi_indexed_datatype!(LongDoubleInt, DatatypeTag::LongDoubleInt);
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
+const _: () = assert!(
+    std::mem::size_of::<LongDoubleInt>() == 32 && std::mem::align_of::<LongDoubleInt>() == 16
+);
 
 // ============================================================
 // Byte-permutable types for MPI_BYTE bitwise reductions
@@ -492,9 +546,18 @@ mod tests {
     #[cfg(feature = "rma")]
     use super::AtomicMpiDatatype;
     use super::{
-        BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, LongDoubleInt, LongInt,
-        MpiDatatype, MpiIndexedDatatype, PlainData, ShortInt,
+        BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, MpiDatatype, MpiIndexedDatatype,
+        PlainData, ShortInt,
     };
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            all(target_arch = "powerpc64", target_endian = "little")
+        )
+    ))]
+    use super::{LongDoubleInt, LongInt};
 
     #[test]
     fn datatype_tag_values_match_c_defines() {
@@ -522,9 +585,25 @@ mod tests {
         assert_eq!(u64::TAG as i32, 6);
         assert_eq!(FloatInt::TAG as i32, 7);
         assert_eq!(DoubleInt::TAG as i32, 8);
+        #[cfg(all(
+            target_os = "linux",
+            any(
+                target_arch = "x86_64",
+                target_arch = "aarch64",
+                all(target_arch = "powerpc64", target_endian = "little")
+            )
+        ))]
         assert_eq!(LongInt::TAG as i32, 9);
         assert_eq!(Int2::TAG as i32, 10);
         assert_eq!(ShortInt::TAG as i32, 11);
+        #[cfg(all(
+            target_os = "linux",
+            any(
+                target_arch = "x86_64",
+                target_arch = "aarch64",
+                all(target_arch = "powerpc64", target_endian = "little")
+            )
+        ))]
         assert_eq!(LongDoubleInt::TAG as i32, 12);
     }
 
@@ -590,22 +669,6 @@ mod tests {
             );
         }
 
-        // LongInt: { i64, i32 } — same shape as DoubleInt
-        // sizeof == 16, alignof == 8 on 64-bit Linux.
-        assert!(
-            size_of::<LongInt>() >= 12,
-            "LongInt must hold at least i64 + i32"
-        );
-        assert!(
-            align_of::<LongInt>() >= 8,
-            "LongInt alignment must be at least i64 alignment"
-        );
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            assert_eq!(size_of::<LongInt>(), 16, "LongInt size on x86_64/aarch64");
-            assert_eq!(align_of::<LongInt>(), 8, "LongInt align on x86_64/aarch64");
-        }
-
         // Int2: { i32, i32 } — no padding
         // sizeof == 8, alignof == 4
         assert_eq!(size_of::<Int2>(), 8, "Int2 size");
@@ -628,33 +691,6 @@ mod tests {
                 align_of::<ShortInt>(),
                 4,
                 "ShortInt align on x86_64/aarch64"
-            );
-        }
-
-        // LongDoubleInt: { [u8;16], i32 } — value is 16 bytes, index is 4 bytes,
-        // trailing padding to satisfy alignment. On x86_64: sizeof == 20 rounds up
-        // to 32 due to 16-byte alignment of long double. On aarch64: sizeof == 32.
-        assert!(
-            size_of::<LongDoubleInt>() >= 20,
-            "LongDoubleInt must hold at least [u8;16] + i32"
-        );
-        assert!(
-            align_of::<LongDoubleInt>() >= 1,
-            "LongDoubleInt must have at least 1-byte alignment"
-        );
-        // On x86_64 Linux, MPI_LONG_DOUBLE_INT is { long double (16 bytes), int (4 bytes) }
-        // with 12 bytes trailing padding, total 32 bytes, aligned to 16 bytes.
-        #[cfg(target_arch = "x86_64")]
-        {
-            assert_eq!(
-                size_of::<LongDoubleInt>(),
-                32,
-                "LongDoubleInt size on x86_64"
-            );
-            assert_eq!(
-                align_of::<LongDoubleInt>(),
-                16,
-                "LongDoubleInt align on x86_64"
             );
         }
     }
