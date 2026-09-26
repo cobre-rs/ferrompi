@@ -24,12 +24,15 @@
 #define MAX_REQUESTS 16384
 
 // The request table tracks occupancy with a bitmap of 64-bit words (one bit
-// per slot) rather than a dense array of one atomic_int per slot. This is the
-// hot, large table (the MPI_THREAD_MULTIPLE posting path); the bitmap shrinks
-// the occupancy metadata ~64x (2 KiB vs 64 KiB), so far fewer slots share a
-// cache line (less false sharing, F2-002), and lets allocation skip 64 slots
-// per scanned word via a hardware find-first-zero rather than probing each slot
-// (F2-006). MAX_REQUESTS must stay a multiple of 64 so every word is full.
+// per slot) rather than a dense array of one atomic_int per slot: allocation
+// skips 64 taken slots per scanned word via a hardware find-first-zero
+// rather than probing each slot. MAX_REQUESTS must stay a multiple of 64 so
+// every word is full.
+//
+// Measured: every thread starts its scan at the same hint word and
+// read-modify-writes the same 64-bit word, so the bitmap concentrates
+// contention on one cache line, and a single-thread alloc+free pair costs
+// about 3x the dense per-slot table it replaced.
 #define REQUEST_BITS_WORDS (MAX_REQUESTS / 64)
 _Static_assert(MAX_REQUESTS % 64 == 0,
                "MAX_REQUESTS must be a multiple of 64 for the occupancy bitmap");
@@ -117,8 +120,9 @@ static atomic_int next_request_hint;  // advisory start word for the next scan
 // registered nonblocking (non-persistent) request is always active and
 // carries no REQUEST_ACTIVE bit of its own. Plain bytes, not atomics:
 // distinct slots are distinct objects, and ferrompi_finalize — the one
-// reader outside the owning thread's own calls — runs after every other
-// MPI call.
+// reader outside the owning thread's own calls — relies on the caller
+// having ordered every other thread's request calls before Mpi is
+// dropped (joined or equivalent); it does not itself order against them.
 static uint8_t request_state[MAX_REQUESTS];
 #define REQUEST_PERSISTENT 1
 #define REQUEST_ACTIVE     2
@@ -128,8 +132,7 @@ static uint8_t request_state[MAX_REQUESTS];
 // alloc_win uses a CAS loop; free_win uses atomic_store (release); readers use
 // atomic_load (acquire).  Mirrors the comm_used/alloc_comm pattern.  (Unlike
 // the request table, the small fixed tables — windows, comms, datatypes, ops,
-// groups, infos — keep the dense per-slot used-flag scan: at <=256 slots the
-// scan cost and false sharing the request bitmap addresses are negligible.)
+// groups, infos — keep the dense per-slot used-flag scan.)
 static MPI_Win win_table[MAX_WINDOWS];
 static atomic_int win_used[MAX_WINDOWS];  // 1 if slot is in use
 static atomic_int next_win_hint;
@@ -773,13 +776,16 @@ int ferrompi_finalize(int32_t* active_requests) {
     // concurrent MPI operations are complete, but the consistent access
     // pattern avoids spurious TSan warnings in the finalizer check.
     //
-    // Only an inactive persistent request is freed here. MPI_Request_free
-    // does not cancel an active operation (MPI-3 §3.7.3), so freeing an
-    // active request — a nonblocking operation still in flight, or a
-    // persistent one started but not yet waited — would let MPI keep
-    // touching the caller's buffer after MPI_Finalize returns. Every other
-    // occupied slot is left for MPI to tear down on its own and counted
-    // instead, so the caller can report it.
+    // Only an inactive persistent request is freed here. Freeing an active
+    // point-to-point request, persistent included, is legal, but this table
+    // does not distinguish point-to-point from collective requests: freeing
+    // a nonblocking-collective request or an active persistent collective is
+    // erroneous (Open MPI returns MPI_ERR_REQUEST). Leaving a request
+    // pending at MPI_Finalize is itself non-conforming but tolerated by
+    // MPICH and Open MPI, which progress it inside MPI_Finalize, so the
+    // sweep takes that as the lesser error: every other occupied slot is
+    // left for MPI to tear down and counted instead, so the caller can
+    // report it.
     int32_t active = 0;
     for (int i = 0; i < MAX_REQUESTS; i++) {
         unsigned widx = (unsigned)(i / 64);
