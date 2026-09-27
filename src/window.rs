@@ -449,6 +449,46 @@ fn exchange_window_words(comm: &Communicator, word: u64) -> Result<Box<[u64]>> {
     Ok(words.into_boxed_slice())
 }
 
+/// Validates an RMA target against `words` (see [`window_word`]): rejects a
+/// `target_rank` outside `0..words.len()`, a negative `target_count` or a
+/// `buffer_lens` entry unequal to it, a negative `target_disp`, and an access
+/// `target_disp * disp_unit(target_rank) + target_count * elem_size` that
+/// overflows `u64` or exceeds the target's exposed byte length.
+fn check_rma_target(
+    words: &[u64],
+    elem_size: usize,
+    target_rank: i32,
+    target_disp: i64,
+    target_count: i64,
+    buffer_lens: &[usize],
+) -> Result<()> {
+    if target_rank < 0 || target_rank as usize >= words.len() {
+        return Err(Error::InvalidBuffer);
+    }
+    if target_count < 0 || buffer_lens.iter().any(|&len| len as i64 != target_count) {
+        return Err(Error::InvalidBuffer);
+    }
+    if target_disp < 0 {
+        return Err(Error::InvalidBuffer);
+    }
+    let word = words[target_rank as usize];
+    let disp_unit = word >> WINDOW_WORD_DISP_SHIFT;
+    let len = word & WINDOW_WORD_LEN_MASK;
+    let disp_bytes = (target_disp as u64)
+        .checked_mul(disp_unit)
+        .ok_or(Error::InvalidBuffer)?;
+    let count_bytes = (target_count as u64)
+        .checked_mul(elem_size as u64)
+        .ok_or(Error::InvalidBuffer)?;
+    let total = disp_bytes
+        .checked_add(count_bytes)
+        .ok_or(Error::InvalidBuffer)?;
+    if total > len {
+        return Err(Error::InvalidBuffer);
+    }
+    Ok(())
+}
+
 impl<T: MpiDatatype> SharedWindow<T> {
     /// Allocate a shared memory window.
     ///
@@ -1609,6 +1649,25 @@ impl<T: MpiDatatype> Win<'_, T> {
 }
 
 impl<T: MpiDatatype> Win<'_, T> {
+    /// Forwards to [`check_rma_target`] with this window's exchanged words
+    /// and `size_of::<T>()`.
+    fn check_target(
+        &self,
+        target_rank: i32,
+        target_disp: i64,
+        target_count: i64,
+        buffer_lens: &[usize],
+    ) -> Result<()> {
+        check_rma_target(
+            &self.words,
+            std::mem::size_of::<T>(),
+            target_rank,
+            target_disp,
+            target_count,
+            buffer_lens,
+        )
+    }
+
     /// One-sided write: copy `origin` into the remote rank's window memory.
     ///
     /// Wraps `MPI_Put`. The operation is posted to the network immediately, but
@@ -1627,9 +1686,11 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
-    /// * [`Error::Mpi`] — if `MPI_Put` fails (e.g., `MPI_ERR_RANK` for an
-    ///   invalid `target_rank`).
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
+    /// * [`Error::Mpi`] — if `MPI_Put` fails.
     ///
     /// # Safety Contract
     ///
@@ -1675,14 +1736,14 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<()> {
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
         let (p, n, dt) = buf(origin);
         // SAFETY: the call must be inside an active access epoch, which the caller must
         // ensure. `origin` is read by MPI until the epoch closes; the signature does not
         // tie the buffer to the epoch, so keeping it alive and unmodified until then is
         // the caller's documented obligation. `target_rank`, `target_disp`, and
-        // `target_count` are passed through unchecked; a value outside the target window
-        // is an MPI-level error or an out-of-bounds remote access, and this function does
-        // not check it.
+        // `target_count` were checked above against the target rank's exposed window, so
+        // MPI accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_put(
                 p,
@@ -1734,9 +1795,11 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
-    /// * [`Error::Mpi`] — if `MPI_Rput` fails (e.g., `MPI_ERR_RANK` for an
-    ///   invalid `target_rank`).
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
+    /// * [`Error::Mpi`] — if `MPI_Rput` fails.
     /// * [`Error::Mpi { class: MpiErrorClass::Other }`] — if the internal
     ///   request table is exhausted.
     ///
@@ -1773,15 +1836,15 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<Request> {
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
         let (p, n, dt) = buf(origin);
         let mut request_handle: i64 = 0;
         // SAFETY: the call must be inside an active access epoch, which the caller must
         // ensure. `origin` is read by MPI until the returned `Request` completes; the
         // signature does not tie the buffer to the `Request`, so keeping it alive and
         // unmodified until then is the caller's documented obligation. `target_rank`,
-        // `target_disp`, and `target_count` are passed through unchecked; a value outside
-        // the target window is an MPI-level error or an out-of-bounds remote access, and
-        // this function does not check it.
+        // `target_disp`, and `target_count` were checked above against the target rank's
+        // exposed window, so MPI accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_rput(
                 p,
@@ -1818,9 +1881,11 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
-    /// * [`Error::Mpi`] — if `MPI_Get` fails (e.g., `MPI_ERR_RANK` for an
-    ///   invalid `target_rank`).
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
+    /// * [`Error::Mpi`] — if `MPI_Get` fails.
     ///
     /// # Safety Contract
     ///
@@ -1867,14 +1932,14 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<()> {
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
         let (p, n, dt) = buf_mut(origin);
         // SAFETY: the call must be inside an active access epoch, which the caller must
         // ensure. `origin` is written by MPI until the epoch closes; the signature does
         // not tie the buffer to the epoch, so keeping it alive and untouched until then is
         // the caller's documented obligation. `target_rank`, `target_disp`, and
-        // `target_count` are passed through unchecked; a value outside the target window
-        // is an MPI-level error or an out-of-bounds remote access, and this function does
-        // not check it.
+        // `target_count` were checked above against the target rank's exposed window, so
+        // MPI accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_get(
                 p,
@@ -1918,9 +1983,11 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
-    /// * [`Error::Mpi`] — if `MPI_Rget` fails (e.g., `MPI_ERR_RANK` for an
-    ///   invalid `target_rank`).
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
+    /// * [`Error::Mpi`] — if `MPI_Rget` fails.
     /// * [`Error::Mpi { class: MpiErrorClass::Other }`] — if the internal
     ///   request table is exhausted.
     ///
@@ -1966,15 +2033,15 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<Request> {
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
         let (p, n, dt) = buf_mut(origin);
         let mut request_handle: i64 = 0;
         // SAFETY: the call must be inside an active access epoch, which the caller must
         // ensure. `origin` is written by MPI until the returned `Request` completes; the
         // signature does not tie the buffer to the `Request`, so keeping it alive and
         // untouched until then is the caller's documented obligation. `target_rank`,
-        // `target_disp`, and `target_count` are passed through unchecked; a value outside
-        // the target window is an MPI-level error or an out-of-bounds remote access, and
-        // this function does not check it.
+        // `target_disp`, and `target_count` were checked above against the target rank's
+        // exposed window, so MPI accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_rget(
                 p,
@@ -2017,7 +2084,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
     /// * [`Error::Mpi`] — if `MPI_Accumulate` fails for any other reason.
@@ -2071,15 +2141,15 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_count: i64,
         op: ReduceOp,
     ) -> Result<()> {
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
         let (p, n, dt) = buf(origin);
         // SAFETY: the call must be inside an active access epoch, which the caller must
         // ensure. `origin` is read by MPI until the epoch closes; the signature does not
         // tie the buffer to the epoch, so keeping it alive and unmodified until then is
         // the caller's documented obligation. `target_rank`, `target_disp`, and
-        // `target_count` are passed through unchecked; a value outside the target window
-        // is an MPI-level error or an out-of-bounds remote access, and this function does
-        // not check it. `op as i32` is a valid `ReduceOp` discriminant that the shim maps
-        // to an `MPI_Op`.
+        // `target_count` were checked above against the target rank's exposed window, so
+        // MPI accesses only memory the target exposed. `op as i32` is a valid `ReduceOp`
+        // discriminant that the shim maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_accumulate(
                 p,
@@ -2133,7 +2203,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
     /// * [`Error::Mpi { class: MpiErrorClass::Other }`] — if the internal
@@ -2178,16 +2251,16 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_count: i64,
         op: ReduceOp,
     ) -> Result<Request> {
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
         let (p, n, dt) = buf(origin);
         let mut request_handle: i64 = 0;
         // SAFETY: the call must be inside an active access epoch, which the caller must
         // ensure. `origin` is read by MPI until the returned `Request` completes; the
         // signature does not tie the buffer to the `Request`, so keeping it alive and
         // unmodified until then is the caller's documented obligation. `target_rank`,
-        // `target_disp`, and `target_count` are passed through unchecked; a value outside
-        // the target window is an MPI-level error or an out-of-bounds remote access, and
-        // this function does not check it. `op as i32` is a valid `ReduceOp` discriminant
-        // that the shim maps to an `MPI_Op`.
+        // `target_disp`, and `target_count` were checked above against the target rank's
+        // exposed window, so MPI accesses only memory the target exposed. `op as i32` is a
+        // valid `ReduceOp` discriminant that the shim maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_raccumulate(
                 p,
@@ -2235,8 +2308,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` or `result.len()` does
-    ///   not fit in `i64`.
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
     /// * [`Error::Mpi`] — if `MPI_Get_accumulate` fails for any other reason.
@@ -2299,6 +2374,12 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_count: i64,
         op: ReduceOp,
     ) -> Result<()> {
+        self.check_target(
+            target_rank,
+            target_disp,
+            target_count,
+            &[origin.len(), result.len()],
+        )?;
         let (o_ptr, o_n, dt) = buf(origin);
         let (r_ptr, r_n, _) = buf_mut(result);
         // SAFETY: the call must be inside an active access epoch, which the caller must
@@ -2306,11 +2387,10 @@ impl<T: MpiDatatype> Win<'_, T> {
         // closes; the signature does not tie either buffer to the epoch, so keeping
         // `origin` alive and unmodified, and `result` alive and unread, until then is the
         // caller's documented obligation. `origin` (`&[T]`) and `result` (`&mut [T]`)
-        // cannot alias. `target_rank`, `target_disp`, and `target_count` are passed
-        // through unchecked; a value outside the target window is an MPI-level error or
-        // an out-of-bounds remote access, and this function does not check it.
-        // `op as i32` is a valid `ReduceOp` discriminant that the shim maps to an
-        // `MPI_Op`.
+        // cannot alias. `target_rank`, `target_disp`, and `target_count` were checked
+        // above against the target rank's exposed window, so MPI accesses only memory the
+        // target exposed. `op as i32` is a valid `ReduceOp` discriminant that the shim
+        // maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_get_accumulate(
                 o_ptr,
@@ -2357,6 +2437,9 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, or
+    ///   the access does not fit in the target rank's window.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
     /// * [`Error::Mpi`] — if `MPI_Fetch_and_op` fails for any other reason.
@@ -2412,6 +2495,7 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         op: ReduceOp,
     ) -> Result<PendingFetchResult<T>> {
+        self.check_target(target_rank, target_disp, 1, &[])?;
         use std::mem::MaybeUninit;
         // Box the origin and result so they have heap-stable addresses
         // that survive across the epoch.  MPI_Fetch_and_op only *initiates*
@@ -2436,8 +2520,10 @@ impl<T: MpiDatatype> Win<'_, T> {
         // exactly once by `PendingFetchResult`'s `Drop`, on both the `resolve` and
         // drop-without-resolve paths. `T::TAG` matches T's memory layout per the
         // `MpiDatatype` invariant. `op as i32` is a valid `ReduceOp` discriminant that
-        // the shim maps to an `MPI_Op`. `target_rank`, `target_disp`, and `win_handle`
-        // are passed through unchecked.
+        // the shim maps to an `MPI_Op`. `target_rank` and `target_disp` were checked
+        // above (with `target_count` 1) against the target rank's exposed window, so MPI
+        // accesses only memory the target exposed. `win_handle` is a valid handle owned
+        // by `self`.
         let ret = unsafe {
             ffi::ferrompi_fetch_and_op(
                 (origin_box.as_ref() as *const T).cast::<std::ffi::c_void>(),
@@ -2526,8 +2612,11 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::Mpi`] — if `MPI_Compare_and_swap` fails (e.g., invalid rank
-    ///   or displacement, or the MPI version is < 3).
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, or
+    ///   the access does not fit in the target rank's window.
+    /// * [`Error::Mpi`] — if `MPI_Compare_and_swap` fails (e.g., the MPI
+    ///   version is < 3).
     ///
     /// # Safety Contract
     ///
@@ -2579,6 +2668,7 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
         target_rank: i32,
         target_disp: i64,
     ) -> Result<PendingFetchResult<T>> {
+        self.check_target(target_rank, target_disp, 1, &[])?;
         use std::mem::MaybeUninit;
         // Box origin, compare, and result for heap-stable addresses that
         // survive across the epoch.  MPI_Compare_and_swap is non-blocking
@@ -2600,8 +2690,10 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
         // exactly once by `PendingFetchResult`'s `Drop`, on both the `resolve` and
         // drop-without-resolve paths. `T::TAG` matches T's memory layout per the
         // `MpiDatatype` invariant; `AtomicMpiDatatype` restricts T to the integer and
-        // byte types MPI supports for compare-and-swap (MPI 4.1 §12.5.4). `target_rank`,
-        // `target_disp`, and `win_handle` are passed through unchecked.
+        // byte types MPI supports for compare-and-swap (MPI 4.1 §12.5.4). `target_rank`
+        // and `target_disp` were checked above (with `target_count` 1) against the target
+        // rank's exposed window, so MPI accesses only memory the target exposed.
+        // `win_handle` is a valid handle owned by `self`.
         let ret = unsafe {
             ffi::ferrompi_compare_and_swap(
                 (origin_box.as_ref() as *const T).cast::<std::ffi::c_void>(),
@@ -2922,8 +3014,8 @@ impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, '_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        window_word, PendingFetchResult, WinFenceAssert, WinPscwAssert, WINDOW_WORD_LEN_MASK,
-        WINDOW_WORD_REJECT,
+        check_rma_target, window_word, Error, PendingFetchResult, WinFenceAssert, WinPscwAssert,
+        WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT,
     };
     use std::ptr::NonNull;
 
@@ -2941,6 +3033,50 @@ mod tests {
 
         assert_eq!(window_word::<u8>(1usize << 56), WINDOW_WORD_REJECT);
         assert_eq!(window_word::<u64>(usize::MAX / 8 + 1), WINDOW_WORD_REJECT);
+    }
+
+    // -------------------------------------------------------------------------
+    // check_rma_target unit tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn check_rma_target_boundaries() {
+        let words = [window_word::<u64>(4), window_word::<u8>(3)];
+
+        // (elem_size, rank, disp, count, lens)
+        let ok_cases: &[(usize, i32, i64, i64, &[usize])] = &[
+            (8, 0, 0, 4, &[4]),
+            (8, 0, 3, 1, &[1]),
+            (8, 0, 4, 0, &[0]),
+            (1, 1, 0, 3, &[3, 3]),
+        ];
+        for &(elem_size, rank, disp, count, lens) in ok_cases {
+            assert!(
+                check_rma_target(&words, elem_size, rank, disp, count, lens).is_ok(),
+                "expected Ok for ({elem_size}, {rank}, {disp}, {count}, {lens:?})"
+            );
+        }
+
+        let err_cases: &[(usize, i32, i64, i64, &[usize])] = &[
+            (8, 0, 2, 4, &[4]),
+            (8, 0, 4, 1, &[]),
+            (8, 0, 0, 4, &[3]),
+            (1, 1, 0, 3, &[3, 2]),
+            (8, 0, 0, -1, &[]),
+            (8, 0, -1, 1, &[1]),
+            (8, 2, 0, 1, &[1]),
+            (8, -1, 0, 1, &[1]),
+            (8, 0, i64::MAX, 1, &[1]),
+        ];
+        for &(elem_size, rank, disp, count, lens) in err_cases {
+            assert!(
+                matches!(
+                    check_rma_target(&words, elem_size, rank, disp, count, lens),
+                    Err(Error::InvalidBuffer)
+                ),
+                "expected Err(InvalidBuffer) for ({elem_size}, {rank}, {disp}, {count}, {lens:?})"
+            );
+        }
     }
 
     // -------------------------------------------------------------------------
