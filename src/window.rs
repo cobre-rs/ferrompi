@@ -408,6 +408,47 @@ fn mark_window_alive() {
     LIVE_WINDOWS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Bit position of the displacement-unit field in a window word (see
+/// [`window_word`]). The low 56 bits hold the exposed byte length.
+const WINDOW_WORD_DISP_SHIFT: u32 = 56;
+
+/// Mask for the exposed-byte-length field of a window word: the largest
+/// length that can be packed into the low 56 bits.
+const WINDOW_WORD_LEN_MASK: u64 = (1u64 << WINDOW_WORD_DISP_SHIFT) - 1;
+
+/// Sentinel word for a rank whose exposed length cannot be packed. No real
+/// window has a displacement unit of 255 (`MpiDatatype` is sealed to types
+/// of at most 8 bytes), so this cannot collide with a real word.
+const WINDOW_WORD_REJECT: u64 = u64::MAX;
+
+/// Packs `size_of::<T>()` and `count * size_of::<T>()` into one word:
+/// displacement unit in bits 56..63, exposed byte length in bits 0..55.
+/// Returns [`WINDOW_WORD_REJECT`] if the byte length does not fit in 56 bits.
+fn window_word<T>(count: usize) -> u64 {
+    let disp_unit = std::mem::size_of::<T>();
+    match count.checked_mul(disp_unit) {
+        Some(len) if len as u64 <= WINDOW_WORD_LEN_MASK => {
+            ((disp_unit as u64) << WINDOW_WORD_DISP_SHIFT) | len as u64
+        }
+        _ => WINDOW_WORD_REJECT,
+    }
+}
+
+/// Exchanges one window word per rank over `comm` via `Communicator::allgather`.
+///
+/// Every rank passes the same collective, so every rank observes the same
+/// `words` (or the same error): if any word is [`WINDOW_WORD_REJECT`], every
+/// rank returns `Err(Error::InvalidBuffer)`, before any rank has created a
+/// window.
+fn exchange_window_words(comm: &Communicator, word: u64) -> Result<Box<[u64]>> {
+    let mut words = vec![0u64; comm.size() as usize];
+    comm.allgather(&[word], &mut words)?;
+    if words.contains(&WINDOW_WORD_REJECT) {
+        return Err(Error::InvalidBuffer);
+    }
+    Ok(words.into_boxed_slice())
+}
+
 impl<T: MpiDatatype> SharedWindow<T> {
     /// Allocate a shared memory window.
     ///
@@ -901,8 +942,9 @@ pub struct Win<'a, T: MpiDatatype> {
     local_ptr: NonNull<T>,
     /// Number of `T` elements in the local buffer.
     local_len: usize,
-    /// Number of processes in the window's communicator.
-    comm_size: i32,
+    /// Every rank's displacement unit and exposed byte length, packed by
+    /// [`window_word`] and indexed by rank in the window's communicator.
+    words: Box<[u64]>,
     /// Captures the `'a` lifetime so the borrow checker enforces that a
     /// caller-supplied buffer outlives the `Win`. For `Win::allocate` (which
     /// uses `'static`) this is a zero-sized phantom that imposes no constraint.
@@ -917,7 +959,8 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// moved while the window is alive.
     ///
     /// `disp_unit` is set to `size_of::<T>()` and `size` to
-    /// `buf.len() * size_of::<T>()`.
+    /// `buf.len() * size_of::<T>()`. Creation first exchanges each rank's
+    /// displacement unit and exposed length with one allgather over `comm`.
     ///
     /// # Arguments
     ///
@@ -927,7 +970,8 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The byte size overflows `i64` (`Error::InvalidBuffer`).
+    /// - Any rank's exposed byte length does not fit in 56 bits
+    ///   (`Error::InvalidBuffer` on every rank).
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_create")`).
     ///
     /// # Example
@@ -941,6 +985,7 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// let win = Win::create(&world, &mut buf).unwrap();
     /// ```
     pub fn create(comm: &Communicator, buf: &'a mut [T]) -> Result<Self> {
+        let words = exchange_window_words(comm, window_word::<T>(buf.len()))?;
         let (size, disp_unit) = win_size_and_disp_unit::<T>(buf.len())?;
         let mut win_handle: i32 = 0;
 
@@ -977,7 +1022,7 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
             win_handle,
             local_ptr,
             local_len: buf.len(),
-            comm_size: comm.size(),
+            words,
             _marker: std::marker::PhantomData,
         })
     }
@@ -992,7 +1037,8 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// `'static` because there is no caller buffer to track.
     ///
     /// `disp_unit` is set to `size_of::<T>()` and `size` to
-    /// `local_count * size_of::<T>()`.
+    /// `local_count * size_of::<T>()`. Creation first exchanges each rank's
+    /// displacement unit and exposed length with one allgather over `comm`.
     ///
     /// # Arguments
     ///
@@ -1003,7 +1049,8 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The byte size overflows `i64` (`Error::InvalidBuffer`).
+    /// - Any rank's exposed byte length does not fit in 56 bits
+    ///   (`Error::InvalidBuffer` on every rank).
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_allocate")`).
     /// - MPI returns a null pointer for a non-zero count (`Error::Internal`).
     ///
@@ -1017,6 +1064,7 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// let win = Win::<f64>::allocate(&world, 32).unwrap();
     /// ```
     pub fn allocate(comm: &Communicator, local_count: usize) -> Result<Self> {
+        let words = exchange_window_words(comm, window_word::<T>(local_count))?;
         let (size, disp_unit) = win_size_and_disp_unit::<T>(local_count)?;
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut win_handle: i32 = 0;
@@ -1053,7 +1101,7 @@ impl<T: MpiDatatype> Win<'static, T> {
             win_handle,
             local_ptr,
             local_len: local_count,
-            comm_size: comm.size(),
+            words,
             _marker: std::marker::PhantomData,
         })
     }
@@ -1109,7 +1157,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// Equals the size of the communicator used to create the window and
     /// determines the valid rank range for RMA operations.
     pub fn comm_size(&self) -> i32 {
-        self.comm_size
+        self.words.len() as i32
     }
 
     /// Fence synchronization (active-target epoch boundary).
@@ -2871,8 +2919,29 @@ impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, '_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PendingFetchResult, WinFenceAssert, WinPscwAssert};
+    use super::{
+        window_word, PendingFetchResult, WinFenceAssert, WinPscwAssert, WINDOW_WORD_LEN_MASK,
+        WINDOW_WORD_REJECT,
+    };
     use std::ptr::NonNull;
+
+    // -------------------------------------------------------------------------
+    // window_word unit tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn window_word_packs_disp_unit_and_length() {
+        assert_eq!(window_word::<u64>(4), (8u64 << 56) | 32);
+        assert_eq!(window_word::<u8>(0), 1u64 << 56);
+
+        let max_len = WINDOW_WORD_LEN_MASK;
+        let word = window_word::<u8>(max_len as usize);
+        assert_ne!(word, WINDOW_WORD_REJECT);
+        assert_eq!(word & WINDOW_WORD_LEN_MASK, max_len);
+
+        assert_eq!(window_word::<u8>(1usize << 56), WINDOW_WORD_REJECT);
+        assert_eq!(window_word::<u64>(usize::MAX / 8 + 1), WINDOW_WORD_REJECT);
+    }
 
     // -------------------------------------------------------------------------
     // Win<'a, T> unit tests — exercise the type without an MPI runtime
