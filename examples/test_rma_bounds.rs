@@ -185,8 +185,8 @@ fn run_bounds_cases(world: &Communicator, win: &Win<'_, u64>, name: &str, len: i
         .unwrap_or_else(|e| panic!("{name}: closing fence failed: {e}"));
 
     // Red-run only: an unexpected `Ok` request/pending result must not be
-    // waited or dropped before the closing fence above (SND-04 UB); it is
-    // safe now that the epoch is closed.
+    // waited or dropped before the closing fence above (undefined per the
+    // MPI standard); it is safe now that the epoch is closed.
     for req in stray_requests {
         let _ = req.wait();
     }
