@@ -972,6 +972,7 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// Returns an error if:
     /// - Any rank's exposed byte length does not fit in 56 bits
     ///   (`Error::InvalidBuffer` on every rank).
+    /// - The length exchange fails (`Error::Mpi` with `operation: Some("allgather")`).
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_create")`).
     ///
     /// # Example
@@ -1051,6 +1052,7 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// Returns an error if:
     /// - Any rank's exposed byte length does not fit in 56 bits
     ///   (`Error::InvalidBuffer` on every rank).
+    /// - The length exchange fails (`Error::Mpi` with `operation: Some("allgather")`).
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_allocate")`).
     /// - MPI returns a null pointer for a non-zero count (`Error::Internal`).
     ///
@@ -2935,9 +2937,7 @@ mod tests {
         assert_eq!(window_word::<u8>(0), 1u64 << 56);
 
         let max_len = WINDOW_WORD_LEN_MASK;
-        let word = window_word::<u8>(max_len as usize);
-        assert_ne!(word, WINDOW_WORD_REJECT);
-        assert_eq!(word & WINDOW_WORD_LEN_MASK, max_len);
+        assert_eq!(window_word::<u8>(max_len as usize), (1u64 << 56) | max_len);
 
         assert_eq!(window_word::<u8>(1usize << 56), WINDOW_WORD_REJECT);
         assert_eq!(window_word::<u64>(usize::MAX / 8 + 1), WINDOW_WORD_REJECT);
