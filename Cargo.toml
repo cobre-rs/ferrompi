@@ -138,6 +138,10 @@ path = "examples/test_rma_raccumulate.rs"
 required-features = ["rma"]
 
 [[example]]
+name = "test_rma_win_oversize"
+required-features = ["rma"]
+
+[[example]]
 name = "shared_memory"
 path = "examples/shared_memory.rs"
 required-features = ["rma"]
