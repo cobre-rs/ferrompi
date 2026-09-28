@@ -1047,11 +1047,13 @@ int ferrompi_send(
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Send_c(buf, (MPI_Count)count, dt, dest, tag, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Send(buf, (int)count, dt, dest, tag, comm);
 }
 
@@ -1075,12 +1077,13 @@ int ferrompi_recv(
     int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
     
     int ret;
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Recv_c(buf, (MPI_Count)count, dt, mpi_source, mpi_tag, comm, &status);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Recv(buf, (int)count, dt, mpi_source, mpi_tag, comm, &status);
     }
     
@@ -1115,12 +1118,13 @@ int ferrompi_isend(
     MPI_Request req;
     int ret;
 
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Isend_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Isend(buf, (int)count, dt, dest, tag, comm, &req);
     }
 
@@ -1153,12 +1157,13 @@ int ferrompi_irecv(
     int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
 
     int ret;
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Irecv_c(buf, (MPI_Count)count, dt, mpi_source, mpi_tag, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Irecv(buf, (int)count, dt, mpi_source, mpi_tag, comm, &req);
     }
 
@@ -1199,14 +1204,15 @@ int ferrompi_sendrecv(
     int mpi_recvtag = (recvtag == -1) ? MPI_ANY_TAG : recvtag;
 
     int ret;
-#if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Sendrecv_c(sendbuf, (MPI_Count)sendcount, send_dt, dest, sendtag,
                              recvbuf, (MPI_Count)recvcount, recv_dt, mpi_source, mpi_recvtag,
                              comm, &status);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Sendrecv(sendbuf, (int)sendcount, send_dt, dest, sendtag,
                            recvbuf, (int)recvcount, recv_dt, mpi_source, mpi_recvtag,
                            comm, &status);
@@ -1298,11 +1304,13 @@ int ferrompi_bcast(void* buf, int64_t count, int32_t datatype_tag, int32_t root,
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Bcast_c(buf, (MPI_Count)count, dt, root, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Bcast(buf, (int)count, dt, root, comm);
 }
 
@@ -1320,11 +1328,13 @@ int ferrompi_reduce(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
     const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Reduce_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Reduce(sb, recvbuf, (int)count, dt, mpi_op, root, comm);
 }
 
@@ -1341,11 +1351,13 @@ int ferrompi_allreduce(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
     const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Allreduce_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Allreduce(sb, recvbuf, (int)count, dt, mpi_op, comm);
 }
 
@@ -1361,11 +1373,13 @@ int ferrompi_scan(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Scan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Scan(sendbuf, recvbuf, (int)count, dt, mpi_op, comm);
 }
 
@@ -1381,11 +1395,13 @@ int ferrompi_exscan(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Exscan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Exscan(sendbuf, recvbuf, (int)count, dt, mpi_op, comm);
 }
 
@@ -1402,13 +1418,15 @@ int ferrompi_gather(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
-#if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Gather_c(sb, (MPI_Count)sendcount, dt,
                            recvbuf, (MPI_Count)recvcount, dt,
                            root, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Gather(sb, (int)sendcount, dt,
                       recvbuf, (int)recvcount, dt,
                       root, comm);
@@ -1426,13 +1444,15 @@ int ferrompi_allgather(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
-#if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Allgather_c(sb, (MPI_Count)sendcount, dt,
                                recvbuf, (MPI_Count)recvcount, dt,
                                comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Allgather(sb, (int)sendcount, dt,
                          recvbuf, (int)recvcount, dt,
                          comm);
@@ -1451,13 +1471,15 @@ int ferrompi_scatter(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     void* rb = recvbuf ? recvbuf : MPI_IN_PLACE;
-#if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Scatter_c(sendbuf, (MPI_Count)sendcount, dt,
                             rb, (MPI_Count)recvcount, dt,
                             root, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Scatter(sendbuf, (int)sendcount, dt,
                        rb, (int)recvcount, dt,
                        root, comm);
@@ -1475,12 +1497,14 @@ int ferrompi_alltoall(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
-#if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Alltoall_c(sb, (MPI_Count)sendcount, dt,
                               recvbuf, (MPI_Count)recvcount, dt, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Alltoall(sb, (int)sendcount, dt,
                         recvbuf, (int)recvcount, dt, comm);
 }
@@ -1497,11 +1521,13 @@ int ferrompi_reduce_scatter_block(
     MPI_Datatype dt = get_datatype(datatype_tag);
     MPI_Op mpi_op = get_op(op);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-#if MPI_VERSION >= 4
     if (recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Reduce_scatter_block_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Reduce_scatter_block(sendbuf, recvbuf, (int)recvcount, dt, mpi_op, comm);
 }
 
@@ -1583,12 +1609,13 @@ int ferrompi_ibcast(
     MPI_Request req;
     int ret;
     
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Ibcast_c(buf, (MPI_Count)count, dt, root, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Ibcast(buf, (int)count, dt, root, comm, &req);
     }
     
@@ -1619,12 +1646,13 @@ int ferrompi_iallreduce(
     MPI_Request req;
     int ret;
     
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Iallreduce_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Iallreduce(sendbuf, recvbuf, (int)count, dt, mpi_op, comm, &req);
     }
     
@@ -1656,12 +1684,13 @@ int ferrompi_ireduce(
     MPI_Request req;
     int ret;
 
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Ireduce_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Ireduce(sendbuf, recvbuf, (int)count, dt, mpi_op, root, comm, &req);
     }
 
@@ -1693,14 +1722,15 @@ int ferrompi_igather(
     MPI_Request req;
     int ret;
 
-#if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Igather_c(sb, (MPI_Count)sendcount, dt,
                             recvbuf, (MPI_Count)recvcount, dt,
                             root, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Igather(sb, (int)sendcount, dt,
                           recvbuf, (int)recvcount, dt,
                           root, comm, &req);
@@ -1733,14 +1763,15 @@ int ferrompi_iallgather(
     MPI_Request req;
     int ret;
 
-#if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Iallgather_c(sb, (MPI_Count)sendcount, dt,
                                 recvbuf, (MPI_Count)recvcount, dt,
                                 comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Iallgather(sb, (int)sendcount, dt,
                              recvbuf, (int)recvcount, dt,
                              comm, &req);
@@ -1774,14 +1805,15 @@ int ferrompi_iscatter(
     MPI_Request req;
     int ret;
 
-#if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Iscatter_c(sendbuf, (MPI_Count)sendcount, dt,
                              rb, (MPI_Count)recvcount, dt,
                              root, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Iscatter(sendbuf, (int)sendcount, dt,
                            rb, (int)recvcount, dt,
                            root, comm, &req);
@@ -1833,12 +1865,13 @@ int ferrompi_iscan(
     MPI_Request req;
     int ret;
 
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Iscan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Iscan(sendbuf, recvbuf, (int)count, dt, mpi_op, comm, &req);
     }
 
@@ -1869,12 +1902,13 @@ int ferrompi_iexscan(
     MPI_Request req;
     int ret;
 
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Iexscan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Iexscan(sendbuf, recvbuf, (int)count, dt, mpi_op, comm, &req);
     }
 
@@ -1905,13 +1939,14 @@ int ferrompi_ialltoall(
     MPI_Request req;
     int ret;
 
-#if MPI_VERSION >= 4
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Ialltoall_c(sb, (MPI_Count)sendcount, dt,
                                recvbuf, (MPI_Count)recvcount, dt, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Ialltoall(sb, (int)sendcount, dt,
                             recvbuf, (int)recvcount, dt, comm, &req);
     }
@@ -2047,12 +2082,13 @@ int ferrompi_ireduce_scatter_block(
     MPI_Request req;
     int ret;
 
-#if MPI_VERSION >= 4
     if (recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Ireduce_scatter_block_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Ireduce_scatter_block(sendbuf, recvbuf, (int)recvcount, dt, mpi_op, comm, &req);
     }
 
@@ -4188,11 +4224,13 @@ int ferrompi_send_custom(
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Datatype dt = get_datatype_committed(datatype_handle);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Send_c(buf, (MPI_Count)count, dt, dest, tag, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Send(buf, (int)count, dt, dest, tag, comm);
 }
 
@@ -4216,12 +4254,13 @@ int ferrompi_recv_custom(
     int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
 
     int ret;
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Recv_c(buf, (MPI_Count)count, dt, mpi_source, mpi_tag, comm, &status);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Recv(buf, (int)count, dt, mpi_source, mpi_tag, comm, &status);
     }
 
@@ -4256,12 +4295,13 @@ int ferrompi_isend_custom(
     MPI_Request req;
     int ret;
 
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Isend_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Isend(buf, (int)count, dt, dest, tag, comm, &req);
     }
 
@@ -4294,12 +4334,13 @@ int ferrompi_irecv_custom(
     int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
 
     int ret;
-#if MPI_VERSION >= 4
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Irecv_c(buf, (MPI_Count)count, dt, mpi_source, mpi_tag, comm, &req);
-    } else
+#else
+        return MPI_ERR_COUNT;
 #endif
-    {
+    } else {
         ret = MPI_Irecv(buf, (int)count, dt, mpi_source, mpi_tag, comm, &req);
     }
 
@@ -4498,11 +4539,17 @@ int ferrompi_allreduce_user_op(
     if (op_handle < 0 || op_handle >= MAX_OPS) return MPI_ERR_ARG;
     MPI_Op op = atomic_load_explicit(&op_table[op_handle], memory_order_acquire);
     if (op == MPI_OP_NULL) return MPI_ERR_OP;
-#if MPI_VERSION >= 4
+    /* MPI-4.0 section 6.9.5: when a large count is narrowed to the classic
+     * MPI_User_function's int len, MPI calls that function multiple times
+     * with a sequence of len values summing to count, so an op created with
+     * the classic MPI_Op_create remains valid for a large-count reduction. */
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         return MPI_Allreduce_c(sendbuf, recvbuf, (MPI_Count)count, dt, op, comm);
-    }
+#else
+        return MPI_ERR_COUNT;
 #endif
+    }
     return MPI_Allreduce(sendbuf, recvbuf, (int)count, dt, op, comm);
 }
 
