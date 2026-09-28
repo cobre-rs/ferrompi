@@ -10,59 +10,23 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/cobre-rs/ferrompi"
 keywords = ["mpi", "hpc", "parallel", "distributed"]
 categories = ["science", "concurrency"]
-
-[lib]
-name = "ferrompi"
-path = "src/lib.rs"
-
-[[example]]
-name = "hello_world"
-path = "examples/hello_world.rs"
-
-[[example]]
-name = "ring"
-path = "examples/ring.rs"
-
-[[example]]
-name = "allreduce"
-path = "examples/allreduce.rs"
-
-[[example]]
-name = "persistent_bcast"
-path = "examples/persistent_bcast.rs"
-
-[[example]]
-name = "nonblocking"
-path = "examples/nonblocking.rs"
-
-[[example]]
-name = "pi_monte_carlo"
-path = "examples/pi_monte_carlo.rs"
-
-[[example]]
-name = "hybrid_openmp"
-path = "examples/hybrid_openmp.rs"
-
-[[example]]
-name = "comm_split"
-path = "examples/comm_split.rs"
-
-[[example]]
-name = "scan"
-path = "examples/scan.rs"
-
-[[example]]
-name = "gatherv"
-path = "examples/gatherv.rs"
+include = [
+    "/src/**",
+    "/csrc/**",
+    "/docs/**",
+    "/build.rs",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+]
 
 [[example]]
 name = "test_rma_window"
-path = "examples/test_rma_window.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_win_create"
-path = "examples/test_rma_win_create.rs"
 required-features = ["rma"]
 
 [[example]]
@@ -75,67 +39,54 @@ required-features = ["rma"]
 
 [[example]]
 name = "test_rma_win_fence"
-path = "examples/test_rma_win_fence.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_win_pscw"
-path = "examples/test_rma_win_pscw.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_win_lock"
-path = "examples/test_rma_win_lock.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_win_flush_sync"
-path = "examples/test_rma_win_flush_sync.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_put"
-path = "examples/test_rma_put.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_get"
-path = "examples/test_rma_get.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_accumulate"
-path = "examples/test_rma_accumulate.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_get_accumulate"
-path = "examples/test_rma_get_accumulate.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_fetch_and_op"
-path = "examples/test_rma_fetch_and_op.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_compare_and_swap"
-path = "examples/test_rma_compare_and_swap.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_rput"
-path = "examples/test_rma_rput.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_rget"
-path = "examples/test_rma_rget.rs"
 required-features = ["rma"]
 
 [[example]]
 name = "test_rma_raccumulate"
-path = "examples/test_rma_raccumulate.rs"
 required-features = ["rma"]
 
 [[example]]
@@ -156,136 +107,7 @@ required-features = ["rma"]
 
 [[example]]
 name = "shared_memory"
-path = "examples/shared_memory.rs"
 required-features = ["rma"]
-
-[[example]]
-name = "test_collectives"
-path = "examples/test_collectives.rs"
-
-[[example]]
-name = "test_nonblocking"
-path = "examples/test_nonblocking.rs"
-
-[[example]]
-name = "test_comm_split"
-path = "examples/test_comm_split.rs"
-
-[[example]]
-name = "test_p2p_extra"
-path = "examples/test_p2p_extra.rs"
-
-[[example]]
-name = "test_blocking_extra"
-path = "examples/test_blocking_extra.rs"
-
-[[example]]
-name = "test_nonblocking_collectives"
-path = "examples/test_nonblocking_collectives.rs"
-
-[[example]]
-name = "test_lifecycle"
-path = "examples/test_lifecycle.rs"
-
-[[example]]
-name = "test_info"
-path = "examples/test_info.rs"
-
-[[example]]
-name = "topology"
-path = "examples/topology.rs"
-
-[[example]]
-name = "reduce_op_bitwise"
-path = "examples/reduce_op_bitwise.rs"
-
-[[example]]
-name = "reduce_op_maxloc"
-path = "examples/reduce_op_maxloc.rs"
-
-[[example]]
-name = "test_persistent"
-path = "examples/test_persistent.rs"
-
-[[example]]
-name = "test_errhandler_returns"
-path = "examples/test_errhandler_returns.rs"
-
-[[example]]
-name = "test_error_context"
-path = "examples/test_error_context.rs"
-
-[[example]]
-name = "test_request_table_concurrency"
-path = "examples/test_request_table_concurrency.rs"
-
-[[example]]
-name = "test_group_basic"
-path = "examples/test_group_basic.rs"
-
-[[example]]
-name = "test_group_set_ops"
-path = "examples/test_group_set_ops.rs"
-
-[[example]]
-name = "test_group_ranges"
-path = "examples/test_group_ranges.rs"
-
-[[example]]
-name = "test_comm_from_group"
-path = "examples/test_comm_from_group.rs"
-
-[[example]]
-name = "test_group_compare"
-path = "examples/test_group_compare.rs"
-
-[[example]]
-name = "test_group_translate"
-path = "examples/test_group_translate.rs"
-
-[[example]]
-name = "test_custom_dt_contiguous"
-path = "examples/test_custom_dt_contiguous.rs"
-
-[[example]]
-name = "test_custom_dt_vector"
-path = "examples/test_custom_dt_vector.rs"
-
-[[example]]
-name = "test_custom_dt_struct"
-path = "examples/test_custom_dt_struct.rs"
-
-[[example]]
-name = "test_custom_dt_resized"
-path = "examples/test_custom_dt_resized.rs"
-
-[[example]]
-name = "test_custom_dt_p2p"
-path = "examples/test_custom_dt_p2p.rs"
-
-[[example]]
-name = "test_mpi_from_group"
-path = "examples/test_mpi_from_group.rs"
-
-[[example]]
-name = "test_user_op"
-path = "examples/test_user_op.rs"
-
-[[example]]
-name = "test_persistent_p2p"
-path = "examples/test_persistent_p2p.rs"
-
-[[example]]
-name = "test_persistent_rsend"
-path = "examples/test_persistent_rsend.rs"
-
-[[example]]
-name = "test_persistent_ssend"
-path = "examples/test_persistent_ssend.rs"
-
-[[example]]
-name = "test_persistent_bsend"
-path = "examples/test_persistent_bsend.rs"
 
 [dependencies]
 thiserror = "2"
@@ -300,22 +122,18 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 
 [[bench]]
 name = "bench_smoke"
-path = "benches/bench_smoke.rs"
 harness = false
 
 [[bench]]
 name = "allreduce_roundtrip"
-path = "benches/allreduce_roundtrip.rs"
 harness = false
 
 [[bench]]
 name = "persistent_vs_iallreduce"
-path = "benches/persistent_vs_iallreduce.rs"
 harness = false
 
 [[bench]]
 name = "ffi_overhead"
-path = "benches/ffi_overhead.rs"
 harness = false
 
 [features]
