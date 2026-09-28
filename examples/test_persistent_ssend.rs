@@ -32,12 +32,6 @@ fn main() {
             .ssend_init(&send, 1, TAG)
             .expect("ssend_init failed on rank 0");
 
-        // Synchronize both ranks past the init phase before any start().
-        // Required for OpenMPI 4.x compatibility — ssend (synchronous send)
-        // waits for matching recv, and without this barrier rank 0 may
-        // start before rank 1 has finished recv_init.
-        world.barrier().expect("post-init barrier failed on rank 0");
-
         for iter in 0..ITERS {
             // Fill the send buffer for this iteration.
             for (i, slot) in send.iter_mut().enumerate() {
@@ -58,9 +52,6 @@ fn main() {
         let mut recv_req = world
             .recv_init(&mut recv, 0, TAG)
             .expect("recv_init failed on rank 1");
-
-        // See companion comment on rank 0.
-        world.barrier().expect("post-init barrier failed on rank 1");
 
         for iter in 0..ITERS {
             // Post the receive first so the synchronous send can complete.
