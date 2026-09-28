@@ -127,7 +127,6 @@ Third-party references, deliberately not copied here:
 |---|---|
 | `tools/ffi_cmp.py` | Compares every `pub fn` in `src/ffi.rs` with its C definition in `csrc/ferrompi.c` (arity, argument widths, return type). Run `python3 tools/ffi_cmp.py`. It resolves the repo root relative to itself. Result on v0.5.0: `checked 172 bad 0` |
 | `tools/run_mpi_tests_patched.sh` | `tests/run_mpi_tests.sh` with one change: binary paths honour `${CARGO_TARGET_DIR:-./target}` (2 lines). Used to produce the np=1/3/4/5/8 logs in `evidence/` (INF-01, INF-10). Usage: `MPI_NP=<n> MPI_TEST_TIMEOUT=60 tools/run_mpi_tests_patched.sh [rma]` from the repo root |
-| `tools/decoy-mpich.pc.in` | INF-04 probe-precedence repro. Replace `@PREFIX@` with an empty directory that has `include/` and `lib/`, then run `PKG_CONFIG_PATH=<dir> MPICC=/opt/mpich/bin/mpicc cargo build`. Observed: `build.rs` prints `Found MPI via pkg-config: mpich`, so `MPICC` is ignored. The C compile then picked up a stray `/usr/local/include/mpi.h` and failed with `fatal error: mpi_proto.h`. Expected after fix: an explicit `MPICC` takes precedence, and an explicit variable that fails to resolve is a hard error |
 
 ## evidence/
 
