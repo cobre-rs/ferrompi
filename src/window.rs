@@ -1671,17 +1671,18 @@ impl<T: MpiDatatype> Win<'_, T> {
         Error::check_with_op(ret, "win_flush_local_all")
     }
 
-    /// Synchronize the local public window copy with the local private copy.
+    /// Synchronize the public and private copies of this window's local memory.
     ///
-    /// Issues a memory barrier that ensures consistency between the public and
-    /// private copies of the window memory on the local process. This is a
-    /// purely local operation — it does not require a surrounding lock epoch
-    /// and does not communicate with any remote process.
+    /// Wraps `MPI_Win_sync`, a local memory barrier: it does not communicate
+    /// and does not complete pending RMA operations. MPI allows it only inside
+    /// a passive-target epoch (MPI-4.0 section 12.5.4), that is between
+    /// [`Win::lock`] or [`Win::lock_all`] and the matching unlock; outside one,
+    /// MPICH returns an error.
     ///
     /// # Errors
     ///
     /// Returns `Error::Mpi { operation: Some("win_sync"), .. }` if the MPI
-    /// call fails.
+    /// call fails, including when no passive-target epoch is open.
     ///
     /// # Example
     ///
@@ -1692,12 +1693,16 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// let world = mpi.world();
     /// let win = Win::<f64>::allocate(&world, 8).unwrap();
     ///
-    /// // sync is valid outside any epoch
-    /// win.sync().unwrap();
+    /// {
+    ///     let _guard = win.lock_all().unwrap();
+    ///     win.sync().unwrap();
+    ///     // The epoch ends when `_guard` is dropped
+    /// }
     /// ```
     pub fn sync(&self) -> Result<()> {
-        // SAFETY: `win_handle` is a valid MPI window handle. `MPI_Win_sync`
-        // is a local operation and is valid at any point after window creation.
+        // SAFETY: `win_handle` is a valid MPI window handle. `MPI_Win_sync` is
+        // valid only inside a passive-target epoch, which the caller must open;
+        // outside one MPI returns an error rather than touching memory.
         let ret = unsafe { ffi::ferrompi_win_sync(self.win_handle) };
         Error::check_with_op(ret, "win_sync")
     }
