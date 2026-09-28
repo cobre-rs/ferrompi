@@ -254,7 +254,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | INF-04 | build.rs precedence contradicts docs; overrides fail silently | major | repro | 0.5.x | fixed (0c8e405, 8e5e108) |
 | INF-05 | build.rs dead/misleading output | minor | reading | 0.5.x | fixed (0c8e405, 8e5e108, 50e7d63) |
 | INF-06 | No `links` manifest key | minor | reasoning | 0.5.x | fixed (39b9fbb) |
-| INF-07 | docs.rs builds default features only (no RMA docs) | major | live check | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| INF-07 | docs.rs builds default features only (no RMA docs) | major | live check | 0.5.x | fixed (844ec07): docs.rs all features, doc_cfg, default-feature doc warnings; PR doc checks planned (ferrompi-0.5.x-hardening) |
 | INF-08 | Doctests never run on PRs | major | reading | 0.5.x | fixed (acd809f) |
 | INF-09 | MPI-4 probes turn regressions into silent passes | major | reading | 0.5.x | fixed (87ac8d9) |
 | INF-10 | Odd-np deadlocks; CI np=4 only | minor | repro | 0.5.x | fixed (6ee2c4e) |
