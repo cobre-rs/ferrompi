@@ -154,4 +154,16 @@ if ! build MPICC="$FX/bin/draft-mpicc" && logged "draft MPI ABI"; then
   pass "$name"
 else fail "$name"; fi
 
+# --- rebuild tracking --------------------------------------------------------
+
+name="a changed selection variable reruns the build script"
+if build && ! MPI_PKG_CONFIG=nonexistent cargo build -q --example hello_world >"$FX/log" 2>&1 &&
+  logged "MPI_PKG_CONFIG=nonexistent" &&
+  emitted "cargo:rerun-if-env-changed=MPI_PKG_CONFIG" &&
+  emitted "cargo:rerun-if-env-changed=MPICC" &&
+  emitted "cargo:rerun-if-env-changed=CRAY_MPICH_DIR" &&
+  emitted "cargo:rerun-if-env-changed=PATH"; then
+  pass "$name"
+else fail "$name"; fi
+
 exit "$FAILED"
