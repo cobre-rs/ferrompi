@@ -184,7 +184,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | ABI-04 | Public-API one-way doors (= ARC-02/03) | major | reading | 0.6 | open |
 | ABI-05 | ADR-0001 misstates what the ABI adds; ADR-0006 needed | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | ABI-06 | No interop API (deliberately deferred) | info | — | after ABI backend | open |
-| ABI-07 | Optional CI compile+link job against Forum ABI stubs | info | built locally | 0.5.x or 0.7 | planned (ferrompi-0.5.x-hardening) |
+| ABI-07 | Optional CI compile+link job against Forum ABI stubs | info | built locally | 0.5.x or 0.7 | fixed (5d62df7) |
 
 ### Performance — [05](findings/05-performance.md)
 

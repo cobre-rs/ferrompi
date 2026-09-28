@@ -101,26 +101,6 @@ All binaries run interleaved A/B rounds, timing raw MPI (called directly through
 |---|---|---|---|---|---|
 | `api-checks/lib_ne.rs` + `api-checks/main_ne.rs` | ARC-02 | A downstream crate casts a `#[non_exhaustive] #[repr(i32)]` enum from another crate with `as i32` | two `rustc` invocations (see Building) | Compiles and prints `0` on rustc 1.95. Adding `#[non_exhaustive]` to `DatatypeTag`/`ReduceOp` does not break numeric casts; only the documented discriminant "contract" is a lock-in | Reference only |
 
-### abi/: MPI 5 standard-ABI compile and link check
-
-| File | Finding | Purpose | How to run |
-|---|---|---|---|
-| `abi/mpiabi-stub.pc.in` | MPI 5 ABI readiness (see `../findings/`) | pkg-config template for linking ferrompi against the MPI Forum reference ABI stubs | Steps below |
-
-The steps below are reconstructed from the ABI reviewer's report; the exact command lines were not archived.
-
-1. `git clone https://github.com/mpi-forum/mpi-abi-stubs`, then `cc -shared -fPIC -I. mpilib.c -o libmpi_abi.so`.
-2. `cc -std=c11 -fsyntax-only -Wall -Wextra -Wpedantic -I<stubs> csrc/ferrompi.c`. Observed: **zero diagnostics**. The same result was obtained against MPICH v5.0.1's `mpi_abi.h`.
-3. Copy the template to `<pcdir>/mpiabi-stub.pc`, replacing `@PREFIX@` with the stubs directory. Then run `PKG_CONFIG_PATH=<pcdir> MPI_PKG_CONFIG=mpiabi-stub cargo build --locked --features rma --examples` from the repo root. Observed: builds and links against `libmpi_abi.so`.
-
-Runtime was not tested, because the stubs call `abort()` in every non-trivial function.
-
-Third-party references, deliberately not copied here:
-- https://github.com/mpi-forum/mpi-abi-stubs
-- https://github.com/pmodels/mpich/blob/v5.0.1/src/binding/abi/mpi_abi.h
-- https://github.com/pmodels/mpich/blob/v4.3.0/src/binding/abi/mpi_abi.h (a pre-standard draft: `MPI_ERRORS_RETURN`/`ABORT` are swapped and the thread levels differ)
-- https://www.mpi-forum.org/docs/mpi-5.0/mpi50-report.pdf
-
 ## tools/
 
 | File | Purpose |
