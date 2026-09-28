@@ -116,12 +116,6 @@ jobs:
           chmod +x tests/run_mpi_tests.sh
           MPI_NP_LIST="${{ matrix.np_list }}" ./tests/run_mpi_tests.sh "${{ matrix.features }}"
 
-      - name: Build documentation
-        if: matrix.features == 'rma'
-        run: cargo doc --no-deps --features rma
-        env:
-          RUSTDOCFLAGS: -D warnings
-
   test-openmpi5:
     name: Test (openmpi5, rma)
     runs-on: ubuntu-24.04
@@ -312,7 +306,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
   doc:
-    name: Doctests
+    name: Docs
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 
@@ -342,6 +336,19 @@ jobs:
 
       - name: Doctests (all features)
         run: cargo test --doc --all-features
+
+      - name: Documentation (default features)
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: docs.rs emulation (nightly, all features)
+        run: cargo +nightly doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
 
   valgrind:
     name: Valgrind (mpich)
