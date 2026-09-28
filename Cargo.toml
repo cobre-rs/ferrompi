@@ -109,6 +109,9 @@ required-features = ["rma"]
 name = "shared_memory"
 required-features = ["rma"]
 
+[package.metadata.docs.rs]
+all-features = true
+
 [dependencies]
 thiserror = "2"
 
