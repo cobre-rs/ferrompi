@@ -572,6 +572,17 @@ impl<T: MpiDatatype> SharedWindow<T> {
     ///
     /// The caller must ensure proper MPI synchronization (fence or lock)
     /// before reading data that may have been written by other processes.
+    ///
+    /// # Concurrent writes
+    ///
+    /// The slice aliases memory that other processes in the window can write
+    /// at any time, but a `&[T]` promises the compiler that its contents do
+    /// not change while it is borrowed. The compiler may therefore load a
+    /// value once and reuse it, so a loop that polls the slice for another
+    /// process's write can spin forever; this has been observed in optimised
+    /// builds. Polling through this slice is unsupported. Take a new slice
+    /// after each synchronising call (fence, lock or unlock) and read data
+    /// another process wrote only through that new slice.
     pub fn local_slice(&self) -> &[T] {
         // SAFETY: `local_ptr` was returned by MPI_Win_allocate_shared and is
         // guaranteed valid for `local_len` elements of type T for the lifetime
@@ -588,6 +599,16 @@ impl<T: MpiDatatype> SharedWindow<T> {
     ///
     /// The caller must ensure proper MPI synchronization (fence or lock)
     /// before writing data that other processes may read.
+    ///
+    /// # Concurrent writes
+    ///
+    /// The slice aliases memory that other processes in the window can read
+    /// and write at any time, but a `&mut [T]` promises the compiler
+    /// exclusive access while it is borrowed. The compiler may therefore keep
+    /// values in registers and skip loads or stores, so a loop that polls the
+    /// slice for another process's write can spin forever.
+    /// Polling through this slice is unsupported. Take a new slice after each
+    /// synchronising call (fence, lock or unlock).
     pub fn local_slice_mut(&mut self) -> &mut [T] {
         // SAFETY: `local_ptr` was returned by MPI_Win_allocate_shared and is
         // guaranteed valid for `local_len` elements of type T for the lifetime
@@ -615,6 +636,17 @@ impl<T: MpiDatatype> SharedWindow<T> {
     ///
     /// The caller must ensure proper MPI synchronization (fence or lock)
     /// before reading data that was written by the remote process.
+    ///
+    /// # Concurrent writes
+    ///
+    /// The slice aliases memory that other processes in the window can write
+    /// at any time, but a `&[T]` promises the compiler that its contents do
+    /// not change while it is borrowed. The compiler may therefore load a
+    /// value once and reuse it, so a loop that polls the slice for another
+    /// process's write can spin forever; this has been observed in optimised
+    /// builds. Polling through this slice is unsupported. Take a new slice
+    /// after each synchronising call (fence, lock or unlock) and read data
+    /// another process wrote only through that new slice.
     ///
     /// # Example
     ///
