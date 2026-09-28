@@ -262,7 +262,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | INF-12 | Public APIs untested; examples never run | minor | reading | 0.5.x | fixed (da87ce5) |
 | INF-13 | Error-class assertions accept any class | major | reading | 0.5.x | fixed (ea3cff2) |
 | INF-14 | Release notes extraction yields empty bodies | minor | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
-| INF-15 | CI coverage gaps (numa clippy, sanitizers, coverage 11/73) | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| INF-15 | CI coverage gaps (numa clippy, sanitizers, coverage 11/73) | minor | reading | 0.5.x | fixed (a0501aa, 1569e4c, bd3b98c, b0a1a41, 2e9dd20) |
 | INF-16 | MPICH hotfix: unchecked downloads, copy-pasted ×4 | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | INF-17 | `security.yml` hygiene | nit | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | INF-18 | Package ships repo internals (incl. `audits/`) | minor | `cargo package` | 0.5.x | fixed (07c5241): include allow-list; PR package check planned (ferrompi-0.5.x-hardening) |
