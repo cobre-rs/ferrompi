@@ -28,6 +28,9 @@ fn main() {
     for path in &mpi_config.include_paths {
         build.include(path);
     }
+    for (name, value) in &mpi_config.defines {
+        build.define(name, value.as_deref());
+    }
 
     // Set optimization level
     if env::var("PROFILE").unwrap_or_default() == "release" {
@@ -75,6 +78,7 @@ struct MpiConfig {
     include_paths: Vec<PathBuf>,
     link_paths: Vec<PathBuf>,
     libs: Vec<String>,
+    defines: Vec<(String, Option<String>)>,
     version: Option<String>,
 }
 
@@ -166,6 +170,7 @@ fn try_prefix(prefix: &Path, lib_dirs: &[&str], libs: &[&str]) -> Option<MpiConf
                     include_paths: vec![include],
                     link_paths: vec![dir],
                     libs: vec![(*lib).to_string()],
+                    defines: Vec::new(),
                     version: None,
                 });
             }
@@ -192,49 +197,61 @@ fn try_pkg_config(name: &str) -> Result<MpiConfig, pkg_config::Error> {
         include_paths: lib.include_paths,
         link_paths: lib.link_paths,
         libs: lib.libs,
+        defines: lib.defines.into_iter().collect(),
         version: Some(lib.version),
     })
 }
 
+/// Runs the compiler wrapper with `-show` (MPICH, Intel MPI) and, if that exits
+/// non-zero, with `--showme` (Open MPI), and parses the first success.
 fn try_mpicc(mpicc: &str) -> Result<MpiConfig, String> {
-    let output = Command::new(mpicc)
-        .arg("-show")
-        .output()
-        .map_err(|e| format!("Failed to run '{mpicc}': {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!("'{mpicc} -show' failed"));
+    for option in ["-show", "--showme"] {
+        let output = Command::new(mpicc)
+            .arg(option)
+            .output()
+            .map_err(|e| format!("failed to run '{mpicc}': {e}"))?;
+        if output.status.success() {
+            return Ok(parse_wrapper_flags(&String::from_utf8_lossy(
+                &output.stdout,
+            )));
+        }
     }
-
-    let show_output = String::from_utf8_lossy(&output.stdout);
-    parse_mpicc_show(&show_output)
+    Err(format!(
+        "both '{mpicc} -show' and '{mpicc} --showme' failed"
+    ))
 }
 
-#[allow(clippy::unnecessary_wraps)]
-fn parse_mpicc_show(output: &str) -> Result<MpiConfig, String> {
-    let mut include_paths = Vec::new();
-    let mut link_paths = Vec::new();
-    let mut libs = Vec::new();
+/// The joined `-I`, `-L`, `-l` and `-DNAME[=VAL]` flags of a wrapper's output,
+/// with surrounding quotes stripped from each value. Other tokens are ignored.
+/// Without a `-l`, links `mpi`.
+fn parse_wrapper_flags(output: &str) -> MpiConfig {
+    let mut config = MpiConfig {
+        include_paths: Vec::new(),
+        link_paths: Vec::new(),
+        libs: Vec::new(),
+        defines: Vec::new(),
+        version: None,
+    };
 
-    for part in output.split_whitespace() {
-        if let Some(path) = part.strip_prefix("-I") {
-            include_paths.push(PathBuf::from(path));
-        } else if let Some(path) = part.strip_prefix("-L") {
-            link_paths.push(PathBuf::from(path));
-        } else if let Some(lib) = part.strip_prefix("-l") {
-            libs.push(lib.to_string());
+    for token in output.split_whitespace() {
+        let (Some(flag), Some(value)) = (token.get(..2), token.get(2..)) else {
+            continue;
+        };
+        let value = value.trim_matches(|c| c == '"' || c == '\'');
+        match flag {
+            "-I" => config.include_paths.push(PathBuf::from(value)),
+            "-L" => config.link_paths.push(PathBuf::from(value)),
+            "-l" => config.libs.push(value.to_string()),
+            "-D" => config.defines.push(match value.split_once('=') {
+                Some((name, val)) => (name.to_string(), Some(val.to_string())),
+                None => (value.to_string(), None),
+            }),
+            _ => {}
         }
     }
 
-    // Ensure we have at least the basic MPI library
-    if libs.is_empty() {
-        libs.push("mpi".to_string());
+    if config.libs.is_empty() {
+        config.libs.push("mpi".to_string());
     }
-
-    Ok(MpiConfig {
-        include_paths,
-        link_paths,
-        libs,
-        version: None,
-    })
+    config
 }
