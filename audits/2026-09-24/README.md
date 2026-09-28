@@ -209,7 +209,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | BLT-06 | Example scaffolding duplicated in 26 files | 390 | 0.5.x† | fixed (f503dbf) |
 | BLT-08 | Boilerplate SAFETY / marshalling; 59 `unsafe` blocks without SAFETY | 300 | 0.5.x† | fixed (0647d69) |
 | BLT-09 | Three drifted test runners + deprecated `test.sh` | 200 | 0.5.x† | fixed (a0501aa) |
-| BLT-10 | 42 redundant `[[example]]` entries | 185 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| BLT-10 | 42 redundant `[[example]]` entries | 185 | 0.5.x† | fixed (07c5241) |
 | BLT-11 | Tables/indexes repeated across 3–5 docs; marketing tone | 250 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
 | BLT-14 | 15 in-place C shims differ only by `MPI_IN_PLACE`; dead `is_root` | 300 | 0.5.x† | fixed (38c789e) |
 | BLT-15 | `UserOp` double registry + dead per-callback lookup | 120 | 0.5.x† | fixed (2d53b18) |
@@ -265,7 +265,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | INF-15 | CI coverage gaps (numa clippy, sanitizers, coverage 11/73) | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | INF-16 | MPICH hotfix: unchecked downloads, copy-pasted ×4 | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | INF-17 | `security.yml` hygiene | nit | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
-| INF-18 | Package ships repo internals (incl. `audits/`) | minor | `cargo package` | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| INF-18 | Package ships repo internals (incl. `audits/`) | minor | `cargo package` | 0.5.x | fixed (07c5241): include allow-list; PR package check planned (ferrompi-0.5.x-hardening) |
 | INF-19 | ADR-0002 mandated TSan step missing | minor | reading | 0.5.x / moot after ARC-01 | planned (ferrompi-0.5.x-hardening) |
 | INF-20 | CI covers MPICH 4.2 + Open MPI 4.x only (no Open MPI 5) | minor | reading | 0.5.x | fixed (3f8ec50) |
 | INF-21 | Unit tests mutate a global static (latent) | nit | stress test | — | open |
