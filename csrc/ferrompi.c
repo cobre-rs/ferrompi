@@ -6,6 +6,11 @@
 
 #include "ferrompi.h"
 #include <mpi.h>
+
+#if defined(MPI_ABI_VERSION) && MPI_VERSION < 5
+#error "ferrompi does not support the draft MPI ABI (MPI_ABI_VERSION with MPI_VERSION < 5, as in MPICH 4.3 built with -DMPI_ABI); build against the native MPI headers or an MPI 5.0 ABI implementation"
+#endif
+
 #include <string.h>
 #include <stdlib.h>
 #include <stdatomic.h>
