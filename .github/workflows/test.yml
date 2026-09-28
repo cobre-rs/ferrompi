@@ -232,6 +232,38 @@ jobs:
         env:
           MPICC: ${{ runner.temp }}/mpi-abi/bin/mpicc_abi
 
+  large-count:
+    name: Large count (mpich)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-large-count-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-large-count-
+
+      - name: Setup MPICH
+        uses: ./.github/actions/setup-mpich
+
+      - name: Build the large-count example
+        run: cargo build --locked --release --features rma --example large_count
+
+      - name: Run the large-count example
+        run: mpiexec -n 1 target/release/examples/large_count
+
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04
