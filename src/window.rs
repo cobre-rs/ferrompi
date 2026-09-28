@@ -497,6 +497,8 @@ impl<T: MpiDatatype> SharedWindow<T> {
     /// The communicator should be a shared-memory communicator (e.g., from
     /// [`Communicator::split_shared()`]).
     ///
+    /// The local segment reads as zero when the call returns.
+    ///
     /// # Arguments
     ///
     /// * `comm` - A shared-memory communicator (all processes must be on the same node)
@@ -506,7 +508,9 @@ impl<T: MpiDatatype> SharedWindow<T> {
     ///
     /// Returns an error if:
     /// - The MPI window allocation fails (e.g., insufficient shared memory)
-    /// - The MPI implementation returns a null base pointer
+    /// - An error occurs while zeroing the new segment (the window is then not freed)
+    /// - The MPI implementation returns a null base pointer for a non-zero count
+    ///   (the window is then not freed)
     ///
     /// # Example
     ///
@@ -536,8 +540,14 @@ impl<T: MpiDatatype> SharedWindow<T> {
         };
         Error::check_with_op(ret, "win_allocate_shared")?;
 
-        let local_ptr = NonNull::new(baseptr.cast::<T>())
-            .ok_or_else(|| Error::Internal("Win_allocate_shared returned null".into()))?;
+        let local_ptr = if local_count == 0 {
+            // Zero-count: MPI may return a null base pointer for an empty
+            // segment (mirrors Win::allocate's zero-count arm).
+            NonNull::<T>::dangling()
+        } else {
+            NonNull::new(baseptr.cast::<T>())
+                .ok_or_else(|| Error::Internal("Win_allocate_shared returned null".into()))?
+        };
 
         mark_window_alive();
 
@@ -1081,6 +1091,8 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// `local_count * size_of::<T>()`. Creation first exchanges each rank's
     /// displacement unit and exposed length with one allgather over `comm`.
     ///
+    /// The local segment reads as zero when the call returns.
+    ///
     /// # Arguments
     ///
     /// * `comm`        - Communicator; all processes must call this collectively.
@@ -1094,7 +1106,10 @@ impl<T: MpiDatatype> Win<'static, T> {
     ///   (`Error::InvalidBuffer` on every rank).
     /// - The length exchange fails (`Error::Mpi` with `operation: Some("allgather")`).
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_allocate")`).
-    /// - MPI returns a null pointer for a non-zero count (`Error::Internal`).
+    /// - An error occurs while zeroing the new segment (`Error::Mpi` with
+    ///   `operation: Some("win_allocate")`; the window is then not freed).
+    /// - MPI returns a null pointer for a non-zero count (`Error::Internal`;
+    ///   the window is then not freed).
     ///
     /// # Example
     ///

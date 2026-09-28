@@ -3575,9 +3575,66 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
  * RMA Window Operations (MPI 3.0+)
  * ============================================================ */
 
+/* Zeroes the calling rank's own segment of a freshly allocated window so
+ * that MPI_Win_allocate[_shared] never hands out uninitialised memory. The
+ * memset itself is not an MPI call and needs no lock to be valid C, but it
+ * must run inside a passive-target epoch: without the lock/sync bracket a
+ * peer racing ahead of this rank could read the segment before the memset
+ * is visible to it under RMA's relaxed consistency. MPI_MODE_NOCHECK skips
+ * lock negotiation, since no epoch can already be open on a window that was
+ * just created.
+ *
+ * The opening barrier keeps a fast peer from reading this rank's segment
+ * before the memset below has run. The closing barrier keeps every rank
+ * inside the constructor until every peer has left this zeroing epoch, so a
+ * post, fence, or lock issued right after construction returns is always
+ * legal MPI: no rank can still be mid-epoch on the window.
+ *
+ * Both barriers are always reached, whether or not the lock/sync calls
+ * succeed: only the calls that depend on a failed lock (sync, unlock) are
+ * skipped, and the first non-success code is returned only after both
+ * barriers. On a failure the window is left registered and unfreed:
+ * MPI_Win_free is collective, and a peer whose own zeroing succeeded still
+ * holds a live window that only its own teardown can free. The caller must
+ * not call MPI_Win_free here. */
+static int zero_own_segment(MPI_Win win, MPI_Comm comm, void* base, MPI_Aint size) {
+    int ret = MPI_SUCCESS;
+
+    int first = MPI_Win_lock_all(MPI_MODE_NOCHECK, win);
+    int locked = (first == MPI_SUCCESS);
+    if (ret == MPI_SUCCESS) ret = first;
+
+    if (size > 0) memset(base, 0, (size_t)size);
+
+    if (locked) {
+        int r = MPI_Win_sync(win);
+        if (ret == MPI_SUCCESS) ret = r;
+    }
+
+    {
+        int r = MPI_Barrier(comm);
+        if (ret == MPI_SUCCESS) ret = r;
+    }
+
+    if (locked) {
+        int r = MPI_Win_sync(win);
+        if (ret == MPI_SUCCESS) ret = r;
+        r = MPI_Win_unlock_all(win);
+        if (ret == MPI_SUCCESS) ret = r;
+    }
+
+    {
+        int r = MPI_Barrier(comm);
+        if (ret == MPI_SUCCESS) ret = r;
+    }
+
+    return ret;
+}
+
 int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_handle,
                                   int32_t comm_handle, void** baseptr, int32_t* win_handle) {
     MPI_Comm comm = get_comm(comm_handle);
+    if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
     MPI_Info info = (info_handle < 0) ? MPI_INFO_NULL : get_info(info_handle);
     MPI_Win win;
     int ret = MPI_Win_allocate_shared((MPI_Aint)size, disp_unit, info, comm, baseptr, &win);
@@ -3585,6 +3642,8 @@ int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_h
         /* Install MPI_ERRORS_RETURN so RMA errors are returned rather than
          * aborting the process (mirrors the communicator error-handler pattern). */
         install_errors_return_win(win);
+        ret = zero_own_segment(win, comm, *baseptr, (MPI_Aint)size);
+        if (ret != MPI_SUCCESS) return ret;
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
             MPI_Win_free(&win);
@@ -3625,6 +3684,8 @@ int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info_handle,
         /* Install MPI_ERRORS_RETURN so RMA errors are returned rather than
          * aborting the process (mirrors the communicator error-handler pattern). */
         install_errors_return_win(win);
+        ret = zero_own_segment(win, comm, *baseptr, (MPI_Aint)size);
+        if (ret != MPI_SUCCESS) return ret;
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
             MPI_Win_free(&win);
