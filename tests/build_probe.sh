@@ -49,6 +49,23 @@ fail() {
   FAILED=1
 }
 
+# wrapper NAME OPTION FLAGS: a fake mpicc that prints FLAGS for OPTION only.
+wrapper() {
+  mkdir -p "$FX/bin"
+  cat >"$FX/bin/$1" <<EOF
+#!/bin/sh
+[ "\$1" = $2 ] || exit 1
+echo 'cc $3'
+EOF
+  chmod +x "$FX/bin/$1"
+}
+
+# header DIR LINE...: a fixture mpi.h found before the real one.
+header() {
+  mkdir -p "$FX/$1"
+  printf '%s\n' "${@:2}" >"$FX/$1/mpi.h"
+}
+
 # pcfile PATH LIBS: a pkg-config file for package `mpich`.
 pcfile() {
   mkdir -p "$(dirname "$1")"
@@ -98,6 +115,33 @@ ln -s "$REAL_LIBDIR/lib$REAL_LIB.so" "$FX/cray-fs/lib64/libmpich.so"
 if build CRAY_MPICH_DIR="$FX/cray-fs" &&
   emitted "cargo:rustc-link-search=native=$FX/cray-fs/lib64" &&
   emitted "cargo:rustc-link-lib=mpich"; then
+  pass "$name"
+else fail "$name"; fi
+
+# --- defines, quotes and --showme -------------------------------------------
+
+header abi-define '#ifndef MPI_ABI' '#error "MPI_ABI was not passed to the compiler"' '#endif' \
+  '#undef MPI_ABI' '#include_next <mpi.h>'
+
+name="a wrapper's -D reaches the shim compile and its quotes are stripped"
+mkdir -p "$FX/quoted/lib"
+wrapper abi-mpicc -show "-I$FX/abi-define -DMPI_ABI -L\"$FX/quoted/lib\" $REAL_FLAGS"
+if build MPICC="$FX/bin/abi-mpicc" &&
+  emitted "cargo:rustc-link-search=native=$FX/quoted/lib"; then
+  pass "$name"
+else fail "$name"; fi
+
+name="a pkg-config -D reaches the shim compile"
+pcfile "$FX/pc/abi-fixture.pc" "-I$FX/abi-define -DMPI_ABI $REAL_FLAGS"
+if build PKG_CONFIG_PATH="$FX/pc" MPI_PKG_CONFIG=abi-fixture; then
+  pass "$name"
+else fail "$name"; fi
+
+name="a wrapper that answers only --showme"
+mkdir -p "$FX/showme/lib"
+wrapper showme-mpicc --showme "-L$FX/showme/lib $REAL_FLAGS"
+if build MPICC="$FX/bin/showme-mpicc" &&
+  emitted "cargo:rustc-link-search=native=$FX/showme/lib"; then
   pass "$name"
 else fail "$name"; fi
 
