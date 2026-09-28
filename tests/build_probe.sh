@@ -145,4 +145,13 @@ if build MPICC="$FX/bin/showme-mpicc" &&
   pass "$name"
 else fail "$name"; fi
 
+# --- draft MPI ABI ----------------------------------------------------------
+
+name="the draft MPI ABI stops the build"
+header draft-abi '#include_next <mpi.h>' '#define MPI_ABI_VERSION 1'
+wrapper draft-mpicc -show "-I$FX/draft-abi $REAL_FLAGS"
+if ! build MPICC="$FX/bin/draft-mpicc" && logged "draft MPI ABI"; then
+  pass "$name"
+else fail "$name"; fi
+
 exit "$FAILED"
