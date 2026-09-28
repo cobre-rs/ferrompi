@@ -1,4 +1,4 @@
-//! Regression for zeroed window memory (ADR-032).
+//! Regression for zeroed window memory.
 //!
 //! `Win::allocate` and `SharedWindow::allocate` must never hand a caller a
 //! fresh window's memory before it has been zeroed: reading it is an
