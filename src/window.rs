@@ -512,6 +512,10 @@ impl<T: MpiDatatype> SharedWindow<T> {
     /// - The MPI implementation returns a null base pointer for a non-zero count
     ///   (the window is then not freed)
     ///
+    /// In the latter two cases, a peer whose own zeroing succeeded blocks in its
+    /// collective `Drop` (`MPI_Win_free`) waiting for this rank, and if this rank's
+    /// `Mpi` later drops, it calls `MPI_Finalize` with a live, uncounted window.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -1110,6 +1114,10 @@ impl<T: MpiDatatype> Win<'static, T> {
     ///   `operation: Some("win_allocate")`; the window is then not freed).
     /// - MPI returns a null pointer for a non-zero count (`Error::Internal`;
     ///   the window is then not freed).
+    ///
+    /// In the latter two cases, a peer whose own zeroing succeeded blocks in its
+    /// collective `Drop` (`MPI_Win_free`) waiting for this rank, and if this rank's
+    /// `Mpi` later drops, it calls `MPI_Finalize` with a live, uncounted window.
     ///
     /// # Example
     ///

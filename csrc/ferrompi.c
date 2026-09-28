@@ -3581,19 +3581,20 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
  * must run inside a passive-target epoch: without the lock/sync bracket a
  * peer racing ahead of this rank could read the segment before the memset
  * is visible to it under RMA's relaxed consistency. MPI_MODE_NOCHECK skips
- * lock negotiation, since no epoch can already be open on a window that was
- * just created.
+ * lock negotiation: valid because no process holds or will attempt a
+ * conflicting lock on this window, since every peer takes only a shared
+ * lock_all here and none can leave before the closing barrier below.
  *
- * The opening barrier keeps a fast peer from reading this rank's segment
- * before the memset below has run. The closing barrier keeps every rank
- * inside the constructor until every peer has left this zeroing epoch, so a
- * post, fence, or lock issued right after construction returns is always
- * legal MPI: no rank can still be mid-epoch on the window.
+ * The middle barrier keeps a fast peer from reading this rank's segment
+ * until the memset above has completed. The closing barrier keeps every
+ * rank inside the constructor until every peer has left this zeroing
+ * epoch, so a post, fence, or lock issued right after construction returns
+ * is always legal MPI: no rank can still be mid-epoch on the window.
  *
  * Both barriers are always reached, whether or not the lock/sync calls
  * succeed: only the calls that depend on a failed lock (sync, unlock) are
  * skipped, and the first non-success code is returned only after both
- * barriers. On a failure the window is left registered and unfreed:
+ * barriers. On a failure the window is left unregistered and unfreed:
  * MPI_Win_free is collective, and a peer whose own zeroing succeeded still
  * holds a live window that only its own teardown can free. The caller must
  * not call MPI_Win_free here. */
@@ -3604,7 +3605,7 @@ static int zero_own_segment(MPI_Win win, MPI_Comm comm, void* base, MPI_Aint siz
     int locked = (first == MPI_SUCCESS);
     if (ret == MPI_SUCCESS) ret = first;
 
-    if (size > 0) memset(base, 0, (size_t)size);
+    if (size > 0 && base != NULL) memset(base, 0, (size_t)size);
 
     if (locked) {
         int r = MPI_Win_sync(win);

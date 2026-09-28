@@ -14,7 +14,8 @@
 //!
 //! Also checks that a zero-count allocation on both window kinds returns
 //! `Ok` with an empty `local_slice()`, rather than leaking the registered
-//! window on every rank.
+//! window on every rank, and that a mixed-count allocation (rank 0 gets 0,
+//! every other rank gets N) still zeroes every nonzero segment.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_zeroed
 // mpi-test: np=1.. valgrind
@@ -101,6 +102,27 @@ fn main() {
             &world,
             ok,
             "SharedWindow::allocate(0) returns Ok with empty local_slice",
+        );
+    }
+
+    // Mixed counts: rank 0 allocates 0, every other rank allocates N. A
+    // zero-length rank still takes both zeroing barriers, so every rank
+    // with a nonzero segment must still read all zero.
+    {
+        let count = if world.rank() == 0 { 0 } else { N };
+        let win = Win::<u64>::allocate(&world, count).expect("Win::allocate failed");
+        let ok = win.local_slice().len() == count && win.local_slice().iter().all(|&v| v == 0);
+        common::check(&world, ok, "mixed-count Win::allocate memory reads zero");
+    }
+    {
+        let count = if world.rank() == 0 { 0 } else { N };
+        let win =
+            SharedWindow::<u64>::allocate(&node, count).expect("SharedWindow::allocate failed");
+        let ok = win.local_slice().len() == count && win.local_slice().iter().all(|&v| v == 0);
+        common::check(
+            &world,
+            ok,
+            "mixed-count SharedWindow::allocate memory reads zero",
         );
     }
 
