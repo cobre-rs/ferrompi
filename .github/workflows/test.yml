@@ -107,6 +107,10 @@ jobs:
       - name: Runner self-test
         run: bash tests/runner_selftest.sh
 
+      - name: Build-script probe test
+        if: matrix.mpi == 'mpich' && matrix.features == ''
+        run: bash tests/build_probe.sh
+
       - name: MPI integration tests
         run: |
           chmod +x tests/run_mpi_tests.sh
