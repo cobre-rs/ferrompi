@@ -1,6 +1,6 @@
 #![allow(dead_code)] // each example binary uses a subset of these helpers
 
-use ferrompi::{Communicator, Mpi, ReduceOp};
+use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, ReduceOp, Result};
 
 /// Aggregates this rank's verdict across `world` via `allreduce(Min)`. If any
 /// rank reports failure, rank 0 prints `FAIL: {name}` and every rank exits
@@ -23,6 +23,17 @@ pub fn skip(world: &Communicator, reason: &str) {
     if world.rank() == 0 {
         println!("SKIP: {reason}");
     }
+}
+
+/// True iff `r` is `Err(Error::Mpi { class: MpiErrorClass::Count, .. })`.
+pub fn is_count<T>(r: &Result<T>) -> bool {
+    matches!(
+        r,
+        Err(Error::Mpi {
+            class: MpiErrorClass::Count,
+            ..
+        })
+    )
 }
 
 /// Parses the major version number from `Mpi::version()` (format `MPI

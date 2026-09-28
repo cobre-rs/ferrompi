@@ -20,24 +20,13 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_count_overflow
 // mpi-test: np=2.. skip-ok=mpich
 
-use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, ReduceOp, Result, UserOp};
+use ferrompi::{Communicator, Mpi, ReduceOp, UserOp};
 #[cfg(feature = "rma")]
-use ferrompi::{MpiDatatype, Win, WinFenceAssert};
+use ferrompi::{Error, MpiDatatype, MpiErrorClass, Win, WinFenceAssert};
 
 mod common;
 
 const N: usize = (1 << 32) + 16;
-
-/// True iff `r` is `Err(Error::Mpi { class: MpiErrorClass::Count, .. })`.
-fn is_count<T>(r: &Result<T>) -> bool {
-    matches!(
-        r,
-        Err(Error::Mpi {
-            class: MpiErrorClass::Count,
-            ..
-        })
-    )
-}
 
 /// V-collectives have no `_c` large-count path: they must reject a scalar
 /// send count above `INT_MAX` on every MPI version.
@@ -48,7 +37,7 @@ fn v_collectives(world: &Communicator) {
     let displs: Vec<i32> = (0..size).map(|r| r * 16).collect();
     let mut recv = vec![0u8; 16 * size as usize];
 
-    let allgatherv_ok = is_count(&world.allgatherv(&send, &mut recv, &counts, &displs));
+    let allgatherv_ok = common::is_count(&world.allgatherv(&send, &mut recv, &counts, &displs));
     common::check(
         world,
         allgatherv_ok,
@@ -56,7 +45,7 @@ fn v_collectives(world: &Communicator) {
     );
 
     let igatherv_result = world.igatherv(&send, &mut recv, &counts, &displs, 0);
-    let igatherv_ok = if is_count(&igatherv_result) {
+    let igatherv_ok = if common::is_count(&igatherv_result) {
         true
     } else {
         if let Ok(req) = igatherv_result {
@@ -159,9 +148,9 @@ fn main() {
 
     let mut send_recv_ok = true;
     if rank == 0 {
-        send_recv_ok = is_count(&world.send(&send, 1, 7));
+        send_recv_ok = common::is_count(&world.send(&send, 1, 7));
     } else if rank == 1 {
-        send_recv_ok = is_count(&world.recv(&mut recv, 0, 7));
+        send_recv_ok = common::is_count(&world.recv(&mut recv, 0, 7));
     }
     common::check(
         &world,
@@ -169,14 +158,14 @@ fn main() {
         "send/recv of 2^32+16 bytes returns Count",
     );
 
-    let broadcast_ok = is_count(&world.broadcast(&mut recv, 0));
+    let broadcast_ok = common::is_count(&world.broadcast(&mut recv, 0));
     common::check(
         &world,
         broadcast_ok,
         "broadcast of 2^32+16 bytes returns Count",
     );
 
-    let allreduce_ok = is_count(&world.allreduce(&send, &mut recv, ReduceOp::Max));
+    let allreduce_ok = common::is_count(&world.allreduce(&send, &mut recv, ReduceOp::Max));
     common::check(
         &world,
         allreduce_ok,
@@ -189,7 +178,8 @@ fn main() {
         }
     })
     .expect("UserOp::new failed");
-    let allreduce_with_op_ok = is_count(&world.allreduce_with_op(&send, &mut recv, &max_op));
+    let allreduce_with_op_ok =
+        common::is_count(&world.allreduce_with_op(&send, &mut recv, &max_op));
     common::check(
         &world,
         allreduce_with_op_ok,
@@ -200,7 +190,7 @@ fn main() {
     // real (16-byte) MPI_Ibcast, so `Ok` must still be drained via `wait()`
     // before counting the failure, rather than leaking the request.
     let ibcast_result = world.ibroadcast(&mut recv, 0);
-    let ibroadcast_ok = if is_count(&ibcast_result) {
+    let ibroadcast_ok = if common::is_count(&ibcast_result) {
         true
     } else {
         if let Ok(req) = ibcast_result {

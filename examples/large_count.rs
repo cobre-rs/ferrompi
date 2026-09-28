@@ -6,31 +6,22 @@
 //! path, so each one is expected to fail with `Err(Mpi { class: Count, .. })`
 //! instead.
 //!
-//! Needs about 4.3 GB resident (two ~2 GiB buffers) and takes a few seconds
-//! in a release build, so this file carries no runner directive and the
-//! default test runner never picks it up. Run it manually:
+//! Needs about 4.3 GB resident on MPI >= 4 (two ~2 GiB buffers) and about
+//! 6.4 GB below MPI 4, where the put check adds a ~2 GiB `Win::allocate`
+//! window. It takes a few seconds in a release build, so this file carries
+//! no runner directive and the default test runner never picks it up. Run it
+//! manually:
 //!
 //! ```text
 //! cargo build --release --features rma --example large_count
 //! mpiexec -n 1 ./target/release/examples/large_count
 //! ```
 
-use ferrompi::{Error, Mpi, MpiErrorClass, ReduceOp, Result, Win, WinFenceAssert};
+use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
 
 mod common;
 
 const N: usize = (1 << 31) + 16;
-
-/// True iff `r` is `Err(Error::Mpi { class: MpiErrorClass::Count, .. })`.
-fn is_count<T>(r: &Result<T>) -> bool {
-    matches!(
-        r,
-        Err(Error::Mpi {
-            class: MpiErrorClass::Count,
-            ..
-        })
-    )
-}
 
 /// Prints `PASS: {name}` or `FAIL: {name}` and returns `ok`, so callers can
 /// accumulate the overall result while still reporting every check.
@@ -83,25 +74,25 @@ fn main() {
         }
         all_ok &= report("put of 2^31+16 bytes", b == a);
     } else {
-        let isend_ok = is_count(&world.isend(&a, 0, 1));
-        all_ok &= report("isend of 2^31+16 bytes below MPI 4 returns Count", isend_ok);
-
-        let broadcast_ok = is_count(&world.broadcast(&mut b, 0));
         all_ok &= report(
-            "broadcast of 2^31+16 bytes below MPI 4 returns Count",
-            broadcast_ok,
+            "isend of 2^31+16 bytes below MPI 4 returns Count",
+            common::is_count(&world.isend(&a, 0, 1)),
         );
 
-        let allreduce_ok = is_count(&world.allreduce(&a, &mut b, ReduceOp::Max));
+        all_ok &= report(
+            "broadcast of 2^31+16 bytes below MPI 4 returns Count",
+            common::is_count(&world.broadcast(&mut b, 0)),
+        );
+
         all_ok &= report(
             "allreduce of 2^31+16 bytes below MPI 4 returns Count",
-            allreduce_ok,
+            common::is_count(&world.allreduce(&a, &mut b, ReduceOp::Max)),
         );
 
         let win = Win::<u8>::allocate(&world, N).expect("Win::allocate failed");
         win.fence(WinFenceAssert::default())
             .expect("opening fence failed");
-        let put_ok = is_count(&win.put(&a, 0, 0, N as i64));
+        let put_ok = common::is_count(&win.put(&a, 0, 0, N as i64));
         win.fence(WinFenceAssert::default())
             .expect("closing fence failed");
         all_ok &= report("put of 2^31+16 bytes below MPI 4 returns Count", put_ok);
