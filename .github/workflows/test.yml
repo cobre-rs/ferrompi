@@ -98,6 +98,10 @@ jobs:
         if: matrix.features != ''
         run: cargo clippy --all-targets --features ${{ matrix.features }} -- -D warnings
 
+      - name: Clippy (numa feature)
+        if: matrix.mpi == 'mpich' && matrix.features == 'rma'
+        run: cargo clippy --all-targets --features numa -- -D warnings
+
       - name: Unit tests
         run: cargo test --lib --features numa --verbose
 
