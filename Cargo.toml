@@ -2,7 +2,8 @@
 name = "ferrompi"
 version = "0.5.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.85"
+links = "ferrompi"
 authors = ["Rogerio Alves"]
 description = "A safe, generic Rust wrapper for MPI with support for MPI 4.0+ features, shared memory windows, and hybrid MPI+OpenMP"
 license = "MIT OR Apache-2.0"

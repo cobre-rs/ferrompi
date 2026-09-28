@@ -2595,12 +2595,11 @@ impl<T: MpiDatatype> Win<'_, T> {
                 self.win_handle,
             )
         };
-        Error::check_with_op(ret, "fetch_and_op").map_err(|e| {
+        Error::check_with_op(ret, "fetch_and_op").inspect_err(|_| {
             // SAFETY: `result_ptr` was obtained from `Box::into_raw` above and has not
             // been freed; reconstructing the `Box` here and dropping it frees the
             // allocation exactly once on this error path.
             unsafe { drop(Box::from_raw(result_ptr.as_ptr())) };
-            e
         })?;
         Ok(PendingFetchResult {
             _origin: origin_box,
@@ -2765,12 +2764,11 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
                 self.win_handle,
             )
         };
-        Error::check_with_op(ret, "compare_and_swap").map_err(|e| {
+        Error::check_with_op(ret, "compare_and_swap").inspect_err(|_| {
             // SAFETY: `result_ptr` was obtained from `Box::into_raw` above and has not
             // been freed; reconstructing the `Box` here and dropping it frees the
             // allocation exactly once on this error path.
             unsafe { drop(Box::from_raw(result_ptr.as_ptr())) };
-            e
         })?;
         Ok(PendingFetchResult {
             _origin: origin_box,
