@@ -310,7 +310,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
   doc:
-    name: Docs
+    name: Docs and package
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 
@@ -345,6 +345,14 @@ jobs:
         run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+      - name: Package allow-list
+        run: |
+          cargo package --locked
+          cargo package --locked --list > "$RUNNER_TEMP/package-files"
+          if grep -E '^(examples|benches|audits|tests|\.github)/|^test\.sh$' "$RUNNER_TEMP/package-files"; then
+            exit 1
+          fi
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@nightly

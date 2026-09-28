@@ -66,10 +66,10 @@ jobs:
           done
 
       - name: Verify package
-        run: cargo package --allow-dirty
+        run: cargo package
 
       - name: Dry-run publish
-        run: cargo publish --dry-run --allow-dirty
+        run: cargo publish --dry-run
 
   publish:
     name: Publish to crates.io
