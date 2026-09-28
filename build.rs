@@ -1,9 +1,5 @@
-//! Build script for ferrompi
-//!
-//! This script:
-//! 1. Finds the MPICH installation via pkg-config or mpicc
-//! 2. Compiles the C wrapper (ferrompi.c)
-//! 3. Links against the MPI library
+//! Compiles the C shim (`csrc/ferrompi.c`) against the MPI installation that
+//! `find_mpi_config` selects, and links the MPI library.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -16,10 +12,8 @@ fn main() {
         println!("cargo:rerun-if-env-changed={var}");
     }
 
-    // Try to find MPI configuration
     let mpi_config = find_mpi_config();
 
-    // Build the C wrapper
     let mut build = cc::Build::new();
     build
         .file("csrc/ferrompi.c")
@@ -27,7 +21,6 @@ fn main() {
         .warnings(true)
         .extra_warnings(true);
 
-    // Add MPI include paths
     for path in &mpi_config.include_paths {
         build.include(path);
     }
@@ -35,15 +28,8 @@ fn main() {
         build.define(name, value.as_deref());
     }
 
-    // Set optimization level
-    if env::var("PROFILE").unwrap_or_default() == "release" {
-        build.opt_level(3);
-    }
-
-    // Compile
     build.compile("ferrompi");
 
-    // Link MPI library
     for path in &mpi_config.link_paths {
         println!("cargo:rustc-link-search=native={}", path.display());
         // RPATH is intentionally NOT embedded. Pre-built release binaries should
@@ -53,27 +39,15 @@ fn main() {
         // ldconfig, or their cluster's module system.
     }
 
-    // Only link the main MPI library and essential system libraries
-    // The MPI library (e.g., mpich, mpi, ompi) will handle its own dependencies (hwloc, pmix, etc.)
-    // Explicitly linking transitive dependencies can cause linker errors
-    // when those libraries are not in standard search paths
-
-    // Common transitive dependencies that should be handled by the main MPI library
-    // This primarily affects pkg-config detection on Ubuntu/Debian systems
-    // where MPICH's pkg-config file includes all dependencies
-    // MPICH 3.x/4.x and OpenMPI typically include: hwloc, pmix, ucx/ucp/ucs
-    // Note: For non-standard MPI implementations, set MPI_SKIP_LIBS environment variable
+    // The MPI library loads its own dependencies. Naming them again, as some
+    // pkg-config files do, fails the link when they are not on the default
+    // library path.
     const SKIP_LIBS: &[&str] = &["hwloc", "pmix", "ucp", "ucs", "ucx", "slurm", "amdhip64"];
 
     for lib in &mpi_config.libs {
         if !SKIP_LIBS.contains(&lib.as_str()) {
             println!("cargo:rustc-link-lib={lib}");
         }
-    }
-
-    // Export MPI version info for Rust code
-    if let Some(version) = mpi_config.version {
-        println!("cargo:rustc-env=MPI_VERSION={version}");
     }
 }
 
@@ -82,7 +56,6 @@ struct MpiConfig {
     link_paths: Vec<PathBuf>,
     libs: Vec<String>,
     defines: Vec<(String, Option<String>)>,
-    version: Option<String>,
 }
 
 fn find_mpi_config() -> MpiConfig {
@@ -174,7 +147,6 @@ fn try_prefix(prefix: &Path, lib_dirs: &[&str], libs: &[&str]) -> Option<MpiConf
                     link_paths: vec![dir],
                     libs: vec![(*lib).to_string()],
                     defines: Vec::new(),
-                    version: None,
                 });
             }
         }
@@ -201,7 +173,6 @@ fn try_pkg_config(name: &str) -> Result<MpiConfig, pkg_config::Error> {
         link_paths: lib.link_paths,
         libs: lib.libs,
         defines: lib.defines.into_iter().collect(),
-        version: Some(lib.version),
     })
 }
 
@@ -233,7 +204,6 @@ fn parse_wrapper_flags(output: &str) -> MpiConfig {
         link_paths: Vec::new(),
         libs: Vec::new(),
         defines: Vec::new(),
-        version: None,
     };
 
     for token in output.split_whitespace() {
