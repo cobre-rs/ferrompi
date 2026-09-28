@@ -25,12 +25,12 @@ They are meant to become regression tests during the 0.5.x plan. Once a finding 
 Every crate is a standalone Cargo package with its own empty `[workspace]`. Each depends on the ferrompi working tree through a relative path (`../../../..`), so it always builds against the current code.
 
 ```bash
-cd audits/2026-09-24/repros/<crate>      # soundness | c-shim | win-sync | perf
+cd audits/2026-09-24/repros/<crate>      # soundness | c-shim | perf
 cargo build --release
 mpiexec -n <N> target/release/<program>
 ```
 
-- `soundness`, `c-shim`, `win-sync` and `perf` enable `ferrompi/rma`.
+- `soundness`, `c-shim` and `perf` enable `ferrompi/rma`.
 - Some fixes will make a repro stop compiling on purpose. The SND-01, SND-02, SND-05 and SND-08 (case B) repros rely on APIs that the fix removes. A compile error is then the expected "after fix" result, and the repro should be replaced by a `compile_fail` doctest.
 
 Building the C programs:
@@ -77,14 +77,6 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 | `c-shim/src/bin/t15_err_after_finalize.rs` | VER (late request drop, error string after finalize) | An `irecv` request outlives `Mpi`; `wait()` is called after finalize | np=1 | Returns `Err` with a readable message and prints `SURVIVED`. The table sweep makes late request use harmless, and `MPI_Error_class`/`Error_string` work after finalize on MPICH | Unchanged, or a clearer "finalized" error once COR-07 lands |
 | `c-shim/c/pair_type_extents.c` | VER (pair layouts), COR-11 baseline | Prints lb, extent and size of the MPI value+index pair types (`MPI_FLOAT_INT` … `MPI_LONG_DOUBLE_INT`) | `mpicc`; np=1 | x86_64 Linux MPICH: FLOAT_INT 8, DOUBLE_INT 16, LONG_INT 16, 2INT 8, SHORT_INT 8, LONG_DOUBLE_INT 32. All match the Rust `#[repr(C)]` sizes in `src/datatype.rs` | Unchanged on Linux |
 | `c-shim/c/gfree.c` | VER | `MPI_Group_free(MPI_GROUP_EMPTY)` in plain C | `mpicc`; np=1 | MPICH accepts it (rc=0) | Reference only |
-
-### win-sync/: `Win::sync` rustdoc example
-
-| Program | Finding | What it does | How to run | Observed on v0.5.0 | Expected after fix |
-|---|---|---|---|---|---|
-| `win-sync/src/main.rs` | Docs finding: `Win::sync` rustdoc (see `../findings/`) | Runs the rustdoc example as written: a bare `win.sync()` outside any epoch | np=1 or 2 | `bare Win::sync outside epoch -> Err: MPI error in win_sync: Wrong synchronization of RMA calls` | The rustdoc is corrected (or `sync` moves onto the lock guards), and this call is documented as an error |
-
-Note: the scratchpad crate this came from was named `reinit`, but it contains only the `Win::sync` check.
 
 ### perf/: overhead measurements (MPICH only; release profile uses thin LTO, cgu=1)
 
