@@ -180,7 +180,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 |---|---|---|---|---|---|
 | ABI-01 | build.rs drops `-D` flags (`MPI_ABI` lost → silent ABI mismatch) | critical (latent) | reading | 0.5.x | fixed (8e5e108) |
 | ABI-02 | No ABI detection probe; MPICH 4.3 draft ABI accepted | major | reading | 0.5.x reject / 0.7 build | fixed (67fbcd4): draft ABI rejected; ABI build open (0.7) |
-| ABI-03 | Build-selection env vars not tracked (= INF-03) | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| ABI-03 | Build-selection env vars not tracked (= INF-03) | major | repro | 0.5.x | fixed (8f9fbfd) |
 | ABI-04 | Public-API one-way doors (= ARC-02/03) | major | reading | 0.6 | open |
 | ABI-05 | ADR-0001 misstates what the ABI adds; ADR-0006 needed | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | ABI-06 | No interop API (deliberately deferred) | info | — | after ABI backend | open |
@@ -250,7 +250,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 |---|---|---|---|---|---|
 | INF-01 | MPI test runner passes when it ran nothing | major | repro | 0.5.x | fixed (87ac8d9) |
 | INF-02 | Declared MSRV false; no MSRV job | major | repro | 0.5.x (D-12: 1.85) | planned (ferrompi-0.5.x-hardening) |
-| INF-03 | build.rs never re-runs on MPI selection change | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| INF-03 | build.rs never re-runs on MPI selection change | major | repro | 0.5.x | fixed (8f9fbfd) |
 | INF-04 | build.rs precedence contradicts docs; overrides fail silently | major | repro | 0.5.x | fixed (0c8e405, 8e5e108) |
 | INF-05 | build.rs dead/misleading output | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | INF-06 | No `links` manifest key | minor | reasoning | 0.5.x | planned (ferrompi-0.5.x-hardening) |
