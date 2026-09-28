@@ -12,6 +12,9 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=csrc/ferrompi.c");
     println!("cargo:rerun-if-changed=csrc/ferrompi.h");
+    for var in ["MPI_PKG_CONFIG", "MPICC", "CRAY_MPICH_DIR", "PATH"] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
 
     // Try to find MPI configuration
     let mpi_config = find_mpi_config();
