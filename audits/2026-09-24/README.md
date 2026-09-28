@@ -121,7 +121,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | SND-09 | RMA target range / origin count unvalidated (remote OOB write) | critical | repro | 0.5.x (D-11) | fixed (91bb508) |
 | SND-10 | Window memory used after finalize | critical | repro | 0.5.x (D-8) | fixed (90d9544) |
 | SND-11 | `Communicator` Send+Sync regardless of thread level | critical | repro | 0.5.x (D-3, D-9) | fixed (49cb30c) |
-| SND-12 | Uninitialised window memory exposed as `&[T]` | major | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| SND-12 | Uninitialised window memory exposed as `&[T]` | major | repro | 0.5.x | fixed (4747cd1) |
 | SND-13 | `SharedWindow` slices over concurrently-written memory (observed miscompile) | critical | repro | 0.6 (D-5); 0.5.x doc warning | planned (ferrompi-0.5.x-hardening: doc warning); API fix open (0.6) |
 | SND-14 | `UserOp` fat-pointer transmute relies on unspecified layout | minor | reading | 0.5.x† | fixed (2d53b18) |
 | SND-15 | `fetch_and_op`/`compare_and_swap` result pointer derived from a shared borrow | minor | reading | 0.5.x | fixed (9777b12) |
@@ -148,6 +148,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-15 | `op_set_closure` no bounds check; `op_create_user` no `op_used` check | nit | reading | 0.5.x | fixed (2d53b18) |
 | COR-16 | `type_create_struct` maybe-uninitialised arrays at count 0 | nit | compiler | 0.5.x | fixed (34a748c) |
 | COR-17 | Open MPI frees a persistent request that errors in `MPI_Wait`, `MPI_Test` or `MPI_Waitall`; `PersistentRequest` then keeps `active` set after a single-request wait/test (further `wait` fails, `start` reports already-active), and `MPI_Waitall` over already-finished requests can return success and lose the truncation error | minor | repro | 0.6 | open |
+| COR-18 | `SharedWindow::allocate` with a zero count returns `Err(Internal)` and leaks the registered window, which `Mpi::drop` does not count | minor | repro | 0.5.x | fixed (4747cd1) |
 
 ### Architecture / API — [03](findings/03-architecture-api.md)
 
