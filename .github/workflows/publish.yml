@@ -47,6 +47,9 @@ jobs:
           fi
           echo "✅ Versions match: ${{ steps.cargo_version.outputs.version }}"
 
+      - name: Check release notes
+        run: bash .github/scripts/release-notes.sh "${GITHUB_REF#refs/tags/v}" > /dev/null
+
       - name: Run cargo-audit
         uses: actions-rust-lang/audit@v1
         with:
@@ -104,23 +107,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
 
       - name: Generate release notes
-        id: release_notes
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-          # Try to extract changelog section
-          if [ -f "CHANGELOG.md" ]; then
-            awk "/^## \[$VERSION\]/,/^## \[/" CHANGELOG.md | sed '$d' > release_notes.txt
-          else
-            echo "Release $VERSION" > release_notes.txt
-            echo "" >> release_notes.txt
-            echo "See [CHANGELOG.md](CHANGELOG.md) for details." >> release_notes.txt
-          fi
+        run: bash .github/scripts/release-notes.sh "${GITHUB_REF#refs/tags/v}" > release_notes.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3

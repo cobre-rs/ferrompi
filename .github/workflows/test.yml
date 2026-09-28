@@ -75,6 +75,10 @@ jobs:
         if: matrix.mpi == 'mpich'
         run: bash .github/scripts/mpich-hotfix-test.sh
 
+      - name: Release-notes fixture test
+        if: matrix.mpi == 'mpich' && matrix.features == ''
+        run: bash .github/scripts/release-notes-test.sh
+
       - name: Configure OpenMPI environment
         if: matrix.mpi == 'openmpi'
         run: |
