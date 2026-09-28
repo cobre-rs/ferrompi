@@ -258,7 +258,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | INF-08 | Doctests never run on PRs | major | reading | 0.5.x | fixed (acd809f) |
 | INF-09 | MPI-4 probes turn regressions into silent passes | major | reading | 0.5.x | fixed (87ac8d9) |
 | INF-10 | Odd-np deadlocks; CI np=4 only | minor | repro | 0.5.x | fixed (6ee2c4e) |
-| INF-11 | No large-count integration test | major | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| INF-11 | No large-count integration test | major | reading | 0.5.x | fixed (033e16a, db52738) |
 | INF-12 | Public APIs untested; examples never run | minor | reading | 0.5.x | fixed (da87ce5) |
 | INF-13 | Error-class assertions accept any class | major | reading | 0.5.x | fixed (ea3cff2) |
 | INF-14 | Release notes extraction yields empty bodies | minor | repro | 0.5.x | planned (ferrompi-0.5.x-hardening) |
