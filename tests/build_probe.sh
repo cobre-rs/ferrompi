@@ -4,7 +4,8 @@
 #
 # Builds hello_world against fake wrappers, pkg-config files, headers and
 # Cray-style directories that point at the MPI whose `mpicc` is on PATH.
-# Every build starts from a fresh build-script run (`cargo clean -p`).
+# `build` starts each case from a fresh build-script run (`cargo clean -p`);
+# the rerun case then builds again without cleaning.
 #
 # Prints "ok <case>" or "not ok <case>" per case and exits 1 if any failed.
 # ==========================================================================
