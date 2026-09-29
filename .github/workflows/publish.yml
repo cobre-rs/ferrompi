@@ -18,10 +18,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
 
       - name: Setup MPICH
         uses: ./.github/actions/setup-mpich
@@ -52,7 +54,7 @@ jobs:
         run: bash .github/scripts/release-notes.sh "${GITHUB_REF#refs/tags/v}" > /dev/null
 
       - name: Run cargo-audit
-        uses: actions-rust-lang/audit@v1
+        uses: actions-rust-lang/audit@72c09e02f132669d52284a3323acdb503cfc1a24 # v1.2.7
         with:
           denyWarnings: false
 
@@ -85,10 +87,12 @@ jobs:
       url: https://crates.io/crates/ferrompi
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
 
       - name: Setup MPICH
         uses: ./.github/actions/setup-mpich
@@ -107,13 +111,13 @@ jobs:
       contents: write
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Generate release notes
         run: bash .github/scripts/release-notes.sh "${GITHUB_REF#refs/tags/v}" > release_notes.txt
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           body_path: release_notes.txt
           draft: false
