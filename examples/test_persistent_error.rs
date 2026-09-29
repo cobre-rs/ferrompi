@@ -226,7 +226,7 @@ fn part3_wait_all_skips_inactive(world: &Communicator, rank: i32) {
 fn part4_partial_start_all(world: &Communicator, mpi: &Mpi, rank: i32, mpich: bool) {
     if rank == 0 {
         let mut small = [0i32; 1];
-        let big = [0.0f64; 1];
+        let payload = [0.0f64; 1];
 
         if !mpich {
             mpi.buffer_attach(vec![0u8; 64 * 1024].into_boxed_slice())
@@ -236,7 +236,9 @@ fn part4_partial_start_all(world: &Communicator, mpi: &Mpi, rank: i32, mpich: bo
         let recv_req = world
             .recv_init(&mut small, 0, 75)
             .expect("part4: recv_init from self");
-        let bsend_req = world.bsend_init(&big, 0, 79).expect("part4: bsend_init");
+        let bsend_req = world
+            .bsend_init(&payload, 0, 79)
+            .expect("part4: bsend_init");
         let mut reqs = [recv_req, bsend_req];
 
         let start_result = PersistentRequest::start_all(&mut reqs);

@@ -102,8 +102,8 @@ fn main() {
             // raw_ret == MPI_SUCCESS — the guard failed to fire; the
             // out_h slot may now hold MPI_COMM_NULL (corrupt state).
             //
-            // The version gate above already excludes MPI < 4, so a SUCCESS here
-            // is definitely a bug.
+            // The capability gate above already excludes libraries without
+            // MPI_Comm_create_from_group, so a SUCCESS here is definitely a bug.
             eprintln!(
                 "rank {rank}: FAIL: create_from_group returned MPI_SUCCESS for excluded rank — \
                  MPI_COMM_NULL guard is missing or not compiled in"
@@ -116,8 +116,8 @@ fn main() {
         let err = Error::from_code(raw_ret);
         println!("PASS rank {rank}: create_from_group for excluded rank returned: {err:?}");
     } else {
-        // Rank 0 is in the group; the version gate above already excludes
-        // MPI < 4, so it must succeed.
+        // Rank 0 is in the group; the capability gate above already excludes
+        // libraries without MPI_Comm_create_from_group, so it must succeed.
         if raw_ret != 0 {
             let err = Error::from_code(raw_ret);
             eprintln!(
