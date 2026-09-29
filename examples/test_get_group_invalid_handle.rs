@@ -16,7 +16,6 @@ use ferrompi::{Error, Mpi, MpiErrorClass};
 //   - group_handle 999 is deliberately out-of-range (MAX_GROUPS == 64).
 //   - size points to a valid i32 on the stack; it is only written if the
 //     call succeeds (which it must not).
-#[allow(dead_code)]
 extern "C" {
     fn ferrompi_group_size(group_handle: i32, size: *mut i32) -> std::ffi::c_int;
 }

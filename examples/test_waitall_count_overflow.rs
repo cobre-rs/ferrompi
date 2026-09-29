@@ -28,7 +28,6 @@ use ferrompi::{Error, Mpi, MpiErrorClass};
 //     the count check, so it is always a valid write target.
 //   - count = i64::MAX triggers the guard and returns MPI_ERR_COUNT before any
 //     MPI function or malloc is called, so no MPI state is modified.
-#[allow(dead_code)]
 extern "C" {
     fn ferrompi_waitall(
         count: i64,

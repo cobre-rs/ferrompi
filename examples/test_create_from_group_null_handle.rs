@@ -29,7 +29,6 @@ mod common;
 //   - out_h points to a valid i32 on the stack.
 //   - Below MPI 4, the shim is an unconditional stub that reads none of its
 //     arguments and never writes through out_h.
-#[allow(dead_code)]
 extern "C" {
     fn ferrompi_comm_create_from_group(
         group_h: i32,

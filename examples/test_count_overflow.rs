@@ -69,7 +69,6 @@ fn v_collectives(world: &Communicator) {
 // target_count before MPI_Put/MPI_Put_c is called, so `origin` is never
 // read by MPI and need only be valid for the duration of the call.
 #[cfg(feature = "rma")]
-#[allow(dead_code)]
 extern "C" {
     fn ferrompi_put(
         origin: *const std::ffi::c_void,

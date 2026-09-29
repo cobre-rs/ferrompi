@@ -34,7 +34,6 @@ mod common;
 //     request now occupies the slot.
 //   - `flag` points to a valid i32 on the stack; it is only meaningful if
 //     the call succeeds, which it must not.
-#[allow(dead_code)]
 extern "C" {
     fn ferrompi_test(request: i64, flag: *mut i32) -> std::ffi::c_int;
 }
