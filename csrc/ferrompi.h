@@ -474,6 +474,7 @@ int ferrompi_startall(int64_t count, const int64_t* requests);
 #define FERROMPI_LOCK_EXCLUSIVE 0
 #define FERROMPI_LOCK_SHARED    1
 
+/* Both allocating shims set *win to a negative value on any failure: -1 when MPI created no window, or when the handle table was full (the window was then freed); -2 when MPI created the window but zeroing it failed (that window is never freed). *win holds the real non-negative handle only on success. */
 int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info,
                                   int32_t comm, void** baseptr, int32_t* win);
 

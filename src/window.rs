@@ -380,6 +380,11 @@ fn win_size_and_disp_unit<T>(count: usize) -> Result<(i64, i32)> {
     Ok((size, disp_unit))
 }
 
+// Sentinel an allocating shim writes to its handle out-parameter when MPI
+// created the window but zeroing it failed. This MUST stay in sync with
+// `FERROMPI_WIN_LEAKED` in `csrc/ferrompi.c`.
+const FERROMPI_WIN_LEAKED: i32 = -2;
+
 /// Count of live windows of any kind (`Win::create`, `Win::allocate`,
 /// `SharedWindow::allocate`). `Mpi::drop` reads this through
 /// [`live_windows`] to decide whether `MPI_Finalize` is safe to call: some
@@ -508,13 +513,13 @@ impl<T: MpiDatatype> SharedWindow<T> {
     ///
     /// Returns an error if:
     /// - The MPI window allocation fails (e.g., insufficient shared memory)
-    /// - An error occurs while zeroing the new segment (the window is then not freed)
+    /// - An error occurs while zeroing the new segment (the window is
+    ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
     /// - The MPI implementation returns a null base pointer for a non-zero count
-    ///   (the window is then not freed)
+    ///   (the window is then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
     ///
     /// In the latter two cases, a peer whose own zeroing succeeded blocks in its
-    /// collective `Drop` (`MPI_Win_free`) waiting for this rank, and if this rank's
-    /// `Mpi` later drops, it calls `MPI_Finalize` with a live, uncounted window.
+    /// collective `Drop` (`MPI_Win_free`) waiting for this rank.
     ///
     /// # Example
     ///
@@ -528,7 +533,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
     pub fn allocate(comm: &Communicator, local_count: usize) -> Result<Self> {
         let (size, disp_unit) = win_size_and_disp_unit::<T>(local_count)?;
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let mut win_handle: i32 = 0;
+        let mut win_handle: i32 = -1;
 
         // SAFETY: We pass valid pointers for out-parameters. The C layer
         // allocates shared memory and returns a window handle + base pointer.
@@ -542,7 +547,13 @@ impl<T: MpiDatatype> SharedWindow<T> {
                 &mut win_handle,
             )
         };
+        if ret != 0 && win_handle == FERROMPI_WIN_LEAKED {
+            // MPI created the window but could not zero it; it is never freed.
+            mark_window_alive();
+        }
         Error::check_with_op(ret, "win_allocate_shared")?;
+
+        mark_window_alive();
 
         let local_ptr = if local_count == 0 {
             // Zero-count: MPI may return a null base pointer for an empty
@@ -552,8 +563,6 @@ impl<T: MpiDatatype> SharedWindow<T> {
             NonNull::new(baseptr.cast::<T>())
                 .ok_or_else(|| Error::Internal("Win_allocate_shared returned null".into()))?
         };
-
-        mark_window_alive();
 
         Ok(SharedWindow {
             win_handle,
@@ -1144,13 +1153,14 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// - The length exchange fails (`Error::Mpi` with `operation: Some("allgather")`).
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_allocate")`).
     /// - An error occurs while zeroing the new segment (`Error::Mpi` with
-    ///   `operation: Some("win_allocate")`; the window is then not freed).
+    ///   `operation: Some("win_allocate")`; the window is
+    ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`).
     /// - MPI returns a null pointer for a non-zero count (`Error::Internal`;
-    ///   the window is then not freed).
+    ///   the window is then leaked: never freed, and counted as alive so `Mpi`
+    ///   skips `MPI_Finalize`).
     ///
     /// In the latter two cases, a peer whose own zeroing succeeded blocks in its
-    /// collective `Drop` (`MPI_Win_free`) waiting for this rank, and if this rank's
-    /// `Mpi` later drops, it calls `MPI_Finalize` with a live, uncounted window.
+    /// collective `Drop` (`MPI_Win_free`) waiting for this rank.
     ///
     /// # Example
     ///
@@ -1165,7 +1175,7 @@ impl<T: MpiDatatype> Win<'static, T> {
         let words = exchange_window_words(comm, window_word::<T>(local_count))?;
         let (size, disp_unit) = win_size_and_disp_unit::<T>(local_count)?;
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let mut win_handle: i32 = 0;
+        let mut win_handle: i32 = -1;
 
         // SAFETY: We pass valid out-parameter pointers to the C shim, which
         // calls MPI_Win_allocate. The C shim validates the comm handle. The
@@ -1181,7 +1191,13 @@ impl<T: MpiDatatype> Win<'static, T> {
                 &mut win_handle,
             )
         };
+        if ret != 0 && win_handle == FERROMPI_WIN_LEAKED {
+            // MPI created the window but could not zero it; it is never freed.
+            mark_window_alive();
+        }
         Error::check_with_op(ret, "win_allocate")?;
+
+        mark_window_alive();
 
         let local_ptr = if local_count == 0 {
             // Zero-count: use a dangling aligned pointer (same trick as
@@ -1192,8 +1208,6 @@ impl<T: MpiDatatype> Win<'static, T> {
                 Error::Internal("Win_allocate returned null base pointer for non-zero count".into())
             })?
         };
-
-        mark_window_alive();
 
         Ok(Win {
             win_handle,

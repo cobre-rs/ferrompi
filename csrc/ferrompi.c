@@ -71,6 +71,10 @@ _Static_assert(MAX_REQUESTS % 64 == 0,
 // sync with the mirrored const in src/error.rs.
 #define FERROMPI_ERR_NOT_SUPPORTED   (-7008)
 
+// Written to a window-allocating shim's handle out-parameter when MPI
+// created the window but zeroing it failed: the window is never freed.
+#define FERROMPI_WIN_LEAKED (-2)
+
 // Split type constants (must match Rust SplitType enum and header defines)
 #define FERROMPI_COMM_TYPE_SHARED 0
 
@@ -3718,10 +3722,11 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
  * Both barriers are always reached, whether or not the lock/sync calls
  * succeed: only the calls that depend on a failed lock (sync, unlock) are
  * skipped, and the first non-success code is returned only after both
- * barriers. On a failure the window is left unregistered and unfreed:
- * MPI_Win_free is collective, and a peer whose own zeroing succeeded still
- * holds a live window that only its own teardown can free. The caller must
- * not call MPI_Win_free here. */
+ * barriers. On a failure the window is never freed: MPI_Win_free is
+ * collective, and a peer whose own zeroing succeeded still holds a live
+ * window that only its own teardown can free. The caller must not call
+ * MPI_Win_free here; it reports the leak through FERROMPI_WIN_LEAKED so the
+ * Rust side counts the window as alive. */
 static int zero_own_segment(MPI_Win win, MPI_Comm comm, void* base, MPI_Aint size) {
     int ret = MPI_SUCCESS;
 
@@ -3768,7 +3773,10 @@ int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_h
          * aborting the process (mirrors the communicator error-handler pattern). */
         install_errors_return_win(win);
         ret = zero_own_segment(win, comm, *baseptr, (MPI_Aint)size);
-        if (ret != MPI_SUCCESS) return ret;
+        if (ret != MPI_SUCCESS) {
+            *win_handle = FERROMPI_WIN_LEAKED;
+            return ret;
+        }
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
             MPI_Win_free(&win);
@@ -3810,7 +3818,10 @@ int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info_handle,
          * aborting the process (mirrors the communicator error-handler pattern). */
         install_errors_return_win(win);
         ret = zero_own_segment(win, comm, *baseptr, (MPI_Aint)size);
-        if (ret != MPI_SUCCESS) return ret;
+        if (ret != MPI_SUCCESS) {
+            *win_handle = FERROMPI_WIN_LEAKED;
+            return ret;
+        }
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
             MPI_Win_free(&win);

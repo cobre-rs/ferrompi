@@ -175,6 +175,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 - **A failure to install `MPI_ERRORS_RETURN` right after `MPI_Init_thread`
   now aborts the process** instead of returning `Err` with MPI left
   initialized, where a retry called `MPI_Init_thread` a second time.
+- **A window that `Win::allocate` or `SharedWindow::allocate` fails to
+  zero, or gets a null base for, now counts as alive**, so dropping `Mpi`
+  skips `MPI_Finalize` instead of finalizing with the leaked window still
+  live.
 
 ## [0.5.0] - 2026-06-18
 
