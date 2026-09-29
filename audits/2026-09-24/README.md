@@ -154,7 +154,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-17 | Open MPI frees a persistent request that errors in `MPI_Wait`, `MPI_Test` or `MPI_Waitall`; `PersistentRequest` then keeps `active` set after a single-request wait/test (further `wait` fails, `start` reports already-active), and `MPI_Waitall` over already-finished requests can return success and lose the truncation error | minor | repro | 0.5.x | planned (ferrompi-0.6.0-closeout) |
 | COR-18 | `SharedWindow::allocate` with a zero count returns `Err(Internal)` and leaks the registered window, which `Mpi::drop` does not count | minor | repro | 0.5.x | fixed (4747cd1) |
 | COR-19 | `Win::allocate`/`SharedWindow::allocate` leave the window live but uncounted in `LIVE_WINDOWS` when zeroing fails or MPI returns a null base for a non-zero count, so `Mpi::drop` can call `MPI_Finalize` with it alive | minor | reading | 0.5.x | planned (ferrompi-0.6.0-closeout) |
-| COR-20 | `Mpi::init_thread` resets to uninitialized when installing `MPI_ERRORS_RETURN` on `MPI_COMM_WORLD`/`MPI_COMM_SELF` fails after `MPI_Init_thread` succeeded, so a retry calls `MPI_Init_thread` twice | minor | reading | 0.5.x | planned (ferrompi-0.6.0-closeout) |
+| COR-20 | `Mpi::init_thread` resets to uninitialized when installing `MPI_ERRORS_RETURN` on `MPI_COMM_WORLD`/`MPI_COMM_SELF` fails after `MPI_Init_thread` succeeded, so a retry calls `MPI_Init_thread` twice | minor | reading | 0.5.x | fixed (762e841) |
 
 ### Architecture / API — [03](findings/03-architecture-api.md)
 
