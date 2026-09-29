@@ -21,8 +21,8 @@ readonly LIBMPICH_SHA256="87a1622661bf4875af6fabfdb163f5e8bcbdb43c22524f78823300
 # Fetches the two pinned .debs from the snapshot into <dir>.
 download() {
   local dir="$1"
-  curl -fsSL --retry 5 "${SNAPSHOT_BASE}/pool/universe/u/ucx/${LIBUCX_DEB}" -o "${dir}/${LIBUCX_DEB}"
-  curl -fsSL --retry 5 "${SNAPSHOT_BASE}/pool/universe/m/mpich/${LIBMPICH_DEB}" -o "${dir}/${LIBMPICH_DEB}"
+  curl -fsSL --retry 8 --retry-max-time 300 "${SNAPSHOT_BASE}/pool/universe/u/ucx/${LIBUCX_DEB}" -o "${dir}/${LIBUCX_DEB}"
+  curl -fsSL --retry 8 --retry-max-time 300 "${SNAPSHOT_BASE}/pool/universe/m/mpich/${LIBMPICH_DEB}" -o "${dir}/${LIBMPICH_DEB}"
 }
 
 # verify <dir>
