@@ -365,9 +365,10 @@ pub enum ReduceOp {
 ///
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
 /// whose `Drop` calls MPI — an uncompleted [`Request`], a
-/// [`PersistentRequest`], a communicator other than the world, a datatype,
-/// group, info object or user op — on a thread other than the one that
-/// called [`Mpi::init`]/[`Mpi::init_thread`] prints
+/// [`PersistentRequest`], a communicator other than the world, a window or
+/// window lock guard, a datatype, group, info object or user op — on a
+/// thread other than the one that called [`Mpi::init`]/[`Mpi::init_thread`]
+/// prints
 /// `ferrompi: <Type> dropped on thread <name or id>` to stderr and aborts
 /// the process.
 ///
