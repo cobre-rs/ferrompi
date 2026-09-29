@@ -891,7 +891,7 @@ guarded_extern! {
     // ============================================================
     pub fn ferrompi_start(request: int64_t) -> c_int;
 
-    pub fn ferrompi_startall(count: int64_t, requests: *const int64_t) -> c_int;
+    pub fn ferrompi_startall(count: int64_t, requests: *const int64_t, started: *mut u8) -> c_int;
 
     // ============================================================
     // Utility Functions

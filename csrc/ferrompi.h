@@ -464,7 +464,8 @@ int ferrompi_testsome(int64_t count, const int64_t* requests, int64_t* outcount,
 
 int ferrompi_start(int64_t request);
 
-int ferrompi_startall(int64_t count, const int64_t* requests);
+/** started[i] is set to 1 for every request passed to MPI_Startall, whatever it returns; left untouched when the shim fails before calling it. */
+int ferrompi_startall(int64_t count, const int64_t* requests, uint8_t* started);
 
 /* ============================================================
  * RMA Window Operations (MPI 3.0+)

@@ -194,6 +194,9 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 - **`PersistentRequest::wait_all` skips inactive requests**, so it
   completes the others even when Open MPI freed a request whose earlier
   `wait` failed.
+- **After a failed `PersistentRequest::start_all`, every request counts as
+  started**, so dropping one waits for it instead of freeing a request MPI
+  may have started.
 
 ## [0.5.0] - 2026-06-18
 

@@ -3472,7 +3472,7 @@ int ferrompi_start(int64_t request_handle) {
     return ret;
 }
 
-int ferrompi_startall(int64_t count, const int64_t* request_handles) {
+int ferrompi_startall(int64_t count, const int64_t* request_handles, uint8_t* started) {
     if (count <= 0) return MPI_SUCCESS;
     if (count > INT_MAX) return MPI_ERR_COUNT;
 
@@ -3493,15 +3493,16 @@ int ferrompi_startall(int64_t count, const int64_t* request_handles) {
 
     int ret = MPI_Startall((int)count, reqs);
 
-    // Update handles with post-start state
+    // MPI_Startall may have started any subset before failing (it is MPI_Start
+    // on each request, in some order), so every request it was given counts as
+    // started: a later wait on one that never started returns at once.
     for (int64_t i = 0; i < count; i++) {
         int64_t slot = request_slot(request_handles[i]);
         if (slot < 0) continue;
         MPI_Request* req = &request_table[slot];
         *req = reqs[i];
-        if (ret == MPI_SUCCESS) {
-            request_state[slot] |= REQUEST_ACTIVE;
-        }
+        request_state[slot] |= REQUEST_ACTIVE;
+        started[i] = 1;
     }
 
     if (reqs != stack_reqs) free(reqs);

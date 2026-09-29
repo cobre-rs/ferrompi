@@ -159,6 +159,13 @@ impl PersistentRequest {
     /// Start multiple persistent operations.
     ///
     /// This is more efficient than starting each operation individually.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(Internal)` without calling MPI if any request is already
+    /// active. If MPI reports an error, it may have started some of the
+    /// requests; every request is then marked active, so `wait`, `wait_all`
+    /// or `Drop` completes whichever did start.
     pub fn start_all(requests: &mut [PersistentRequest]) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
@@ -172,23 +179,17 @@ impl PersistentRequest {
         }
 
         // SAFETY: with_handles provides a valid, contiguous [i64] of the
-        // persistent-request handles whose length we pass as count.
+        // persistent-request handles and a same-length [u8] started buffer,
+        // both sized to the count we pass.
         let ret = crate::request::with_handles(
             requests,
             |r| r.handle,
-            |handles, _done| unsafe {
-                ffi::ferrompi_startall(handles.len() as i64, handles.as_ptr())
+            |handles, started| unsafe {
+                ffi::ferrompi_startall(handles.len() as i64, handles.as_ptr(), started.as_mut_ptr())
             },
-            |_| {},
+            |r| r.active = true,
         );
-        Error::check_with_op(ret, "startall")?;
-
-        // Mark all as active
-        for req in requests.iter_mut() {
-            req.active = true;
-        }
-
-        Ok(())
+        Error::check_with_op(ret, "startall")
     }
 
     /// Wait for all persistent operations to complete.
