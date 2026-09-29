@@ -176,6 +176,7 @@ jobs:
         run: MPI_NP_LIST=4 ./tests/run_mpi_tests.sh rma
 
       - name: Receive pending after a process failure aborts (ULFM)
+        shell: bash
         run: |
           cargo build --example ulfm_pending
           for mode in wait wait_all wait_any; do
