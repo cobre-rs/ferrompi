@@ -16,7 +16,7 @@ potentially any thread under `MPI_THREAD_MULTIPLE`.
 
 Every existing FFI call in ferrompi flows Rust → C. `MPI_Op_create` inverts
 that flow: C → Rust. This inversion creates three constraints with no
-precedent in prior epics:
+precedent elsewhere in ferrompi:
 
 1. **Closure lifetime.** The Rust closure passed by the caller has an opaque
    type and may hold borrowed or owned state. MPI holds the `MPI_Op` handle —

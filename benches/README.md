@@ -76,8 +76,8 @@ outside the loop, then 100x `start`+`wait`) against `iallreduce` (100x fresh
 
 **SETUP ordering.** Rank 0 sends a `SETUP` command before each size's `allreduce_init`,
 and every rank re-initializes its persistent request only in response to that command, so
-every `allreduce_init` call is issued in the same collective order on every rank. MPI-4.1
-§7.13 requires this: initialization calls for persistent collective operations are
+every `allreduce_init` call is issued in the same collective order on every rank.
+MPI-4.1 §7.13 requires this: initialization calls for persistent collective operations are
 nonlocal and follow the existing collective-operation ordering rules.
 
 **Measured results.** np 2, 3 full runs each, local MPICH 4.2.3 (`ch4:ofi`, shm) and an
