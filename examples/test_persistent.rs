@@ -1,7 +1,8 @@
 //! Integration test for ALL persistent collective operations (MPI 4.0+).
 //!
 //! Tests the full PersistentRequest lifecycle: init, start, wait, test,
-//! start_all, wait_all, and drop. Below MPI 4.0, asserts that bcast_init
+//! start_all, wait_all, and drop. Where the library lacks persistent
+//! collectives (below MPI 4.0, except Open MPI 5), asserts that bcast_init
 //! refuses with Error::NotSupported instead of running the suite.
 //!
 //! Exercises all 15 persistent collective `_init` methods in `Comm`:
@@ -32,11 +33,15 @@ fn main() {
         "test_persistent requires at least 2 processes, got {size}"
     );
 
-    if common::mpi_major() < 4 {
+    if !common::has_mpi4_collectives() {
         let mut data = vec![0.0f64; 10];
         let result = world.bcast_init(&mut data, 0);
         let ok = matches!(&result, Err(Error::NotSupported(op)) if op == "bcast_init");
-        common::check(&world, ok, "bcast_init refuses below MPI 4");
+        common::check(
+            &world,
+            ok,
+            "bcast_init refuses without persistent collectives",
+        );
         return;
     }
 

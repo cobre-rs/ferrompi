@@ -5,7 +5,8 @@
 //!
 //! Run with: mpiexec -n 4 cargo run --example persistent_bcast
 //!
-//! Note: below MPI 4.0, `bcast_init` refuses with `Error::NotSupported`
+//! Note: where the library lacks persistent collectives (below MPI 4.0,
+//! except Open MPI 5), `bcast_init` refuses with `Error::NotSupported`
 //! instead of running the persistent-collectives demo.
 // mpi-test: np=2..
 
@@ -28,7 +29,7 @@ fn main() -> Result<()> {
 
     world.barrier()?;
 
-    if common::mpi_major() >= 4 {
+    if common::has_mpi4_collectives() {
         // ============================================================
         // Test 1: Persistent Broadcast
         // ============================================================
@@ -145,7 +146,11 @@ fn main() -> Result<()> {
             world.bcast_init(&mut buf, 0),
             Err(Error::NotSupported(op)) if op == "bcast_init"
         );
-        common::check(&world, ok, "bcast_init refuses below MPI 4");
+        common::check(
+            &world,
+            ok,
+            "bcast_init refuses without persistent collectives",
+        );
     }
 
     world.barrier()?;
@@ -191,7 +196,7 @@ fn main() -> Result<()> {
     {
         let mut buffer = vec![0.0f64; buffer_size];
 
-        if common::mpi_major() >= 4 {
+        if common::has_mpi4_collectives() {
             let mut persistent = world.bcast_init(&mut buffer, 0)?;
             world.barrier()?;
 

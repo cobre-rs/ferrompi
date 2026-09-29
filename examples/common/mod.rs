@@ -52,3 +52,20 @@ pub fn mpi_major() -> u32 {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| panic!("mpi_major: could not parse version string {version:?}"))
 }
+
+/// True iff the library provides the MPI 4.0 persistent collectives: it
+/// reports MPI 4.0 or later, or it is Open MPI 5 or later, which
+/// implements them while reporting MPI 3.1. Mirrors the C shim's
+/// compile-time gate.
+pub fn has_mpi4_collectives() -> bool {
+    if mpi_major() >= 4 {
+        return true;
+    }
+    let library =
+        Mpi::library_version().expect("has_mpi4_collectives: Mpi::library_version() failed");
+    library
+        .strip_prefix("Open MPI v")
+        .and_then(|v| v.split('.').next())
+        .and_then(|major| major.parse::<u32>().ok())
+        .is_some_and(|major| major >= 5)
+}

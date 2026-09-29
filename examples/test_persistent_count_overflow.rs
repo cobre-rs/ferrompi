@@ -4,9 +4,12 @@
 //! both dispatch the `_c` large-count variant for a count above `INT_MAX` and
 //! return `Ok`. Below MPI 4.0, `send_init` returns
 //! `Err(Error::Mpi { class: MpiErrorClass::Count, .. })`, while `bcast_init`
-//! (stubbed out below MPI 4.0) returns `Err(Error::NotSupported(_))`. Neither
-//! request is ever started, so dropping both without a matching operation is
-//! legal.
+//! (stubbed out where the library lacks persistent collectives) returns
+//! `Err(Error::NotSupported(_))`. On Open MPI 5, which provides persistent
+//! collectives but keeps the `_c` large-count call gated on reporting MPI
+//! 4.0, `bcast_init` also returns `Err(Count)` for the same reason
+//! `send_init` does. Neither request is ever started, so dropping both
+//! without a matching operation is legal.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_count_overflow
 // mpi-test: np=2
@@ -46,7 +49,11 @@ fn main() {
                 ..
             })
         );
-        let coll_ok = matches!(&coll, Err(Error::NotSupported(_)));
+        let coll_ok = if common::has_mpi4_collectives() {
+            common::is_count(&coll)
+        } else {
+            matches!(&coll, Err(Error::NotSupported(_)))
+        };
         p2p_ok && coll_ok
     };
 

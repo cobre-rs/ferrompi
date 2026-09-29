@@ -19,10 +19,11 @@
 //! | `alltoall_init`  | persistent  | as `alltoall`, 3 iterations, re-seed |
 //! | `scatter_init`   | persistent  | as `scatter`, 3 iterations, root re-seeds all slots; skipped on MPICH 4.2.x |
 //!
-//! The four persistent functions run only on MPI 4.0+ (`common::mpi_major()
-//! >= 4`); below that, each asserts `Error::NotSupported` instead of
-//! running. `scatter_init` additionally carries its own narrow MPICH 4.2.x
-//! skip for a known `MPI_Scatter_init` + `MPI_IN_PLACE` deadlock.
+//! The four persistent functions run only where the library provides
+//! persistent collectives (`common::has_mpi4_collectives()`); otherwise,
+//! each asserts `Error::NotSupported` instead of running. `scatter_init`
+//! additionally carries its own narrow MPICH 4.2.x skip for a known
+//! `MPI_Scatter_init` + `MPI_IN_PLACE` deadlock.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_inplace
 // mpi-test: np=2.. skip-ok=mpich-4.2
@@ -327,7 +328,8 @@ fn scatter_init(world: &Communicator) -> Result<()> {
     Ok(())
 }
 
-/// Below MPI 4.0, asserts that the four persistent in-place collectives
+/// Where the library lacks persistent collectives (below MPI 4.0, except
+/// Open MPI 5), asserts that the four persistent in-place collectives
 /// refuse with `Error::NotSupported` naming themselves, instead of running.
 /// `gather_init_inplace` is root-only: it returns `Error::InvalidOp` on
 /// non-root regardless of MPI version, so only rank 0 exercises its
@@ -347,7 +349,11 @@ fn assert_persistent_inplace_not_supported(world: &Communicator) -> Result<()> {
     } else {
         true
     };
-    common::check(world, gather_ok, "gather_init_inplace refuses below MPI 4");
+    common::check(
+        world,
+        gather_ok,
+        "gather_init_inplace refuses without persistent collectives",
+    );
 
     let mut data = vec![0i32; if rank == 0 { size } else { 1 }];
     let scatter_ok = matches!(
@@ -357,7 +363,7 @@ fn assert_persistent_inplace_not_supported(world: &Communicator) -> Result<()> {
     common::check(
         world,
         scatter_ok,
-        "scatter_init_inplace refuses below MPI 4",
+        "scatter_init_inplace refuses without persistent collectives",
     );
 
     let mut data = vec![0i32; size];
@@ -365,14 +371,22 @@ fn assert_persistent_inplace_not_supported(world: &Communicator) -> Result<()> {
         world.allgather_init_inplace(&mut data),
         Err(Error::NotSupported(op)) if op == "allgather_init_inplace"
     );
-    common::check(world, ok, "allgather_init_inplace refuses below MPI 4");
+    common::check(
+        world,
+        ok,
+        "allgather_init_inplace refuses without persistent collectives",
+    );
 
     let mut data = vec![0i32; size];
     let ok = matches!(
         world.alltoall_init_inplace(&mut data),
         Err(Error::NotSupported(op)) if op == "alltoall_init_inplace"
     );
-    common::check(world, ok, "alltoall_init_inplace refuses below MPI 4");
+    common::check(
+        world,
+        ok,
+        "alltoall_init_inplace refuses without persistent collectives",
+    );
 
     Ok(())
 }
@@ -396,7 +410,7 @@ fn main() -> Result<()> {
     iscatter(&world)?;
     ialltoall(&world)?;
 
-    if common::mpi_major() >= 4 {
+    if common::has_mpi4_collectives() {
         gather_init(&world)?;
         allgather_init(&world)?;
         alltoall_init(&world)?;
