@@ -103,8 +103,9 @@ dependency refreshes and documentation work.
   lock/lock-all epochs (`WinFenceAssert`, `WinPscwAssert`, `LockType`,
   `WinLockGuard`, `WinLockAllGuard`), flush and sync, blocking and
   request-based put, get and accumulate, and the atomic `get_accumulate`,
-  `fetch_and_op` and `compare_and_swap` (`PendingFetchResult<T>`; integer
-  types only, via `AtomicMpiDatatype`).
+  `fetch_and_op` and `compare_and_swap`. `fetch_and_op` and
+  `compare_and_swap` return a `PendingFetchResult<T>`; `compare_and_swap`
+  takes integer types only (`AtomicMpiDatatype`).
 - **Buffered and persistent point-to-point.** `Mpi::buffer_attach` (buffers
   above `i32::MAX` bytes return `Err(InvalidBuffer)`) and `buffer_detach`,
   and the persistent `send_init`, `bsend_init`, `rsend_init`, `ssend_init`
