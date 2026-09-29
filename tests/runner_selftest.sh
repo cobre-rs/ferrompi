@@ -230,6 +230,22 @@ f=$(mk_outfile $'shutdown complete\n')
 check "classify: expect=unfinalized, exit 101" \
   "$(classify 101 "$f" "" "unfinalized" "shutdown" "unknown")" "FAIL exit 101"
 
+f=$(mk_outfile $'ferrompi: MPI_Finalize skipped: 1 window(s) still alive\n')
+check "classify: exit 0, finalize skipped without expect=unfinalized" \
+  "$(classify 0 "$f" "" "" "" "unknown")" "FAIL MPI_Finalize skipped without expect=unfinalized"
+
+f=$(mk_outfile $'SKIP: x\nferrompi: MPI_Finalize skipped: 1 window(s) still alive\n')
+check "classify: finalize skipped fails a registered SKIP" \
+  "$(classify 0 "$f" "openmpi" "" "" "openmpi-5.0.7")" "FAIL MPI_Finalize skipped without expect=unfinalized"
+
+f=$(mk_outfile $'ferrompi: MPI_Finalize skipped: 1 window(s) still alive\n')
+check "classify: expect=unfinalized, finalize skipped line present, literal matches" \
+  "$(classify 1 "$f" "" "unfinalized" "MPI_Finalize skipped" "unknown")" "PASS"
+
+check "finalize-skipped marker matches the crate's warning" \
+  "$(grep -qF -- "$FINALIZE_SKIPPED_MARKER" "$SCRIPT_DIR/../src/lib.rs" && echo yes || echo no)" \
+  "yes"
+
 # --- feature_closure -------------------------------------------------------
 
 check "feature_closure: numa pulls in rma" \

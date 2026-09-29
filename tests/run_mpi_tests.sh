@@ -27,6 +27,10 @@ MPI_NP_LIST="${MPI_NP_LIST:-4}"
 MPIEXEC="${MPIEXEC:-mpiexec}"
 MPI_TEST_TIMEOUT="${MPI_TEST_TIMEOUT:-90}"
 
+# The warning Mpi's Drop prints when it skips MPI_Finalize because a window is
+# still alive. Only expect=unfinalized examples may print it.
+FINALIZE_SKIPPED_MARKER="MPI_Finalize skipped"
+
 FEATURES=""
 IMPL_ID=""
 FEATURE_CLOSURE=""
@@ -251,6 +255,11 @@ classify() {
 
   if [[ "$exit_code" == "99" ]]; then
     echo "FAIL valgrind errors"
+    return 0
+  fi
+
+  if [[ "$expect" != "unfinalized" ]] && grep -qF -- "$FINALIZE_SKIPPED_MARKER" "$outfile"; then
+    echo "FAIL $FINALIZE_SKIPPED_MARKER without expect=unfinalized"
     return 0
   fi
 
