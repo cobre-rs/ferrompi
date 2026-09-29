@@ -83,7 +83,7 @@ fn main() {
     }
 
     if world.rank() == 0 {
-        // ── Rank 0: sole Criterion driver ──────────────────────────────────
+        // Rank 0: sole Criterion driver.
         let mut c = Criterion::default()
             .configure_from_args()
             .measurement_time(Duration::from_secs(5))
@@ -96,7 +96,7 @@ fn main() {
         // Send the stop command so non-root ranks exit their mirror loop.
         common::lead(&world, common::STOP);
     } else {
-        // ── Non-root ranks: mirror loop ─────────────────────────────────────
+        // Non-root ranks: mirror loop.
         run_follower(&world);
     }
 

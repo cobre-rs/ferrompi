@@ -25,8 +25,6 @@ const SETUP: u64 = 1;
 const PERSISTENT: u64 = 2;
 const IALLREDUCE: u64 = 3;
 
-// ─── Rank-0 benchmark driver ─────────────────────────────────────────────────
-
 /// Register and drive the two benchmarks on rank 0, one pair per size in [`SIZES`].
 ///
 /// For each size, this function sends a `SETUP` command (so every rank re-initializes
@@ -81,8 +79,6 @@ fn bench_iterative_allreduce(c: &mut Criterion, world: &Communicator) {
     group.finish();
 }
 
-// ─── Non-root mirror loop ─────────────────────────────────────────────────────
-
 /// Mirror loop for ranks > 0.
 ///
 /// Loops until rank 0 sends `STOP`. On `SETUP` it frees its current persistent
@@ -131,8 +127,6 @@ fn run_follower(world: &Communicator) {
     });
 }
 
-// ─── Entry point ─────────────────────────────────────────────────────────────
-
 fn main() {
     let _mpi = common::init_mpi_for_bench();
     let world = _mpi.world();
@@ -143,7 +137,7 @@ fn main() {
     }
 
     if world.rank() == 0 {
-        // ── Rank 0: sole Criterion driver ─────────────────────────────────────
+        // Rank 0: sole Criterion driver.
         let mut c = Criterion::default().configure_from_args();
 
         bench_iterative_allreduce(&mut c, &world);
@@ -153,7 +147,7 @@ fn main() {
         // Send the stop command so follower ranks exit their mirror loop.
         common::lead(&world, common::STOP);
     } else {
-        // ── Non-root ranks: mirror loop ───────────────────────────────────────
+        // Non-root ranks: mirror loop.
         run_follower(&world);
     }
 
