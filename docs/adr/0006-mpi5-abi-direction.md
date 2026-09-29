@@ -53,9 +53,10 @@ alone cannot tell the draft header from the ratified one.
 - The `DatatypeTag` and `ReduceOp` discriminants are internal (ADR-0003,
   amended 2026-09-24), which leaves room to encode them as ABI handle
   values later.
-- The public API exposes no implementation handle type; interoperability
-  with other MPI-using libraries waits for the by-value handle
-  representation in Decision 3.
+- The public API exposes no MPI implementation handle: `raw_handle()`
+  returns an index into ferrompi's own tables. Interoperability with other
+  MPI-using libraries waits for the by-value handle representation in
+  Decision 3.
 - `docs/mpi-compatibility.md` is the reference for selecting an ABI build.
 
 ## Alternatives

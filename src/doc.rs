@@ -11,15 +11,11 @@
 #[doc = include_str!("../docs/architecture.md")]
 pub mod architecture {}
 
-// A leading empty `#[doc]` attribute keeps this module's rendered doc
-// comment from starting at byte 0 of the included file. Without it,
-// clippy's `doc_overindented_list_items` misparses the six-space-aligned
-// continuation lines under the "Migration Checklist" task list in
-// docs/migrating-from-rsmpi.md as over-indented and fails `-D warnings`
-// (verified: removing this line alone reproduces all 14 false positives;
-// the architecture and mpi-compatibility includes need no such attribute).
-#[doc = ""]
 #[doc = include_str!("../docs/migrating-from-rsmpi.md")]
+#[allow(
+    clippy::doc_overindented_list_items,
+    reason = "the Migration Checklist aligns its continuation lines under the task-list text"
+)]
 pub mod migrating_from_rsmpi {}
 
 #[doc = include_str!("../docs/mpi-compatibility.md")]

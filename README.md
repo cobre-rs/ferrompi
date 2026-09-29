@@ -1,6 +1,6 @@
 # FerroMPI
 
-**Safe, generic Rust bindings for MPI 4.x with persistent collectives support.**
+**Safe, generic Rust bindings for MPI, with MPI 4.0 persistent collectives and large counts when the library provides them.**
 
 [![Crates.io](https://img.shields.io/crates/v/ferrompi.svg)](https://crates.io/crates/ferrompi)
 [![Documentation](https://docs.rs/ferrompi/badge.svg)](https://docs.rs/ferrompi)
