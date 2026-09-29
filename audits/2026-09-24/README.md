@@ -93,7 +93,7 @@ The crate has a solid core (sealed datatype traits, sound UserOp trampolines,
 | D-18 | **Package contents:** allow-list (`src/`, `csrc/`, `docs/`, `build.rs`, README, CHANGELOG, licenses); `examples/`, `benches/`, `audits/`, `.github/`, `tests/`, `test.sh` excluded. | **accepted 2026-09-24** | 0.5.x — INF-18 |
 | D-19 | **`LongDoubleInt`/`LongInt`:** cfg-gated to verified targets (Linux x86_64/aarch64/ppc64le); Windows unsupported; per-target layouts deferred to the API milestone. | **accepted 2026-09-24** | 0.5.x — COR-11 |
 | D-20 | **Discriminant "semver contract"** retracted now in docs only (architecture.md + ADR-0003 amendment note). | **accepted 2026-09-24** | 0.5.x — DOC-01, ARC-03 |
-| D-21 | **0.6.0 close-out:** COR-17, COR-19, COR-20, SND-17, INF-22, ARC-18 and the `WinKind` part of ARC-13 move to the `0.5.x` milestone and ship in 0.6.0; for COR-19 this supersedes the 2026-09-28 ruling that kept the gap as a tracked open row; for SND-17 the fix contract becomes an abort of the process, replacing the finding's still-pending fix direction. | **accepted 2026-09-29** | 0.5.x — COR-17, COR-19, COR-20, SND-17, INF-22, ARC-18, ARC-13 |
+| D-21 | **0.6.0 close-out:** COR-17, COR-19, COR-20, SND-17, INF-22, ARC-18 and the `WinKind` part of ARC-13 move to the `0.5.x` milestone and ship in 0.6.0; for COR-19 this supersedes the 2026-09-28 ruling that kept the gap as a tracked open row; for SND-17 the fix contract becomes an abort of the process, replacing the finding's still-pending fix direction. | **accepted 2026-09-29** | 0.5.x — COR-17, COR-19, COR-20, SND-17, INF-22, ARC-18, ARC-13, COR-21 |
 
 ## Roadmap (accepted 2026-09-24)
 
@@ -155,6 +155,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-18 | `SharedWindow::allocate` with a zero count returns `Err(Internal)` and leaks the registered window, which `Mpi::drop` does not count | minor | repro | 0.5.x | fixed (4747cd1) |
 | COR-19 | `Win::allocate`/`SharedWindow::allocate` leave the window live but uncounted in `LIVE_WINDOWS` when zeroing fails or MPI returns a null base for a non-zero count, so `Mpi::drop` can call `MPI_Finalize` with it alive | minor | reading | 0.5.x | fixed (4263c80) |
 | COR-20 | `Mpi::init_thread` resets to uninitialized when installing `MPI_ERRORS_RETURN` on `MPI_COMM_WORLD`/`MPI_COMM_SELF` fails after `MPI_Init_thread` succeeded, so a retry calls `MPI_Init_thread` twice | minor | reading | 0.5.x | fixed (762e841) |
+| COR-21 | `PersistentRequest::start_all` marks no request active when `MPI_Startall` fails, although MPI may have started some; `Drop` then frees a started request without waiting | minor | reading | 0.5.x | fixed (388dc16, f42fe0a) |
 
 ### Architecture / API — [03](findings/03-architecture-api.md)
 
