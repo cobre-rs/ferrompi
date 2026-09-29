@@ -239,7 +239,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | DOC-07 | `docs/mpi-compatibility.md` inaccuracies | minor | 0.5.x | fixed (98236f8) |
 | DOC-08 | `README.md` inaccuracies (badge, version, reqs, `LD_LIBRARY_PATH`) | minor | 0.5.x | fixed (76eded0) |
 | DOC-09 | Crate rustdoc (`src/lib.rs`) inaccuracies | minor | 0.5.x | fixed (a6262a9) |
-| DOC-10 | Stale/wrong item-level rustdoc | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| DOC-10 | Stale/wrong item-level rustdoc | minor | 0.5.x | fixed (e5034a8) |
 | DOC-11 | CONTRIBUTING template filler + false policies | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-12 | CHANGELOG internal IDs / restated rustdoc | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-13 | `benches/README.md` claims | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
