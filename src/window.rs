@@ -813,10 +813,11 @@ impl<T: MpiDatatype> SharedWindow<T> {
         Ok(LockAllGuard { window: self })
     }
 
-    /// Get the raw MPI window handle.
+    /// Get this window's raw handle.
     ///
-    /// This is provided for advanced use cases where direct access to the
-    /// underlying MPI window handle is needed (e.g., custom FFI calls).
+    /// The value is ferrompi's internal table index for this window. It is
+    /// not an MPI handle and cannot be passed to MPI; use it only to tell
+    /// objects apart, for example in logs.
     pub fn raw_handle(&self) -> i32 {
         self.win_handle
     }
@@ -1241,10 +1242,11 @@ impl<T: MpiDatatype> Win<'_, T> {
         unsafe { std::slice::from_raw_parts_mut(self.local_ptr.as_ptr(), self.local_len) }
     }
 
-    /// Get the raw MPI window handle.
+    /// Get this window's raw handle.
     ///
-    /// Provided for advanced use cases where direct access to the underlying
-    /// MPI window handle is needed (e.g., custom FFI calls).
+    /// The value is ferrompi's internal table index for this window. It is
+    /// not an MPI handle and cannot be passed to MPI; use it only to tell
+    /// objects apart, for example in logs.
     pub fn raw_handle(&self) -> i32 {
         self.win_handle
     }
@@ -1776,17 +1778,17 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let win = Win::<f64>::allocate(&world, 4).unwrap();
+    /// let buf = [1.0f64, 2.0, 3.0, 4.0];
     ///
     /// // Open fence epoch on all ranks
     /// win.fence(WinFenceAssert::default()).unwrap();
     ///
     /// // Rank 0 puts four elements into rank 1's window at displacement 0
     /// if world.rank() == 0 {
-    ///     let buf = [1.0f64, 2.0, 3.0, 4.0];
     ///     win.put(&buf, 1, 0, buf.len() as i64).unwrap();
     /// }
     ///
-    /// // Close epoch — put completes here
+    /// // Close epoch — put completes here; `buf` must stay alive until now
     /// win.fence(WinFenceAssert::default()).unwrap();
     /// ```
     pub fn put(
@@ -1971,19 +1973,23 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let win = Win::<f64>::allocate(&world, 4).unwrap();
+    /// let mut buf = [0.0f64; 4];
     ///
     /// // Open fence epoch on all ranks
     /// win.fence(WinFenceAssert::default()).unwrap();
     ///
     /// // Rank 0 reads four elements from rank 1's window at displacement 0
     /// if world.rank() == 0 {
-    ///     let mut buf = [0.0f64; 4];
     ///     win.get(&mut buf, 1, 0, 4).unwrap();
     ///     // buf is NOT yet valid here — read after the closing fence
     /// }
     ///
     /// // Close epoch — get completes here, buf is now valid
     /// win.fence(WinFenceAssert::default()).unwrap();
+    ///
+    /// if world.rank() == 0 {
+    ///     println!("{:?}", buf);
+    /// }
     /// ```
     pub fn get(
         &self,
@@ -2174,6 +2180,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let mut win = Win::<f64>::allocate(&world, 4).unwrap();
+    /// let buf = [10.0f64, 20.0, 30.0, 40.0];
     ///
     /// // Rank 1 initialises its window
     /// if world.rank() == 1 {
@@ -2185,11 +2192,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// // Rank 0 adds [10, 20, 30, 40] to rank 1's window
     /// if world.rank() == 0 {
-    ///     let buf = [10.0f64, 20.0, 30.0, 40.0];
     ///     win.accumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum).unwrap();
     /// }
     ///
-    /// // Close epoch — accumulate completes here
+    /// // Close epoch — accumulate completes here; `buf` must stay alive until now
     /// win.fence(WinFenceAssert::default()).unwrap();
     /// // Rank 1's window is now [11.0, 22.0, 33.0, 44.0]
     /// ```
@@ -2404,6 +2410,8 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let mut win = Win::<i32>::allocate(&world, 4).unwrap();
+    /// let origin = [1i32, 2, 3, 4];
+    /// let mut result = [0i32; 4];
     ///
     /// // Rank 1 initialises its window
     /// if world.rank() == 1 {
@@ -2415,13 +2423,16 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// // Rank 0 atomically fetches rank 1's values and adds [1, 2, 3, 4]
     /// if world.rank() == 0 {
-    ///     let origin = [1i32, 2, 3, 4];
-    ///     let mut result = [0i32; 4];
     ///     win.get_accumulate(&origin, &mut result, 1, 0, 4, ReduceOp::Sum).unwrap();
     /// }
     ///
-    /// // Close epoch — get_accumulate completes here
+    /// // Close epoch — get_accumulate completes here; `origin`/`result` must
+    /// // stay alive until now
     /// win.fence(WinFenceAssert::default()).unwrap();
+    ///
+    /// if world.rank() == 0 {
+    ///     println!("{:?}", result);
+    /// }
     /// // Rank 0's result == [10, 20, 30, 40] (pre-update)
     /// // Rank 1's window == [11, 22, 33, 44] (post-update)
     /// ```

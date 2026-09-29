@@ -107,12 +107,13 @@ pub struct Communicator {
 }
 
 // SAFETY: Communicator handles are integer indices into a C-side table.
-// The C MPI library manages its own thread safety based on the thread level
-// requested via MPI_Init_thread. Sending a Communicator to another thread is
-// safe because MPI_Comm operations are defined to be callable from any thread
-// when the appropriate thread level (Serialized or Multiple) was requested.
-// Users must ensure they requested sufficient thread support and serialize
-// access themselves when using ThreadLevel::Serialized.
+// Every MPI call goes through the lifecycle guard (`rt::enter`): below
+// `ThreadLevel::Serialized` (Single or Funneled), it rejects a call from any
+// thread other than the one that called `Mpi::init`/`init_thread`, with
+// `Err(Error::ThreadLevelViolation)`, without touching MPI. At `Serialized`,
+// the caller must serialize its own calls (debug builds detect two
+// overlapping calls). At `Multiple`, calls from any thread may run
+// concurrently.
 //
 // All seven C-layer handle tables (comm_table, request_table, win_table,
 // info_table, group_table, datatype_table, op_table) use the C11 atomic-CAS
@@ -120,8 +121,8 @@ pub struct Communicator {
 // See docs/adr/0002-handle-tables.md for the full rationale and design.
 unsafe impl Send for Communicator {}
 // SAFETY: &Communicator exposes only reads of immutable fields and FFI calls
-// whose concurrent use MPI governs by the initialized thread level, and this
-// type does not check that level.
+// gated by the same lifecycle guard described above, so its thread safety
+// follows the requested `ThreadLevel` the same way.
 unsafe impl Sync for Communicator {}
 
 impl Communicator {

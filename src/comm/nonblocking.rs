@@ -86,9 +86,15 @@ impl Communicator {
     /// # Arguments
     ///
     /// * `send` - Data to send from this process
-    /// * `recv` - Buffer for result (only significant at root)
+    /// * `recv` - Buffer for the result; must have `send.len()` elements on
+    ///   every rank (its contents matter only at the root)
     /// * `op` - Reduction operation
     /// * `root` - Rank of the root process
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidBuffer`] if `recv.len() != send.len()`, on
+    /// any rank.
     ///
     /// # Example
     ///

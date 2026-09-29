@@ -3222,9 +3222,9 @@ int ferrompi_group_translate_ranks(int32_t g1_h, int32_t n,
     int ret = MPI_Group_translate_ranks(g1, n, ranks1, g2, ranks2);
     if (ret != MPI_SUCCESS) return ret;
     /* Normalize MPI_UNDEFINED to -1 so the Rust side has a single
-     * portable sentinel. MPI_UNDEFINED is conventionally -1 on every
-     * implementation we have observed (MPICH 4.x, Open MPI 5.x), but
-     * the standard does not pin the value. */
+     * portable sentinel. The MPI standard does not fix MPI_UNDEFINED's
+     * value across implementations, so this shim always translates it
+     * to -1, as the other shims in this file do. */
     for (int32_t i = 0; i < n; i++) {
         if (ranks2[i] == MPI_UNDEFINED) ranks2[i] = -1;
     }

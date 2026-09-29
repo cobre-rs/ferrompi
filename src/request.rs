@@ -245,15 +245,14 @@ impl Request {
     /// Wait for any one request in a collection to complete.
     ///
     /// Blocks until at least one not-yet-completed request completes and
-    /// returns its index. An entry already marked completed is passed to the
-    /// C layer as a null sentinel and skipped; `wait_any` returns `Ok(None)`
-    /// once every entry in the slice is completed (or the slice was empty),
-    /// which is what lets the standard MPI Waitany loop idiom — calling
-    /// `wait_any` repeatedly on the same slice without removing completed
-    /// entries — terminate.
+    /// returns its index. Completed entries are skipped; `wait_any` returns
+    /// `Ok(None)` once every entry in the slice is completed (or the slice
+    /// was empty), which is what lets the standard MPI Waitany loop idiom —
+    /// calling `wait_any` repeatedly on the same slice without removing
+    /// completed entries — terminate.
     ///
-    /// The completed `Request` is marked `completed = true` in place. Removing
-    /// it from the vector is optional, not required for correctness.
+    /// The completed `Request` is marked completed in place. Removing it
+    /// from the vector is optional, not required for correctness.
     pub fn wait_any(requests: &mut [Request]) -> Result<Option<usize>> {
         if requests.is_empty() {
             return Ok(None);
@@ -288,10 +287,9 @@ impl Request {
     /// Returns `Ok(vec![])` when no requests were active (all null, all
     /// already completed, or a mix of the two).
     ///
-    /// An entry already marked completed is passed to the C layer as a null
-    /// sentinel and skipped. The completed `Request`s are marked
-    /// `completed = true` in place. Removing them from the vector is
-    /// optional, not required for correctness.
+    /// Completed entries are skipped. The completed `Request`s are marked
+    /// completed in place. Removing them from the vector is optional, not
+    /// required for correctness.
     ///
     /// On a failed request, the returned error carries that request's own
     /// class and code, and its message ends with `(request N)`, `N` being
@@ -349,10 +347,9 @@ impl Request {
     /// Returns `Ok(Some(idx))` if a request completed, `Ok(None)` if no request
     /// has completed yet or all requests were already null.
     ///
-    /// An entry already marked completed is passed to the C layer as a null
-    /// sentinel and skipped, so calling `test_any` again after every entry
-    /// has completed keeps returning `Ok(None)` rather than erroring. The
-    /// completed `Request` is marked `completed = true` in place. Removing it
+    /// Completed entries are skipped, so calling `test_any` again after every
+    /// entry has completed keeps returning `Ok(None)` rather than erroring.
+    /// The completed `Request` is marked completed in place. Removing it
     /// from the vector is optional, not required for correctness.
     pub fn test_any(requests: &mut [Request]) -> Result<Option<usize>> {
         if requests.is_empty() {
@@ -393,10 +390,9 @@ impl Request {
     /// Returns the indices of all requests that have completed at the moment of
     /// the call. Returns `Ok(vec![])` when none have completed or all were null.
     ///
-    /// An entry already marked completed is passed to the C layer as a null
-    /// sentinel and skipped. The completed `Request`s are marked
-    /// `completed = true` in place. Removing them from the vector is
-    /// optional, not required for correctness.
+    /// Completed entries are skipped. The completed `Request`s are marked
+    /// completed in place. Removing them from the vector is optional, not
+    /// required for correctness.
     ///
     /// On a failed request, the returned error carries that request's own
     /// class and code, and its message ends with `(request N)`, `N` being

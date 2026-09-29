@@ -1,8 +1,8 @@
-//! MPI Info object for passing hints to MPI operations.
+//! An MPI info object of key-value hints.
 //!
 //! [`Info`] wraps an `MPI_Info` handle and provides methods for setting and
-//! querying key-value pairs used as hints by various MPI operations (e.g.,
-//! window allocation, file I/O).
+//! querying key-value pairs. No ferrompi call accepts an `Info` in this
+//! release.
 //!
 //! # Example
 //!
@@ -22,10 +22,11 @@ use std::ffi::{CStr, CString};
 /// Maximum buffer size for retrieving info values from MPI.
 const INFO_VALUE_MAX_LEN: i32 = 1024;
 
-/// An MPI info object for passing hints to MPI operations.
+/// An MPI info object of key-value hints.
 ///
-/// This type wraps an `MPI_Info` handle with RAII semantics: the underlying
-/// MPI info object is freed automatically when the `Info` is dropped.
+/// No ferrompi call accepts an `Info` in this release. This type wraps an
+/// `MPI_Info` handle with RAII semantics: the underlying MPI info object is
+/// freed automatically when the `Info` is dropped.
 ///
 /// Use [`Info::null()`] to represent `MPI_INFO_NULL` (no hints), or
 /// [`Info::new()`] to create a mutable info object that can hold key-value
@@ -201,7 +202,11 @@ impl Info {
         Ok(Some(value.to_string()))
     }
 
-    /// Get the raw info handle for passing to C functions.
+    /// Get this info object's raw handle.
+    ///
+    /// The value is ferrompi's internal table index for this info object.
+    /// It is not an MPI handle and cannot be passed to MPI; use it only to
+    /// tell objects apart, for example in logs.
     ///
     /// Returns `-1` for `MPI_INFO_NULL`.
     pub fn raw_handle(&self) -> i32 {
