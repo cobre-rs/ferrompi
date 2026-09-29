@@ -26,8 +26,7 @@
 //! - **Group operations**: [`Group`] with incl/excl/union/intersection/difference,
 //!   [`RankRange`] for range constructors, [`GroupComparison`].
 //!
-//!   Note: [`Mpi::create_from_group`] requires MPI 4.0+.
-//!   Support is probed once and cached; see the function rustdoc for the cache invariant.
+//!   Note: [`Mpi::create_from_group`] needs MPI 4.0, or Open MPI 5.
 //! - **Custom datatypes**: [`CustomDatatype`]
 //!   (contiguous/vector/struct/resized) and [`StructField`]
 //!   for struct-type builders.
@@ -209,7 +208,7 @@ pub use window::{
 struct ReadmeDoctests;
 
 use std::marker::PhantomData;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 /// Process-wide buffer attached for buffered sends (`MPI_Buffer_attach`).
 ///
@@ -561,47 +560,6 @@ impl Mpi {
         flag != 0
     }
 
-    /// Returns `true` if the runtime MPI version is 4.0 or later.
-    ///
-    /// Caching semantics:
-    /// - An `Err` from `Mpi::version()` (e.g., called before `Mpi::init`)
-    ///   is NOT cached; a subsequent call after init can re-probe and
-    ///   observe support correctly.
-    /// - A successful `version()` whose string parses to a major version
-    ///   `≥ 4` caches `true`.
-    /// - A successful `version()` whose string parses to a major version
-    ///   `< 4` (including unrecognized formats that yield major `= 0` via
-    ///   the `unwrap_or(0)` fallback) caches `false`. Re-probing is not
-    ///   possible once a successful `version()` has been seen, so a
-    ///   non-standard version string format from an unusual MPI build
-    ///   permanently disables `Mpi::create_from_group` for this process.
-    fn supports_create_from_group() -> bool {
-        static SUPPORTED: OnceLock<bool> = OnceLock::new();
-        if let Some(&cached) = SUPPORTED.get() {
-            return cached;
-        }
-        // Probe. If `version()` fails, return `false` without caching;
-        // a future call can re-probe successfully.
-        let Ok(v) = Mpi::version() else {
-            return false;
-        };
-        // Mpi::version() returns a string like "MPI 4.0" or "MPI 3.1".
-        // Extract the major version number from the second whitespace-delimited
-        // token, then its first dot-delimited component.
-        let major: u32 = v
-            .split_whitespace()
-            .nth(1)
-            .and_then(|tok| tok.split('.').next())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-        let supported = major >= 4;
-        // Race: if another thread already won set(), discard our value;
-        // both threads agree on the result anyway because the probe is
-        // deterministic given a successful version() call.
-        let _ = SUPPORTED.set(supported);
-        supported
-    }
-
     /// Create a communicator from a group without requiring a parent
     /// communicator (MPI 4.0+).
     ///
@@ -613,8 +571,8 @@ impl Mpi {
     ///
     /// - Returns `Err(Error::Internal(_))` if `stringtag` contains a null byte
     ///   (the FFI call is never invoked in this case).
-    /// - Returns `Err(Error::NotSupported("MPI_Comm_create_from_group"))` on
-    ///   MPI < 4.0 installations.
+    /// - Returns `Err(Error::NotSupported(_))` when ferrompi was built
+    ///   against an MPI older than 4.0 other than Open MPI 5.
     /// - Returns `Err(Error::Mpi { .. })` if the underlying MPI call fails.
     ///
     /// # Example
@@ -632,11 +590,6 @@ impl Mpi {
     pub fn create_from_group(&self, group: &group::Group, stringtag: &str) -> Result<Communicator> {
         let c_tag = CString::new(stringtag)
             .map_err(|_| Error::Internal("stringtag contains null byte".into()))?;
-        if !Self::supports_create_from_group() {
-            return Err(Error::NotSupported(
-                "MPI_Comm_create_from_group".to_string(),
-            ));
-        }
         let mut new_handle: i32 = -1;
         // SAFETY: c_tag.as_ptr() is a valid, null-terminated C string that
         // lives for the duration of this call. group.handle is a valid group

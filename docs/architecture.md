@@ -266,11 +266,6 @@ belongs in C from what belongs in Rust.
   `Error::NotSupported`, `Error::ResourceExhausted`) for a Rust- or C-layer
   sentinel code. On `Error::Mpi`, `operation` is the C function name with the
   `ferrompi_` prefix stripped, enabling precise error attribution.
-- **`OnceLock`-cached version probes** — `Mpi::create_from_group` (MPI 4.0+)
-  is gated by a private `OnceLock<bool>` that probes `Mpi::version()` once and
-  caches whether the runtime reports MPI 4.0 or later. Below MPI 4.0, the
-  corresponding C stub returns a sentinel that `Error::from_code` maps to
-  `Error::NotSupported`.
 - **`catch_unwind + abort` panic fence** — the `rust_user_op_invoke`
   `extern "C"` entry point in `src/op.rs` wraps every closure invocation in
   `std::panic::catch_unwind`. If the closure panics, the process aborts

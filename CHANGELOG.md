@@ -80,9 +80,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   ratified MPI 5.0 ABI still build (the latter untested at run time).
 - **New `ferrompi::doc::adr_0006_mpi5_abi_direction` module** documents
   ADR-0006, the MPI 5.0 standard-ABI direction.
-- **Persistent collectives work on Open MPI 5**, which implements them
-  while its `mpi.h` reports MPI 3.1. A count above `i32::MAX` there
-  returns `Err(Count)`, as on any library below MPI 4.0.
+- **Persistent collectives and `Mpi::create_from_group` work on Open MPI
+  5**, which implements them while its `mpi.h` reports MPI 3.1. A count
+  above `i32::MAX` there returns `Err(Count)`, as on any library below
+  MPI 4.0.
 
 ### Changed
 
@@ -101,8 +102,8 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   window now return `Err` on MPI-4 libraries instead of aborting.
 - **`Request::cancel` on a nonblocking-collective or RMA request now
   returns `Err(NotSupported)`** without calling MPI.
-- **Built against MPI older than 4.0, the persistent collectives (except
-  on Open MPI 5) and `create_from_group` now return
+- **Built against MPI older than 4.0 (other than Open MPI 5), the
+  persistent collectives and `create_from_group` now return
   `Err(NotSupported(op))`.**
 - **`Status.count` is now `-1` when the message is not a whole number of
   elements** (MPI reports `MPI_UNDEFINED`).

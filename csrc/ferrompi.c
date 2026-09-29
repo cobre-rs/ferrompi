@@ -65,16 +65,16 @@ _Static_assert(MAX_REQUESTS % 64 == 0,
 #define FERROMPI_ERR_GROUPS_FULL     (-7006)
 #define FERROMPI_ERR_INFOS_FULL      (-7007)
 
-// Returned by the persistent-collective stubs compiled without
-// FERROMPI_HAVE_MPI4_COLLECTIVES and by the comm_create_from_group stub
-// compiled when MPI_VERSION < 4 (the library lacks the MPI 4.0 operation).
-// src/error.rs maps it to Error::NotSupported. This MUST stay in
-// sync with the mirrored const in src/error.rs.
+// Returned by the persistent-collective and comm_create_from_group stubs
+// compiled without FERROMPI_HAVE_MPI4_COLLECTIVES (the library lacks the
+// MPI 4.0 operation). src/error.rs maps it to Error::NotSupported. This
+// MUST stay in sync with the mirrored const in src/error.rs.
 #define FERROMPI_ERR_NOT_SUPPORTED   (-7008)
 
-// Open MPI 5 implements the MPI 4.0 persistent collectives while its mpi.h
-// still reports MPI_VERSION 3. The _c large-count calls stay gated on
-// MPI_VERSION >= 4: Open MPI 5 has none.
+// Open MPI 5 implements the MPI 4.0 persistent collectives and
+// MPI_Comm_create_from_group while its mpi.h still reports MPI_VERSION 3.
+// The _c large-count calls stay gated on MPI_VERSION >= 4: Open MPI 5 has
+// none.
 #if MPI_VERSION >= 4 || (defined(OMPI_MAJOR_VERSION) && OMPI_MAJOR_VERSION >= 5)
 #define FERROMPI_HAVE_MPI4_COLLECTIVES 1
 #endif
@@ -1024,7 +1024,7 @@ int ferrompi_comm_create_from_group_parent(int32_t comm_h,
 int ferrompi_comm_create_from_group(int32_t group_h,
                                     const char* stringtag,
                                     int32_t* out_h) {
-#if MPI_VERSION >= 4
+#ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
     MPI_Group g = get_group(group_h);
     if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Comm new_comm;
