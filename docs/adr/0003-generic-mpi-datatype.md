@@ -1,6 +1,6 @@
 # ADR-0003: Sealed Generic MpiDatatype Trait Family
 
-**Status:** Accepted — 2026-05-17
+**Status:** Accepted — 2026-05-17; amended 2026-09-24
 **Date:** 2026-05-17
 **Deciders:** Rogerio Alves
 
@@ -73,7 +73,7 @@ layer or accepting a vtable lookup on every buffer element.
    site, not inside the element loop.
 
 2. **Closed type set.** ferrompi supports exactly the primitive types documented
-   in `README.md` plus the custom datatype mechanism from epic 6 for user-defined
+   in `README.md` plus the custom datatype mechanism for user-defined
    structures. The C-side `DatatypeTag` enumeration is not extensible at runtime:
    new variants require source changes in `csrc/ferrompi.h`, the `switch` bodies
    in `csrc/ferrompi.c`, and the Rust `DatatypeTag` enum in `src/datatype.rs`,
@@ -321,7 +321,7 @@ the type set.
 **User-defined non-primitive types are supported through `CustomDatatype` builders.**
 The sealed-trait design does not prevent ferrompi from operating on
 user-defined structs, padded layouts, or non-primitive numeric types. The
-`CustomDatatype` API (implemented in epic 6, `src/datatype_builder.rs`) provides
+`CustomDatatype` API (`src/datatype_builder.rs`) provides
 constructors for contiguous blocks, strided vectors, and heterogeneous structs
 via `MPI_Type_contiguous`, `MPI_Type_vector`, and `MPI_Type_create_struct`. A
 `CustomDatatype` produces a committed `MPI_Datatype` handle at runtime and is
@@ -347,6 +347,8 @@ require either runtime size detection (violating driver 1) or platform-condition
 impls that produce different `DatatypeTag` values on different architectures,
 which breaks the ABI stability invariant of `DatatypeTag`.
 
+> **Amended 2026-09-24 — Discriminant values are internal.** See [Amendments](#amendments).
+
 **Attribute-macro opt-in on user types.** A `#[derive(MpiDatatype)]` or
 `#[ferrompi::mpi_type(f64)]` attribute macro could allow user types to opt in
 to the trait for a specific base MPI type. This is rejected for the same reason
@@ -359,7 +361,16 @@ modifying the closed `DatatypeTag` enumeration.
 
 ---
 
+## Amendments
+
+### 2026-09-24 — Discriminant values are internal
+
+The Alternatives section above called the `DatatypeTag` discriminant values an ABI stability invariant, and `docs/architecture.md` presented the `DatatypeTag` and `ReduceOp` discriminants as a stability promise. That promise is withdrawn. The discriminant values are an internal contract between the Rust enums and the C shim's `FERROMPI_*` defines; any release may change them.
+
+No discriminant value changed in 0.6.0. Code names the enum variant, never its integer value. Keeping the values internal leaves room to encode them as MPI 5.0 standard-ABI handle values.
+
+---
+
 ## Status
 
-Accepted — 2026-05-17. Implemented across epics 1-7; `AtomicMpiDatatype`
-introduced in epic 7 (`src/datatype.rs`).
+Accepted — 2026-05-17; amended 2026-09-24.
