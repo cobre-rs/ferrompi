@@ -50,7 +50,7 @@ fn main() {
 
     let world_group = world.group().expect("world.group() failed");
 
-    if common::mpi_major() < 4 {
+    if !common::has_mpi4_collectives() {
         let group_h = world_group.raw_handle();
         let tag = b"test_null_guard\0";
         let mut out_h: i32 = -2;
@@ -66,7 +66,7 @@ fn main() {
         common::check(
             &world,
             ok,
-            "ferrompi_comm_create_from_group refuses below MPI 4",
+            "ferrompi_comm_create_from_group refuses without MPI_Comm_create_from_group",
         );
         return;
     }

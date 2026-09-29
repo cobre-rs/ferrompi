@@ -6,8 +6,9 @@
 //! - On MPI 4.0+: every rank that calls `mpi.create_from_group(&g, tag)`
 //!   with the same world group and the same tag receives an `Ok(comm)` with
 //!   `comm.size() == world.size()`.
-//! - On MPI < 4.0: `create_from_group` returns `Err(Error::NotSupported(_))`
-//!   instead of calling into the (unbuilt) MPI 4.0 shim.
+//! - Where the library lacks it (below MPI 4.0, except Open MPI 5):
+//!   `create_from_group` returns `Err(Error::NotSupported(_))` instead of
+//!   calling into the (unbuilt) MPI 4.0 shim.
 //!
 //! All assertions are guarded by a sentinel `allreduce_scalar(Min)` before
 //! any `process::exit` so that no rank exits while others are still inside
@@ -42,12 +43,16 @@ fn main() {
     // ========================================================================
     // Version check — below MPI 4.0, create_from_group refuses.
     // ========================================================================
-    if common::mpi_major() < 4 {
+    if !common::has_mpi4_collectives() {
         let ok = matches!(
             mpi.create_from_group(&world_group, "ferrompi-test"),
-            Err(Error::NotSupported(op)) if op == "MPI_Comm_create_from_group"
+            Err(Error::NotSupported(op)) if op == "comm_create_from_group"
         );
-        common::check(&world, ok, "create_from_group refuses below MPI 4");
+        common::check(
+            &world,
+            ok,
+            "create_from_group refuses without MPI_Comm_create_from_group",
+        );
         return;
     }
 
