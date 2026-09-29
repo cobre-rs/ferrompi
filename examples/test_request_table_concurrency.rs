@@ -10,8 +10,7 @@
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_request_table_concurrency
 //!
-//! TSan manual verification (pre-release step, not CI-gated because libmpi
-//! internals trigger false positives):
+//! Optional TSan run (not CI-gated: libmpi internals trigger false positives):
 //!   RUSTFLAGS="-Zsanitizer=thread" CFLAGS="-fsanitize=thread" \
 //!   cargo +nightly build --target x86_64-unknown-linux-gnu --examples && \
 //!   mpiexec -n 2 \
