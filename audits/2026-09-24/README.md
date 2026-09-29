@@ -228,7 +228,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 
 | ID | Title | Sev | Target | Status |
 |---|---|---|---|---|
-| DOC-01 | `docs/architecture.md` false statements | major | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| DOC-01 | `docs/architecture.md` false statements | major | 0.5.x | fixed (713cb4f) |
 | DOC-02 | ADR-0001 driver 1 false (= ABI-05) | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-03 | ADR-0002 claims that do not hold | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-04 | ADR-0004 lifetime rejection mis-argued; nonexistent variant | minor | 0.5.x note / 0.6 new ADR | planned (ferrompi-0.5.x-hardening: note); new ADR open (0.6) |
