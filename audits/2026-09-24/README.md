@@ -236,7 +236,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | DOC-05 | ADR-0005 Decision 7 describes the rejected design; plan sections | major | 0.5.x | fixed (134bfed) |
 | DOC-06 | Migration guide: nonexistent APIs, false safety claim | major | 0.5.x | fixed (eb63b5d) |
 | DOC-07 | `docs/mpi-compatibility.md` inaccuracies | minor | 0.5.x | fixed (98236f8) |
-| DOC-08 | `README.md` inaccuracies (badge, version, reqs, `LD_LIBRARY_PATH`) | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| DOC-08 | `README.md` inaccuracies (badge, version, reqs, `LD_LIBRARY_PATH`) | minor | 0.5.x | fixed (76eded0) |
 | DOC-09 | Crate rustdoc (`src/lib.rs`) inaccuracies | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-10 | Stale/wrong item-level rustdoc | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-11 | CONTRIBUTING template filler + false policies | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
