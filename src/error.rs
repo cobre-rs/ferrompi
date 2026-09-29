@@ -21,9 +21,10 @@ const FERROMPI_ERR_WINDOWS_FULL: i32 = -7005;
 const FERROMPI_ERR_GROUPS_FULL: i32 = -7006;
 const FERROMPI_ERR_INFOS_FULL: i32 = -7007;
 
-// Returned by the persistent-collective and comm_create_from_group stubs
-// compiled when MPI_VERSION < 4 (the underlying MPI 4.0 operation does not
-// exist). Intercepted in [`Error::from_code`]/[`Error::from_code_with_op`]
+// Returned by the persistent-collective stubs compiled without
+// FERROMPI_HAVE_MPI4_COLLECTIVES and by the comm_create_from_group stub
+// compiled when MPI_VERSION < 4 (the library lacks the MPI 4.0 operation).
+// Intercepted in [`Error::from_code`]/[`Error::from_code_with_op`]
 // and mapped to [`Error::NotSupported`]. This MUST match
 // `FERROMPI_ERR_NOT_SUPPORTED` in `csrc/ferrompi.c`.
 const FERROMPI_ERR_NOT_SUPPORTED: i32 = -7008;
@@ -308,9 +309,10 @@ pub enum Error {
     InvalidOp,
 
     /// Operation not supported. Two sources:
-    /// - an MPI 4.0 operation (a persistent collective or
-    ///   [`Mpi::create_from_group`](crate::Mpi::create_from_group)) when
-    ///   ferrompi was built against an MPI older than 4.0;
+    /// - a persistent collective when ferrompi was built against an MPI
+    ///   older than 4.0 other than Open MPI 5, or
+    ///   [`Mpi::create_from_group`](crate::Mpi::create_from_group) when built
+    ///   against an MPI older than 4.0;
     /// - [`Request::cancel`](crate::Request::cancel) on a nonblocking-collective
     ///   or RMA request.
     ///

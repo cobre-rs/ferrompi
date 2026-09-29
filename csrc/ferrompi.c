@@ -65,11 +65,19 @@ _Static_assert(MAX_REQUESTS % 64 == 0,
 #define FERROMPI_ERR_GROUPS_FULL     (-7006)
 #define FERROMPI_ERR_INFOS_FULL      (-7007)
 
-// Returned by the persistent-collective and comm_create_from_group stubs
-// compiled when MPI_VERSION < 4 (the underlying MPI 4.0 operation does not
-// exist). src/error.rs maps it to Error::NotSupported. This MUST stay in
+// Returned by the persistent-collective stubs compiled without
+// FERROMPI_HAVE_MPI4_COLLECTIVES and by the comm_create_from_group stub
+// compiled when MPI_VERSION < 4 (the library lacks the MPI 4.0 operation).
+// src/error.rs maps it to Error::NotSupported. This MUST stay in
 // sync with the mirrored const in src/error.rs.
 #define FERROMPI_ERR_NOT_SUPPORTED   (-7008)
+
+// Open MPI 5 implements the MPI 4.0 persistent collectives while its mpi.h
+// still reports MPI_VERSION 3. The _c large-count calls stay gated on
+// MPI_VERSION >= 4: Open MPI 5 has none.
+#if MPI_VERSION >= 4 || (defined(OMPI_MAJOR_VERSION) && OMPI_MAJOR_VERSION >= 5)
+#define FERROMPI_HAVE_MPI4_COLLECTIVES 1
+#endif
 
 // Written to a window-allocating shim's handle out-parameter when MPI
 // created the window but zeroing it failed: the window is never freed.
@@ -2365,7 +2373,7 @@ int ferrompi_bsend_init(
  * Generic Persistent Collectives (MPI 4.0+)
  * ============================================================ */
 
-#if MPI_VERSION >= 4
+#ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
 
 int ferrompi_bcast_init(
     void* buf,
@@ -2382,7 +2390,11 @@ int ferrompi_bcast_init(
     int ret;
 
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Bcast_init_c(buf, (MPI_Count)count, dt, root, comm, MPI_INFO_NULL, &req);
+#else
+        return MPI_ERR_COUNT;
+#endif
     } else {
         ret = MPI_Bcast_init(buf, (int)count, dt, root, comm, MPI_INFO_NULL, &req);
     }
@@ -2416,8 +2428,12 @@ int ferrompi_allreduce_init(
     int ret;
 
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Allreduce_init_c(sb, recvbuf, (MPI_Count)count, dt,
                                     mpi_op, comm, MPI_INFO_NULL, &req);
+#else
+        return MPI_ERR_COUNT;
+#endif
     } else {
         ret = MPI_Allreduce_init(sb, recvbuf, (int)count, dt,
                                   mpi_op, comm, MPI_INFO_NULL, &req);
@@ -2452,9 +2468,13 @@ int ferrompi_gather_init(
     int ret;
 
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Gather_init_c(sb, (MPI_Count)sendcount, dt,
                                  recvbuf, (MPI_Count)recvcount, dt,
                                  root, comm, MPI_INFO_NULL, &req);
+#else
+        return MPI_ERR_COUNT;
+#endif
     } else {
         ret = MPI_Gather_init(sb, (int)sendcount, dt,
                               recvbuf, (int)recvcount, dt,
@@ -2490,8 +2510,12 @@ int ferrompi_reduce_init(
     int ret;
 
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Reduce_init_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm,
                                  MPI_INFO_NULL, &req);
+#else
+        return MPI_ERR_COUNT;
+#endif
     } else {
         ret = MPI_Reduce_init(sendbuf, recvbuf, (int)count, dt, mpi_op, root, comm,
                               MPI_INFO_NULL, &req);
@@ -2526,9 +2550,13 @@ int ferrompi_scatter_init(
     int ret;
 
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Scatter_init_c(sendbuf, (MPI_Count)sendcount, dt,
                                   rb, (MPI_Count)recvcount, dt,
                                   root, comm, MPI_INFO_NULL, &req);
+#else
+        return MPI_ERR_COUNT;
+#endif
     } else {
         ret = MPI_Scatter_init(sendbuf, (int)sendcount, dt,
                                rb, (int)recvcount, dt,
@@ -2563,9 +2591,13 @@ int ferrompi_allgather_init(
     int ret;
 
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Allgather_init_c(sb, (MPI_Count)sendcount, dt,
                                     recvbuf, (MPI_Count)recvcount, dt,
                                     comm, MPI_INFO_NULL, &req);
+#else
+        return MPI_ERR_COUNT;
+#endif
     } else {
         ret = MPI_Allgather_init(sb, (int)sendcount, dt,
                                  recvbuf, (int)recvcount, dt,
@@ -2600,8 +2632,12 @@ int ferrompi_scan_init(
     int ret;
 
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Scan_init_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm,
                                MPI_INFO_NULL, &req);
+#else
+        return MPI_ERR_COUNT;
+#endif
     } else {
         ret = MPI_Scan_init(sendbuf, recvbuf, (int)count, dt, mpi_op, comm,
                             MPI_INFO_NULL, &req);
@@ -2635,8 +2671,12 @@ int ferrompi_exscan_init(
     int ret;
 
     if (count > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Exscan_init_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm,
                                  MPI_INFO_NULL, &req);
+#else
+        return MPI_ERR_COUNT;
+#endif
     } else {
         ret = MPI_Exscan_init(sendbuf, recvbuf, (int)count, dt, mpi_op, comm,
                               MPI_INFO_NULL, &req);
@@ -2670,9 +2710,13 @@ int ferrompi_alltoall_init(
     int ret;
 
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Alltoall_init_c(sb, (MPI_Count)sendcount, dt,
                                    recvbuf, (MPI_Count)recvcount, dt,
                                    comm, MPI_INFO_NULL, &req);
+#else
+        return MPI_ERR_COUNT;
+#endif
     } else {
         ret = MPI_Alltoall_init(sb, (int)sendcount, dt,
                                 recvbuf, (int)recvcount, dt,
@@ -2839,8 +2883,12 @@ int ferrompi_reduce_scatter_block_init(
     int ret;
 
     if (recvcount > INT_MAX) {
+#if MPI_VERSION >= 4
         ret = MPI_Reduce_scatter_block_init_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op,
                                                comm, MPI_INFO_NULL, &req);
+#else
+        return MPI_ERR_COUNT;
+#endif
     } else {
         ret = MPI_Reduce_scatter_block_init(sendbuf, recvbuf, (int)recvcount, dt, mpi_op, comm,
                                             MPI_INFO_NULL, &req);
@@ -2857,7 +2905,7 @@ int ferrompi_reduce_scatter_block_init(
     return ret;
 }
 
-#else /* MPI_VERSION < 4 */
+#else /* !FERROMPI_HAVE_MPI4_COLLECTIVES */
 
 int ferrompi_bcast_init(void* buf, int64_t count, int32_t datatype_tag, int32_t root,
                         int32_t comm_handle, int64_t* request_handle) {
@@ -2960,7 +3008,7 @@ int ferrompi_reduce_scatter_block_init(const void* sendbuf, void* recvbuf, int64
     return FERROMPI_ERR_NOT_SUPPORTED;
 }
 
-#endif /* MPI_VERSION >= 4 */
+#endif /* FERROMPI_HAVE_MPI4_COLLECTIVES */
 
 /* ============================================================
  * Info Object Operations
