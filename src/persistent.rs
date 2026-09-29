@@ -113,8 +113,10 @@ impl PersistentRequest {
     ///
     /// # Errors
     ///
-    /// Returns an error if the wait fails. The request is inactive
-    /// afterwards either way: MPI completed it with that error.
+    /// Returns an error if the wait fails. A wait that MPI ran leaves the
+    /// request inactive either way: MPI completed it with that error. A call
+    /// rejected before reaching MPI (wrong thread, or after finalize) leaves
+    /// it active.
     #[inline]
     pub fn wait(&mut self) -> Result<()> {
         if !self.active {
