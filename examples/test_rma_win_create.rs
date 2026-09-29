@@ -42,12 +42,14 @@ fn main() {
                 "Win::create raw_handle() = {handle}, expected >= 0"
             );
 
-            let cs = win.comm_size();
-            assert_eq!(cs, size, "Win::create comm_size() mismatch");
+            assert_eq!(win.comm_size(), size, "Win::create comm_size() mismatch");
 
             // Verify local_slice / local_slice_mut round-trip
-            let slice = win.local_slice();
-            assert_eq!(slice.len(), 16, "Win::create local_slice len mismatch");
+            assert_eq!(
+                win.local_slice().len(),
+                16,
+                "Win::create local_slice len mismatch"
+            );
 
             // Win dropped at end of arm — frees a window over caller memory.
             drop(win);
@@ -87,8 +89,7 @@ fn main() {
             "Win::allocate raw_handle() = {handle}, expected >= 0"
         );
 
-        let cs = win.comm_size();
-        assert_eq!(cs, size, "Win::allocate comm_size() mismatch");
+        assert_eq!(win.comm_size(), size, "Win::allocate comm_size() mismatch");
 
         // Verify local_slice_mut write-then-read round-trip
         {
