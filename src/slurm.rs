@@ -76,17 +76,6 @@ mod tests {
         num_nodes,
     };
 
-    #[test]
-    fn not_in_slurm_by_default() {
-        // In a test environment, we're not in a SLURM job
-        // (unless running on a cluster, but CI won't be)
-        if std::env::var("SLURM_JOB_ID").is_err() {
-            assert!(!is_slurm_job());
-            assert!(job_id().is_none());
-            assert!(local_rank().is_none());
-        }
-    }
-
     /// Set an environment variable for `slurm_env_var_parsing` below.
     fn set_env(key: &str, value: &str) {
         // SAFETY: slurm_env_var_parsing is the only test in this crate that
@@ -111,12 +100,18 @@ mod tests {
         }
     }
 
-    /// Tests that mutate environment variables are combined into a single test
-    /// to avoid data races when tests run in parallel. `env::set_var` and
-    /// `env::remove_var` are not thread-safe — multiple tests touching the same
-    /// env vars concurrently will produce flaky results.
+    /// Every test that reads or writes `SLURM_*` variables lives in this one
+    /// test: another test reading them in parallel would see this one's
+    /// writes.
     #[test]
     fn slurm_env_var_parsing() {
+        // --- outside a SLURM job, before any variable is set here ---
+        if std::env::var("SLURM_JOB_ID").is_err() {
+            assert!(!is_slurm_job());
+            assert!(job_id().is_none());
+            assert!(local_rank().is_none());
+        }
+
         // --- local_size: parses SLURM_TASKS_PER_NODE "4(x2)" format ---
         set_env("SLURM_TASKS_PER_NODE", "4(x2)");
         unset_env("SLURM_NTASKS_PER_NODE");
