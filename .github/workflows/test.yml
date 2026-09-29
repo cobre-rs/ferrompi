@@ -139,7 +139,6 @@ jobs:
     env:
       OMPI_ALLOW_RUN_AS_ROOT: 1
       OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: 1
-      CARGO_TERM_COLOR: always
 
     steps:
       - name: Install OpenMPI and build tools
