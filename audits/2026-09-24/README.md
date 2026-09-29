@@ -142,7 +142,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-09 | `-1` = PROC_NULL (MPICH) vs ANY_SOURCE (Open MPI) | minor | repro | 0.6 | open |
 | COR-10 | `cancel()` allowed on collective/RMA requests | minor | repro | 0.5.x | fixed (4947bc4) |
 | COR-11 | `LongDoubleInt`/`LongInt` layout wrong on macOS arm64 / Windows | minor | reading | 0.5.x | fixed (3a01966): target gating; per-target layouts open (0.6) |
-| COR-12 | Pre-MPI-4 stubs never yield `NotSupported`; 3 contradicting docs | minor | reading | 0.5.x | fixed (58f8fdc): stub mapping; contradicting docs planned (ferrompi-0.5.x-hardening) |
+| COR-12 | Pre-MPI-4 stubs never yield `NotSupported`; 3 contradicting docs | minor | reading | 0.5.x | fixed (58f8fdc, 134bfed): stub mapping, ADR-0004; docs/mpi-compatibility.md planned (ferrompi-0.5.x-hardening) |
 | COR-13 | `Win::sync` rustdoc wrong; example fails on MPICH | minor | repro | 0.5.x docs / 0.6 API | fixed (3f50248): rustdoc; docs/mpi-compatibility.md planned (ferrompi-0.5.x-hardening); sync on lock guards open (0.6) |
 | COR-14 | `MPI_UNDEFINED` from `MPI_Get_count` leaks; rc ignored | nit | reading | 0.5.x | fixed (e918274) |
 | COR-15 | `op_set_closure` no bounds check; `op_create_user` no `op_used` check | nit | reading | 0.5.x | fixed (2d53b18) |
@@ -231,8 +231,8 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | DOC-01 | `docs/architecture.md` false statements | major | 0.5.x | fixed (713cb4f) |
 | DOC-02 | ADR-0001 driver 1 false (= ABI-05) | minor | 0.5.x | fixed (03f01e8) |
 | DOC-03 | ADR-0002 claims that do not hold | minor | 0.5.x | fixed (605fd2d) |
-| DOC-04 | ADR-0004 lifetime rejection mis-argued; nonexistent variant | minor | 0.5.x note / 0.6 new ADR | planned (ferrompi-0.5.x-hardening: note); new ADR open (0.6) |
-| DOC-05 | ADR-0005 Decision 7 describes the rejected design; plan sections | major | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| DOC-04 | ADR-0004 lifetime rejection mis-argued; nonexistent variant | minor | 0.5.x note / 0.6 new ADR | fixed (134bfed): note; new ADR open (0.6) |
+| DOC-05 | ADR-0005 Decision 7 describes the rejected design; plan sections | major | 0.5.x | fixed (134bfed) |
 | DOC-06 | Migration guide: nonexistent APIs, false safety claim | major | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-07 | `docs/mpi-compatibility.md` inaccuracies | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-08 | `README.md` inaccuracies (badge, version, reqs, `LD_LIBRARY_PATH`) | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
