@@ -55,6 +55,8 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   MPICH used to treat `-1` as `MPI_PROC_NULL`, a silent no-op.
 - **Invalid arguments that used to reach MPI unchecked now return `Err`**
   in more cases; see Fixed below for the specific checks.
+- **`WinKind` is removed.** No function returned or accepted it; code that
+  only named the type can drop the reference.
 
 ### Added
 

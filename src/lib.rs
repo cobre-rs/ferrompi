@@ -201,7 +201,7 @@ pub use topology::{HostEntry, TopologyInfo};
 #[cfg(feature = "rma")]
 pub use window::{
     LockAllGuard, LockGuard, LockType, PendingFetchResult, SharedWindow, Win, WinFenceAssert,
-    WinKind, WinLockAllGuard, WinLockGuard, WinPscwAssert,
+    WinLockAllGuard, WinLockGuard, WinPscwAssert,
 };
 
 #[cfg(doctest)]

@@ -973,18 +973,6 @@ impl<T> Drop for PendingFetchResult<T> {
     }
 }
 
-/// Whether a window's local memory is caller-supplied (`Win::create`) or
-/// MPI-allocated (`Win::allocate`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WinKind {
-    /// Buffer was supplied by the caller (`Win::create`). The user owns the
-    /// memory; `Drop` calls `MPI_Win_free` but does **not** free the buffer.
-    Created,
-    /// Buffer was allocated by MPI (`Win::allocate`). `Drop` calls
-    /// `MPI_Win_free` which also releases the MPI-managed buffer.
-    Allocated,
-}
-
 /// A general-purpose distributed RMA window.
 ///
 /// `Win<'a, T>` wraps either:

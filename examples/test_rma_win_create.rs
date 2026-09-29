@@ -49,8 +49,7 @@ fn main() {
             let slice = win.local_slice();
             assert_eq!(slice.len(), 16, "Win::create local_slice len mismatch");
 
-            // Win dropped at end of arm — exercises MPI_Win_free for
-            // WinKind::Created.
+            // Win dropped at end of arm — frees a window over caller memory.
             drop(win);
             false
         }
@@ -116,7 +115,7 @@ fn main() {
             }
         }
 
-        // Win dropped here — exercises MPI_Win_free for WinKind::Allocated
+        // Win dropped here — frees a window over MPI-allocated memory.
     }
 
     world.barrier().expect("barrier after test 2 failed");
