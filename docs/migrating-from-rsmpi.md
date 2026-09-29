@@ -18,22 +18,22 @@ function-for-function mapping as a conversion reference.
 The table below lists the dimensions that matter most during migration. See
 `docs/architecture.md` for the rationale behind each design choice.
 
-| Dimension                   | rsmpi 0.8                                    | ferrompi 0.6                                                          |
-| ---------------------------- | --------------------------------------------- | ----------------------------------------------------------------------- |
-| MPI standard                 | 3.1                                            | MPI 3.1 library; MPI 4.0 operations when the library reports MPI 4.0  |
-| Persistent collectives       | No                                             | Yes, with an MPI 4.0 library (MPICH 4.x) (`_init` / `start` / `wait`) |
-| Large-count (>2³¹)           | No                                             | Yes, with an MPI 4.0 library (MPICH 4.x)                              |
-| Thread safety                | `!Send` — communicators cannot cross threads | `Send + Sync` — hybrid MPI+threads                                    |
-| Generic API style            | Trait objects (`Buffer`, `BufferMut`)         | Sealed trait (`MpiDatatype`)                                          |
-| Buffer wrapping              | `.buffer()` / `.buffer_mut()` required        | `&[T]` / `&mut [T]` directly                                          |
-| Custom datatypes             | `Equivalence` derive macro                    | `CustomDatatype` builder + `BytePermutable`                           |
-| Custom reductions            | `UserOperation` trait                         | `UserOp<T: MpiDatatype>` (16-slot registry)                           |
-| Error handling                | Panics on MPI errors by default               | `Result<T, Error>` on every call                                      |
-| RAII cleanup                  | Manual or partial                             | Full — `Drop` frees groups, comms, windows, datatypes, ops           |
-| Shared memory / RMA windows   | No                                             | Yes — `SharedWindow<T>` and `Win<T>`, both behind the `rma` feature  |
-| Intercommunicators            | Yes                                            | No                                                                     |
-| Dynamic processes             | Yes (`spawn`, `accept`, `open_port`)          | No                                                                     |
-| MPI I/O                       | Yes (`MPI_File_*`)                            | No                                                                     |
+| Dimension                   | rsmpi 0.8                                    | ferrompi 0.6                                                                                                     |
+| ---------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| MPI standard                 | 3.1                                            | MPI 3.1 library; MPI 4.0 operations when the library reports MPI 4.0 (persistent collectives also on Open MPI 5) |
+| Persistent collectives       | No                                             | Yes, with MPICH 4.x or Open MPI 5 (`_init` / `start` / `wait`)                                                   |
+| Large-count (>2³¹)           | No                                             | Yes, with an MPI 4.0 library (MPICH 4.x)                                                                         |
+| Thread safety                | `!Send` — communicators cannot cross threads | `Send + Sync` — hybrid MPI+threads                                                                               |
+| Generic API style            | Trait objects (`Buffer`, `BufferMut`)         | Sealed trait (`MpiDatatype`)                                                                                     |
+| Buffer wrapping              | `.buffer()` / `.buffer_mut()` required        | `&[T]` / `&mut [T]` directly                                                                                     |
+| Custom datatypes             | `Equivalence` derive macro                    | `CustomDatatype` builder + `BytePermutable`                                                                      |
+| Custom reductions            | `UserOperation` trait                         | `UserOp<T: MpiDatatype>` (16-slot registry)                                                                      |
+| Error handling                | Panics on MPI errors by default               | `Result<T, Error>` on every call                                                                                 |
+| RAII cleanup                  | Manual or partial                             | Full — `Drop` frees groups, comms, windows, datatypes, ops                                                       |
+| Shared memory / RMA windows   | No                                             | Yes — `SharedWindow<T>` and `Win<T>`, both behind the `rma` feature                                              |
+| Intercommunicators            | Yes                                            | No                                                                                                               |
+| Dynamic processes             | Yes (`spawn`, `accept`, `open_port`)          | No                                                                                                               |
+| MPI I/O                       | Yes (`MPI_File_*`)                            | No                                                                                                               |
 
 ferrompi is deliberately narrower than rsmpi. The trade-off is a smaller, more
 consistent API in exchange for dropping features that few HPC applications use.
@@ -397,9 +397,9 @@ Key differences: `bcast_init` calls `MPI_Bcast_init` once; each `start`/`wait` p
 calls `MPI_Start`/`MPI_Wait` without reinitialising the request. On MPICH at 2
 ranks, a persistent allreduce was 20–58 % faster per call than `iallreduce` up to
 4 KiB, at most 8 % faster at 32 KiB, and no faster from 256 KiB (`benches/README.md`).
-Open MPI 4.1 and 5.0 report MPI 3.1, so ferrompi's persistent collectives return
-`Error::NotSupported` there. The `PersistentRequest` is freed automatically when it
-goes out of scope.
+Open MPI 4.1 lacks the MPI 4.0 `MPI_*_init` entry points, so ferrompi's persistent
+collectives return `Error::NotSupported` there; Open MPI 5 provides them. The
+`PersistentRequest` is freed automatically when it goes out of scope.
 
 ---
 

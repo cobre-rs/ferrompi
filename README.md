@@ -13,7 +13,7 @@
 
 - Generic over `MpiDatatype`: one API for `f32`, `f64`, `i32`, `i64`, `u8`, `u32`, and `u64`.
 - Fallible operations return `Result` with structured MPI error context, not panics.
-- Persistent collectives and counts above `i32::MAX` when the library reports MPI 4.0.
+- Persistent collectives when the library reports MPI 4.0 or is Open MPI 5; counts above `i32::MAX` when it reports MPI 4.0.
 - RMA and shared-memory windows with RAII lock guards (feature: `rma`).
 - Hybrid MPI + threads: `Communicator` is `Send + Sync`, and a call from a thread the requested `ThreadLevel` does not permit is rejected at run time.
 - On MPICH at 2 ranks, a persistent allreduce was 20–58 % faster per call than `iallreduce` up to 4 KiB, at most 8 % faster at 32 KiB, and no faster from 256 KiB ([benches](benches/README.md)).
@@ -23,7 +23,7 @@
 - **Rust 1.85** or newer (MSRV).
 - **Linux**, the only CI-tested platform. macOS builds but is not CI-tested and lacks `LongDoubleInt`/`LongInt`. Windows is not supported.
 - An MPI 3.1 library. CI tests MPICH 4.2, Open MPI 4.1 and Open MPI 5.0.
-- Persistent collectives, `create_from_group` and counts above `i32::MAX` need a library that reports MPI 4.0 — currently MPICH 4.x (both Open MPI versions report 3.1).
+- Persistent collectives and `create_from_group` need a library that reports MPI 4.0 (MPICH 4.x) or Open MPI 5. Counts above `i32::MAX` need one that reports MPI 4.0; both Open MPI versions report 3.1.
 
 **Ubuntu/Debian:**
 

@@ -458,6 +458,7 @@ shims. On an MPI older than 4.0 the shims return a ferrompi sentinel that surfac
 version gate, and no runtime version probe is required.
 
 > **Amended 2026-09-24 — Constructor set and MPI version gates.** See [Amendments](#amendments).
+> **Amended 2026-09-29 — Open MPI 5 capability gate.** See [Amendments](#amendments).
 
 ---
 
@@ -537,10 +538,17 @@ The 10–30% per-iteration figure above was not measured. On MPICH at 2 ranks, a
 persistent allreduce was 20–58 % faster per call than `iallreduce` up to 4 KiB, at most
 8 % faster at 32 KiB, and no faster from 256 KiB.
 
+### 2026-09-29 — Open MPI 5 capability gate
+
+The collective constructors are compiled when `mpi.h` reports `MPI_VERSION >= 4` or the
+library is Open MPI 5 or later, which implements them while reporting MPI 3.1. Their
+large-count forms stay gated on `MPI_VERSION >= 4`. Elsewhere the constructors return
+`Err(Error::NotSupported(_))` as before.
+
 ---
 
 ## Status
 
-Accepted — 2026-05-17; amended 2026-09-24. The implementation lives in `src/persistent.rs` (the `PersistentRequest`
+Accepted — 2026-05-17; amended 2026-09-24, 2026-09-29. The implementation lives in `src/persistent.rs` (the `PersistentRequest`
 type and its `Drop` impl) and `src/comm/persistent.rs` (all `*_init` constructor methods
 on `Communicator`).

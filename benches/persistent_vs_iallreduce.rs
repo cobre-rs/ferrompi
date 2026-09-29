@@ -46,7 +46,7 @@ fn bench_iterative_allreduce(c: &mut Criterion, world: &Communicator) {
         let mut recv = vec![0.0f64; n];
         let mut persistent = world
             .allreduce_init(&send, &mut recv, ReduceOp::Sum)
-            .expect("allreduce_init needs an MPI-4 library");
+            .expect("allreduce_init needs persistent collectives");
 
         group.bench_with_input(BenchmarkId::new("persistent", bytes), &n, |b, _| {
             b.iter(|| {
@@ -102,7 +102,7 @@ fn run_follower(world: &Communicator) {
             persistent = Some(
                 world
                     .allreduce_init(&send, &mut recv, ReduceOp::Sum)
-                    .expect("allreduce_init needs an MPI-4 library"),
+                    .expect("allreduce_init needs persistent collectives"),
             );
         }
 

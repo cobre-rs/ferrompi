@@ -12,40 +12,41 @@ Linux is the supported platform and the only one CI tests (x86_64,
 and `LongInt` are available only on Linux, and only on x86_64, aarch64 and
 little-endian powerpc64. Windows is not supported.
 
-ferrompi needs an MPI 3.1 library. It enables its MPI 4.0 operations —
-persistent collectives, `Mpi::create_from_group`, and the `_c` large-count
-calls — only when the library's `mpi.h` reports `MPI_VERSION >= 4`. Below
-that threshold, persistent collectives and `create_from_group` return
-`Error::NotSupported`, and a count above `i32::MAX` returns `Error::Mpi` with
+ferrompi needs an MPI 3.1 library. It enables the persistent collectives and
+`Mpi::create_from_group` when the library's `mpi.h` reports `MPI_VERSION >= 4`,
+or when the library is Open MPI 5 or later, which implements both while
+reporting MPI 3.1; elsewhere they return `Error::NotSupported`. It uses the
+`_c` large-count calls only when `mpi.h` reports `MPI_VERSION >= 4`; below
+that, Open MPI 5 included, a count above `i32::MAX` returns `Error::Mpi` with
 class `Count`. The variable-count collectives (`gatherv`, `scatterv`,
 `allgatherv`, `alltoallv` and their persistent forms) take their counts as
-`i32` arrays; a count above `i32::MAX` returns that same `Count` error on
-every MPI, including one with `MPI_VERSION >= 4`.
+`i32` arrays; a count above `i32::MAX` returns that same `Count` error on every
+MPI, including one with `MPI_VERSION >= 4`.
 
 The table below is the outcome of ferrompi's three CI builds: MPICH 4.2.1
 (`ubuntu-24.04`, the Noble package hotfixed to that version, np 2/3/4,
 default and `rma`), Open MPI 4.1.6 (`ubuntu-24.04`, np 4, default and
 `rma`), and Open MPI 5.0.7 (a pinned `debian:trixie` container, np 4,
-`rma`). Every other MPI — MPICH 3.x, Intel MPI, Cray MPICH, or any other
-Open MPI version — is untested; expect it to behave like the MPICH or Open
-MPI row that reports the same `MPI_VERSION`.
+`rma`). Every other MPI — MPICH 3.x, Intel MPI, Cray MPICH, or any other Open
+MPI version — is untested; expect it to behave like the MPICH row if it reports
+`MPI_VERSION` 4, like the Open MPI 5.0.7 row if it is Open MPI 5 or later, and
+like the Open MPI 4.1.6 row otherwise.
 
 | Feature family | MPICH 4.2.1 | Open MPI 4.1.6 | Open MPI 5.0.7 |
 | --- | --- | --- | --- |
 | Blocking and nonblocking collectives and point-to-point | tested | tested | tested |
 | Persistent point-to-point | tested | tested | tested |
-| Persistent collectives | tested | `NotSupported` | `NotSupported` |
-| `create_from_group` | tested | `NotSupported` | `NotSupported` |
+| Persistent collectives | tested | `NotSupported` | tested |
+| `create_from_group` | tested | `NotSupported` | tested |
 | Counts above `i32::MAX` | tested | `Err` (class `Count`) | `Err` (class `Count`) |
 | RMA windows (`rma`) | tested | tested | tested |
 
 MPICH 4.2.1 reports `MPI_VERSION` 4, which is why it takes the "tested" cell
-throughout. Open MPI 4.1.6 and 5.0.7 both report MPI 3.1 (`MPI_VERSION` 3),
-so ferrompi compiles its MPI 4.0 stubs against them regardless of what the
-library itself implements: Open MPI 5.0.7's library exports
-`MPI_Allreduce_init`, but ferrompi's gate reads the header's `MPI_VERSION`,
-not the library's symbol table, so the call still returns `NotSupported` on
-that build.
+throughout. Open MPI 4.1.6 and 5.0.7 both report MPI 3.1 (`MPI_VERSION` 3).
+Open MPI 5.0.7 implements the persistent collectives and
+`MPI_Comm_create_from_group` anyway, so ferrompi enables them on Open MPI 5 or
+later from the header's `OMPI_MAJOR_VERSION`. It has no `_c` calls, so counts
+above `i32::MAX` return `Count` there, as on Open MPI 4.1.
 
 ## Known implementation issues
 

@@ -7,8 +7,8 @@ the crate, and are not run by CI.
 ## Requirements
 
 - An MPI implementation as `mpiexec` in `PATH`:
-  - `persistent_vs_iallreduce` needs an MPI-4 library (MPICH 4.x). Open MPI 4.1 and 5.0
-    report MPI 3.1 and the bench exits with an `allreduce_init needs an MPI-4 library`
+  - `persistent_vs_iallreduce` needs persistent collectives (MPICH 4.x or Open MPI 5).
+    On Open MPI 4.1 the bench exits with an `allreduce_init needs persistent collectives`
     error.
   - `ffi_overhead`'s direct-MPI arm needs MPICH; on any other library it prints a skip
     line and exits 0.
@@ -100,8 +100,9 @@ On MPICH at 2 ranks, a persistent allreduce was 20–58 % faster per call than
 table above shows the 8 % separation at 32 KiB holds only over UCX; the local `ch4:ofi`
 run shows no separation at that size.
 
-No Open MPI regime exists: ferrompi's MPI-4 gate rejects `allreduce_init` on Open MPI 4.1
-and 5.0 before any timing is possible.
+The bench also runs on Open MPI 5, but its regime there is unmeasured: the table above
+was measured on MPICH only. Open MPI 4.1 lacks the MPI 4.0 `MPI_*_init` entry points, so
+ferrompi does not enable persistent collectives there.
 
 This benchmark is not a pass/fail gate — the reported numbers are inspected by a human.
 
