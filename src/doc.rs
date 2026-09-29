@@ -32,42 +32,20 @@ pub mod migrating_from_rsmpi {}
 #[doc = include_str!("../docs/mpi-compatibility.md")]
 pub mod mpi_compatibility {}
 
-/// ADR-0001: Why ferrompi uses a hand-written C wrapper layer.
-///
-/// Explains the ABI portability problem with `bindgen`, the handle-table
-/// pattern, large-count version gating, and the op-trampoline infrastructure.
 #[doc = include_str!("../docs/adr/0001-why-c-wrapper.md")]
 pub mod adr_0001_why_c_wrapper {}
 
-/// ADR-0002: Handle-table concurrency strategy for the request table.
-///
-/// Justifies C11 atomic `compare_exchange_strong` over pthread mutex and a
-/// lock-free Treiber stack for safe concurrent slot allocation under
-/// `MPI_THREAD_MULTIPLE`.
 #[doc = include_str!("../docs/adr/0002-handle-tables.md")]
 pub mod adr_0002_handle_tables {}
 
-/// ADR-0003: Sealed generic `MpiDatatype` trait family.
-///
-/// Documents the design of the sealed-trait type family (`MpiDatatype`,
-/// `MpiIndexedDatatype`, `BytePermutable`, `AtomicMpiDatatype`) and the
-/// `#[repr(i32)]` discriminant ABI contract for `DatatypeTag`.
 #[doc = include_str!("../docs/adr/0003-generic-mpi-datatype.md")]
 pub mod adr_0003_generic_mpi_datatype {}
 
-/// ADR-0004: `PersistentRequest` lifecycle and buffer-lifetime invariants.
-///
-/// Covers the `*_init` / `start` / `wait` lifecycle, the decision to omit
-/// `_c` large-count variants from persistent shims, and the buffer-borrow
-/// safety model.
 #[doc = include_str!("../docs/adr/0004-persistent-collective-approach.md")]
 pub mod adr_0004_persistent_collective_approach {}
 
-/// ADR-0005: `MPI_Op_create` safety model.
-///
-/// Seven decisions covering closure storage (per-op static slot table),
-/// `Send + Sync + 'static` bounds, `MPI_Op_free`-before-slot-release drop
-/// ordering, default commutativity, per-slot baked-index C trampolines, and
-/// `catch_unwind + abort` panic handling.
 #[doc = include_str!("../docs/adr/0005-mpi-op-create.md")]
 pub mod adr_0005_mpi_op_create {}
+
+#[doc = include_str!("../docs/adr/0006-mpi5-abi-direction.md")]
+pub mod adr_0006_mpi5_abi_direction {}
