@@ -110,10 +110,11 @@ pub struct Communicator {
 // Every MPI call goes through the lifecycle guard (`rt::enter`): below
 // `ThreadLevel::Serialized` (Single or Funneled), it rejects a call from any
 // thread other than the one that called `Mpi::init`/`init_thread`, with
-// `Err(Error::ThreadLevelViolation)`, without touching MPI. At `Serialized`,
-// the caller must serialize its own calls (debug builds detect two
-// overlapping calls). At `Multiple`, calls from any thread may run
-// concurrently.
+// `Err(Error::ThreadLevelViolation)`, without touching MPI. A `Drop` cannot
+// return `Err`, so the equivalent guard (`rt::drop_guard`) instead aborts the
+// process on a wrong-thread drop below `Serialized`. At `Serialized`, the
+// caller must serialize its own calls (debug builds detect two overlapping
+// calls). At `Multiple`, calls from any thread may run concurrently.
 //
 // All seven C-layer handle tables (comm_table, request_table, win_table,
 // info_table, group_table, datatype_table, op_table) use the C11 atomic-CAS

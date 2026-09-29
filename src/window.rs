@@ -1829,12 +1829,13 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// `request.wait()` returns, the `origin` slice can be safely overwritten
     /// or dropped. **Remote completion is not guaranteed by the request**: the
     /// remote rank does not observe the written data until the surrounding epoch
-    /// closes (fence / complete / unlock).
+    /// is flushed or closed (a lock guard's `flush`, or the unlock when the guard
+    /// drops).
     ///
     /// # Local vs. Remote completion
     ///
     /// - `request.wait()` → local buffer is free to reuse.
-    /// - Epoch close (fence / unlock / complete) → remote rank observes the
+    /// - Flush or unlock (guard drop) → remote rank observes the
     ///   write.
     ///
     /// Both are required for the full operation to be visible end-to-end.
@@ -1867,9 +1868,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Epoch Requirement
     ///
-    /// `rput` must be called inside an active access epoch (passive-target lock,
-    /// fence, or PSCW). Calling it outside an epoch is undefined per the MPI
-    /// standard.
+    /// `rput` must be called inside a passive-target epoch, that is between
+    /// [`Win::lock`] or [`Win::lock_all`] and the unlock when the guard
+    /// drops. MPI does not allow request-based RMA in fence or PSCW epochs;
+    /// calling it anywhere else is erroneous.
     ///
     /// # Example
     ///
@@ -1889,7 +1891,8 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///     req.wait().unwrap(); // local buffer safe to reuse after this
     ///     // Remote write completes when _guard drops (MPI_Win_unlock)
     /// }
-    /// // Rank 1 can read its local memory after a barrier here
+    /// // Rank 1 can read its local memory after a barrier and a lock (or
+    /// // `sync`) on its own window
     /// ```
     pub fn rput(
         &self,
@@ -2059,9 +2062,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Epoch Requirement
     ///
-    /// `rget` must be called inside an active access epoch (passive-target lock,
-    /// fence, or PSCW). Calling it outside an epoch is undefined per the MPI
-    /// standard.
+    /// `rget` must be called inside a passive-target epoch, that is between
+    /// [`Win::lock`] or [`Win::lock_all`] and the unlock when the guard
+    /// drops. MPI does not allow request-based RMA in fence or PSCW epochs;
+    /// calling it anywhere else is erroneous.
     ///
     /// # Cancellation
     ///
@@ -2240,8 +2244,8 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// Wraps `MPI_Raccumulate`. Unlike [`Win::accumulate`], local completion
     /// (i.e., the `origin` buffer being safe to reuse) is signaled by the
     /// returned [`Request`] rather than the epoch boundary. **Remote-side
-    /// completion** (visibility at the target) still requires the surrounding
-    /// epoch to close (fence, `complete`, or `unlock`). This is the same
+    /// completion** (visibility at the target) still requires a flush or the
+    /// unlock that closes the passive-target epoch. This is the same
     /// local-completion contract as [`Win::rput`].
     ///
     /// Any [`ReduceOp`] variant is accepted, including [`ReduceOp::Replace`]
@@ -2281,14 +2285,15 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Epoch Requirement
     ///
-    /// `raccumulate` must be called inside an active access epoch
-    /// (passive-target lock, fence, or PSCW). Calling it outside an epoch is
-    /// undefined per the MPI standard.
+    /// `raccumulate` must be called inside a passive-target epoch, that is
+    /// between [`Win::lock`] or [`Win::lock_all`] and the unlock when the
+    /// guard drops. MPI does not allow request-based RMA in fence or PSCW
+    /// epochs; calling it anywhere else is erroneous.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{LockType, Mpi, ReduceOp, Win};
+    /// use ferrompi::{LockType, Mpi, ReduceOp, Win, WinFenceAssert};
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
@@ -2298,16 +2303,26 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///     win.local_slice_mut().copy_from_slice(&[1, 2, 3, 4]);
     /// }
     ///
-    /// win.fence(ferrompi::WinFenceAssert::default()).unwrap();
+    /// // Make rank 1's store visible in its window; `no_succeed` says no fence
+    /// // epoch follows. The barrier orders the store before rank 0's lock.
+    /// win.fence(WinFenceAssert::no_succeed()).unwrap();
+    /// world.barrier().unwrap();
     ///
+    /// // Request-based RMA is valid only in a passive-target epoch
     /// if world.rank() == 0 {
     ///     let _guard = win.lock(LockType::Exclusive, 1).unwrap();
     ///     let buf = [10i32, 20, 30, 40];
     ///     let req = win.raccumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum).unwrap();
     ///     req.wait().unwrap(); // origin buffer safe to reuse after this
-    ///     // _guard drops here (MPI_Win_unlock) — remote visibility guaranteed
+    ///     // _guard drops here (MPI_Win_unlock): the update completes at rank 1
     /// }
-    /// // Rank 1's window is now [11, 22, 33, 44]
+    ///
+    /// world.barrier().unwrap();
+    /// if world.rank() == 1 {
+    ///     // Locking its own window makes the update visible to rank 1's loads
+    ///     let _guard = win.lock(LockType::Shared, 1).unwrap();
+    ///     assert_eq!(win.local_slice(), &[11, 22, 33, 44]);
+    /// }
     /// ```
     pub fn raccumulate(
         &self,
