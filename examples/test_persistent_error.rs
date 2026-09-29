@@ -14,7 +14,18 @@
 //! inactive one and completes the other instead of rejecting the whole
 //! batch.
 //!
-//! Part 4 checks the other half of the same bookkeeping: the finalize sweep
+//! Part 4 checks a `start_all` over a persistent receive from self and a
+//! persistent buffered send: on MPICH, an unattached buffer makes it fail
+//! after starting only the receive; both requests must come back
+//! `is_active()` regardless. Other libraries observed so far only surface
+//! a missing buffer as a hang once something actually waits on the send,
+//! so there a small attached buffer is used instead and `start_all`
+//! succeeds outright — still exercising the same bookkeeping, just without
+//! a failure to over-mark from. Either way, a matching send to self and a
+//! `wait_all` complete whichever of the two requests did start, and the
+//! receive's data must have arrived.
+//!
+//! Part 5 checks the other half of the same bookkeeping: the finalize sweep
 //! must not count a request that failed through `wait`/`test` as still
 //! active. Rank 0 keeps its two failed persistent requests alive (never
 //! dropped) alongside one plain nonblocking receive it deliberately never
@@ -199,13 +210,84 @@ fn part3_wait_all_skips_inactive(world: &Communicator, rank: i32) {
     }
 }
 
+// A `start_all` that fails partway through must still mark every request
+// it was given active, not just the ones MPI finished starting: rank 0
+// builds a receive from itself (tag 75) and a buffered send (tag 79, never
+// matched). On MPICH, `bsend_init` with no buffer attached fails
+// `MPI_Startall` outright once it reaches the send, after the receive has
+// already started. Other libraries observed so far defer that check past
+// `MPI_Startall` to whenever the send is actually driven to completion, so
+// running the same no-buffer send through a `wait` there hangs forever
+// instead of failing; a small attached buffer avoids that hang and lets
+// `start_all` and `wait_all` both succeed, which still exercises the same
+// activity bookkeeping (just without a failure to over-mark from). Either
+// way, a matching send to self and a `wait_all` complete whichever request
+// did start, and the buffered send's own error, if the library reports
+// one, must not stop the receive from completing.
+fn part4_partial_start_all(world: &Communicator, mpi: &Mpi, rank: i32, mpich: bool) {
+    if rank == 0 {
+        let mut small = [0i32; 1];
+
+        if !mpich {
+            mpi.buffer_attach(vec![0u8; 64 * 1024].into_boxed_slice())
+                .expect("part4: buffer_attach");
+        }
+        let payload_len = if mpich { 1 << 16 } else { 1 };
+        let big = vec![0.0f64; payload_len];
+
+        let recv_req = world
+            .recv_init(&mut small, 0, 75)
+            .expect("part4: recv_init from self");
+        let bsend_req = world.bsend_init(&big, 0, 79).expect("part4: bsend_init");
+        let mut reqs = [recv_req, bsend_req];
+
+        let start_result = PersistentRequest::start_all(&mut reqs);
+        let mut ok = if mpich {
+            start_result.is_err()
+        } else {
+            start_result.is_ok()
+        };
+        ok &= reqs[0].is_active();
+        ok &= reqs[1].is_active();
+
+        world
+            .send(&[42i32], 0, 75)
+            .expect("part4: send to self (matches the recv)");
+
+        let wait_result = PersistentRequest::wait_all(&mut reqs);
+        // On MPICH the buffered send never had a buffer to send from, so
+        // wait_all reports ERR_BUFFER behind it; with a buffer attached it
+        // completes normally. Either way the receive must complete.
+        ok &= wait_result.is_ok() || class_of(&wait_result) == Some(MpiErrorClass::Buffer);
+        ok &= !reqs[0].is_active();
+        ok &= !reqs[1].is_active();
+        ok &= small == [42];
+
+        if !mpich {
+            ok &= mpi.buffer_detach().is_ok();
+        }
+
+        common::check(
+            world,
+            ok,
+            "part 4: start_all marks every request active after a partial failure",
+        );
+    } else {
+        common::check(
+            world,
+            true,
+            "part 4: start_all marks every request active after a partial failure",
+        );
+    }
+}
+
 // Rank 0 keeps two failed persistent requests (one completed through
 // `wait`, one through `test`) and one never-completed plain receive alive
 // across `drop(mpi)`, then finalizes while all three are still registered.
 // Only the never-completed plain receive should be counted active; the
 // module-level `mpi-test-stderr` directive pins the expected count to
 // catch the finalize sweep miscounting either failed persistent request.
-fn part4_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
+fn part5_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
     let mut small_a = [0i32; 1];
     let mut small_b = [0i32; 1];
     let mut ctrl = [0i32; 1];
@@ -213,14 +295,14 @@ fn part4_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
     if rank == 0 {
         let mut req_a = world
             .recv_init(&mut small_a, 1, 76)
-            .expect("part4: recv_init a");
+            .expect("part5: recv_init a");
         let mut req_b = world
             .recv_init(&mut small_b, 1, 77)
-            .expect("part4: recv_init b");
-        req_a.start().expect("part4: start a");
-        req_b.start().expect("part4: start b");
-        world.barrier().expect("part4: barrier A");
-        world.barrier().expect("part4: barrier B");
+            .expect("part5: recv_init b");
+        req_a.start().expect("part5: start a");
+        req_b.start().expect("part5: start b");
+        world.barrier().expect("part5: barrier A");
+        world.barrier().expect("part5: barrier B");
 
         let result_a = req_a.wait();
         let mut ok = class_of(&result_a) == Some(MpiErrorClass::Truncate);
@@ -239,13 +321,13 @@ fn part4_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
 
         // Never waited: stays active until finalize, giving the sweep
         // exactly one request it must count.
-        let ctrl_req = world.irecv(&mut ctrl, 1, 78).expect("part4: irecv ctrl");
-        world.barrier().expect("part4: barrier C");
+        let ctrl_req = world.irecv(&mut ctrl, 1, 78).expect("part5: irecv ctrl");
+        world.barrier().expect("part5: barrier C");
 
         common::check(
             world,
             ok,
-            "part 4: a failed persistent wait or test does not leave the request counted active at finalize",
+            "part 5: a failed persistent wait or test does not leave the request counted active at finalize",
         );
 
         // Drop Mpi while req_a, req_b and ctrl_req are still alive: their
@@ -256,22 +338,22 @@ fn part4_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
         drop(req_b);
         drop(ctrl_req);
     } else {
-        world.barrier().expect("part4: barrier A");
+        world.barrier().expect("part5: barrier A");
         world
             .send(&PAYLOAD, 0, 76)
-            .expect("part4: send a (truncates)");
+            .expect("part5: send a (truncates)");
         world
             .send(&PAYLOAD, 0, 77)
-            .expect("part4: send b (truncates)");
-        world.barrier().expect("part4: barrier B");
+            .expect("part5: send b (truncates)");
+        world.barrier().expect("part5: barrier B");
 
-        world.barrier().expect("part4: barrier C");
-        world.send(&[9i32], 0, 78).expect("part4: send ctrl");
+        world.barrier().expect("part5: barrier C");
+        world.send(&[9i32], 0, 78).expect("part5: send ctrl");
 
         common::check(
             world,
             true,
-            "part 4: a failed persistent wait or test does not leave the request counted active at finalize",
+            "part 5: a failed persistent wait or test does not leave the request counted active at finalize",
         );
 
         drop(mpi);
@@ -296,7 +378,8 @@ fn main() {
     part1_wait(&world, rank, mpich);
     part2_test(&world, rank);
     part3_wait_all_skips_inactive(&world, rank);
-    part4_finalize_accounting(mpi, &world, rank);
+    part4_partial_start_all(&world, &mpi, rank, mpich);
+    part5_finalize_accounting(mpi, &world, rank);
 
     if rank == 0 {
         println!("PASS: test_persistent_error");

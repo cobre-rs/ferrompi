@@ -125,7 +125,9 @@ static atomic_int next_request_hint;  // advisory start word for the next scan
 // Per-slot request-kind/activity state, written only by the owning thread
 // (as request_table itself is): REQUEST_PERSISTENT marks a slot registered
 // by a persistent initiator; REQUEST_ACTIVE marks a persistent request
-// active from a successful start until MPI reports it complete. A
+// active from a successful MPI_Start, or from being passed to
+// MPI_Startall (whatever that call returns, since a partial failure can
+// leave some of them already started), until MPI reports it complete. A
 // registered nonblocking (non-persistent) request is always active and
 // carries no REQUEST_ACTIVE bit of its own. Plain bytes, not atomics:
 // distinct slots are distinct objects, and ferrompi_finalize — the one
