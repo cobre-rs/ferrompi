@@ -160,7 +160,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | ID | Title | Sev | Reversibility | Target | Status |
 |---|---|---|---|---|---|
 | ARC-01 | C handle tables are the root cause of ABA, per-request cost, caps, sweep | major | two-way (large) | 0.7 (D-2) | open |
-| ARC-02 | Non-additive `rma` feature; no `#[non_exhaustive]` anywhere | major | one-way | 0.6 | planned (ferrompi-0.5.x-hardening: #[non_exhaustive] on Error); rest open (0.6) |
+| ARC-02 | Non-additive `rma` feature; no `#[non_exhaustive]` anywhere | major | one-way | 0.6 | fixed (1bbac44): #[non_exhaustive] on Error; rest open (0.6) |
 | ARC-03 | Shim representation in public API (`raw_handle`, discriminant contract, pub `from_code`) | major | one-way | 0.6 | open |
 | ARC-04 | Handles not tied to `Mpi` lifetime | major | mixed | 0.5.x guards / 0.6 | fixed (90d9544): runtime guards; lifetime parameter open (0.6) |
 | ARC-05 | Thread-safety model inconsistent | major | mixed | 0.5.x (D-3) | fixed (49cb30c) |
