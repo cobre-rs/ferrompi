@@ -191,6 +191,9 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   active.** MPI completed it with the error; on Open MPI, which frees it,
   `start` now reports `Err` with class `Request` instead of "already
   active".
+- **`PersistentRequest::wait_all` skips inactive requests**, so it
+  completes the others even when Open MPI freed a request whose earlier
+  `wait` failed.
 
 ## [0.5.0] - 2026-06-18
 

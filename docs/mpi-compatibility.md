@@ -83,8 +83,7 @@ One item each: the symptom, the affected library, and what to do.
 - Open MPI 4.1.6 and 5.0.7: a persistent request that fails inside `wait`,
   `test` or `wait_all` is freed by MPI. ferrompi marks the owning
   `PersistentRequest` inactive; a later `start` on it returns `Err` with
-  class `Request`, and it cannot be passed to `wait_all` again. Create a
-  new request to run the operation again.
+  class `Request`. Create a new request to run the operation again.
 - Open MPI 4.1: `Win::create` over a self/TCP-only transport fails with
   `MPI_ERR_WIN`, even at a single process; restricting the transport to one
   interface does not help. In that configuration, `Win::allocate` works

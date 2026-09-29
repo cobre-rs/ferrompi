@@ -196,6 +196,8 @@ impl PersistentRequest {
     /// Whatever the result, every request MPI completed is marked inactive
     /// in place; the others stay active. This is the same policy
     /// [`Request::wait_all`](crate::Request::wait_all) applies.
+    /// Inactive requests are skipped, so a request whose earlier `wait` or
+    /// `test` failed can stay in the slice.
     ///
     /// On a failed request, the returned error carries that request's own
     /// class and code, and its message ends with `(request N)`, `N` being
@@ -212,7 +214,7 @@ impl PersistentRequest {
         // output parameter.
         let ret = crate::request::with_handles(
             requests,
-            |r| r.handle,
+            |r| if r.active { r.handle } else { -1 },
             |handles, done| unsafe {
                 ffi::ferrompi_waitall(
                     handles.len() as i64,
