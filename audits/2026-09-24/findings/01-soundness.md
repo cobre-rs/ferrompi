@@ -147,3 +147,11 @@ Severity legend: **critical** = safe code → UB / memory corruption / data race
 - **Defect:** at `Serialized`/`Multiple`, a worker thread's guarded call (through `enter` or `drop_guard`) can read `Active` from `STATE` just before the init thread's `Mpi::drop` stores `FINALIZED`, then reach MPI just after `ferrompi_finalize` runs. No ordering on `STATE` closes this window; it is currently a caller contract (`Mpi` must not be dropped while another thread is inside an MPI call) that `ferrompi` does not enforce.
 - **Fix direction:** in-flight call tracking in `rt::enter`/its matching exit (an epoch or counter), with `finalize` waiting for it to reach zero before calling `MPI_Finalize`; needs an ADR-033 amendment and an R29 re-measurement of the fast-path overhead under `Multiple`.
 - **Acceptance:** a concurrent-finalize stress repro no longer reaches MPI after `MPI_Finalize` returns, at both `Serialized` and `Multiple`.
+
+### SND-17 — Under fault-tolerant MPI, a receive failing with `MPIX_ERR_PROC_FAILED_PENDING` is treated as complete while MPI still owns its buffer
+
+- **Severity:** major · **Verified:** reading · **Target:** 0.6
+- **Locations:** `src/request.rs:203` (`Request::wait` sets `completed` before calling `MPI_Wait`), `csrc/ferrompi.c:3394-3395` (the waitall shim marks every status other than `MPI_ERR_PENDING` as done).
+- **Defect:** with a library's process-fault-tolerance (ULFM) mode enabled, a wildcard receive can fail with `MPIX_ERR_PROC_FAILED_PENDING` while MPI still holds the request pending. ferrompi marks the request completed and ends the Rust borrow of the receive buffer, so a later matching message can be written into memory the program may have reused or freed. Documented as unsupported in `docs/mpi-compatibility.md`; not enforced.
+- **Fix direction:** in the 0.6 request-completion redesign, treat `MPIX_ERR_PROC_FAILED_PENDING` as still pending (keep the borrow and the handle), or refuse to run when the library's fault-tolerance mode is enabled.
+- **Acceptance:** under a ULFM-enabled library, a wildcard receive that fails with `MPIX_ERR_PROC_FAILED_PENDING` leaves its `Request` incomplete and its buffer borrowed, for both `wait` and `wait_all`.

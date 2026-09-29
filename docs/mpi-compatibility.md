@@ -52,8 +52,7 @@ that build.
 One item each: the symptom, the affected library, and what to do.
 
 - MPICH 4.2.x: `scatter_init_inplace` (persistent `scatter` with
-  `MPI_IN_PLACE`) deadlocks the whole collective — every rank blocks, not
-  only the root that passes `MPI_IN_PLACE`. Fixed in MPICH 4.3. Use
+  `MPI_IN_PLACE` at the root) deadlocks. Fixed in MPICH 4.3. Use
   `scatter_init` with a separate send buffer on 4.2.x instead;
   `examples/test_inplace.rs` detects the affected version string at
   runtime and skips only this one case, not the other in-place persistent
@@ -62,7 +61,7 @@ One item each: the symptom, the affected library, and what to do.
   each sees a world of size 1 — once more than one process is launched. CI
   installs MPICH 4.2.1 from a pinned Ubuntu snapshot instead
   ([Launchpad bug 2072338](https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338)).
-  To use that package, upgrade to MPICH 4.2.1 or later;
+  To avoid it, use an MPICH 4.2.1 or later package;
   `.github/scripts/mpich-hotfix.sh` shows the exact packages CI installs.
 - `Win::sync` outside a passive-target epoch is erroneous; MPICH returns an
   error for it. Call it between `Win::lock`/`Win::lock_all` and the guard's
@@ -184,12 +183,12 @@ module.
 Launch with the library's own `mpiexec` or `srun`, not another
 implementation's.
 
-Run-time costs, measured on MPICH:
+Run-time costs of ferrompi's own checks:
 
 - `Win::create` and `Win::allocate` each perform one allgather of 8 bytes
   per rank, for the RMA bounds check; `SharedWindow::allocate` does not;
 - `Win::allocate` and `SharedWindow::allocate` also zero their segment,
-  which adds a lock-all epoch, two barriers, and a memory-set that commits
+  which adds a lock-all epoch, two barriers, and a `memset` that commits
   every page at construction time. For example, a 64 MiB window at 4 ranks
   took about 60 ms per create-and-free, against about 18 ms for the raw MPI
   calls without ferrompi's zeroing, measured on MPICH 4.2.3 on one host;
