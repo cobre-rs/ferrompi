@@ -180,7 +180,7 @@ jobs:
         run: |
           cargo build --example ulfm_pending
           for mode in wait wait_all wait_any; do
-            out=$(mpiexec --with-ft ulfm -n 3 target/debug/examples/ulfm_pending "$mode" 2>&1 || true)
+            out=$(mpiexec --oversubscribe --with-ft ulfm -n 3 target/debug/examples/ulfm_pending "$mode" 2>&1 || true)
             printf '%s\n' "$out"
             grep -qF 'ferrompi: receive pending after a process failure' <<<"$out"
             if grep -qF 'FAIL: ' <<<"$out"; then exit 1; fi
