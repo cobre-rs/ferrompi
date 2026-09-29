@@ -211,7 +211,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | BLT-08 | Boilerplate SAFETY / marshalling; 59 `unsafe` blocks without SAFETY | 300 | 0.5.x† | fixed (0647d69) |
 | BLT-09 | Three drifted test runners + deprecated `test.sh` | 200 | 0.5.x† | fixed (a0501aa) |
 | BLT-10 | 42 redundant `[[example]]` entries | 185 | 0.5.x† | fixed (07c5241) |
-| BLT-11 | Tables/indexes repeated across 3–5 docs; marketing tone | 250 | 0.5.x† | planned (ferrompi-0.5.x-hardening) |
+| BLT-11 | Tables/indexes repeated across 3–5 docs; marketing tone | 250 | 0.5.x† | fixed (713cb4f, 76eded0, a6262a9) |
 | BLT-14 | 15 in-place C shims differ only by `MPI_IN_PLACE`; dead `is_root` | 300 | 0.5.x† | fixed (38c789e) |
 | BLT-15 | `UserOp` double registry + dead per-callback lookup | 120 | 0.5.x† | fixed (2d53b18) |
 | BLT-16 | Benches measuring nothing; duplicated bench protocol | 210 | 0.5.x† | fixed (aa460f1) |
@@ -237,7 +237,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | DOC-06 | Migration guide: nonexistent APIs, false safety claim | major | 0.5.x | fixed (eb63b5d) |
 | DOC-07 | `docs/mpi-compatibility.md` inaccuracies | minor | 0.5.x | fixed (98236f8) |
 | DOC-08 | `README.md` inaccuracies (badge, version, reqs, `LD_LIBRARY_PATH`) | minor | 0.5.x | fixed (76eded0) |
-| DOC-09 | Crate rustdoc (`src/lib.rs`) inaccuracies | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| DOC-09 | Crate rustdoc (`src/lib.rs`) inaccuracies | minor | 0.5.x | fixed (a6262a9) |
 | DOC-10 | Stale/wrong item-level rustdoc | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-11 | CONTRIBUTING template filler + false policies | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-12 | CHANGELOG internal IDs / restated rustdoc | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
