@@ -142,8 +142,8 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-09 | `-1` = PROC_NULL (MPICH) vs ANY_SOURCE (Open MPI) | minor | repro | 0.6 | open |
 | COR-10 | `cancel()` allowed on collective/RMA requests | minor | repro | 0.5.x | fixed (4947bc4) |
 | COR-11 | `LongDoubleInt`/`LongInt` layout wrong on macOS arm64 / Windows | minor | reading | 0.5.x | fixed (3a01966): target gating; per-target layouts open (0.6) |
-| COR-12 | Pre-MPI-4 stubs never yield `NotSupported`; 3 contradicting docs | minor | reading | 0.5.x | fixed (58f8fdc, 134bfed): stub mapping, ADR-0004; docs/mpi-compatibility.md planned (ferrompi-0.5.x-hardening) |
-| COR-13 | `Win::sync` rustdoc wrong; example fails on MPICH | minor | repro | 0.5.x docs / 0.6 API | fixed (3f50248): rustdoc; docs/mpi-compatibility.md planned (ferrompi-0.5.x-hardening); sync on lock guards open (0.6) |
+| COR-12 | Pre-MPI-4 stubs never yield `NotSupported`; 3 contradicting docs | minor | reading | 0.5.x | fixed (58f8fdc, 134bfed, 98236f8): stub mapping, ADR-0004, docs/mpi-compatibility.md |
+| COR-13 | `Win::sync` rustdoc wrong; example fails on MPICH | minor | repro | 0.5.x docs / 0.6 API | fixed (3f50248, 98236f8): rustdoc, docs/mpi-compatibility.md; sync on lock guards open (0.6) |
 | COR-14 | `MPI_UNDEFINED` from `MPI_Get_count` leaks; rc ignored | nit | reading | 0.5.x | fixed (e918274) |
 | COR-15 | `op_set_closure` no bounds check; `op_create_user` no `op_used` check | nit | reading | 0.5.x | fixed (2d53b18) |
 | COR-16 | `type_create_struct` maybe-uninitialised arrays at count 0 | nit | compiler | 0.5.x | fixed (34a748c) |
@@ -234,14 +234,14 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | DOC-04 | ADR-0004 lifetime rejection mis-argued; nonexistent variant | minor | 0.5.x note / 0.6 new ADR | fixed (134bfed): note; new ADR open (0.6) |
 | DOC-05 | ADR-0005 Decision 7 describes the rejected design; plan sections | major | 0.5.x | fixed (134bfed) |
 | DOC-06 | Migration guide: nonexistent APIs, false safety claim | major | 0.5.x | fixed (eb63b5d) |
-| DOC-07 | `docs/mpi-compatibility.md` inaccuracies | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| DOC-07 | `docs/mpi-compatibility.md` inaccuracies | minor | 0.5.x | fixed (98236f8) |
 | DOC-08 | `README.md` inaccuracies (badge, version, reqs, `LD_LIBRARY_PATH`) | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-09 | Crate rustdoc (`src/lib.rs`) inaccuracies | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-10 | Stale/wrong item-level rustdoc | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-11 | CONTRIBUTING template filler + false policies | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-12 | CHANGELOG internal IDs / restated rustdoc | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-13 | `benches/README.md` claims | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
-| DOC-14 | Missing docs: lifecycle, error reporting, runtime lib path, Open MPI build | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| DOC-14 | Missing docs: lifecycle, error reporting, runtime lib path, Open MPI build | minor | 0.5.x | fixed (98236f8): runtime library path, Open MPI build; lifecycle and error reporting planned (ferrompi-0.5.x-hardening) |
 | DOC-15 | Wrong C comments | nit | 0.5.x | fixed (01866f1) |
 
 ### Build / CI / tests — [08](findings/08-build-ci-tests.md)
