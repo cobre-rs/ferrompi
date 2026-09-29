@@ -155,7 +155,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-18 | `SharedWindow::allocate` with a zero count returns `Err(Internal)` and leaks the registered window, which `Mpi::drop` does not count | minor | repro | 0.5.x | fixed (4747cd1) |
 | COR-19 | `Win::allocate`/`SharedWindow::allocate` leave the window live but uncounted in `LIVE_WINDOWS` when zeroing fails or MPI returns a null base for a non-zero count, so `Mpi::drop` can call `MPI_Finalize` with it alive | minor | reading | 0.5.x | fixed (4263c80) |
 | COR-20 | `Mpi::init_thread` resets to uninitialized when installing `MPI_ERRORS_RETURN` on `MPI_COMM_WORLD`/`MPI_COMM_SELF` fails after `MPI_Init_thread` succeeded, so a retry calls `MPI_Init_thread` twice | minor | reading | 0.5.x | fixed (762e841) |
-| COR-21 | `PersistentRequest::start_all` marks no request active when `MPI_Startall` fails, although MPI may have started some; `Drop` then frees a started request without waiting | minor | reading | 0.5.x | fixed (388dc16, f42fe0a) |
+| COR-21 | `PersistentRequest::start_all` marks no request active when `MPI_Startall` fails, although MPI may have started some; `Drop` then frees a started request without waiting | minor | reading | 0.5.x | fixed (388dc16, f42fe0a, fc7bc7f) |
 
 ### Architecture / API — [03](findings/03-architecture-api.md)
 
