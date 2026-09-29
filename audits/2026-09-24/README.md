@@ -182,7 +182,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | ABI-02 | No ABI detection probe; MPICH 4.3 draft ABI accepted | major | reading | 0.5.x reject / 0.7 build | fixed (67fbcd4): draft ABI rejected; ABI build open (0.7) |
 | ABI-03 | Build-selection env vars not tracked (= INF-03) | major | repro | 0.5.x | fixed (8f9fbfd) |
 | ABI-04 | Public-API one-way doors (= ARC-02/03) | major | reading | 0.6 | open |
-| ABI-05 | ADR-0001 misstates what the ABI adds; ADR-0006 needed | minor | reading | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| ABI-05 | ADR-0001 misstates what the ABI adds; ADR-0006 needed | minor | reading | 0.5.x | fixed (03f01e8, fb99656) |
 | ABI-06 | No interop API (deliberately deferred) | info | — | after ABI backend | open |
 | ABI-07 | Optional CI compile+link job against Forum ABI stubs | info | built locally | 0.5.x or 0.7 | fixed (5d62df7) |
 
