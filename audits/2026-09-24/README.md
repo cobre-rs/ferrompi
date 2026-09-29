@@ -193,7 +193,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | PRF-01 | Request table: ~14 ns / 2 locked RMWs per request (+58%/+33% small nonblocking p2p) | major | measured | 0.7 (D-2); no 0.5.x stop-gap | open |
 | PRF-02 | Bitmap concentrates contention; ADR/comment claim the opposite | minor | measured | 0.5.x docs / 0.7 | fixed (01866f1): shim comment; ADR-0002 planned (ferrompi-0.5.x-hardening); table change open (0.7) |
 | PRF-03 | `ffi_overhead` bench cannot measure FFI overhead | minor | measured | 0.5.x | fixed (f74665a): interleaved A/B bench; benches README planned (ferrompi-0.5.x-hardening) |
-| PRF-04 | "Persistent 10–30% faster" refuted as stated; bench at 1 MiB only | minor | measured | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| PRF-04 | "Persistent 10–30% faster" refuted as stated; bench at 1 MiB only | minor | measured | 0.5.x | fixed (e73c3d0): size sweep; persistent-speedup claims planned (ferrompi-0.5.x-hardening) |
 | PRF-05 | `start_all`/`wait_all` zero 512 B scratch per call | nit | measured | — | wont-fix (adds `unsafe` for ~8 ns; rejected in 0.5.x planning) |
 | PRF-06 | Dead per-callback tag lookup; `Vec` per `wait_some`; topology 256·P | nit | reading | 0.5.x | fixed (2d53b18) for the callback tag lookup; Vec return and topology 256·P deferred |
 | PRF-07 | `[profile.release]` doesn't reach downstream; comment says it does | minor | Cargo semantics | 0.5.x | fixed (affb75c): profile removed; CHANGELOG claim planned (ferrompi-0.5.x-hardening) |
