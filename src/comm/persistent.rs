@@ -1,4 +1,4 @@
-//! Persistent point-to-point (MPI 1.1+) and persistent collective operations (MPI 4.0+).
+//! Persistent point-to-point (MPI 1.1+) and persistent collective operations (MPI 4.0, or Open MPI 5).
 
 use crate::comm::{check_rank_slots, check_same_len, rank_block, Communicator};
 use crate::datatype::{buf, buf_mut, MpiDatatype};
@@ -288,13 +288,13 @@ impl Communicator {
     }
 
     // ========================================================================
-    // Generic Persistent Collectives (MPI 4.0+)
+    // Generic Persistent Collectives (MPI 4.0, or Open MPI 5)
     // ========================================================================
 
     /// Initialize a persistent broadcast operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -333,7 +333,7 @@ impl Communicator {
 
     /// Initialize a persistent all-reduce operation.
     ///
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Example
     ///
@@ -373,7 +373,7 @@ impl Communicator {
 
     /// Initialize a persistent in-place all-reduce operation.
     ///
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     pub fn allreduce_init_inplace<T: MpiDatatype>(
         &self,
         data: &mut [T],
@@ -405,7 +405,7 @@ impl Communicator {
     /// Initialize a persistent reduce operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -469,7 +469,7 @@ impl Communicator {
 
     /// Initialize a persistent gather operation.
     ///
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Errors
     ///
@@ -503,7 +503,7 @@ impl Communicator {
     /// Initialize a persistent scatter operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -558,7 +558,7 @@ impl Communicator {
     /// Initialize a persistent all-gather operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -608,7 +608,7 @@ impl Communicator {
     /// Initialize a persistent scan (inclusive prefix reduction) operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -655,7 +655,7 @@ impl Communicator {
     /// Initialize a persistent exclusive scan (exclusive prefix reduction) operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -703,7 +703,7 @@ impl Communicator {
     /// Initialize a persistent all-to-all operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -758,7 +758,7 @@ impl Communicator {
     /// Initialize a persistent reduce-scatter-block operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -815,7 +815,7 @@ impl Communicator {
     /// must use `gather_init` — this method returns `Error::InvalidOp` on non-root.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Buffer Layout (root)
     ///
@@ -883,7 +883,7 @@ impl Communicator {
     /// is both send contribution and receive buffer.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Buffer Layout
     ///
@@ -945,7 +945,7 @@ impl Communicator {
     /// non-root, `data` is the `recvcount`-element receive buffer.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Buffer Layout (root)
     ///
@@ -1025,7 +1025,7 @@ impl Communicator {
     /// `wait()`, slot `s` contains the data received FROM rank `s`.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Buffer Layout
     ///

@@ -1,4 +1,4 @@
-//! Persistent collectives example (MPI 4.0+).
+//! Persistent collectives example (MPI 4.0, or Open MPI 5).
 //!
 //! Demonstrates the use of persistent collectives for iterative algorithms
 //! where the same communication pattern is repeated many times.
@@ -22,7 +22,7 @@ fn main() -> Result<()> {
     let size = world.size();
 
     if rank == 0 {
-        println!("Testing persistent collectives (MPI 4.0+)");
+        println!("Testing persistent collectives (MPI 4.0, or Open MPI 5)");
         println!("MPI Version: {}", Mpi::version()?);
         println!("Running on {} processes\n", size);
     }

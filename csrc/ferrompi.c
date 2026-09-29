@@ -1040,7 +1040,7 @@ int ferrompi_comm_create_from_group(int32_t group_h,
     return MPI_SUCCESS;
 #else
     (void)group_h; (void)stringtag; (void)out_h;
-    return FERROMPI_ERR_NOT_SUPPORTED;  /* MPI 4.0+ required */
+    return FERROMPI_ERR_NOT_SUPPORTED;  /* needs MPI 4.0, or Open MPI 5 */
 #endif
 }
 
@@ -2370,7 +2370,7 @@ int ferrompi_bsend_init(
 }
 
 /* ============================================================
- * Generic Persistent Collectives (MPI 4.0+)
+ * Generic Persistent Collectives (MPI 4.0, or Open MPI 5)
  * ============================================================ */
 
 #ifdef FERROMPI_HAVE_MPI4_COLLECTIVES

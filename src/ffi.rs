@@ -665,7 +665,7 @@ guarded_extern! {
     ) -> c_int;
 
     // ============================================================
-    // Generic Persistent Collectives (MPI 4.0+)
+    // Generic Persistent Collectives (MPI 4.0, or Open MPI 5)
     // ============================================================
     pub fn ferrompi_bcast_init(
         buf: *mut c_void,

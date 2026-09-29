@@ -1,4 +1,4 @@
-//! Persistent request handles for MPI 4.0+ persistent collectives.
+//! Persistent request handles for persistent collectives (MPI 4.0, or Open MPI 5).
 //!
 //! Persistent collectives allow you to initialize a collective operation once
 //! and then start it multiple times. This amortizes the setup cost across many
@@ -15,7 +15,7 @@
 //! // Buffer that will be used for all broadcasts
 //! let mut data = vec![0.0f64; 1000];
 //!
-//! // Initialize persistent broadcast (MPI 4.0+)
+//! // Initialize persistent broadcast (MPI 4.0, or Open MPI 5)
 //! let mut persistent = world.bcast_init(&mut data, 0).unwrap();
 //!
 //! // Run many iterations

@@ -6,9 +6,9 @@
 //! non-`MPI_SUCCESS` return code (previously they would receive a corrupt
 //! handle because the NULL guard was missing).
 //!
-//! Below MPI_VERSION 4, the shim is an unconditional stub: the raw call
-//! returns the `FERROMPI_ERR_NOT_SUPPORTED` sentinel (`Error::NotSupported`)
-//! and leaves the output handle untouched.
+//! Where the library lacks it (below MPI 4.0, except Open MPI 5), the shim is
+//! an unconditional stub: the raw call returns the `FERROMPI_ERR_NOT_SUPPORTED`
+//! sentinel (`Error::NotSupported`) and leaves the output handle untouched.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_create_from_group_null_handle
 // mpi-test: np=2
@@ -27,8 +27,9 @@ mod common;
 //   - group_h is a valid ferrompi group handle obtained from the Rust API.
 //   - stringtag is a valid null-terminated C string on the stack.
 //   - out_h points to a valid i32 on the stack.
-//   - Below MPI 4, the shim is an unconditional stub that reads none of its
-//     arguments and never writes through out_h.
+//   - Where the library lacks it (below MPI 4.0, except Open MPI 5), the shim
+//     is an unconditional stub that reads none of its arguments and never
+//     writes through out_h.
 extern "C" {
     fn ferrompi_comm_create_from_group(
         group_h: i32,

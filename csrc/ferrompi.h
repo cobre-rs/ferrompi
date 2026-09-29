@@ -98,7 +98,7 @@ int ferrompi_comm_create_from_group_parent(int32_t comm_handle,
 
 /**
  * Create a communicator from a group without a parent communicator
- * (MPI_Comm_create_from_group, MPI 4.0+). Collective only over the processes
+ * (MPI_Comm_create_from_group, MPI 4.0, or Open MPI 5). Collective only over the processes
  * sharing the same group and stringtag, not over an existing communicator.
  * Returns MPI_ERR_OTHER on MPI < 4.0.
  */
@@ -370,7 +370,7 @@ int ferrompi_bsend_init(
 );
 
 /* ============================================================
- * Generic Persistent Collectives (MPI 4.0+)
+ * Generic Persistent Collectives (MPI 4.0, or Open MPI 5)
  * ============================================================ */
 
 int ferrompi_bcast_init(void* buf, int64_t count, int32_t datatype_tag, int32_t root, int32_t comm, int64_t* request);

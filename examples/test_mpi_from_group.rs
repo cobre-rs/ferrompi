@@ -1,9 +1,9 @@
-//! Integration test for `Mpi::create_from_group` (MPI 4.0+).
+//! Integration test for `Mpi::create_from_group` (MPI 4.0, or Open MPI 5).
 //!
 //! Exercises `MPI_Comm_create_from_group` via the
 //! `ferrompi_comm_create_from_group` shim.  Verifies that:
 //!
-//! - On MPI 4.0+: every rank that calls `mpi.create_from_group(&g, tag)`
+//! - On MPI 4.0, or Open MPI 5: every rank that calls `mpi.create_from_group(&g, tag)`
 //!   with the same world group and the same tag receives an `Ok(comm)` with
 //!   `comm.size() == world.size()`.
 //! - Where the library lacks it (below MPI 4.0, except Open MPI 5):

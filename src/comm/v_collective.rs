@@ -613,13 +613,13 @@ impl Communicator {
     }
 
     // ========================================================================
-    // Persistent V-Collectives (MPI 4.0+)
+    // Persistent V-Collectives (MPI 4.0, or Open MPI 5)
     // ========================================================================
 
     /// Initialize a persistent gatherv operation (variable-count gather).
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -693,7 +693,7 @@ impl Communicator {
     /// Initialize a persistent scatterv operation (variable-count scatter).
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -767,7 +767,7 @@ impl Communicator {
     /// Initialize a persistent all-gatherv operation (variable-count all-gather).
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -835,7 +835,7 @@ impl Communicator {
     /// Initialize a persistent all-to-allv operation (variable-count all-to-all).
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///

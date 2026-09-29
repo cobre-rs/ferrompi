@@ -10,7 +10,7 @@
 //! - **Blocking collectives**: barrier, broadcast, reduce, allreduce, gather, scatter, allgather,
 //!   alltoall, scan, exscan, reduce\_scatter\_block, plus V-variants (gatherv, scatterv, allgatherv, alltoallv)
 //! - **Nonblocking collectives**: All 15 `i`-prefixed variants with [`Request`] handles
-//! - **Persistent collectives** (MPI 4.0+): `*_init` forms of every blocking collective except
+//! - **Persistent collectives** (MPI 4.0, or Open MPI 5): `*_init` forms of every blocking collective except
 //!   `barrier`, plus five in-place forms, with [`PersistentRequest`] handles
 //! - **Large counts**: with an MPI 4.0 library, a count above `i32::MAX` uses MPI's `_c` call
 //!   (point-to-point, collectives including persistent ones, RMA, user-op reductions); below
@@ -561,7 +561,7 @@ impl Mpi {
     }
 
     /// Create a communicator from a group without requiring a parent
-    /// communicator (MPI 4.0+).
+    /// communicator (MPI 4.0, or Open MPI 5).
     ///
     /// `stringtag` must be identical across all ranks that participate
     /// in the call; ranks with different tags or in different groups
@@ -853,7 +853,7 @@ mod tests {
     #[test]
     fn create_from_group_null_byte_in_tag() {
         // Construct a minimal stub Mpi to call the method (no MPI calls made
-        // because the null-byte check fires before the version probe or FFI).
+        // because the null-byte check fires before the FFI call).
         // We bypass init by constructing the struct directly — this is valid
         // inside the crate's own test module where the fields are accessible.
         let mpi = stub_mpi();

@@ -1,4 +1,4 @@
-//! Integration test for ALL persistent collective operations (MPI 4.0+).
+//! Integration test for ALL persistent collective operations (MPI 4.0, or Open MPI 5).
 //!
 //! Tests the full PersistentRequest lifecycle: init, start, wait, test,
 //! start_all, wait_all, and drop. Where the library lacks persistent
