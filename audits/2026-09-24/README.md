@@ -242,7 +242,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | DOC-11 | CONTRIBUTING template filler + false policies | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-12 | CHANGELOG internal IDs / restated rustdoc | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-13 | `benches/README.md` claims | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
-| DOC-14 | Missing docs: lifecycle, error reporting, runtime lib path, Open MPI build | minor | 0.5.x | fixed (98236f8): runtime library path, Open MPI build; lifecycle and error reporting planned (ferrompi-0.5.x-hardening) |
+| DOC-14 | Missing docs: lifecycle, error reporting, runtime lib path, Open MPI build | minor | 0.5.x | fixed (98236f8, 90c95c6) |
 | DOC-15 | Wrong C comments | nit | 0.5.x | fixed (01866f1) |
 
 ### Build / CI / tests — [08](findings/08-build-ci-tests.md)
