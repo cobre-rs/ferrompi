@@ -191,7 +191,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | ID | Title | Sev | Verified | Target | Status |
 |---|---|---|---|---|---|
 | PRF-01 | Request table: ~14 ns / 2 locked RMWs per request (+58%/+33% small nonblocking p2p) | major | measured | 0.7 (D-2); no 0.5.x stop-gap | open |
-| PRF-02 | Bitmap concentrates contention; ADR/comment claim the opposite | minor | measured | 0.5.x docs / 0.7 | fixed (01866f1): shim comment; ADR-0002 planned (ferrompi-0.5.x-hardening); table change open (0.7) |
+| PRF-02 | Bitmap concentrates contention; ADR/comment claim the opposite | minor | measured | 0.5.x docs / 0.7 | fixed (01866f1, 605fd2d): shim comment, ADR-0002; table change open (0.7) |
 | PRF-03 | `ffi_overhead` bench cannot measure FFI overhead | minor | measured | 0.5.x | fixed (f74665a): interleaved A/B bench; benches README planned (ferrompi-0.5.x-hardening) |
 | PRF-04 | "Persistent 10–30% faster" refuted as stated; bench at 1 MiB only | minor | measured | 0.5.x | fixed (e73c3d0): size sweep; persistent-speedup claims planned (ferrompi-0.5.x-hardening) |
 | PRF-05 | `start_all`/`wait_all` zero 512 B scratch per call | nit | measured | — | wont-fix (adds `unsafe` for ~8 ns; rejected in 0.5.x planning) |
@@ -230,7 +230,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 |---|---|---|---|---|
 | DOC-01 | `docs/architecture.md` false statements | major | 0.5.x | fixed (713cb4f) |
 | DOC-02 | ADR-0001 driver 1 false (= ABI-05) | minor | 0.5.x | fixed (03f01e8) |
-| DOC-03 | ADR-0002 claims that do not hold | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| DOC-03 | ADR-0002 claims that do not hold | minor | 0.5.x | fixed (605fd2d) |
 | DOC-04 | ADR-0004 lifetime rejection mis-argued; nonexistent variant | minor | 0.5.x note / 0.6 new ADR | planned (ferrompi-0.5.x-hardening: note); new ADR open (0.6) |
 | DOC-05 | ADR-0005 Decision 7 describes the rejected design; plan sections | major | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-06 | Migration guide: nonexistent APIs, false safety claim | major | 0.5.x | planned (ferrompi-0.5.x-hardening) |
@@ -266,7 +266,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | INF-16 | MPICH hotfix: unchecked downloads, copy-pasted ×4 | minor | reading | 0.5.x | fixed (cd55e0b, bbd98f6) |
 | INF-17 | `security.yml` hygiene | nit | reading | 0.5.x | fixed (d42b069) |
 | INF-18 | Package ships repo internals (incl. `audits/`) | minor | `cargo package` | 0.5.x | fixed (07c5241, bbd98f6) |
-| INF-19 | ADR-0002 mandated TSan step missing | minor | reading | 0.5.x / moot after ARC-01 | planned (ferrompi-0.5.x-hardening) |
+| INF-19 | ADR-0002 mandated TSan step missing | minor | reading | 0.5.x / moot after ARC-01 | fixed (605fd2d) |
 | INF-20 | CI covers MPICH 4.2 + Open MPI 4.x only (no Open MPI 5) | minor | reading | 0.5.x | fixed (3f8ec50) |
 | INF-21 | Unit tests mutate a global static (latent) | nit | stress test | — | open |
 | INF-22 | Third-party GitHub Actions pinned by tag, not commit SHA | minor | reading | later | open |
