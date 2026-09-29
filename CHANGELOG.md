@@ -187,6 +187,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 - **`PersistentRequest::wait_all` and `Request::wait_all` now report a
   failed request that the MPI library completed behind a success return**
   (seen with Open MPI's persistent requests).
+- **A `PersistentRequest` whose `wait` or `test` fails is no longer left
+  active.** MPI completed it with the error; on Open MPI, which frees it,
+  `start` now reports `Err` with class `Request` instead of "already
+  active".
 
 ## [0.5.0] - 2026-06-18
 

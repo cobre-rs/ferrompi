@@ -3346,10 +3346,12 @@ int ferrompi_wait(int64_t request_handle) {
     }
     int ret = MPI_Wait(req, MPI_STATUS_IGNORE);
     abort_if_pending_after_failure(ret);
-    // Don't free persistent requests automatically
+    // MPI_Wait completed the request whatever it returned: a nonblocking
+    // request is freed; a persistent one is inactive, or freed too by Open
+    // MPI when it failed.
     if (*req == MPI_REQUEST_NULL) {
         free_request(request_handle);
-    } else if (ret == MPI_SUCCESS) {
+    } else {
         mark_inactive(request_handle);
     }
     return ret;
@@ -3366,13 +3368,14 @@ int ferrompi_test(int64_t request_handle, int32_t* flag) {
     // MPI frees a nonblocking request that completes whether or not MPI_Test
     // itself reports an error (e.g. a truncated receive still nulls the
     // request), so free the slot and report completion on that condition
-    // rather than on ret == MPI_SUCCESS.
+    // rather than on ret == MPI_SUCCESS. A persistent request MPI completed
+    // with an error is inactive too, so flag reports f whatever ret is.
     if (*req == MPI_REQUEST_NULL) {
         free_request(request_handle);
         *flag = 1;
     } else {
-        *flag = (ret == MPI_SUCCESS) ? f : 0;
-        if (f && ret == MPI_SUCCESS) {
+        *flag = f;
+        if (f) {
             mark_inactive(request_handle);
         }
     }

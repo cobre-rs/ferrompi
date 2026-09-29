@@ -113,31 +113,30 @@ impl PersistentRequest {
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation is not active or if the wait fails.
+    /// Returns an error if the wait fails. The request is inactive
+    /// afterwards either way: MPI completed it with that error.
     #[inline]
     pub fn wait(&mut self) -> Result<()> {
         if !self.active {
             // Not started, nothing to wait for
             return Ok(());
         }
+        Error::check_with_op(rt::enter(), "wait")?;
         // SAFETY: self.handle is a valid persistent MPI request handle
         // registered in the C-side request table; self.active was true on
         // entry (checked above), so start() was called and MPI holds an
         // in-flight operation on this handle for ferrompi_wait to complete.
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
-        Error::check_with_op(ret, "wait")?;
-        // Mark inactive only on success: on an MPI error (including a
-        // rejected call, which ferrompi_wait's own guard returns before
-        // touching MPI) the request stays active, so Drop waits (immediate
-        // for an inactive persistent request) before MPI_Request_free, and
-        // Rust never marks a request inactive that MPI may still hold.
+        // MPI completed the request whatever it returned: it is inactive now, or
+        // freed if the library frees failed persistent requests.
         self.active = false;
-        Ok(())
+        Error::check_with_op(ret, "wait")
     }
 
     /// Test if the operation has completed without blocking.
     ///
-    /// Returns `true` if complete, `false` if still in progress.
+    /// Returns `true` if complete, `false` if still in progress. A failed
+    /// `test` that MPI completed also leaves the request inactive.
     #[inline]
     pub fn test(&mut self) -> Result<bool> {
         if !self.active {
@@ -149,10 +148,11 @@ impl PersistentRequest {
         // entry (checked above). flag is a local out-parameter written by
         // ferrompi_test before this function reads it below.
         let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag) };
-        Error::check_with_op(ret, "test")?;
+        // flag is set when MPI completed the request, even with an error.
         if flag != 0 {
             self.active = false;
         }
+        Error::check_with_op(ret, "test")?;
         Ok(flag != 0)
     }
 
