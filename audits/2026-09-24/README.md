@@ -93,6 +93,7 @@ The crate has a solid core (sealed datatype traits, sound UserOp trampolines,
 | D-18 | **Package contents:** allow-list (`src/`, `csrc/`, `docs/`, `build.rs`, README, CHANGELOG, licenses); `examples/`, `benches/`, `audits/`, `.github/`, `tests/`, `test.sh` excluded. | **accepted 2026-09-24** | 0.5.x — INF-18 |
 | D-19 | **`LongDoubleInt`/`LongInt`:** cfg-gated to verified targets (Linux x86_64/aarch64/ppc64le); Windows unsupported; per-target layouts deferred to the API milestone. | **accepted 2026-09-24** | 0.5.x — COR-11 |
 | D-20 | **Discriminant "semver contract"** retracted now in docs only (architecture.md + ADR-0003 amendment note). | **accepted 2026-09-24** | 0.5.x — DOC-01, ARC-03 |
+| D-21 | **0.6.0 close-out:** COR-17, COR-19, COR-20, SND-17, INF-22, ARC-18 and the `WinKind` part of ARC-13 move to the `0.5.x` milestone and ship in 0.6.0; for COR-19 this supersedes the 2026-09-28 ruling that kept the gap as a tracked open row; for SND-17 the fix contract becomes an abort of the process, replacing the finding's still-pending fix direction. | **accepted 2026-09-29** | 0.5.x — COR-17, COR-19, COR-20, SND-17, INF-22, ARC-18, ARC-13 |
 
 ## Roadmap (accepted 2026-09-24)
 
@@ -128,7 +129,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | SND-14 | `UserOp` fat-pointer transmute relies on unspecified layout | minor | reading | 0.5.x† | fixed (2d53b18) |
 | SND-15 | `fetch_and_op`/`compare_and_swap` result pointer derived from a shared borrow | minor | reading | 0.5.x | fixed (9777b12) |
 | SND-16 | `Mpi` drop racing a concurrent guarded call at `Serialized`/`Multiple` reaches MPI after finalize | major | reading | 0.6 | open (0.6: thread-safety API redesign) |
-| SND-17 | Under fault-tolerant MPI, a receive failing with MPIX_ERR_PROC_FAILED_PENDING is treated as complete while MPI still owns its buffer | major | reading | 0.6 | open (0.6: request completion redesign) |
+| SND-17 | Under fault-tolerant MPI, a receive failing with MPIX_ERR_PROC_FAILED_PENDING is treated as complete while MPI still owns its buffer | major | reading | 0.5.x | planned (ferrompi-0.6.0-closeout) |
 
 ### Correctness — [02](findings/02-correctness.md)
 
@@ -150,10 +151,10 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-14 | `MPI_UNDEFINED` from `MPI_Get_count` leaks; rc ignored | nit | reading | 0.5.x | fixed (e918274) |
 | COR-15 | `op_set_closure` no bounds check; `op_create_user` no `op_used` check | nit | reading | 0.5.x | fixed (2d53b18) |
 | COR-16 | `type_create_struct` maybe-uninitialised arrays at count 0 | nit | compiler | 0.5.x | fixed (34a748c) |
-| COR-17 | Open MPI frees a persistent request that errors in `MPI_Wait`, `MPI_Test` or `MPI_Waitall`; `PersistentRequest` then keeps `active` set after a single-request wait/test (further `wait` fails, `start` reports already-active), and `MPI_Waitall` over already-finished requests can return success and lose the truncation error | minor | repro | 0.6 | open |
+| COR-17 | Open MPI frees a persistent request that errors in `MPI_Wait`, `MPI_Test` or `MPI_Waitall`; `PersistentRequest` then keeps `active` set after a single-request wait/test (further `wait` fails, `start` reports already-active), and `MPI_Waitall` over already-finished requests can return success and lose the truncation error | minor | repro | 0.5.x | planned (ferrompi-0.6.0-closeout) |
 | COR-18 | `SharedWindow::allocate` with a zero count returns `Err(Internal)` and leaks the registered window, which `Mpi::drop` does not count | minor | repro | 0.5.x | fixed (4747cd1) |
-| COR-19 | `Win::allocate`/`SharedWindow::allocate` leave the window live but uncounted in `LIVE_WINDOWS` when zeroing fails or MPI returns a null base for a non-zero count, so `Mpi::drop` can call `MPI_Finalize` with it alive | minor | reading | 0.6 | open |
-| COR-20 | `Mpi::init_thread` resets to uninitialized when installing `MPI_ERRORS_RETURN` on `MPI_COMM_WORLD`/`MPI_COMM_SELF` fails after `MPI_Init_thread` succeeded, so a retry calls `MPI_Init_thread` twice | minor | reading | 0.6 | open |
+| COR-19 | `Win::allocate`/`SharedWindow::allocate` leave the window live but uncounted in `LIVE_WINDOWS` when zeroing fails or MPI returns a null base for a non-zero count, so `Mpi::drop` can call `MPI_Finalize` with it alive | minor | reading | 0.5.x | planned (ferrompi-0.6.0-closeout) |
+| COR-20 | `Mpi::init_thread` resets to uninitialized when installing `MPI_ERRORS_RETURN` on `MPI_COMM_WORLD`/`MPI_COMM_SELF` fails after `MPI_Init_thread` succeeded, so a retry calls `MPI_Init_thread` twice | minor | reading | 0.5.x | planned (ferrompi-0.6.0-closeout) |
 
 ### Architecture / API — [03](findings/03-architecture-api.md)
 
@@ -171,12 +172,12 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | ARC-10 | Copy-pasted families drifted (root of SND-06) | major | two-way | 0.5.x (validators) | fixed (c402d59) |
 | ARC-11 | Capability gaps (in-place nonblocking, mprobe, HW_GUIDED…) | minor | additive | 0.6+ | open |
 | ARC-12 | `Info` public but unused | minor | one-way | 0.6 (D-4) | open |
-| ARC-13 | `SharedWindow` duplicates `Win`; `WinKind` dead | minor | one-way | 0.6 (D-5) | open |
+| ARC-13 | `SharedWindow` duplicates `Win`; `WinKind` dead | minor | one-way | 0.5.x WinKind / 0.6 (D-5) | planned (ferrompi-0.6.0-closeout: WinKind); SharedWindow merge open (0.6) |
 | ARC-14 | `numa` feature has no NUMA code, implies `rma` | minor | one-way | 0.6 | open |
 | ARC-15 | Naming/coverage asymmetries | minor | one-way | 0.6 | open |
 | ARC-16 | Magic `-1` sentinels; no typed source/tag | minor | one-way | 0.6 | open |
 | ARC-17 | RMA redundant `target_count`, duplicate tags | minor | one-way | 0.6 | open |
-| ARC-18 | Open MPI 5 capabilities unused (persistent collectives, `create_from_group` gated on `MPI_VERSION >= 4`; OMPI 5 reports 3.1) | minor | two-way | 0.6 | open |
+| ARC-18 | Open MPI 5 capabilities unused (persistent collectives, `create_from_group` gated on `MPI_VERSION >= 4`; OMPI 5 reports 3.1) | minor | two-way | 0.5.x | planned (ferrompi-0.6.0-closeout) |
 
 ### MPI-5 ABI — [04](findings/04-mpi5-abi.md)
 
@@ -273,5 +274,5 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | INF-19 | ADR-0002 mandated TSan step missing | minor | reading | 0.5.x / moot after ARC-01 | fixed (605fd2d) |
 | INF-20 | CI covers MPICH 4.2 + Open MPI 4.x only (no Open MPI 5) | minor | reading | 0.5.x | fixed (3f8ec50) |
 | INF-21 | Unit tests mutate a global static (latent) | nit | stress test | — | open |
-| INF-22 | Third-party GitHub Actions pinned by tag, not commit SHA | minor | reading | later | open |
+| INF-22 | Third-party GitHub Actions pinned by tag, not commit SHA | minor | reading | 0.5.x | planned (ferrompi-0.6.0-closeout) |
 | INF-23 | Publishing uses a long-lived crates.io token (no Trusted Publishing) | minor | reading | later | open |
