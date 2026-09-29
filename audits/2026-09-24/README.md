@@ -198,7 +198,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | PRF-04 | "Persistent 10–30% faster" refuted as stated; bench at 1 MiB only | minor | measured | 0.5.x | fixed (e73c3d0): size sweep; persistent-speedup claims planned (ferrompi-0.5.x-hardening) |
 | PRF-05 | `start_all`/`wait_all` zero 512 B scratch per call | nit | measured | — | wont-fix (adds `unsafe` for ~8 ns; rejected in 0.5.x planning) |
 | PRF-06 | Dead per-callback tag lookup; `Vec` per `wait_some`; topology 256·P | nit | reading | 0.5.x | fixed (2d53b18) for the callback tag lookup; Vec return and topology 256·P deferred |
-| PRF-07 | `[profile.release]` doesn't reach downstream; comment says it does | minor | Cargo semantics | 0.5.x | fixed (affb75c): profile removed; CHANGELOG claim planned (ferrompi-0.5.x-hardening) |
+| PRF-07 | `[profile.release]` doesn't reach downstream; comment says it does | minor | Cargo semantics | 0.5.x | fixed (affb75c, 0c7b942) |
 
 ### Bloat / overengineering — [06](findings/06-bloat-overengineering.md)
 
@@ -241,7 +241,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | DOC-09 | Crate rustdoc (`src/lib.rs`) inaccuracies | minor | 0.5.x | fixed (a6262a9) |
 | DOC-10 | Stale/wrong item-level rustdoc | minor | 0.5.x | fixed (e5034a8) |
 | DOC-11 | CONTRIBUTING template filler + false policies | minor | 0.5.x | fixed (067749d) |
-| DOC-12 | CHANGELOG internal IDs / restated rustdoc | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| DOC-12 | CHANGELOG internal IDs / restated rustdoc | minor | 0.5.x | fixed (0c7b942) |
 | DOC-13 | `benches/README.md` claims | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
 | DOC-14 | Missing docs: lifecycle, error reporting, runtime lib path, Open MPI build | minor | 0.5.x | fixed (98236f8, 90c95c6) |
 | DOC-15 | Wrong C comments | nit | 0.5.x | fixed (01866f1) |
