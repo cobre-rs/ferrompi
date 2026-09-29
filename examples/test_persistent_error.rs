@@ -15,15 +15,15 @@
 //! batch.
 //!
 //! Part 4 checks a `start_all` over a persistent receive from self and a
-//! persistent buffered send: on MPICH, an unattached buffer makes it fail
-//! after starting only the receive; both requests must come back
-//! `is_active()` regardless. Other libraries observed so far only surface
-//! a missing buffer as a hang once something actually waits on the send,
-//! so there a small attached buffer is used instead and `start_all`
-//! succeeds outright — still exercising the same bookkeeping, just without
-//! a failure to over-mark from. Either way, a matching send to self and a
-//! `wait_all` complete whichever of the two requests did start, and the
-//! receive's data must have arrived.
+//! one-element persistent buffered send: on MPICH, an unattached buffer
+//! makes it fail after starting only the receive; both requests must come
+//! back `is_active()` regardless. Other libraries observed so far do not
+//! enforce the attached-buffer requirement at this size, so there a small
+//! buffer is attached anyway and `start_all` succeeds outright — still
+//! exercising the same bookkeeping, just without a failure to over-mark
+//! from. Either way, a matching send to self and a `wait_all` complete
+//! whichever of the two requests did start, and the receive's data must
+//! have arrived.
 //!
 //! Part 5 checks the other half of the same bookkeeping: the finalize sweep
 //! must not count a request that failed through `wait`/`test` as still
@@ -212,28 +212,26 @@ fn part3_wait_all_skips_inactive(world: &Communicator, rank: i32) {
 
 // A `start_all` that fails partway through must still mark every request
 // it was given active, not just the ones MPI finished starting: rank 0
-// builds a receive from itself (tag 75) and a buffered send (tag 79, never
-// matched). On MPICH, `bsend_init` with no buffer attached fails
-// `MPI_Startall` outright once it reaches the send, after the receive has
-// already started. Other libraries observed so far defer that check past
-// `MPI_Startall` to whenever the send is actually driven to completion, so
-// running the same no-buffer send through a `wait` there hangs forever
-// instead of failing; a small attached buffer avoids that hang and lets
-// `start_all` and `wait_all` both succeed, which still exercises the same
-// activity bookkeeping (just without a failure to over-mark from). Either
-// way, a matching send to self and a `wait_all` complete whichever request
-// did start, and the buffered send's own error, if the library reports
-// one, must not stop the receive from completing.
+// builds a receive from itself (tag 75) and a one-element buffered send
+// (tag 79, never matched). On MPICH, `bsend_init` with no buffer attached
+// fails `MPI_Startall` outright once it reaches the send, after the
+// receive has already started. Other libraries observed so far do not
+// enforce the attached-buffer requirement for a message this small, so
+// there a buffer is attached anyway — the standard-conforming way to use a
+// buffered send — and `start_all` succeeds outright, which still exercises
+// the same activity bookkeeping, just without a failure to over-mark from.
+// Either way, a matching send to self and a `wait_all` complete whichever
+// request did start, and the buffered send's own error, if the library
+// reports one, must not stop the receive from completing.
 fn part4_partial_start_all(world: &Communicator, mpi: &Mpi, rank: i32, mpich: bool) {
     if rank == 0 {
         let mut small = [0i32; 1];
+        let big = [0.0f64; 1];
 
         if !mpich {
             mpi.buffer_attach(vec![0u8; 64 * 1024].into_boxed_slice())
                 .expect("part4: buffer_attach");
         }
-        let payload_len = if mpich { 1 << 16 } else { 1 };
-        let big = vec![0.0f64; payload_len];
 
         let recv_req = world
             .recv_init(&mut small, 0, 75)
@@ -257,8 +255,12 @@ fn part4_partial_start_all(world: &Communicator, mpi: &Mpi, rank: i32, mpich: bo
         let wait_result = PersistentRequest::wait_all(&mut reqs);
         // On MPICH the buffered send never had a buffer to send from, so
         // wait_all reports ERR_BUFFER behind it; with a buffer attached it
-        // completes normally. Either way the receive must complete.
-        ok &= wait_result.is_ok() || class_of(&wait_result) == Some(MpiErrorClass::Buffer);
+        // completes normally.
+        ok &= if mpich {
+            class_of(&wait_result) == Some(MpiErrorClass::Buffer)
+        } else {
+            wait_result.is_ok()
+        };
         ok &= !reqs[0].is_active();
         ok &= !reqs[1].is_active();
         ok &= small == [42];
