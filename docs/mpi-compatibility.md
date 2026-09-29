@@ -117,12 +117,13 @@ One item each: the symptom, the affected library, and what to do.
   improperly" notice. On every library, drop all windows before the `Mpi`
   handle so `MPI_Finalize` runs; under Open MPI, a skipped finalize makes
   the job exit non-zero, which batch schedulers and CI treat as a failure.
-- Fault-tolerant MPI (ULFM) is not supported: do not run ferrompi programs
-  with the library's process-fault-tolerance mode enabled. In that mode a
-  receive can fail with `MPIX_ERR_PROC_FAILED_PENDING` while MPI still
-  holds it pending. ferrompi treats such a request as complete and ends
-  its borrow of the receive buffer, so a later matching message can still
-  be written into that memory.
+- Fault-tolerant MPI (ULFM): ferrompi exposes no failure-acknowledgement
+  API. With the library's process-fault-tolerance mode enabled (Open MPI
+  5: `mpiexec --with-ft ulfm`), a receive from any source that a process
+  failure leaves pending (`MPI_ERR_PROC_FAILED_PENDING`) cannot complete
+  through ferrompi. The `wait` or `test` call that reports it prints
+  `ferrompi: receive pending after a process failure` to stderr and aborts
+  the process instead of returning. Other failures return `Err` as usual.
 
 ## Building
 

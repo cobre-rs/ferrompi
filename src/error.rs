@@ -232,7 +232,7 @@ fn fmt_mpi(
 /// failures on those objects return `Err` instead of aborting through MPI's
 /// default handler.
 ///
-/// Six paths end the process instead of returning `Err`:
+/// Seven paths end the process instead of returning `Err`:
 /// - an error inside `MPI_Init_thread` itself, before any error handler is
 ///   installed: MPI's default handler is `MPI_ERRORS_ARE_FATAL`, so
 ///   [`Mpi::init`](crate::Mpi::init)/[`Mpi::init_thread`](crate::Mpi::init_thread)
@@ -249,6 +249,10 @@ fn fmt_mpi(
 ///   the process;
 /// - dropping a handle on the wrong thread aborts the process; see the
 ///   [`Mpi`](crate::Mpi) lifecycle section;
+/// - under a fault-tolerant MPI, a receive from any source that a process
+///   failure leaves pending (`MPI_ERR_PROC_FAILED_PENDING`) makes the
+///   completion call that reports it print a message and abort the
+///   process, since no `ferrompi` call can complete it;
 /// - [`Communicator::abort`](crate::Communicator::abort) aborts the process
 ///   by design.
 ///

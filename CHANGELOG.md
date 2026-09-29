@@ -181,6 +181,9 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   zero, or gets a null base for, now counts as alive**, so dropping `Mpi`
   skips `MPI_Finalize` instead of finalizing with the leaked window still
   live.
+- **Under fault-tolerant MPI, a receive that a process failure leaves
+  pending now aborts the process** instead of being reported complete
+  while MPI still owns its buffer.
 
 ## [0.5.0] - 2026-06-18
 

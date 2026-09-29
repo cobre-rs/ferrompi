@@ -3290,6 +3290,32 @@ int32_t ferrompi_error_class_index(int error_class) {
  * Request Management
  * ============================================================ */
 
+#if defined(MPIX_ERR_PROC_FAILED_PENDING)
+#define FERROMPI_PROC_FAILED_PENDING MPIX_ERR_PROC_FAILED_PENDING
+#elif defined(MPI_ERR_PROC_FAILED_PENDING)
+#define FERROMPI_PROC_FAILED_PENDING MPI_ERR_PROC_FAILED_PENDING
+#endif
+
+/* Under a fault-tolerant MPI, a receive from any source can fail with
+ * PROC_FAILED_PENDING while MPI still holds it pending and owns its
+ * buffer. No call ferrompi exposes can complete it, so reporting it done,
+ * or returning while the Rust side considers it done, would hand the
+ * buffer back to the program while MPI can still write into it. */
+static void abort_if_pending_after_failure(int err) {
+#ifdef FERROMPI_PROC_FAILED_PENDING
+    int cls;
+    if (err != MPI_SUCCESS && MPI_Error_class(err, &cls) == MPI_SUCCESS
+            && cls == FERROMPI_PROC_FAILED_PENDING) {
+        fputs("ferrompi: receive pending after a process failure "
+              "(MPI_ERR_PROC_FAILED_PENDING); fault-tolerant MPI is not "
+              "supported\n", stderr);
+        abort();
+    }
+#else
+    (void)err;
+#endif
+}
+
 // Copies each request's post-call MPI_Request value back into its handle's
 // request-table slot, whatever the batch call's return code, and frees the
 // slot when MPI nulled it there, marking done[i]. The caller has already set
@@ -3319,6 +3345,7 @@ int ferrompi_wait(int64_t request_handle) {
         return MPI_ERR_REQUEST;
     }
     int ret = MPI_Wait(req, MPI_STATUS_IGNORE);
+    abort_if_pending_after_failure(ret);
     // Don't free persistent requests automatically
     if (*req == MPI_REQUEST_NULL) {
         free_request(request_handle);
@@ -3335,6 +3362,7 @@ int ferrompi_test(int64_t request_handle, int32_t* flag) {
     }
     int f = 0;
     int ret = MPI_Test(req, &f, MPI_STATUS_IGNORE);
+    abort_if_pending_after_failure(ret);
     // MPI frees a nonblocking request that completes whether or not MPI_Test
     // itself reports an error (e.g. a truncated receive still nulls the
     // request), so free the slot and report completion on that condition
@@ -3391,6 +3419,12 @@ int ferrompi_waitall(int64_t count, const int64_t* request_handles, uint8_t* don
     }
 
     int ret = MPI_Waitall((int)count, reqs, sts);
+    abort_if_pending_after_failure(ret);
+    if (ret == MPI_ERR_IN_STATUS) {
+        for (int64_t i = 0; i < count; i++) {
+            abort_if_pending_after_failure(sts[i].MPI_ERROR);
+        }
+    }
 
     // Whatever ret is, mark done[i] for every request MPI completed: all of
     // them on success, or on MPI_ERR_IN_STATUS the ones whose own status
@@ -3516,6 +3550,7 @@ int ferrompi_waitany(int64_t count, const int64_t* request_handles,
     }
     int idx = MPI_UNDEFINED;
     int ret = MPI_Waitany((int)count, reqs, &idx, MPI_STATUS_IGNORE);
+    abort_if_pending_after_failure(ret);
     if (idx != MPI_UNDEFINED) {
         done[idx] = 1;
     }
@@ -3567,6 +3602,12 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
     }
     int out = MPI_UNDEFINED;
     int ret = MPI_Waitsome((int)count, reqs, &out, tmp_indices, sts);
+    abort_if_pending_after_failure(ret);
+    if (ret == MPI_ERR_IN_STATUS) {
+        for (int i = 0; i < out; i++) {
+            abort_if_pending_after_failure(sts[i].MPI_ERROR);
+        }
+    }
     if (out == MPI_UNDEFINED) {
         *outcount = -1;
     } else {
@@ -3618,6 +3659,7 @@ int ferrompi_testany(int64_t count, const int64_t* request_handles,
     int idx = MPI_UNDEFINED;
     int f = 0;
     int ret = MPI_Testany((int)count, reqs, &idx, &f, MPI_STATUS_IGNORE);
+    abort_if_pending_after_failure(ret);
     if (f && idx != MPI_UNDEFINED) {
         done[idx] = 1;
     }
@@ -3670,6 +3712,12 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
     }
     int out = MPI_UNDEFINED;
     int ret = MPI_Testsome((int)count, reqs, &out, tmp_indices, sts);
+    abort_if_pending_after_failure(ret);
+    if (ret == MPI_ERR_IN_STATUS) {
+        for (int i = 0; i < out; i++) {
+            abort_if_pending_after_failure(sts[i].MPI_ERROR);
+        }
+    }
     if (out == MPI_UNDEFINED) {
         *outcount = -1;
     } else {
