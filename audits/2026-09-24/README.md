@@ -178,7 +178,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | ARC-15 | Naming/coverage asymmetries | minor | one-way | 0.6 | open |
 | ARC-16 | Magic `-1` sentinels; no typed source/tag | minor | one-way | 0.6 | open |
 | ARC-17 | RMA redundant `target_count`, duplicate tags | minor | one-way | 0.6 | open |
-| ARC-18 | Open MPI 5 capabilities unused (persistent collectives, `create_from_group` gated on `MPI_VERSION >= 4`; OMPI 5 reports 3.1) | minor | two-way | 0.5.x | planned (ferrompi-0.6.0-closeout) |
+| ARC-18 | Open MPI 5 capabilities unused (persistent collectives, `create_from_group` gated on `MPI_VERSION >= 4`; OMPI 5 reports 3.1) | minor | two-way | 0.5.x | fixed (213cfd0, d555791, c58cd05) |
 
 ### MPI-5 ABI — [04](findings/04-mpi5-abi.md)
 
