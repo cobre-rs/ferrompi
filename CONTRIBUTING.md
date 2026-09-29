@@ -32,6 +32,7 @@ Run every command CI runs, with its exact flags:
 
 ```bash
 cargo fmt --all -- --check
+bash .github/scripts/check-no-plan-leaks.sh
 
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features rma -- -D warnings
@@ -55,6 +56,12 @@ cargo +1.85 build --locked --all-features --lib --tests --examples
 Lint policy: `clippy::all` at `-D warnings`, not pedantic strictness. Every `unsafe`
 block needs a `// SAFETY:` comment (`clippy::undocumented_unsafe_blocks` is denied).
 Every public item needs a doc comment (`missing_docs`, fatal under `-D warnings`).
+
+Shipped files (source, examples, benches, tests, docs, README, CHANGELOG) describe
+behaviour, not how the work was planned: no work-item, requirement or audit-register
+identifiers and no paths into planning notes. `check-no-plan-leaks.sh` enforces this;
+commit messages are exempt. To run it with `cargo fmt --check` before every commit:
+`ln -sf ../../.github/scripts/pre-commit .git/hooks/pre-commit`.
 
 ## Writing an MPI test
 
@@ -118,7 +125,7 @@ Pull requests to `main` and `develop` run:
 ## Changelog and releases
 
 A user-visible change adds an entry under `## [Unreleased]` in `CHANGELOG.md`; do
-not reference internal ticket or finding IDs. The release commit renames that
+not reference internal tracking IDs. The release commit renames that
 heading to `## [X.Y.Z] - YYYY-MM-DD`. `.github/scripts/release-notes.sh <version>`
 extracts that section; `publish.yml` runs it before publishing and fails the tag
 if the section is missing or empty, and a CI fixture test requires notes for
