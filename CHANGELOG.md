@@ -7,6 +7,171 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This release hardens soundness and MPI correctness: argument validation,
+request completion, error classes, RMA bounds, large counts and the
+finalize lifecycle. It also makes MPI selection at build time explicit.
+
+### Breaking Changes
+
+- **`Error` is now `#[non_exhaustive]`** and gains two new variants,
+  `Finalized` and `ThreadLevelViolation`. Migration: an exhaustive `match`
+  on `Error` now needs a trailing `_` arm.
+- **`send_custom`, `recv_custom`, `isend_custom` and `irecv_custom` now
+  require `T: PlainData`**, a new public `unsafe trait PlainData: Copy +
+  'static`, implemented for every `MpiDatatype` and for `[T; N]`.
+  Migration: `unsafe impl PlainData for MyType {}` for a `#[repr(C)]` type
+  with no padding-sensitive invariants.
+- **The `*_custom` methods now return `Err(InvalidBuffer)`** unless the
+  datatype's extent equals `size_of::<T>()` and its true bounds lie within
+  one `T` (a smaller extent also fails).
+- **`LongInt`/`LongDoubleInt` now exist only on Linux x86_64, aarch64 and
+  little-endian powerpc64**; the `DatatypeTag` variants stay. Linux is the
+  supported platform; macOS builds but is untested and lacks the two pair
+  types; Windows is not a supported target.
+- **MSRV is now 1.85** (the previously declared 1.74 did not build the
+  crate).
+- **The crate now declares `links = "ferrompi"`**, so two
+  semver-incompatible ferrompi versions in one build now fail at dependency
+  resolution instead of silently linking one of them.
+- **Below `ThreadLevel::Serialized`, a call from a thread other than the
+  one that initialized MPI now returns `Err(ThreadLevelViolation)`**
+  without calling MPI. The provided thread level is honored, `Single` is
+  enforced like `Funneled`, and `Mpi::init()` now requests `Single`.
+- **Below `Serialized`, dropping an MPI-calling handle on a non-init
+  thread now prints `ferrompi: <Type> dropped on thread <name>` to stderr
+  and aborts the process.**
+- **Feature `rma`: dropping `Mpi` while any window is still alive now
+  skips `MPI_Finalize`**, printing `ferrompi: MPI_Finalize skipped: N
+  window(s) still alive; …` to stderr; those windows are never freed, and
+  `Mpi::is_finalized()` still returns `true`.
+- **MPI selection at build time is now explicit.** The first set,
+  non-empty variable among `MPI_PKG_CONFIG`, `MPICC` and `CRAY_MPICH_DIR`
+  selects the MPI installation; if it fails, the build now fails naming
+  that variable instead of falling back to auto-detection.
+- **`CRAY_MPICH_DIR` now outranks auto-detection** (pkg-config, `mpicc` on
+  `PATH`, fixed prefixes). `MPICC` set to the Cray `cc` driver now fails
+  the build, because `cc` answers neither `-show` nor `--showme`.
+- **An RMA call with target rank `-1` now returns `Err(InvalidBuffer)`**;
+  MPICH used to treat `-1` as `MPI_PROC_NULL`, a silent no-op.
+- **Invalid arguments that used to reach MPI unchecked now return `Err`**
+  in more cases; see Fixed below for the specific checks.
+
+### Added
+
+- **`Group::undefined` is now a `const fn`.**
+- **docs.rs now builds with all features** and badges feature- and
+  target-gated items, so `Win`, `SharedWindow` and `slurm` now appear in
+  the published documentation.
+- **The build script now queries a compiler wrapper with `-show`, then
+  `--showme`**, passes every `-D` define from the wrapper or pkg-config
+  through to the C shim's compile, and strips surrounding quotes from
+  paths.
+- **The build script now reruns when `MPI_PKG_CONFIG`, `MPICC`,
+  `CRAY_MPICH_DIR` or `PATH` changes** (any `PATH` change now rebuilds the
+  crate).
+- **`CRAY_MPICH_DIR` now resolves through its `lib/pkgconfig/mpich.pc`**,
+  falling back to `include/mpi.h` with `libmpich` or `libmpi` present
+  under `lib` or `lib64`.
+- **Building against the draft MPI ABI is now a compile error.**
+  `MPI_ABI_VERSION` defined with `MPI_VERSION < 5` (as produced by MPICH
+  4.3 built with `-DMPI_ABI`) fails to compile; native headers and the
+  ratified MPI 5.0 ABI build (the latter untested at run time).
+- **New `ferrompi::doc::adr_0006_mpi5_abi_direction` module** documents
+  ADR-0006, the MPI 5.0 standard-ABI direction.
+
+### Changed
+
+- **After `Mpi` is dropped, MPI-calling methods now return
+  `Err(Finalized)` instead of calling MPI**, and their own drops become
+  silent no-ops. `version`, `library_version`, `wtime`, `is_initialized`
+  and `is_finalized` still answer.
+- **`Mpi::init`/`init_thread` called after finalize now returns
+  `Err(Finalized)`** (MPICH used to abort).
+- **In debug builds at `ThreadLevel::Serialized`, two overlapping MPI
+  calls now return `Err(ThreadLevelViolation)`**; release builds do not
+  perform this check.
+- **`MPI_ERRORS_RETURN` is now also installed on `MPI_COMM_SELF`**, so
+  errors the MPI standard does not attribute to any communicator or
+  window now return `Err` on MPI-4 libraries instead of aborting.
+- **`Request::cancel` on a nonblocking-collective or RMA request now
+  returns `Err(NotSupported)`** without calling MPI.
+- **Built against MPI older than 4.0, the persistent collectives and
+  `create_from_group` now return `Err(NotSupported(op))`.**
+- **`Status.count` is now `-1` when the message is not a whole number of
+  elements** (MPI reports `MPI_UNDEFINED`).
+- **`Request::raw_handle()` values now carry a generation counter** and
+  name no request once that request completes, because completion frees
+  the underlying table slot for reuse.
+- **Batch methods now skip already-completed requests left in a slice**;
+  both `wait_all` implementations mark exactly the requests MPI completed,
+  whether the call as a whole succeeds or fails.
+- **A failed batch completion now reports the failing request's own class
+  and code**, with the message ending in `(request N)`.
+- **On MPI 4.0 and later, persistent point-to-point and non-v persistent
+  collective inits above `INT_MAX` now use the MPI 4.0 large-count
+  variants**; `gatherv_init`, `scatterv_init` and `allgatherv_init` still
+  return `Err(Count)`.
+- **Window creation now runs one allgather of the window lengths across
+  the communicator**; `Win::allocate` and `SharedWindow::allocate` add two
+  barriers and zero the whole segment, committing every page at
+  construction.
+- **`Win::sync` must now be called inside a passive-target epoch** (the
+  documentation used to say the opposite).
+- **The `SharedWindow` slice accessors now document that other ranks may
+  write the memory concurrently.**
+- **The published crates.io package now holds only `src`, `csrc`, `docs`,
+  `build.rs`, the README, the CHANGELOG and the license files.**
+- **The `DatatypeTag`/`ReduceOp` discriminant stability promise is
+  withdrawn.** The discriminant values are an internal contract between
+  the Rust enums and the C shim; any future release may change them. No
+  discriminant value changed in this release.
+- **Documentation corrected to the shipped behavior.** `ADR-0001` through
+  `ADR-0005` carry dated amendments; the architecture guide, the rsmpi
+  migration guide and the MPI compatibility reference are corrected; the
+  `numa` feature is documented as the SLURM job-topology helpers only,
+  with no NUMA or hwloc code; the README is trimmed, with the API tables
+  living on docs.rs.
+
+### Removed
+
+- **The `[profile.release]` section added in 0.5.0 is gone.** Cargo never
+  applied a dependency's own profile settings to its dependents, so it had
+  no effect outside this repository's own builds.
+
+### Fixed
+
+- **`MpiErrorClass` now decodes correctly on MPICH-derived libraries.** 13
+  of 19 classes previously used Open MPI's numbering.
+- **A stale request handle can no longer act on an unrelated request that
+  reused its slot.**
+- **A failed batch completion no longer leaves freed MPI requests that
+  can be waited or tested on again.**
+- **`gather`, `allgather` and `scatter` (blocking, nonblocking and
+  persistent) now return `Err(InvalidBuffer)` for a buffer too small to
+  hold one slot per rank.**
+- **The v-collectives (all three families) now validate the arrays MPI
+  reads on the calling rank**: array length equal to the communicator
+  size, non-negative counts, and each non-empty block inside the buffer.
+- **`CustomDatatype::create_struct` with an empty field list now returns
+  an error before calling MPI.**
+- **The nine RMA data calls now bounds-check target rank, displacement
+  and count against the target's window.**
+- **A `Win::create`/`Win::allocate` with an unrepresentable length now
+  fails on every rank** instead of hanging or aborting.
+- **Freshly allocated `Win::allocate`/`SharedWindow::allocate` memory now
+  reads as zero.**
+- **`SharedWindow::allocate(comm, 0)` now succeeds** (it used to return
+  `Err(Internal)` and leak the window).
+- **Counts above `INT_MAX` no longer truncate.** Below MPI 4.0, an
+  oversized count now returns `Err(Count)`; the v-collectives return
+  `Err(Count)` on every MPI version; RMA calls now use the MPI 4.0
+  large-count variants on MPI 4.0 and later.
+- **A `UserOp` still alive at finalize is now freed and its closure
+  dropped** instead of leaking.
+- **The finalize sweep now frees only inactive persistent requests**; a
+  debug build prints `ferrompi: MPI_Finalize leaves N active request(s)
+  unfreed`.
+
 ## [0.5.0] - 2026-06-18
 
 This release resolves all 11 findings from a 2026 architecture & performance
