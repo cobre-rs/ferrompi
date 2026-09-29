@@ -222,6 +222,36 @@ fn fmt_mpi(
 /// Error types for MPI operations.
 ///
 /// This enum is non-exhaustive: downstream `match`es need a wildcard arm.
+///
+/// # Which failures return `Err`
+///
+/// `ferrompi` installs `MPI_ERRORS_RETURN` on `MPI_COMM_WORLD`, on
+/// `MPI_COMM_SELF` (which receives errors the MPI standard does not
+/// attribute to any communicator or window), and on every communicator and
+/// window it creates (windows on a best-effort basis — see below), so
+/// failures on those objects return `Err` instead of aborting through MPI's
+/// default handler.
+///
+/// Five paths end the process instead of returning `Err`:
+/// - an error inside `MPI_Init_thread` itself, before any error handler is
+///   installed: MPI's default handler is `MPI_ERRORS_ARE_FATAL`, so
+///   [`Mpi::init`](crate::Mpi::init)/[`Mpi::init_thread`](crate::Mpi::init_thread)
+///   return `Err(Error::Mpi)` only when MPI's initial error handler returns
+///   instead of aborting;
+/// - a window whose own `MPI_Win_set_errhandler` call failed (a stderr
+///   warning is printed; a known Open MPI 4.x quirk) keeps MPI's default
+///   handler, so a later RMA error on that window aborts instead of
+///   returning `Err`;
+/// - a panic inside a [`UserOp`](crate::UserOp) reduction closure aborts
+///   the process;
+/// - dropping a handle on the wrong thread aborts the process; see the
+///   [`Mpi`](crate::Mpi) lifecycle section;
+/// - [`Communicator::abort`](crate::Communicator::abort) aborts the process
+///   by design.
+///
+/// `Drop` implementations that call MPI never return an error from that
+/// call; apart from a stderr line when freeing a [`UserOp`](crate::UserOp)
+/// fails, an error during drop is not reported.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {

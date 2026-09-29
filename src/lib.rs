@@ -335,24 +335,51 @@ pub enum ReduceOp {
 
 /// MPI environment handle.
 ///
-/// This type represents an initialized MPI environment. There can only be one
-/// instance of this type at a time. When dropped, it finalizes MPI. After the
-/// handle is dropped, every method that calls MPI through a communicator,
-/// group, request, window, datatype, info or user op returns
-/// `Err(`[`Error::Finalized`]`)` without calling MPI. The queries the MPI
-/// standard allows at any time ([`Mpi::version`], [`Mpi::library_version`],
-/// [`Mpi::wtime`], [`Mpi::is_initialized`], [`Mpi::is_finalized`]) still
-/// answer.
+/// # Lifecycle
+///
+/// There is one `Mpi` per process. While a handle is alive,
+/// [`Mpi::init`]/[`Mpi::init_thread`] return
+/// `Err(`[`Error::AlreadyInitialized`]`)`; once it is dropped, they return
+/// `Err(`[`Error::Finalized`]`)`. MPI cannot be re-initialized.
+///
+/// Dropping this handle finalizes MPI. Afterward, every method that calls
+/// MPI through a communicator, group, request, window, datatype, info or
+/// user op returns `Err(`[`Error::Finalized`]`)` without calling MPI. The
+/// queries the MPI standard allows at any time ([`Mpi::version`],
+/// [`Mpi::library_version`], [`Mpi::is_initialized`],
+/// [`Mpi::is_finalized`]) still answer. [`Mpi::wtime`] is not checked
+/// either and still calls `MPI_Wtime`, which the standard does not define
+/// after finalize. A communicator, request, window or window lock guard,
+/// datatype, group, info object or user op that outlives this handle makes
+/// no MPI call when it is dropped.
 ///
 /// If any window (feature `rma`) is still alive when this handle is
-/// dropped, `MPI_Finalize` is skipped instead — with a stderr warning —
-/// because some MPI implementations free MPI-allocated window memory inside
-/// `MPI_Finalize` itself, and some abort while tearing down internal state
-/// that still tracks a live window.
+/// dropped — whatever constructed it — `MPI_Finalize` is skipped instead,
+/// with a stderr warning, because some MPI implementations free
+/// MPI-allocated window memory inside `MPI_Finalize` itself, and some abort
+/// while tearing down internal state that still tracks a live window;
+/// window memory stays valid until the process exits. Launchers can report
+/// such an exit differently from a clean one; see
+/// [`doc::mpi_compatibility`]. Debug builds print a note to stderr when
+/// finalize still leaves MPI requests unfreed.
+///
+/// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
+/// whose `Drop` calls MPI — an uncompleted [`Request`], a
+/// [`PersistentRequest`], a communicator other than the world, a datatype,
+/// group, info object or user op — on a thread other than the one that
+/// called [`Mpi::init`]/[`Mpi::init_thread`] prints
+/// `ferrompi: <Type> dropped on thread <name or id>` to stderr and aborts
+/// the process.
 ///
 /// At [`ThreadLevel::Serialized`]/[`ThreadLevel::Multiple`], dropping this
 /// handle while another thread is still inside an MPI call through this
 /// crate is a program error that `ferrompi` does not detect.
+///
+/// A call that would fail one of the checks above (finalized, wrong
+/// thread) and is also given invalid arguments may return the argument
+/// error (for example [`Error::InvalidBuffer`]) instead of
+/// `Err(`[`Error::Finalized`]`)`/`Err(`[`Error::ThreadLevelViolation`]`)`;
+/// the order in which these checks run is not part of the API.
 ///
 /// # Example
 ///
@@ -379,7 +406,9 @@ impl Mpi {
     /// Returns `Err(`[`Error::AlreadyInitialized`]`)` while an `Mpi` handle
     /// exists or another thread is initializing, `Err(`[`Error::Finalized`]`)`
     /// once MPI has been finalized, or `Err(`[`Error::Mpi`]`)` if
-    /// `MPI_Init_thread` itself fails.
+    /// `MPI_Init_thread` itself fails. An error inside `MPI_Init_thread`
+    /// itself usually aborts the process before `Err(`[`Error::Mpi`]`)` can
+    /// be returned; see [`Error`].
     pub fn init() -> Result<Self> {
         Self::init_thread(ThreadLevel::Single)
     }
@@ -400,7 +429,9 @@ impl Mpi {
     /// Returns `Err(`[`Error::AlreadyInitialized`]`)` while an `Mpi` handle
     /// exists or another thread is initializing, `Err(`[`Error::Finalized`]`)`
     /// once MPI has been finalized, or `Err(`[`Error::Mpi`]`)` if
-    /// `MPI_Init_thread` itself fails.
+    /// `MPI_Init_thread` itself fails. An error inside `MPI_Init_thread`
+    /// itself usually aborts the process before `Err(`[`Error::Mpi`]`)` can
+    /// be returned; see [`Error`].
     pub fn init_thread(required: ThreadLevel) -> Result<Self> {
         rt::begin_init()?;
 
@@ -775,10 +806,6 @@ impl Drop for Mpi {
         }
     }
 }
-
-// Mpi is not Send or Sync - MPI must be used from the thread that initialized it
-// (unless thread level is Multiple)
-// This is enforced by PhantomData<*const ()> in the struct
 
 #[cfg(test)]
 mod tests {
