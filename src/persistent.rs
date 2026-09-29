@@ -165,12 +165,10 @@ impl PersistentRequest {
         }
 
         // Check none are already active
-        for req in requests.iter() {
-            if req.active {
-                return Err(Error::Internal(
-                    "One or more requests already active".into(),
-                ));
-            }
+        if requests.iter().any(|req| req.active) {
+            return Err(Error::Internal(
+                "One or more requests already active".into(),
+            ));
         }
 
         // SAFETY: with_handles provides a valid, contiguous [i64] of the

@@ -443,7 +443,7 @@ impl Error {
                 class,
                 code,
                 message,
-                operation: _,
+                ..
             } => Error::Mpi {
                 class,
                 code,
