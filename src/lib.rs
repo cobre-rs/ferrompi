@@ -2,15 +2,48 @@
 //!
 //! Safe, generic Rust bindings for MPI (Message Passing Interface).
 //!
-//! This crate wraps MPI functionality through a thin C layer, providing:
-//! - Type-safe generic API for all MPI datatypes
-//! - Blocking, nonblocking, and persistent (MPI 4.0+) collectives
-//! - Communicator management (split, duplicate)
-//! - RMA shared memory windows (with `rma` feature)
-//! - SLURM environment helpers (with `numa` feature)
-//! - Large count support (MPI 4.0+ `_c` variants for blocking/nonblocking
-//!   collectives; persistent collectives currently reject `count > INT_MAX`
-//!   with `MPI_ERR_COUNT` — full `_c` dispatch for persistent ops is deferred)
+//! This crate wraps MPI functionality through a thin C layer.
+//!
+//! ## Capabilities
+//!
+//! - **Generic API**: All operations work with any [`MpiDatatype`] (`f32`, `f64`, `i32`, `i64`, `u8`, `u32`, `u64`)
+//! - **Blocking collectives**: barrier, broadcast, reduce, allreduce, gather, scatter, allgather,
+//!   alltoall, scan, exscan, reduce\_scatter\_block, plus V-variants (gatherv, scatterv, allgatherv, alltoallv)
+//! - **Nonblocking collectives**: All 15 `i`-prefixed variants with [`Request`] handles
+//! - **Persistent collectives** (MPI 4.0+): `*_init` forms of every blocking collective except
+//!   `barrier`, plus five in-place forms, with [`PersistentRequest`] handles
+//! - **Large counts**: with an MPI 4.0 library, a count above `i32::MAX` uses MPI's `_c` call
+//!   (point-to-point, collectives including persistent ones, RMA, user-op reductions); below
+//!   MPI 4.0 it returns [`Error::Mpi`] with class [`MpiErrorClass::Count`]. The V-collectives
+//!   (`gatherv`, `scatterv`, `allgatherv`, `alltoallv`, and their persistent forms) take counts
+//!   as `i32` arrays and return that error on every MPI version.
+//! - **Scalar and in-place variants**: `reduce_scalar`, `allreduce_scalar`, `reduce_inplace`,
+//!   `allreduce_inplace`, `scan_scalar`, `exscan_scalar`
+//! - **Point-to-point**: `send`, `recv`, `isend`, `irecv`, `sendrecv`, `probe`, `iprobe`
+//! - **Persistent point-to-point**: `send_init`, `bsend_init`, `rsend_init`, `ssend_init`,
+//!   `recv_init` methods on [`Communicator`], each returning a [`PersistentRequest`]
+//! - **Communicator management**: `split`, `split_type`, `split_shared`, `duplicate`
+//! - **Group operations**: [`Group`] with incl/excl/union/intersection/difference,
+//!   [`RankRange`] for range constructors, [`GroupComparison`].
+//!
+//!   Note: [`Mpi::create_from_group`] requires MPI 4.0+.
+//!   Support is probed once and cached; see the function rustdoc for the cache invariant.
+//! - **Custom datatypes**: [`CustomDatatype`]
+//!   (contiguous/vector/struct/resized) and [`StructField`]
+//!   for struct-type builders.
+//! - **User-defined reduction operations**: [`UserOp`] wraps `MPI_Op_create`
+//!   with safe closure storage and trampoline.
+//! - **Distributed RMA windows** (feature `rma`): `Win<T>` with
+//!   `WinFenceAssert`, `WinPscwAssert`,
+//!   `WinLockGuard`, and `WinLockAllGuard`
+//!   RAII guards.
+//! - **Shared memory windows** (feature `rma`): `SharedWindow<T>`
+//!   with RAII lock guards for intra-node shared memory (distinct from the
+//!   distributed `Win<T>` windows above).
+//! - **Info objects**: [`Info`] creates and queries MPI info objects;
+//!   no ferrompi call takes one yet.
+//! - **SLURM helpers** (feature `numa`): Job topology queries via `slurm` module
+//! - **Rich error handling**: [`MpiErrorClass`] categorization with messages from the MPI runtime
 //!
 //! ## Supported Types
 //!
@@ -49,91 +82,20 @@
 //!
 //! | Feature | Description | Dependencies |
 //! |---------|-------------|--------------|
-//! | `rma`   | RMA shared memory window operations | — |
-//! | `numa`  | NUMA-aware windows and SLURM helpers | `rma` |
+//! | `rma`   | RMA and shared-memory windows (`Win`, `SharedWindow`, lock guards, RMA operations, `ReduceOp::Replace`/`NoOp`) | — |
+//! | `numa`  | The `slurm` module and `SlurmInfo` | `rma` |
 //!
-//! ## Capabilities
-//!
-//! - **Generic API**: All operations work with any [`MpiDatatype`] (`f32`, `f64`, `i32`, `i64`, `u8`, `u32`, `u64`)
-//! - **Blocking collectives**: barrier, broadcast, reduce, allreduce, gather, scatter, allgather,
-//!   alltoall, scan, exscan, reduce\_scatter\_block, plus V-variants (gatherv, scatterv, allgatherv, alltoallv)
-//! - **Nonblocking collectives**: All 15 `i`-prefixed variants with [`Request`] handles
-//! - **Persistent collectives** (MPI 4.0+): All 15 `_init` variants with [`PersistentRequest`] handles
-//! - **Scalar and in-place variants**: `reduce_scalar`, `allreduce_scalar`, `reduce_inplace`,
-//!   `allreduce_inplace`, `scan_scalar`, `exscan_scalar`
-//! - **Point-to-point**: `send`, `recv`, `isend`, `irecv`, `sendrecv`, `probe`, `iprobe`
-//! - **Communicator management**: `split`, `split_type`, `split_shared`, `duplicate`
-//! - **Group operations**: [`Group`] with incl/excl/union/intersection/difference,
-//!   [`RankRange`] for range constructors, [`GroupComparison`].
-//!
-//!   Note: [`Mpi::create_from_group`] requires MPI 4.0+.
-//!   Support is probed once and cached; see the function rustdoc for the cache invariant.
-//! - **Custom datatypes**: [`CustomDatatype`]
-//!   (contiguous/vector/struct/resized) and [`StructField`]
-//!   for struct-type builders.
-//! - **User-defined reduction operations**: [`UserOp`] wraps `MPI_Op_create`
-//!   with safe closure storage and trampoline.
-//! - **Distributed RMA windows** (feature `rma`): `Win<T>` with
-//!   `WinFenceAssert`, `WinPscwAssert`,
-//!   `WinLockGuard`, and `WinLockAllGuard`
-//!   RAII guards.
-//! - **Info objects**: [`Info`] for runtime hint passing to communicator,
-//!   window, and operation constructors.
-//! - **Persistent point-to-point**: `send_init`, `bsend_init`, `rsend_init`, `ssend_init`,
-//!   `recv_init` methods on [`Communicator`], each returning a
-//!   [`PersistentRequest`].
-//! - **Shared memory windows** (feature `rma`): `SharedWindow<T>`
-//!   with RAII lock guards for NUMA-aware intra-node shared memory (distinct from the
-//!   distributed `Win<T>` windows above).
-//! - **SLURM helpers** (feature `numa`): Job topology queries via `slurm` module
-//! - **Rich error handling**: [`MpiErrorClass`] categorization with messages from the MPI runtime
+//! `numa` needs no system library: it implies `rma` and adds only the SLURM
+//! job-topology helpers; it adds no NUMA code.
 //!
 //! ## Thread Safety
 //!
-//! [`Communicator`] is `Send + Sync` to support hybrid MPI + threads programs
-//! (e.g., MPI between nodes, `std::thread::scope` within a node).
+//! [`Communicator`], [`Group`], [`Request`], [`PersistentRequest`], [`Status`],
+//! [`CustomDatatype`], [`Info`], and [`UserOp`] are `Send + Sync`; [`Mpi`],
+//! `Win<T>`, `SharedWindow<T>` (feature `rma`), and their RAII lock guards are not.
 //!
-//! The actual thread-safety guarantees depend on the thread level requested
-//! at initialization:
-//!
-//! | Thread Level | Who can call MPI | Synchronization |
-//! |--------------|------------------|-----------------|
-//! | [`ThreadLevel::Single`] | Main thread only | N/A |
-//! | [`ThreadLevel::Funneled`] | Main thread only | N/A |
-//! | [`ThreadLevel::Serialized`] | Any thread | User must serialize |
-//! | [`ThreadLevel::Multiple`] | Any thread | None needed |
-//!
-//! ```no_run
-//! use ferrompi::{Mpi, ThreadLevel};
-//!
-//! // Request serialized thread support for hybrid MPI + threads
-//! let mpi = Mpi::init_thread(ThreadLevel::Funneled).unwrap();
-//! assert!(mpi.thread_level() >= ThreadLevel::Funneled);
-//! ```
-//!
-//! [`Mpi`] itself is `!Send + !Sync` — MPI initialization and finalization
-//! must occur on the same thread. Only [`Communicator`] handles (and the
-//! operations on them) may cross thread boundaries.
-//!
-//! ### Send/Sync Status of Public Types
-//!
-//! | Type | Send/Sync | Notes |
-//! |------|-----------|-------|
-//! | [`Communicator`] | `Send + Sync` | Explicit `unsafe impl` in `src/comm/mod.rs`; cross-thread use is the primary hybrid MPI use case. |
-//! | [`Mpi`] | `!Send + !Sync` | `PhantomData<*const ()>` field; init and finalize must occur on the same thread. |
-//! | [`Group`] | `Send + Sync` | Explicit `unsafe impl` in `src/group.rs`; handles are opaque integers, MPI-thread-safe under `MPI_THREAD_MULTIPLE`. |
-//! | [`Request`] | `Send + Sync` | Auto-derived; `i64` + `bool` fields. Cross-thread use requires `MPI_THREAD_MULTIPLE`. Buffer-lifetime invariant still applies. |
-//! | [`PersistentRequest`] | `Send + Sync` | Auto-derived; same shape as `Request`. ADR-0004 §"Drop behavior" applies across thread boundaries. |
-//! | [`Status`] | `Send + Sync` | POD wrapper; all fields are `Copy`. |
-//! | [`CustomDatatype`] | `Send + Sync` | Explicit `unsafe impl` in `src/datatype_builder.rs`; handle is an opaque integer. |
-//! | [`Info`] | `Send + Sync` | Auto-derived from `i32` + `bool` fields; MPI info objects are thread-safe under `MPI_THREAD_MULTIPLE`. |
-//! | [`UserOp<T>`] | `Send + Sync` (for `T: MpiDatatype`) | Auto-derived: fields are `i32` + `PhantomData<T>`. The trait bound `MpiDatatype: Copy + Send + 'static` and the fact that all concrete `MpiDatatype` impls are also `Sync` give `Send + Sync` for `UserOp<T>`. The global closure registry uses internal `unsafe impl Send/Sync` on its slots; that is a separate object from `UserOp<T>` itself. |
-//! | `Win<T>` (feature `rma`) | `!Send + !Sync` | `NonNull<T>` field suppresses auto-traits; RMA window's local memory pointer is not safe to share across threads. |
-//! | `SharedWindow<T>` (feature `rma`) | `!Send + !Sync` | `NonNull<T>` field; same rationale as `Win<T>`. |
-//! | `LockGuard<'a, T>` (feature `rma`) | `!Send + !Sync` | Borrows `SharedWindow<T>`; inherits non-Send/Sync. |
-//! | `LockAllGuard<'a, T>` (feature `rma`) | `!Send + !Sync` | Borrows `SharedWindow<T>`; inherits non-Send/Sync. |
-//! | `WinLockGuard<'g, 'a, T>` (feature `rma`) | `!Send + !Sync` | Borrows `Win<T>`; inherits non-Send/Sync. |
-//! | `WinLockAllGuard<'g, 'a, T>` (feature `rma`) | `!Send + !Sync` | Borrows `Win<T>`; inherits non-Send/Sync. |
+//! Which thread may call MPI is set by the provided [`ThreadLevel`]; see its
+//! documentation for the per-level rules.
 //!
 //! ## Hybrid MPI+OpenMP
 //!
@@ -147,6 +109,7 @@
 //! ```no_run
 //! use ferrompi::{Mpi, ThreadLevel, ReduceOp};
 //!
+//! // Request funneled support for hybrid MPI + threads
 //! let mpi = Mpi::init_thread(ThreadLevel::Funneled).unwrap();
 //! assert!(mpi.thread_level() >= ThreadLevel::Funneled);
 //!
@@ -161,30 +124,23 @@
 //! ```bash
 //! #SBATCH --ntasks-per-node=4        # MPI ranks per node
 //! #SBATCH --cpus-per-task=8          # OpenMP threads per rank
-//! #SBATCH --bind-to core             # Pin MPI ranks
 //! export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-//! srun ./my_program
+//! srun --cpu-bind=cores ./my_program
 //! ```
 //!
 //! Use the `slurm` module (with `numa` feature) to read these values at runtime.
 //! See `examples/hybrid_openmp.rs` for the full pattern.
 //!
+//! ## Lifecycle
+//!
+//! Dropping the [`Mpi`] handle finalizes MPI. See [`Mpi`] for what happens to
+//! other handles afterwards, and [`Error`] for which failures return `Err`
+//! and which abort the process.
+//!
 //! ## Extended documentation
 //!
-//! Long-form documentation artifacts are embedded in the [`doc`] module and
-//! render as individual pages in this rustdoc. The same content is available
-//! as plain Markdown in the `docs/` directory.
-//!
-//! | Module | Description |
-//! |--------|-------------|
-//! | [`doc::architecture`] | Six-layer stack, handle tables, thread-safety model, FFI/ABI invariants, and generic `MpiDatatype` design |
-//! | [`doc::migrating_from_rsmpi`] | Function-for-function API mapping and migration cookbook from rsmpi |
-//! | [`doc::mpi_compatibility`] | Compatibility matrix for MPICH, Open MPI, Intel MPI, and Cray MPI |
-//! | [`doc::adr_0001_why_c_wrapper`] | ADR-0001: why a hand-written C wrapper is used instead of `bindgen` |
-//! | [`doc::adr_0002_handle_tables`] | ADR-0002: C11 atomic CAS strategy for the request-table under `MPI_THREAD_MULTIPLE` |
-//! | [`doc::adr_0003_generic_mpi_datatype`] | ADR-0003: sealed `MpiDatatype` trait family and `DatatypeTag` ABI contract |
-//! | [`doc::adr_0004_persistent_collective_approach`] | ADR-0004: `PersistentRequest` lifecycle and buffer-lifetime invariants |
-//! | [`doc::adr_0005_mpi_op_create`] | ADR-0005: `MPI_Op_create` closure storage, trampoline safety, and drop ordering |
+//! The [`doc`] module embeds the long-form guides and the architecture
+//! decision records.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
@@ -264,7 +220,25 @@ use std::sync::{Mutex, OnceLock};
 /// two calls.
 static ATTACHED_BUFFER: Mutex<Option<Box<[u8]>>> = Mutex::new(None);
 
-/// MPI thread support levels
+/// MPI thread support levels.
+///
+/// | Level | Who may call MPI | Synchronization |
+/// |-------|-------------------|------------------|
+/// | [`Single`](ThreadLevel::Single) | Only the thread that called [`Mpi::init_thread`] | N/A |
+/// | [`Funneled`](ThreadLevel::Funneled) | Only the thread that called [`Mpi::init_thread`] | N/A |
+/// | [`Serialized`](ThreadLevel::Serialized) | Any thread | Caller serializes; debug builds detect an overlap |
+/// | [`Multiple`](ThreadLevel::Multiple) | Any thread | None needed |
+///
+/// A call from any other thread at [`Single`](ThreadLevel::Single) or
+/// [`Funneled`](ThreadLevel::Funneled) returns
+/// `Err(`[`Error::ThreadLevelViolation`]`)` without calling MPI. At
+/// [`Serialized`](ThreadLevel::Serialized), the caller must serialize its own
+/// calls; a debug build that detects two calls overlapping also returns that
+/// error, but a release build does not check.
+///
+/// [`Mpi::thread_level()`] reports the level MPI actually granted, which may
+/// be lower than the level requested to [`Mpi::init_thread`]; it is the
+/// granted level, not the requested one, that these rules apply to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum ThreadLevel {

@@ -8,27 +8,20 @@
 //!
 //! [`docs/README.md`]: https://github.com/cobre-rs/ferrompi/blob/main/docs/README.md
 
-/// Architecture overview for ferrompi contributors.
-///
-/// Describes the six-layer stack, handle tables, thread-safety model, C layer
-/// scope, FFI/ABI invariants, the generic `MpiDatatype` trait family, and the
-/// error handling model.
 #[doc = include_str!("../docs/architecture.md")]
 pub mod architecture {}
 
-/// Migration guide from rsmpi to ferrompi.
-///
-/// Covers the quick-comparison table, a function-for-function API mapping,
-/// migration cookbook examples, unsupported features, and API ergonomic
-/// differences.
+// A leading empty `#[doc]` attribute keeps this module's rendered doc
+// comment from starting at byte 0 of the included file. Without it,
+// clippy's `doc_overindented_list_items` misparses the six-space-aligned
+// continuation lines under the "Migration Checklist" task list in
+// docs/migrating-from-rsmpi.md as over-indented and fails `-D warnings`
+// (verified: removing this line alone reproduces all 14 false positives;
+// the architecture and mpi-compatibility includes need no such attribute).
+#[doc = ""]
 #[doc = include_str!("../docs/migrating-from-rsmpi.md")]
 pub mod migrating_from_rsmpi {}
 
-/// MPI implementation compatibility matrix.
-///
-/// Documents which features are available on MPICH 3.x/4.x, Open MPI 4/5,
-/// Intel MPI, and Cray MPI, including known issues and how to report new
-/// compatibility data.
 #[doc = include_str!("../docs/mpi-compatibility.md")]
 pub mod mpi_compatibility {}
 

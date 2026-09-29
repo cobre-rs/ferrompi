@@ -139,5 +139,5 @@ harness = false
 default = []
 # Enable RMA (Remote Memory Access) shared memory window operations
 rma = []
-# Enable NUMA-aware shared memory windows and SLURM helpers (implies rma)
+# SLURM helpers: the slurm module and SlurmInfo (implies rma)
 numa = ["rma"]
