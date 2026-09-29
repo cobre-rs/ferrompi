@@ -129,7 +129,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | SND-14 | `UserOp` fat-pointer transmute relies on unspecified layout | minor | reading | 0.5.x† | fixed (2d53b18) |
 | SND-15 | `fetch_and_op`/`compare_and_swap` result pointer derived from a shared borrow | minor | reading | 0.5.x | fixed (9777b12) |
 | SND-16 | `Mpi` drop racing a concurrent guarded call at `Serialized`/`Multiple` reaches MPI after finalize | major | reading | 0.6 | open (0.6: thread-safety API redesign) |
-| SND-17 | Under fault-tolerant MPI, a receive failing with MPIX_ERR_PROC_FAILED_PENDING is treated as complete while MPI still owns its buffer | major | reading | 0.5.x | planned (ferrompi-0.6.0-closeout) |
+| SND-17 | Under fault-tolerant MPI, a receive failing with MPIX_ERR_PROC_FAILED_PENDING is treated as complete while MPI still owns its buffer | major | reading | 0.5.x | fixed (20db67d) |
 
 ### Correctness — [02](findings/02-correctness.md)
 
