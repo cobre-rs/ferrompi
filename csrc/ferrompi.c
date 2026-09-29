@@ -3438,8 +3438,12 @@ int ferrompi_waitall(int64_t count, const int64_t* request_handles, uint8_t* don
 
     // Report the first request whose own status carries the real error, so
     // the caller sees that request's class/code instead of the opaque
-    // MPI_ERR_IN_STATUS wrapper.
-    if (ret == MPI_ERR_IN_STATUS) {
+    // MPI_ERR_IN_STATUS wrapper. Open MPI can also return MPI_SUCCESS for
+    // persistent requests that had already finished and leave a failed
+    // request's error only in its status; a conforming MPI leaves the
+    // MPI_ERR_PENDING pre-fill or writes MPI_SUCCESS there, so the scan
+    // cannot misfire on success.
+    if (ret == MPI_ERR_IN_STATUS || ret == MPI_SUCCESS) {
         for (int64_t i = 0; i < count; i++) {
             if (sts[i].MPI_ERROR != MPI_SUCCESS && sts[i].MPI_ERROR != MPI_ERR_PENDING) {
                 *failed_index = i;

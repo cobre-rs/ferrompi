@@ -84,8 +84,6 @@ One item each: the symptom, the affected library, and what to do.
   `test` or `wait_all` is freed by MPI. The owning `PersistentRequest`
   cannot be restarted or passed to `wait_all` again; finish the other
   requests with their own `wait` (or drop them) and create new ones.
-  `wait_all` can also return success, losing a truncation error, when
-  every request had already completed inside MPI before the call.
 - Open MPI 4.1: `Win::create` over a self/TCP-only transport fails with
   `MPI_ERR_WIN`, even at a single process; restricting the transport to one
   interface does not help. In that configuration, `Win::allocate` works

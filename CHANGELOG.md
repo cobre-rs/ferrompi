@@ -184,6 +184,9 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 - **Under fault-tolerant MPI, a receive that a process failure leaves
   pending now aborts the process** instead of being reported complete
   while MPI still owns its buffer.
+- **`PersistentRequest::wait_all` and `Request::wait_all` now report a
+  failed request that the MPI library completed behind a success return**
+  (seen with Open MPI's persistent requests).
 
 ## [0.5.0] - 2026-06-18
 
