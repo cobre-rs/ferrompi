@@ -51,55 +51,79 @@ that build.
 
 One item each: the symptom, the affected library, and what to do.
 
-- MPICH 4.2.x: `scatter_init` with `MPI_IN_PLACE` deadlocks when called on
-  the root rank. Fixed in MPICH 4.3. `examples/test_inplace.rs` detects the
-  affected version string at runtime and skips that one case; its other
-  in-place persistent collectives are unaffected.
+- MPICH 4.2.x: `scatter_init_inplace` (persistent `scatter` with
+  `MPI_IN_PLACE`) deadlocks the whole collective — every rank blocks, not
+  only the root that passes `MPI_IN_PLACE`. Fixed in MPICH 4.3. Use
+  `scatter_init` with a separate send buffer on 4.2.x instead;
+  `examples/test_inplace.rs` detects the affected version string at
+  runtime and skips only this one case, not the other in-place persistent
+  collectives.
 - Ubuntu 24.04's `mpich` 4.2.0 package starts every rank as a singleton —
   each sees a world of size 1 — once more than one process is launched. CI
   installs MPICH 4.2.1 from a pinned Ubuntu snapshot instead
   ([Launchpad bug 2072338](https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338)).
+  To use that package, upgrade to MPICH 4.2.1 or later;
+  `.github/scripts/mpich-hotfix.sh` shows the exact packages CI installs.
 - `Win::sync` outside a passive-target epoch is erroneous; MPICH returns an
   error for it. Call it between `Win::lock`/`Win::lock_all` and the guard's
   drop — see the `Win::sync` method's own documentation on docs.rs for the
-  full rule.
+  full rule. Other libraries may accept it silently, so a program tested
+  only there can fail on MPICH.
 - After a failed `wait_all`, which of the other requests are still pending
   depends on the library and on timing. On MPICH, the requests that come
   after the failed one in the slice stay pending. ferrompi's own rule — a
   request is marked completed only once MPI actually completes it,
   successfully or not — holds on every library; rely on that rather than an
-  implementation's particular pending behaviour.
+  implementation's particular pending behaviour. To finish the rest, call
+  `Request::wait_all` again on the same slice; completed entries are
+  skipped.
 - Open MPI 4.1.6 and 5.0.7: a nonblocking receive truncated by a send from a
   rank to itself is not reported as an error; the receive returns success.
+  A blocking `recv` of the same message does report `Truncate`; use it for
+  self-messages where truncation must be detected.
 - Open MPI 4.1.6 and 5.0.7: a persistent request that fails inside `wait`,
   `test` or `wait_all` is freed by MPI. The owning `PersistentRequest`
-  cannot be restarted after that; create a new one instead. `wait_all` over
-  a mix that includes already-finished requests can also return success and
-  lose a truncation error.
+  cannot be restarted or passed to `wait_all` again; finish the other
+  requests with their own `wait` (or drop them) and create new ones.
+  `wait_all` can also return success, losing a truncation error, when
+  every request had already completed inside MPI before the call.
 - Open MPI 4.1: `Win::create` over a self/TCP-only transport fails with
   `MPI_ERR_WIN`, even at a single process; restricting the transport to one
-  interface does not help. `Win::allocate` is unaffected and should be
-  preferred when this applies.
-- Open MPI 4.1.6's `osc/sm` component: reusing a window across passive
-  synchronised-collective epochs, then opening one with a no-check
-  assertion, lets the exposure wait return before the matching put has
-  landed. Use a freshly allocated window for a no-check epoch.
-- Open MPI 4.1's TCP transport, on a host with more than one network
-  interface (for example a Docker bridge with NAT): persistent sends
-  between ranks on the same host can hang, because the transport
-  round-robins across interfaces and the extra one is misrouted. Restrict
-  the transport to the interface you intend — for same-host ranks, CI sets
-  `OMPI_MCA_btl_tcp_if_include=lo`.
-- Open MPI 4.x can refuse to install ferrompi's error handler on a freshly
-  created window. ferrompi prints a warning to stderr when this happens,
-  and RMA errors on that window then abort the process instead of
-  returning `Err`.
+  interface does not help. In that configuration, `Win::allocate` works
+  when all ranks share one host (CI's setup); prefer it there.
+- Open MPI 4.1.6, for `Win::allocate` windows whose ranks all share one
+  host (these use Open MPI's shared-memory one-sided component, `osc/sm`):
+  once a window has been used for post-start-complete-wait (PSCW) epochs,
+  a further PSCW epoch opened with `WinPscwAssert::no_check()` can let
+  `wait_exposure` return before the matching put has landed. Open
+  `no_check()` PSCW epochs only on a freshly allocated window.
+- Open MPI 4.1's TCP transport, on a host where an extra interface sits
+  behind a NAT rule (for example Docker's `docker0` bridge and its
+  masquerade rule): sends between ranks on the same host can hang. This
+  was observed with consecutive persistent sends. Open MPI spreads
+  messages across one TCP path per interface, and messages on the
+  NAT-rewritten path are never delivered. Same-host ranks use TCP only
+  when shared memory is disabled, as CI does with `OMPI_MCA_btl=self,tcp`.
+  Restrict TCP to the interfaces that actually connect the ranks. CI's
+  ranks share one host, so it sets `OMPI_MCA_btl_tcp_if_include=lo`. A
+  multi-host job must name its cluster interface or subnet instead (for
+  example `eth0` or `10.0.0.0/16`), never `lo`.
+- If the MPI library refuses to install ferrompi's error handler on a
+  newly created window (reported for Open MPI 4.x), ferrompi prints a
+  warning to stderr, and RMA errors on that window then abort the process
+  instead of returning `Err`.
 - When `MPI_Finalize` is skipped because a window is still alive — see the
   `Mpi` type's own documentation for the full rule — MPICH's `mpiexec`
   exits 0. Open MPI 4.1.6 and 5.0.7 instead exit 1 and print an "exiting
-  improperly" notice.
-- Fault-tolerant MPI extensions (ULFM) are not supported. A request that
-  fails with `MPIX_ERR_PROC_FAILED_PENDING` is treated as complete.
+  improperly" notice. On every library, drop all windows before the `Mpi`
+  handle so `MPI_Finalize` runs; under Open MPI, a skipped finalize makes
+  the job exit non-zero, which batch schedulers and CI treat as a failure.
+- Fault-tolerant MPI (ULFM) is not supported: do not run ferrompi programs
+  with the library's process-fault-tolerance mode enabled. In that mode a
+  receive can fail with `MPIX_ERR_PROC_FAILED_PENDING` while MPI still
+  holds it pending. ferrompi treats such a request as complete and ends
+  its borrow of the receive buffer, so a later matching message can still
+  be written into that memory.
 
 ## Building
 
@@ -162,13 +186,15 @@ implementation's.
 
 Run-time costs, measured on MPICH:
 
-- every window constructor performs one allgather of 8 bytes per rank;
+- `Win::create` and `Win::allocate` each perform one allgather of 8 bytes
+  per rank, for the RMA bounds check; `SharedWindow::allocate` does not;
 - `Win::allocate` and `SharedWindow::allocate` also zero their segment,
   which adds a lock-all epoch, two barriers, and a memory-set that commits
   every page at construction time. For example, a 64 MiB window at 4 ranks
   took about 60 ms per create-and-free, against about 18 ms for the raw MPI
-  calls without ferrompi's zeroing;
-- every RMA call adds a bounds check costing a few nanoseconds.
+  calls without ferrompi's zeroing, measured on MPICH 4.2.3 on one host;
+- every `Win` data-transfer call adds a local bounds check — no
+  communication — costing a few nanoseconds.
 
 ### Reporting compatibility
 
