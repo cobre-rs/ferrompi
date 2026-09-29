@@ -194,8 +194,8 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 |---|---|---|---|---|---|
 | PRF-01 | Request table: ~14 ns / 2 locked RMWs per request (+58%/+33% small nonblocking p2p) | major | measured | 0.7 (D-2); no 0.5.x stop-gap | open |
 | PRF-02 | Bitmap concentrates contention; ADR/comment claim the opposite | minor | measured | 0.5.x docs / 0.7 | fixed (01866f1, 605fd2d): shim comment, ADR-0002; table change open (0.7) |
-| PRF-03 | `ffi_overhead` bench cannot measure FFI overhead | minor | measured | 0.5.x | fixed (f74665a): interleaved A/B bench; benches README planned (ferrompi-0.5.x-hardening) |
-| PRF-04 | "Persistent 10–30% faster" refuted as stated; bench at 1 MiB only | minor | measured | 0.5.x | fixed (e73c3d0): size sweep; persistent-speedup claims planned (ferrompi-0.5.x-hardening) |
+| PRF-03 | `ffi_overhead` bench cannot measure FFI overhead | minor | measured | 0.5.x | fixed (f74665a, 15d570c) |
+| PRF-04 | "Persistent 10–30% faster" refuted as stated; bench at 1 MiB only | minor | measured | 0.5.x | fixed (e73c3d0, 134bfed, eb63b5d, 76eded0, 15d570c) |
 | PRF-05 | `start_all`/`wait_all` zero 512 B scratch per call | nit | measured | — | wont-fix (adds `unsafe` for ~8 ns; rejected in 0.5.x planning) |
 | PRF-06 | Dead per-callback tag lookup; `Vec` per `wait_some`; topology 256·P | nit | reading | 0.5.x | fixed (2d53b18) for the callback tag lookup; Vec return and topology 256·P deferred |
 | PRF-07 | `[profile.release]` doesn't reach downstream; comment says it does | minor | Cargo semantics | 0.5.x | fixed (affb75c, 0c7b942) |
@@ -242,7 +242,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | DOC-10 | Stale/wrong item-level rustdoc | minor | 0.5.x | fixed (e5034a8) |
 | DOC-11 | CONTRIBUTING template filler + false policies | minor | 0.5.x | fixed (067749d) |
 | DOC-12 | CHANGELOG internal IDs / restated rustdoc | minor | 0.5.x | fixed (0c7b942) |
-| DOC-13 | `benches/README.md` claims | minor | 0.5.x | planned (ferrompi-0.5.x-hardening) |
+| DOC-13 | `benches/README.md` claims | minor | 0.5.x | fixed (15d570c) |
 | DOC-14 | Missing docs: lifecycle, error reporting, runtime lib path, Open MPI build | minor | 0.5.x | fixed (98236f8, 90c95c6) |
 | DOC-15 | Wrong C comments | nit | 0.5.x | fixed (01866f1) |
 
