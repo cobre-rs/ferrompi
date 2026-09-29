@@ -248,6 +248,10 @@ pub use window::{
     WinKind, WinLockAllGuard, WinLockGuard, WinPscwAssert,
 };
 
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 use std::marker::PhantomData;
 use std::sync::{Mutex, OnceLock};
 
