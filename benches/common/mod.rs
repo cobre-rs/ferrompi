@@ -2,9 +2,11 @@
 //!
 //! Every bench binary declares `mod common;` and calls
 //! [`init_mpi_for_bench`] at the top of `main` before constructing any
-//! [`criterion::Criterion`] instance.
+//! [`criterion::Criterion`] instance. Rank 0 drives Criterion and sends a
+//! [`Command`] with [`lead`] before each measured call; the other ranks run
+//! [`follow`] until rank 0 sends [`STOP`].
 
-use ferrompi::{Communicator, Mpi};
+use ferrompi::{Communicator, Mpi, ReduceOp};
 
 /// Initialize MPI for a Criterion benchmark binary.
 ///
@@ -42,15 +44,35 @@ pub fn init_mpi_for_bench() -> Mpi {
     mpi
 }
 
-/// Execute a closure only on rank 0 of the given communicator.
+/// What rank 0 tells the other ranks to run next: an operation code and one
+/// argument, both chosen by the bench.
+pub type Command = [u64; 2];
+
+/// The command that ends [`follow`]. Bench operation codes start at 1.
+pub const STOP: Command = [0, 0];
+
+/// Rank 0: sends `cmd` to every other rank.
 ///
-/// Non-root ranks skip the closure entirely. This is used to gate
-/// Criterion benchmark registration so that only rank 0 drives the
-/// statistical measurement loop while non-root ranks participate in MPI
-/// collectives through the same code path.
-#[allow(dead_code)]
-pub fn rank_zero_only<F: FnOnce()>(comm: &Communicator, f: F) {
-    if comm.rank() == 0 {
-        f();
+/// The other ranks contribute zeros to a sum allreduce, so they receive
+/// `cmd` unchanged.
+pub fn lead(world: &Communicator, cmd: Command) {
+    let mut received = [0u64; 2];
+    world
+        .allreduce(&cmd, &mut received, ReduceOp::Sum)
+        .expect("bench command allreduce failed");
+}
+
+/// Ranks other than 0: runs `run` on each command rank 0 sends with [`lead`],
+/// until it sends [`STOP`].
+pub fn follow(world: &Communicator, mut run: impl FnMut(Command)) {
+    loop {
+        let mut cmd = [0u64; 2];
+        world
+            .allreduce(&[0u64; 2], &mut cmd, ReduceOp::Sum)
+            .expect("bench command allreduce failed");
+        if cmd == STOP {
+            return;
+        }
+        run(cmd);
     }
 }

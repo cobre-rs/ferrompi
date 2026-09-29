@@ -21,24 +21,9 @@ const SIZES: &[usize] = &[1, 8, 64, 512, 4_096, 32_768, 131_072];
 const ITERS: usize = 100;
 
 /// Command codes carried in the control allreduce.
-const STOP: u64 = 0;
 const SETUP: u64 = 1;
 const PERSISTENT: u64 = 2;
 const IALLREDUCE: u64 = 3;
-
-// ─── Control channel ───────────────────────────────────────────────────────
-
-/// Send a `[code, arg]` control message via the sentinel allreduce and return the
-/// aggregated result. Rank 0 encodes the real command; every other rank contributes
-/// zeros so the sum reproduces rank 0's `[code, arg]` on every rank.
-fn send_command(world: &Communicator, code: u64, arg: u64) -> [u64; 2] {
-    let ctl_send = [code, arg];
-    let mut ctl_recv = [0u64; 2];
-    world
-        .allreduce(&ctl_send, &mut ctl_recv, ReduceOp::Sum)
-        .unwrap();
-    ctl_recv
-}
 
 // ─── Rank-0 benchmark driver ─────────────────────────────────────────────────
 
@@ -57,7 +42,7 @@ fn bench_iterative_allreduce(c: &mut Criterion, world: &Communicator) {
 
         // SETUP: every rank learns the element count and re-initializes its
         // persistent request in the same order before any bench_function runs.
-        send_command(world, SETUP, n as u64);
+        common::lead(world, [SETUP, n as u64]);
 
         let send = vec![world.rank() as f64; n];
         let mut recv = vec![0.0f64; n];
@@ -67,7 +52,7 @@ fn bench_iterative_allreduce(c: &mut Criterion, world: &Communicator) {
 
         group.bench_with_input(BenchmarkId::new("persistent", bytes), &n, |b, _| {
             b.iter(|| {
-                send_command(world, PERSISTENT, 0);
+                common::lead(world, [PERSISTENT, 0]);
                 for _ in 0..ITERS {
                     persistent.start().unwrap();
                     persistent.wait().unwrap();
@@ -82,7 +67,7 @@ fn bench_iterative_allreduce(c: &mut Criterion, world: &Communicator) {
 
         group.bench_with_input(BenchmarkId::new("iallreduce", bytes), &n, |b, _| {
             b.iter(|| {
-                send_command(world, IALLREDUCE, 0);
+                common::lead(world, [IALLREDUCE, 0]);
                 for _ in 0..ITERS {
                     let req = world
                         .iallreduce(black_box(&send), black_box(&mut recv), ReduceOp::Sum)
@@ -109,47 +94,41 @@ fn run_follower(world: &Communicator) {
     let mut recv: Vec<f64> = Vec::new();
     let mut persistent: Option<PersistentRequest> = None;
 
-    loop {
-        let ctl = send_command(world, 0, 0);
-
-        match ctl[0] {
-            STOP => break,
-
-            SETUP => {
-                // Free the old request before reallocating: a request still pointing
-                // into freed buffers is harmless only while inactive, and it must
-                // never be started again after the buffers move.
-                drop(persistent.take());
-                let n = ctl[1] as usize;
-                send = vec![world.rank() as f64; n];
-                recv = vec![0.0f64; n];
-                persistent = Some(
-                    world
-                        .allreduce_init(&send, &mut recv, ReduceOp::Sum)
-                        .expect("allreduce_init needs an MPI-4 library"),
-                );
-            }
-
-            PERSISTENT => {
-                let req = persistent
-                    .as_mut()
-                    .expect("run_follower: PERSISTENT without a preceding SETUP");
-                for _ in 0..ITERS {
-                    req.start().unwrap();
-                    req.wait().unwrap();
-                }
-            }
-
-            IALLREDUCE => {
-                for _ in 0..ITERS {
-                    let req = world.iallreduce(&send, &mut recv, ReduceOp::Sum).unwrap();
-                    req.wait().unwrap();
-                }
-            }
-
-            other => panic!("run_follower: unexpected command code {other}"),
+    common::follow(world, |[op, arg]| match op {
+        SETUP => {
+            // Free the old request before reallocating: a request still pointing
+            // into freed buffers is harmless only while inactive, and it must
+            // never be started again after the buffers move.
+            drop(persistent.take());
+            let n = arg as usize;
+            send = vec![world.rank() as f64; n];
+            recv = vec![0.0f64; n];
+            persistent = Some(
+                world
+                    .allreduce_init(&send, &mut recv, ReduceOp::Sum)
+                    .expect("allreduce_init needs an MPI-4 library"),
+            );
         }
-    }
+
+        PERSISTENT => {
+            let req = persistent
+                .as_mut()
+                .expect("run_follower: PERSISTENT without a preceding SETUP");
+            for _ in 0..ITERS {
+                req.start().unwrap();
+                req.wait().unwrap();
+            }
+        }
+
+        IALLREDUCE => {
+            for _ in 0..ITERS {
+                let req = world.iallreduce(&send, &mut recv, ReduceOp::Sum).unwrap();
+                req.wait().unwrap();
+            }
+        }
+
+        other => panic!("run_follower: unexpected command code {other}"),
+    });
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -172,7 +151,7 @@ fn main() {
         c.final_summary();
 
         // Send the stop command so follower ranks exit their mirror loop.
-        send_command(&world, STOP, 0);
+        common::lead(&world, common::STOP);
     } else {
         // ── Non-root ranks: mirror loop ───────────────────────────────────────
         run_follower(&world);
