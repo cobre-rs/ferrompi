@@ -38,8 +38,8 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   without calling MPI. The provided thread level is honored, `Single` is
   enforced like `Funneled`, and `Mpi::init()` now requests `Single`.
 - **Below `Serialized`, dropping an MPI-calling handle on a non-init
-  thread now prints `ferrompi: <Type> dropped on thread <name>` to stderr
-  and aborts the process.**
+  thread now prints `ferrompi: <Type> dropped on thread <name or id>` to
+  stderr and aborts the process.**
 - **Feature `rma`: dropping `Mpi` while any window is still alive now
   skips `MPI_Finalize`**, printing `ferrompi: MPI_Finalize skipped: N
   window(s) still alive; …` to stderr; those windows are never freed, and
@@ -75,7 +75,7 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 - **Building against the draft MPI ABI is now a compile error.**
   `MPI_ABI_VERSION` defined with `MPI_VERSION < 5` (as produced by MPICH
   4.3 built with `-DMPI_ABI`) fails to compile; native headers and the
-  ratified MPI 5.0 ABI build (the latter untested at run time).
+  ratified MPI 5.0 ABI still build (the latter untested at run time).
 - **New `ferrompi::doc::adr_0006_mpi5_abi_direction` module** documents
   ADR-0006, the MPI 5.0 standard-ABI direction.
 
@@ -83,8 +83,9 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 
 - **After `Mpi` is dropped, MPI-calling methods now return
   `Err(Finalized)` instead of calling MPI**, and their own drops become
-  silent no-ops. `version`, `library_version`, `wtime`, `is_initialized`
-  and `is_finalized` still answer.
+  silent no-ops. `version`, `library_version`, `is_initialized` and
+  `is_finalized` still answer; `wtime` is not checked either and still
+  calls `MPI_Wtime`, which the standard does not define after finalize.
 - **`Mpi::init`/`init_thread` called after finalize now returns
   `Err(Finalized)`** (MPICH used to abort).
 - **In debug builds at `ThreadLevel::Serialized`, two overlapping MPI
