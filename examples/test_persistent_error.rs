@@ -9,7 +9,12 @@
 //! exercises `test`. Barriers order each send after rank 0 has posted the
 //! matching receive.
 //!
-//! Part 3 checks the other half of the same bookkeeping: the finalize sweep
+//! Part 3 checks that a batch wait started over one request left inactive
+//! by an earlier failed wait, alongside one still-active request, skips the
+//! inactive one and completes the other instead of rejecting the whole
+//! batch.
+//!
+//! Part 4 checks the other half of the same bookkeeping: the finalize sweep
 //! must not count a request that failed through `wait`/`test` as still
 //! active. Rank 0 keeps its two failed persistent requests alive (never
 //! dropped) alongside one plain nonblocking receive it deliberately never
@@ -21,7 +26,7 @@
 // mpi-test: np=2 valgrind
 // mpi-test-stderr: ferrompi: MPI_Finalize leaves 1 active request(s) unfreed
 
-use ferrompi::{Communicator, Error, Mpi, MpiErrorClass};
+use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, PersistentRequest};
 
 mod common;
 
@@ -138,28 +143,84 @@ fn part2_test(world: &Communicator, rank: i32) {
     }
 }
 
+// A batch wait over [a request a failed wait already left inactive, a
+// still-active request] must skip the inactive one and complete the other,
+// instead of rejecting the whole batch because the inactive request's
+// handle no longer names a live request on a library that frees a failed
+// persistent request.
+fn part3_wait_all_skips_inactive(world: &Communicator, rank: i32) {
+    let mut small = [0i32; 1];
+    let mut full = [0i32; 4];
+
+    if rank == 0 {
+        let req_small = world
+            .recv_init(&mut small, 1, 73)
+            .expect("part3: recv_init small");
+        let req_full = world
+            .recv_init(&mut full, 1, 74)
+            .expect("part3: recv_init full");
+        let mut reqs = [req_small, req_full];
+        PersistentRequest::start_all(&mut reqs).expect("part3: start_all");
+        world.barrier().expect("part3: barrier A");
+        world.barrier().expect("part3: barrier B");
+
+        let result = reqs[0].wait();
+        let mut ok = class_of(&result) == Some(MpiErrorClass::Truncate);
+        ok &= !reqs[0].is_active();
+
+        world.barrier().expect("part3: barrier C");
+        world.barrier().expect("part3: barrier D");
+
+        ok &= PersistentRequest::wait_all(&mut reqs).is_ok();
+        ok &= full == PAYLOAD;
+        ok &= !reqs[1].is_active();
+
+        common::check(
+            world,
+            ok,
+            "part 3: wait_all skips a request a failed wait left inactive",
+        );
+    } else {
+        world.barrier().expect("part3: barrier A");
+        world
+            .send(&PAYLOAD, 0, 73)
+            .expect("part3: send small (truncates)");
+        world.barrier().expect("part3: barrier B");
+
+        world.barrier().expect("part3: barrier C");
+        world.send(&PAYLOAD, 0, 74).expect("part3: send full");
+        world.barrier().expect("part3: barrier D");
+
+        common::check(
+            world,
+            true,
+            "part 3: wait_all skips a request a failed wait left inactive",
+        );
+    }
+}
+
 // Rank 0 keeps two failed persistent requests (one completed through
 // `wait`, one through `test`) and one never-completed plain receive alive
 // across `drop(mpi)`, then finalizes while all three are still registered.
 // Only the never-completed plain receive should be counted active; the
 // module-level `mpi-test-stderr` directive pins the expected count to
 // catch the finalize sweep miscounting either failed persistent request.
-fn part3_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
+fn part4_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
     let mut small_a = [0i32; 1];
     let mut small_b = [0i32; 1];
     let mut ctrl = [0i32; 1];
 
     if rank == 0 {
         let mut req_a = world
-            .recv_init(&mut small_a, 1, 73)
-            .expect("part3: recv_init a");
+            .recv_init(&mut small_a, 1, 76)
+            .expect("part4: recv_init a");
         let mut req_b = world
-            .recv_init(&mut small_b, 1, 74)
-            .expect("part3: recv_init b");
-        req_a.start().expect("part3: start a");
-        req_b.start().expect("part3: start b");
-        world.barrier().expect("part3: barrier A");
-        world.barrier().expect("part3: barrier B");
+            .recv_init(&mut small_b, 1, 77)
+            .expect("part4: recv_init b");
+        req_a.start().expect("part4: start a");
+        req_b.start().expect("part4: start b");
+        world.barrier().expect("part4: barrier A");
+        world.barrier().expect("part4: barrier B");
 
         let result_a = req_a.wait();
         let mut ok = class_of(&result_a) == Some(MpiErrorClass::Truncate);
@@ -178,13 +239,13 @@ fn part3_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
 
         // Never waited: stays active until finalize, giving the sweep
         // exactly one request it must count.
-        let ctrl_req = world.irecv(&mut ctrl, 1, 75).expect("part3: irecv ctrl");
-        world.barrier().expect("part3: barrier C");
+        let ctrl_req = world.irecv(&mut ctrl, 1, 78).expect("part4: irecv ctrl");
+        world.barrier().expect("part4: barrier C");
 
         common::check(
             world,
             ok,
-            "part 3: a failed persistent wait or test does not leave the request counted active at finalize",
+            "part 4: a failed persistent wait or test does not leave the request counted active at finalize",
         );
 
         // Drop Mpi while req_a, req_b and ctrl_req are still alive: their
@@ -195,22 +256,22 @@ fn part3_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
         drop(req_b);
         drop(ctrl_req);
     } else {
-        world.barrier().expect("part3: barrier A");
+        world.barrier().expect("part4: barrier A");
         world
-            .send(&PAYLOAD, 0, 73)
-            .expect("part3: send a (truncates)");
+            .send(&PAYLOAD, 0, 76)
+            .expect("part4: send a (truncates)");
         world
-            .send(&PAYLOAD, 0, 74)
-            .expect("part3: send b (truncates)");
-        world.barrier().expect("part3: barrier B");
+            .send(&PAYLOAD, 0, 77)
+            .expect("part4: send b (truncates)");
+        world.barrier().expect("part4: barrier B");
 
-        world.barrier().expect("part3: barrier C");
-        world.send(&[9i32], 0, 75).expect("part3: send ctrl");
+        world.barrier().expect("part4: barrier C");
+        world.send(&[9i32], 0, 78).expect("part4: send ctrl");
 
         common::check(
             world,
             true,
-            "part 3: a failed persistent wait or test does not leave the request counted active at finalize",
+            "part 4: a failed persistent wait or test does not leave the request counted active at finalize",
         );
 
         drop(mpi);
@@ -234,7 +295,8 @@ fn main() {
 
     part1_wait(&world, rank, mpich);
     part2_test(&world, rank);
-    part3_finalize_accounting(mpi, &world, rank);
+    part3_wait_all_skips_inactive(&world, rank);
+    part4_finalize_accounting(mpi, &world, rank);
 
     if rank == 0 {
         println!("PASS: test_persistent_error");
