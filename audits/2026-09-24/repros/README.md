@@ -106,18 +106,11 @@ All binaries run interleaved A/B rounds, timing raw MPI (called directly through
 | File | Purpose |
 |---|---|
 | `tools/ffi_cmp.py` | Compares every `pub fn` in `src/ffi.rs` with its C definition in `csrc/ferrompi.c` (arity, argument widths, return type). Run `python3 tools/ffi_cmp.py`. It resolves the repo root relative to itself. Result on v0.5.0: `checked 172 bad 0` |
-| `tools/run_mpi_tests_patched.sh` | `tests/run_mpi_tests.sh` with one change: binary paths honour `${CARGO_TARGET_DIR:-./target}` (2 lines). Used to produce the np=1/3/4/5/8 logs in `evidence/` (INF-01, INF-10). Usage: `MPI_NP=<n> MPI_TEST_TIMEOUT=60 tools/run_mpi_tests_patched.sh [rma]` from the repo root |
 
 ## evidence/
 
 | File | What it shows |
 |---|---|
-| `unmodified_run.log` | INF-01: the unmodified `tests/run_mpi_tests.sh` run with `CARGO_TARGET_DIR` set. Every binary is "not found", yet it reports `Results: 0 passed, 0 failed, 57 skipped (57 total)` / `All tests passed!` and exits 0 |
-| `mpi_default.log` | Patched runner, default features, np=4: 57/57 pass |
-| `mpi_rma.log` | Patched runner, `rma`, np=4: 73/73 pass |
-| `mpi_rma_np1.log` | `rma`, np=1: 65/73. 8 tests exit 101 on their "needs ≥ 2 ranks" asserts (`test_collectives`, `test_blocking_extra`, `test_nonblocking`, `test_p2p_extra`, `test_nonblocking_collectives`, `test_persistent`, `test_errhandler_returns`, `test_rma_window`) |
-| `mpi_rma_np3.log`, `mpi_rma_np5.log` | INF-10: 71/73. `test_nonblocking` and `test_p2p_extra` hit the 60 s timeout (even/odd pairing deadlock at odd np) |
-| `mpi_rma_np8.log` | `rma`, np=8: 73/73 pass |
 | `r11.out` | Output of `soundness` r11: rank 1 never observes the flag |
 | `bt.out` | VER: last iteration of a 300× stress run (`--test-threads=2`) of the `buffer_attach`/`buffer_detach` unit tests in `src/lib.rs`. 4 passed, 0 failures across all 300 iterations; the shared `ATTACHED_BUFFER` static does not race in practice |
 

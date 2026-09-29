@@ -19,7 +19,7 @@ findings; update the **Status** column below as work lands.
 | [`findings/07-docs.md`](findings/07-docs.md) | DOC — documentation that is false or missing |
 | [`findings/08-build-ci-tests.md`](findings/08-build-ci-tests.md) | INF — build.rs, packaging, CI, test runner/coverage |
 | [`findings/09-verified-sound.md`](findings/09-verified-sound.md) | VER — checked and found correct (do not re-flag) |
-| [`repros/`](repros/README.md) | runnable evidence: 5 standalone Cargo crates, C probes, logs, tools; each row maps to finding IDs with pre-fix output and expected post-fix behaviour |
+| [`repros/`](repros/README.md) | runnable evidence: 3 standalone Cargo crates, C probes, logs, tools; each row maps to finding IDs with pre-fix output and expected post-fix behaviour |
 
 Each finding records: severity, how it was verified, target release, exact
 locations (`file:line` at commit `755497b` — line numbers drift as code changes;
@@ -30,7 +30,9 @@ and — where applicable — an **acceptance** check that proves it fixed.
 when a plan takes it, `planned (<plan name>)`; `wont-fix (<reason>)` or
 `superseded (<ID>)` otherwise. Delete the matching repro once a regression test
 exists in `examples/`/`src/` (see `repros/README.md`). Do not edit finding text to
-match a fix — the text records what was true at `755497b`.
+match a fix — the text records what was true at `755497b`. Repros deleted after
+their fix stay in git history: `git show e7e2e90:audits/2026-09-24/repros/<path>`
+prints one.
 
 ## Method
 
