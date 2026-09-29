@@ -5,7 +5,11 @@
 //! receive and runs the requested completion mode on it; that call must
 //! abort the process instead of reporting the receive complete while MPI
 //! still owns its buffer. Rank 0 stays alive for a second so the only
-//! failure rank 1 can observe is rank 2's.
+//! failure rank 1 can observe is rank 2's, then exits without calling
+//! `MPI_Finalize`: that call is an ordinary collective, not a ULFM-aware
+//! one, so if it starts before rank 1 has detected its own failure (or
+//! once rank 1 is already dead) it can block forever waiting for a
+//! participant that will never arrive.
 //!
 //! No `// mpi-test:` directive and no `test_` prefix, so the default runner
 //! never picks this up; a dedicated CI step runs it directly. Needs
@@ -33,7 +37,7 @@ fn main() {
     match world.rank() {
         0 => {
             std::thread::sleep(Duration::from_secs(1));
-            drop(mpi);
+            std::process::exit(0);
         }
         1 => {
             let mut buf = [0i32; 1];

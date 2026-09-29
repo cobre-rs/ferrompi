@@ -179,8 +179,11 @@ jobs:
         shell: bash
         run: |
           cargo build --example ulfm_pending
+          # timeout caps a stuck run at well under the job timeout; a killed
+          # run still fails below unless the two greps already found the
+          # literal with no FAIL: in whatever output it produced first.
           for mode in wait wait_all wait_any; do
-            out=$(mpiexec --oversubscribe --with-ft ulfm -n 3 target/debug/examples/ulfm_pending "$mode" 2>&1 || true)
+            out=$(timeout 60 mpiexec --oversubscribe --with-ft ulfm -n 3 target/debug/examples/ulfm_pending "$mode" 2>&1 || true)
             printf '%s\n' "$out"
             grep -qF 'ferrompi: receive pending after a process failure' <<<"$out"
             if grep -qF 'FAIL: ' <<<"$out"; then exit 1; fi
