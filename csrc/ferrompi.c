@@ -753,12 +753,14 @@ int ferrompi_init_thread(int required, int* provided) {
         comm_table[0] = MPI_COMM_WORLD;
         atomic_store_explicit(&comm_used[0], 1, memory_order_release);
         int eh_ret = install_errors_return(MPI_COMM_WORLD);
-        if (eh_ret != MPI_SUCCESS) {
-            return eh_ret;
+        if (eh_ret == MPI_SUCCESS) {
+            eh_ret = install_errors_return(MPI_COMM_SELF);
         }
-        eh_ret = install_errors_return(MPI_COMM_SELF);
         if (eh_ret != MPI_SUCCESS) {
-            return eh_ret;
+            /* MPI is initialized and cannot be initialized again, and
+             * MPI_Finalize is collective while this failure is local:
+             * end the job as MPI's default error handler would. */
+            MPI_Abort(MPI_COMM_WORLD, eh_ret);
         }
     }
 

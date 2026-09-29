@@ -172,6 +172,9 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 - **The finalize sweep now frees only inactive persistent requests**; a
   debug build prints `ferrompi: MPI_Finalize leaves N active request(s)
   unfreed`.
+- **A failure to install `MPI_ERRORS_RETURN` right after `MPI_Init_thread`
+  now aborts the process** instead of returning `Err` with MPI left
+  initialized, where a retry called `MPI_Init_thread` a second time.
 
 ## [0.5.0] - 2026-06-18
 

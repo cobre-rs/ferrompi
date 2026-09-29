@@ -232,12 +232,15 @@ fn fmt_mpi(
 /// failures on those objects return `Err` instead of aborting through MPI's
 /// default handler.
 ///
-/// Five paths end the process instead of returning `Err`:
+/// Six paths end the process instead of returning `Err`:
 /// - an error inside `MPI_Init_thread` itself, before any error handler is
 ///   installed: MPI's default handler is `MPI_ERRORS_ARE_FATAL`, so
 ///   [`Mpi::init`](crate::Mpi::init)/[`Mpi::init_thread`](crate::Mpi::init_thread)
 ///   return `Err(Error::Mpi)` only when MPI's initial error handler returns
 ///   instead of aborting;
+/// - a failure to install `MPI_ERRORS_RETURN` on `MPI_COMM_WORLD` or
+///   `MPI_COMM_SELF` right after `MPI_Init_thread` succeeds calls
+///   `MPI_Abort`, since MPI cannot be initialized a second time;
 /// - a window whose own `MPI_Win_set_errhandler` call failed (a stderr
 ///   warning is printed; a known Open MPI 4.x quirk) keeps MPI's default
 ///   handler, so a later RMA error on that window aborts instead of
