@@ -38,7 +38,7 @@ graph TD
 | ------------------------ | -------------------------------------------------------------------------------------------------------------- |
 | Rust application         | Calls ferrompi's public API; owns all live data.                                                               |
 | Public ferrompi API      | Type safety, RAII drop semantics, `Result` error mapping, sealed-trait enforcement.                            |
-| `src/ffi.rs`             | Extern declarations. `guarded_extern!` wraps every extern except the categories named at its unguarded blocks — lifecycle queries legal before init or after finalize; a non-status return with no MPI call to guard, such as constants, wtime and op-table bookkeeping; or a call made only from a `Drop` impl — running the lifecycle guard in `src/rt.rs` before forwarding a wrapped call. |
+| `src/ffi.rs`             | Extern declarations; `guarded_extern!` wraps most of them with the lifecycle guard in `src/rt.rs` — see "Lifecycle guard" for what it leaves out and why. |
 | `csrc/ferrompi.c` / `.h` | Handle tables, large-count branching, `MPI_UNDEFINED` normalisation, op trampolines, runtime constant queries. |
 | MPI implementation       | Collective algorithms, point-to-point transport, window coherence.                                             |
 | MPI runtime              | Process launch, rank assignment, network fabric, memory registration.                                          |
@@ -67,11 +67,10 @@ below). Slot 0 of `comm_table` is reserved for `MPI_COMM_WORLD`, and slot 0 of
 `group_table` is reserved for `MPI_GROUP_EMPTY`; both are excluded from
 allocation.
 
-Each table has allocation and free helpers per table. Allocation scans from a
-cached hint index and returns the first available slot; freeing clears the
-occupancy marker and resets the handle to its null sentinel. The hint is
-advisory (not correctness-critical) and advances after each successful
-allocation to amortise scan cost.
+Six of the seven tables have allocation and free helpers (`alloc_*`/`free_*`)
+that scan from a cached hint and reset a freed slot to its null sentinel;
+`group_table` resets to `MPI_GROUP_EMPTY` instead, and `comm_table`'s free is
+inlined in `ferrompi_comm_free` rather than a separate helper.
 
 ### Request table
 
@@ -151,19 +150,21 @@ same communicator are safe once it reports `MPI_THREAD_MULTIPLE`.
 
 `src/rt.rs` holds the process-wide lifecycle state (`STATE: AtomicU8`) and a
 thread-local flag recording which thread called `Mpi::init_thread`. The
-`guarded_extern!` macro in `src/ffi.rs` wraps every extern except the
-categories named at its unguarded blocks — lifecycle queries legal before
-init or after finalize; a non-status return with no MPI call to guard, such
-as constants, wtime and op-table bookkeeping; or a call made only from a
-`Drop` impl — calling `rt::enter` before forwarding a wrapped call:
-`rt::enter` rejects the call, without touching MPI, once state is finalized,
-or once state is `Single`/`Funneled` and the caller is not the init thread.
-Every MPI-calling `Drop` impl calls `rt::drop_guard` in `rt::enter`'s place,
-since a `Drop` cannot return `Err`: it skips the MPI call silently after
-finalize, and aborts the process on a wrong-thread drop below `Serialized`.
-`Request` and `PersistentRequest` are the two `Drop` impls that must wait for
-an in-flight operation: once `rt::drop_guard` clears them, they call the
-unguarded `ffi::raw::ferrompi_wait` directly rather than the guarded wrapper.
+`guarded_extern!` macro in `src/ffi.rs` wraps every extern that returns
+`c_int`, except lifecycle queries legal before init or after finalize,
+op-table bookkeeping that makes no MPI call, and calls made only from a
+`Drop` impl. Anything whose return type isn't `c_int` — `ferrompi_wtime`'s
+`c_double`, the RMA mode-value getters' `void` — sits outside the macro
+regardless of whether it calls MPI. A wrapped call goes through `rt::enter`
+before forwarding: `rt::enter` rejects the call, without touching MPI, once
+state is finalized, or once state is `Single`/`Funneled` and the caller is
+not the init thread. Every MPI-calling `Drop` impl calls `rt::drop_guard` in
+`rt::enter`'s place, since a `Drop` cannot return `Err`: it skips the MPI
+call silently after finalize, and aborts the process on a wrong-thread drop
+below `Serialized`. `Request` and `PersistentRequest` are the two `Drop`
+impls that must wait for an in-flight operation: once `rt::drop_guard`
+clears them, they call the unguarded `ffi::raw::ferrompi_wait` directly
+rather than the guarded wrapper.
 
 `Mpi::drop` moves the lifecycle state to finalized *before* running the
 finalize sweep, so a handle whose drop is nested inside that sweep — a
@@ -228,9 +229,10 @@ The list below distinguishes what belongs in C from what belongs in Rust.
 ### What goes in C (`csrc/ferrompi.c`)
 
 - **Handle tables** — `comm_table`, `request_table`, `win_table`, `info_table`,
-  `group_table`, `datatype_table`, `op_table`, and allocation and free helpers
-  per table. MPI opaque handles cannot be stored in Rust without copying the
-  entire allocation strategy anyway.
+  `group_table`, `datatype_table`, `op_table`; six have allocation and free
+  helpers, `comm_table`'s free is inlined in `ferrompi_comm_free`. MPI opaque
+  handles cannot be stored in Rust without copying the entire allocation
+  strategy anyway.
 - **Large-count branching** — every scalar-count shim (e.g. `ferrompi_send`)
   uses the classic MPI call when the count fits `int`. Above `INT_MAX`, it
   uses the `_c` variant, which accepts `MPI_Count`, when `MPI_VERSION >= 4`,
@@ -240,15 +242,10 @@ The list below distinguishes what belongs in C from what belongs in Rust.
   their count arrays stay `int32_t`. This branching requires C preprocessor
   guards that would be unreadable as inline Rust assembly or build-script
   code generation.
-- **`install_errors_return`** — called on every newly-created communicator handle
-  to set the error handler to `MPI_ERRORS_RETURN`, converting MPI errors from
-  process-aborting signals into return codes that ferrompi can translate to
-  `Err(Error::Mpi { .. })`. `ferrompi_comm_create_from_group` is the one
-  exception: it passes `MPI_ERRORS_RETURN` directly to
-  `MPI_Comm_create_from_group` instead of calling `install_errors_return`.
-  Windows get the same treatment through `install_errors_return_win`, which
-  is best effort — the handler stays `MPI_ERRORS_ARE_FATAL` on Open MPI 4
-  when `MPI_Win_set_errhandler` is rejected on a fresh window.
+- **`install_errors_return`** — called on every newly-created communicator
+  handle to set `MPI_ERRORS_RETURN`, converting MPI aborts into
+  `Err(Error::Mpi { .. })` (see "`install_errors_return` on comm-creating
+  shims" for the one exception and the window equivalent).
 - **Op trampolines** — 16 distinct C functions, `ferrompi_user_op_trampoline_0`
   through `ferrompi_user_op_trampoline_15`, generated by a preprocessor macro.
   Each passes only its own baked-in slot number to `rust_user_op_invoke`,
@@ -260,27 +257,24 @@ The list below distinguishes what belongs in C from what belongs in Rust.
   analogous PSCW assert constants are queried once via C shims and cached in
   Rust via `OnceLock<[i32; N]>`. Hardcoding them in Rust would be incorrect
   because their values are implementation-defined.
-- **MPI-4 capability gating** — `FERROMPI_HAVE_MPI4_COLLECTIVES` compiles the
-  MPI-4-only persistent-collective and `comm_create_from_group` shims only
-  when the linked library supports them, returning
-  `FERROMPI_ERR_NOT_SUPPORTED` otherwise.
+- **MPI-4 capability gating** — `FERROMPI_HAVE_MPI4_COLLECTIVES` is defined
+  at compile time from `mpi.h`'s version macros; when unset, the
+  MPI-4-only persistent-collective and `comm_create_from_group` shims
+  return `FERROMPI_ERR_NOT_SUPPORTED` instead of calling MPI.
 - **Error-class index mapping** — `ferrompi_error_class_index` compares an
   `MPI_ERR_*` value against the linked library's own constants and returns a
   stable index in `MpiErrorClass`'s declaration order.
-- **Batch-completion bookkeeping** — `ferrompi_waitall`, `ferrompi_waitany`,
-  `ferrompi_waitsome` and their `test*` counterparts track per-request
-  completion in a `done[]` array and report the first failing request
-  through `failed_index`.
-- **Finalize sweep** — `ferrompi_finalize` frees every request, op, group,
-  info, datatype and communicator still registered before calling
-  `MPI_Finalize` (see "Lifecycle guard").
+- **Batch-completion bookkeeping** — `ferrompi_waitall`/`ferrompi_waitsome`/
+  `ferrompi_testsome` track completion in a `done[]` array and report the
+  first failure through `failed_index`; `ferrompi_waitany`/`ferrompi_testany`
+  report it through `index` instead.
 - **Window zeroing** — `zero_own_segment` zeroes each rank's own segment of a
   freshly allocated RMA window before returning the handle to Rust.
 - **ULFM abort on a pending failure** — `abort_if_pending_after_failure`
-  aborts the process if a completion call returns
-  `MPI_ERR_PROC_FAILED_PENDING` (a wildcard receive left pending by a
-  process failure under a fault-tolerant MPI), rather than return while MPI
-  still owns the buffer.
+  aborts the process, on an MPI built with ULFM's `PROC_FAILED_PENDING`
+  error class, if a completion path reports it (a wildcard receive left
+  pending by a process failure), rather than return while MPI still owns
+  the buffer.
 
 ### What stays in Rust (`src/`)
 
@@ -290,17 +284,16 @@ The list below distinguishes what belongs in C from what belongs in Rust.
   MPI entry points. The C layer accepts raw integers and cannot enforce this.
 - **RAII drop semantics** — `Communicator`, `Request`, `PersistentRequest`,
   `Group`, `CustomDatatype`, `Win`, `SharedWindow`, `UserOp`, `Info`, and the
-  RMA lock guards all implement `Drop`, which frees the underlying handle.
-  See "Lifecycle guard" above for how a drop behaves relative to `Mpi`'s own
-  lifetime.
+  RMA lock guards all implement `Drop`, which releases the underlying
+  resource. See "Lifecycle guard" above for how a drop behaves relative to
+  `Mpi`'s own lifetime.
 - **`Error` mapping** — `Error::check_with_op(ret, "<tag>")` maps every
   non-zero return code to the matching `Error` variant: `Error::Mpi { class,
   code, message, operation }` for a genuine MPI failure, and the appropriate
   non-`Mpi` variant (`Error::Finalized`, `Error::ThreadLevelViolation`,
   `Error::NotSupported`, `Error::ResourceExhausted`) for a Rust- or C-layer
-  sentinel code. On `Error::Mpi`, `operation` is the ferrompi method name,
-  for example `"allreduce_inplace"` for `Communicator::allreduce_inplace`,
-  enabling precise error attribution.
+  sentinel code (see "`Error::check_with_op` at every call site" for what
+  `<tag>` is), enabling precise error attribution.
 - **`catch_unwind + abort` panic fence** — the `rust_user_op_invoke`
   `extern "C"` entry point in `src/op.rs` wraps every closure invocation in
   `std::panic::catch_unwind`. If the closure panics, the process aborts
@@ -332,10 +325,11 @@ with explicit `= N` discriminants and cross the FFI boundary raw (cast with
 `ReduceOp`, and `ferrompi_init_thread` decodes `ThreadLevel`, each with
 literal `case` values rather than `FERROMPI_*` defines. The discriminant
 values are an internal contract between the Rust enums and the C shim; any
-release may change them. The other values mirrored on both sides of the FFI
-— the resource-exhaustion and lifecycle sentinel codes, the leaked-window
-marker, the op-slot count, and the error-class order — each carry a sync
-comment at their own definition.
+release may change them. A few other cross-FFI integer contracts rely on a
+sync comment: the resource-exhaustion and unsupported-operation sentinel
+codes carry one on both sides (`csrc/ferrompi.h` / `src/error.rs`); the
+leaked-window marker, the op-slot count, and the error-class order carry one
+on one side only.
 
 ### Unconditional C switch
 
@@ -366,9 +360,8 @@ Every new MPI entry point follows this pattern in order:
    above and installing `MPI_ERRORS_RETURN` on any communicator it creates
    (directly, or via `install_errors_return`).
 3. `extern "C"` declaration inside the `guarded_extern!` block in
-   `src/ffi.rs` — unless the call is a lifecycle query legal before init or
-   after finalize, a non-status return with no MPI call to guard (constants,
-   wtime, op-table bookkeeping), or is only ever made from a `Drop` impl.
+   `src/ffi.rs`, unless it falls into one of the categories "Lifecycle
+   guard" names.
 4. Safe Rust wrapper in the appropriate `src/` module: collective arguments
    are checked by the validator functions (`check_rank_slots`,
    `check_same_len`, `rank_block` in `src/comm/mod.rs`; `check_v_args` in
@@ -388,9 +381,13 @@ Omitting any layer is a scope violation.
 ### `Error::check_with_op` at every call site
 
 Every `ferrompi_*` FFI result must pass through
-`Error::check_with_op(ret, "<tag>")`, where `<tag>` is the ferrompi method
-name, for example `"allreduce_inplace"` for `Communicator::allreduce_inplace`.
-Bare `Error::check(ret)` calls are forbidden in production code.
+`Error::check_with_op(ret, "<tag>")`. `<tag>` is the C shim name with the
+`ferrompi_` prefix stripped (e.g. `"info_create"` for `ferrompi_info_create`),
+except where a Rust method shares its shim with a sibling method — the
+in-place collective variants, `allreduce_indexed`, and `allreduce_bytes` all
+call the same shim as their plain collective — where the tag is the Rust
+method name instead, to keep errors distinguishable. Bare `Error::check(ret)`
+calls are forbidden in production code.
 
 ### `install_errors_return` on comm-creating shims
 
@@ -446,8 +443,10 @@ element type of the custom-datatype point-to-point methods (`send_custom`,
 `MpiDatatype` and `MpiIndexedDatatype` each carry a `const TAG: DatatypeTag`
 associated constant, letting the C layer identify the element type at
 runtime via the `#[repr(i32)]` discriminant. `AtomicMpiDatatype` and
-`BytePermutable` are marker traits used alongside `MpiDatatype` and carry no
-tag of their own.
+`BytePermutable` are marker traits with no tag of their own:
+`AtomicMpiDatatype` is always bounded together with `MpiDatatype` and reuses
+`T::TAG`; `BytePermutable` stands alone — `allreduce_bytes` always passes
+the fixed `DatatypeTag::Byte`, regardless of `T`.
 
 The authoritative design record for this trait family is
 `adr/0003-generic-mpi-datatype.md`.
@@ -469,8 +468,8 @@ This is the standard idiom at every FFI call site. It returns `Ok(())` when
 `ret == MPI_SUCCESS` and constructs `Err(Error::Mpi { operation: Some("allreduce"), .. })`
 for a genuine MPI failure — or the matching non-`Mpi` variant for a Rust- or
 C-layer sentinel code (see "Lifecycle guard" for `Error::Finalized` and
-`Error::ThreadLevelViolation`). The tag string is the ferrompi method name,
-not necessarily the name of the C function it calls.
+`Error::ThreadLevelViolation`, and "`Error::check_with_op` at every call
+site" for the `<tag>` rule).
 
 ### `thiserror`-derived `Display`
 
