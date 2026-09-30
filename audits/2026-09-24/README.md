@@ -94,6 +94,7 @@ The crate has a solid core (sealed datatype traits, sound UserOp trampolines,
 | D-19 | **`LongDoubleInt`/`LongInt`:** cfg-gated to verified targets (Linux x86_64/aarch64/ppc64le); Windows unsupported; per-target layouts deferred to the API milestone. | **accepted 2026-09-24** | 0.5.x — COR-11 |
 | D-20 | **Discriminant "semver contract"** retracted now in docs only (architecture.md + ADR-0003 amendment note). | **accepted 2026-09-24** | 0.5.x — DOC-01, ARC-03 |
 | D-21 | **0.6.0 close-out:** COR-17, COR-19, COR-20, SND-17, INF-22, ARC-18 and the `WinKind` part of ARC-13 move to the `0.5.x` milestone and ship in 0.6.0; for COR-19 this supersedes the 2026-09-28 ruling that kept the gap as a tracked open row; for SND-17 the fix contract becomes an abort of the process, replacing the finding's still-pending fix direction. | **accepted 2026-09-29** | 0.5.x — COR-17, COR-19, COR-20, SND-17, INF-22, ARC-18, ARC-13, COR-21 |
+| D-22 | **0.6.0 follow-ups:** SND-18, COR-22 and COR-23 are opened for gaps the close-out reviews found and ship in 0.6.0; for COR-22, a rank-local failure after MPI created a communicator or window on every rank leaks that object instead of freeing it on one rank (the COR-19 leak policy generalized). | **accepted 2026-09-29** | 0.5.x — SND-18, COR-22, COR-23 |
 
 ## Roadmap (accepted 2026-09-24)
 
@@ -130,6 +131,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | SND-15 | `fetch_and_op`/`compare_and_swap` result pointer derived from a shared borrow | minor | reading | 0.5.x | fixed (9777b12) |
 | SND-16 | `Mpi` drop racing a concurrent guarded call at `Serialized`/`Multiple` reaches MPI after finalize | major | reading | 0.6 | open (0.6: thread-safety API redesign) |
 | SND-17 | Under fault-tolerant MPI, a receive failing with MPIX_ERR_PROC_FAILED_PENDING is treated as complete while MPI still owns its buffer | major | reading | 0.5.x | fixed (20db67d) |
+| SND-18 | Under fault-tolerant MPI, a wildcard receive started while the request table is full returns `ResourceExhausted` after its internal wait fails with MPI_ERR_PROC_FAILED_PENDING, while MPI still owns its buffer | major | repro | 0.5.x | planned (ferrompi-0.6.0-followups) |
 
 ### Correctness — [02](findings/02-correctness.md)
 
@@ -156,6 +158,8 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-19 | `Win::allocate`/`SharedWindow::allocate` leave the window live but uncounted in `LIVE_WINDOWS` when zeroing fails or MPI returns a null base for a non-zero count, so `Mpi::drop` can call `MPI_Finalize` with it alive | minor | reading | 0.5.x | fixed (4263c80) |
 | COR-20 | `Mpi::init_thread` resets to uninitialized when installing `MPI_ERRORS_RETURN` on `MPI_COMM_WORLD`/`MPI_COMM_SELF` fails after `MPI_Init_thread` succeeded, so a retry calls `MPI_Init_thread` twice | minor | reading | 0.5.x | fixed (762e841) |
 | COR-21 | `PersistentRequest::start_all` marks no request active when `MPI_Startall` fails, although MPI may have started some; `Drop` then frees a started request without waiting | minor | reading | 0.5.x | fixed (388dc16, f42fe0a, fc7bc7f) |
+| COR-22 | When a rank's communicator or window table is full, or installing `MPI_ERRORS_RETURN` on a new communicator fails, after MPI created the object on every rank, that rank frees it alone with the collective `MPI_Comm_free`/`MPI_Win_free` | minor | reading | 0.5.x | planned (ferrompi-0.6.0-followups) |
+| COR-23 | In debug builds at `ThreadLevel::Serialized`, `Request::wait` and `PersistentRequest::wait` rejected by the overlap check mark the request completed or inactive although MPI never saw the call | minor | repro | 0.5.x | planned (ferrompi-0.6.0-followups) |
 
 ### Architecture / API — [03](findings/03-architecture-api.md)
 
