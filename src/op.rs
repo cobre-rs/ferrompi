@@ -51,6 +51,91 @@ use crate::ffi;
 use crate::rt;
 
 // ============================================================================
+// ReduceOp
+// ============================================================================
+
+/// Reduction operations
+///
+/// The `Replace` and `NoOp` variants are only available with the `rma` feature.
+///
+/// # Feature-gated variants
+///
+/// Without `--features rma`, referencing `ReduceOp::Replace` is a compile error:
+///
+#[cfg_attr(not(feature = "rma"), doc = "```compile_fail")]
+#[cfg_attr(
+    not(feature = "rma"),
+    doc = "// This must not compile without --features rma."
+)]
+#[cfg_attr(not(feature = "rma"), doc = "let _ = ferrompi::ReduceOp::Replace;")]
+#[cfg_attr(not(feature = "rma"), doc = "```")]
+#[cfg_attr(feature = "rma", doc = "```no_run")]
+#[cfg_attr(
+    feature = "rma",
+    doc = "// With --features rma, ReduceOp::Replace is available."
+)]
+#[cfg_attr(feature = "rma", doc = "let _ = ferrompi::ReduceOp::Replace;")]
+#[cfg_attr(feature = "rma", doc = "```")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ReduceOp {
+    /// Sum of values
+    Sum = 0,
+    /// Maximum value
+    Max = 1,
+    /// Minimum value
+    Min = 2,
+    /// Product of values
+    Prod = 3,
+    /// Bitwise OR (`MPI_BOR`). Valid only for integer types; MPI returns
+    /// `MPI_ERR_OP` when used with floating-point types.
+    BitwiseOr = 4,
+    /// Bitwise AND (`MPI_BAND`). Valid only for integer types; MPI returns
+    /// `MPI_ERR_OP` when used with floating-point types.
+    BitwiseAnd = 5,
+    /// Bitwise XOR (`MPI_BXOR`). Valid only for integer types; MPI returns
+    /// `MPI_ERR_OP` when used with floating-point types.
+    BitwiseXor = 6,
+    /// Logical OR (`MPI_LOR`). Interprets nonzero as `true`. Valid for
+    /// integer types.
+    LogicalOr = 7,
+    /// Logical AND (`MPI_LAND`). Interprets nonzero as `true`. Valid for
+    /// integer types.
+    LogicalAnd = 8,
+    /// Logical XOR (`MPI_LXOR`). Interprets nonzero as `true`. Valid for
+    /// integer types.
+    LogicalXor = 9,
+    /// Maximum value with location (`MPI_MAXLOC`). Returns the maximum value
+    /// and the rank (index) where it occurred. Only valid with
+    /// [`MpiIndexedDatatype`](crate::MpiIndexedDatatype) via
+    /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
+    MaxLoc = 10,
+    /// Minimum value with location (`MPI_MINLOC`). Returns the minimum value
+    /// and the rank (index) where it occurred. Only valid with
+    /// [`MpiIndexedDatatype`](crate::MpiIndexedDatatype) via
+    /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
+    MinLoc = 11,
+    /// Replace the target buffer with the source value (`MPI_REPLACE`).
+    ///
+    /// Only valid for `MPI_Accumulate`-family operations. Passing to
+    /// `allreduce`, `reduce`, `scan`, etc. returns `MPI_ERR_OP` from MPI.
+    ///
+    /// This variant is only present when the `rma` feature is enabled.
+    #[cfg(feature = "rma")]
+    Replace = 12,
+    /// No-op: leaves the target buffer unchanged (`MPI_NO_OP`).
+    ///
+    /// Only valid for `MPI_Accumulate`-family operations. Passing to
+    /// `allreduce`, `reduce`, `scan`, etc. returns `MPI_ERR_OP` from MPI.
+    ///
+    /// # Compile-time availability
+    ///
+    /// This variant is only present when the `rma` feature is enabled.
+    #[cfg(feature = "rma")]
+    NoOp = 13,
+}
+
+// ============================================================================
 // Slot count — must match MAX_OPS in csrc/ferrompi.c
 // ============================================================================
 const MAX_OPS: usize = 16;
@@ -386,6 +471,7 @@ mod tests {
 
     use crate::ffi;
 
+    use super::ReduceOp;
     use super::{ferrompi_op_drop_closure, rust_user_op_invoke, typed_adapter, MAX_OPS, REGISTRY};
 
     /// The trampoline must hand the closure typed, full-length buffers built
@@ -474,5 +560,31 @@ mod tests {
         // MPI call is made.
         let ret = unsafe { ffi::ferrompi_op_free(5) };
         assert_eq!(ret, 0, "must skip MPI_Op_free on an unused slot");
+    }
+
+    #[test]
+    fn reduce_op_repr_values() {
+        let ops = [
+            (ReduceOp::Sum, 0),
+            (ReduceOp::Max, 1),
+            (ReduceOp::Min, 2),
+            (ReduceOp::Prod, 3),
+            (ReduceOp::BitwiseOr, 4),
+            (ReduceOp::BitwiseAnd, 5),
+            (ReduceOp::BitwiseXor, 6),
+            (ReduceOp::LogicalOr, 7),
+            (ReduceOp::LogicalAnd, 8),
+            (ReduceOp::LogicalXor, 9),
+            (ReduceOp::MaxLoc, 10),
+            (ReduceOp::MinLoc, 11),
+        ];
+        for (op, expected) in ops {
+            assert_eq!(op as i32, expected);
+        }
+        #[cfg(feature = "rma")]
+        {
+            assert_eq!(ReduceOp::Replace as i32, 12);
+            assert_eq!(ReduceOp::NoOp as i32, 13);
+        }
     }
 }
