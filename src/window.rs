@@ -1103,9 +1103,6 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
         };
         Error::check_with_op(ret, "win_create")?;
 
-        // SAFETY: `buf` is a non-empty or zero-length caller slice. For
-        // non-zero length, `buf.as_mut_ptr()` is guaranteed non-null. For
-        // zero length we use `NonNull::dangling()` as a valid aligned sentinel.
         let local_ptr = if buf.is_empty() {
             NonNull::<T>::dangling()
         } else {
@@ -1444,9 +1441,6 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// against this rank's window are complete. Closes the exposure epoch
     /// opened by [`Win::post`].
     ///
-    /// Named `wait_exposure` rather than `wait` to avoid a name collision with
-    /// `Request::wait` when both are in scope via `use ferrompi::*`.
-    ///
     /// # Errors
     ///
     /// Returns `Error::Mpi { operation: Some("win_wait"), .. }` if MPI reports
@@ -1476,9 +1470,6 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// Wraps `MPI_Win_test`. Returns `true` if the exposure epoch started by
     /// [`Win::post`] has completed (i.e., all access-side ranks have called
     /// [`Win::complete`]), `false` otherwise. Does not block.
-    ///
-    /// Named `test_exposure` rather than `test` to avoid a name collision when
-    /// both `Win` and `Request` are in scope via `use ferrompi::*`.
     ///
     /// # Errors
     ///
@@ -1877,8 +1868,9 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///   buffer's length differs from `target_count`, or the access does not
     ///   fit in the target rank's window.
     /// * [`Error::Mpi`] — if `MPI_Rput` fails.
-    /// * [`Error::Mpi { class: MpiErrorClass::Other }`] — if the internal
-    ///   request table is exhausted.
+    /// * [`Error::ResourceExhausted`] with resource
+    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
+    ///   internal request table is full.
     ///
     /// # Epoch Requirement
     ///
@@ -2071,8 +2063,9 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///   buffer's length differs from `target_count`, or the access does not
     ///   fit in the target rank's window.
     /// * [`Error::Mpi`] — if `MPI_Rget` fails.
-    /// * [`Error::Mpi { class: MpiErrorClass::Other }`] — if the internal
-    ///   request table is exhausted.
+    /// * [`Error::ResourceExhausted`] with resource
+    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
+    ///   internal request table is full.
     ///
     /// # Epoch Requirement
     ///
@@ -2293,8 +2286,9 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///   fit in the target rank's window.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
-    /// * [`Error::Mpi { class: MpiErrorClass::Other }`] — if the internal
-    ///   request table is exhausted.
+    /// * [`Error::ResourceExhausted`] with resource
+    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
+    ///   internal request table is full.
     /// * [`Error::Mpi`] — if `MPI_Raccumulate` fails for any other reason.
     ///
     /// # Epoch Requirement

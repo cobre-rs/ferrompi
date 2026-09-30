@@ -227,6 +227,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   overlaps another thread's MPI call now aborts the process with a
   message**, instead of marking the request completed while MPI still holds
   it and its buffer.
+- **The `# Errors` documentation of `Win::rput`, `Win::rget` and
+  `Win::raccumulate` now names `Error::ResourceExhausted` (resource
+  `Request`) for a full request table**; it previously named `Error::Mpi`
+  with class `Other`, which these methods never return for that case.
 
 ## [0.5.0] - 2026-06-18
 

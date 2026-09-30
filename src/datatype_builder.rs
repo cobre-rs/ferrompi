@@ -101,17 +101,15 @@ pub struct CustomDatatype {
     true_extent: i64,
 }
 
-// SAFETY: CustomDatatype holds an integer handle into a C-side table.
-// The MPI library manages its own thread safety based on the thread level
-// requested via MPI_Init_thread. Sending a handle to another thread is safe
-// for the same reasons as Communicator: the handle itself is an immutable
-// index after construction, and MPI operations on it are safe at the
-// appropriate thread level. The table slot is only mutated (freed) in Drop,
-// which consumes the value — so there is no concurrent mutation risk.
+// SAFETY: CustomDatatype handles are integer indices into a C-side table.
+// Every MPI call on a CustomDatatype goes through the lifecycle guard
+// (`rt::enter`, and `rt::drop_guard` in Drop), which enforces the requested
+// ThreadLevel as described on Communicator's Send impl in src/comm/mod.rs.
+// The table slot is only mutated (freed) in Drop, which consumes the value.
 unsafe impl Send for CustomDatatype {}
-// SAFETY: &CustomDatatype exposes only reads of the immutable handle field and
-// FFI calls whose concurrent use MPI governs by the initialized thread level;
-// this type does not itself check that level.
+// SAFETY: &CustomDatatype exposes only reads of the immutable handle field
+// and FFI calls gated by the same lifecycle guard, so its thread safety
+// follows the requested ThreadLevel as Communicator's does.
 unsafe impl Sync for CustomDatatype {}
 
 impl CustomDatatype {
@@ -120,8 +118,8 @@ impl CustomDatatype {
     ///
     /// Returns `Ok(())` for the seven numeric primitives (`F32`, `F64`, `I32`,
     /// `I64`, `U8`, `U32`, `U64`) and `Byte`. Returns [`Error::InvalidOp`] for
-    /// the indexed paired types (`FloatInt`, `DoubleInt`, etc.), which are
-    /// outside the v1 scope of the CustomDatatype builder family.
+    /// the indexed paired types (`FloatInt`, `DoubleInt`, etc.), which the
+    /// CustomDatatype builders do not accept.
     fn validate_primitive_basetype(basetype: DatatypeTag) -> Result<()> {
         match basetype {
             DatatypeTag::FloatInt
@@ -421,8 +419,8 @@ impl Drop for CustomDatatype {
             if !rt::drop_guard("CustomDatatype") {
                 return;
             }
-            // SAFETY: handle is a valid index allocated by ferrompi_type_contiguous
-            // (or a future constructor). We only free non-negative handles and do
+            // SAFETY: handle is a valid index allocated by one of the
+            // CustomDatatype constructors. We only free non-negative handles and do
             // not use the handle after this point. The return value is intentionally
             // ignored: Drop must not panic, and an MPI error during type free is
             // non-recoverable at this point.

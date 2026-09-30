@@ -41,7 +41,7 @@ extern "C" {
     pub fn ferrompi_type_free(type_handle: int32_t) -> c_int;
     /// Allocate a free slot in the op-slot table.
     /// Writes the slot index to `*out_slot`.
-    /// Returns MPI_SUCCESS on success, MPI_ERR_OTHER if the table is full.
+    /// Returns MPI_SUCCESS on success, FERROMPI_ERR_OPS_FULL if the table is full.
     pub fn ferrompi_op_alloc_slot(out_slot: *mut int32_t) -> c_int;
     /// Free the MPI_Op and release the slot.
     /// Drop ordering: MPI_Op_free → ferrompi_op_drop_closure → free_op_slot.

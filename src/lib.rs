@@ -143,7 +143,6 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
-#![warn(clippy::all)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 // Clippy suppressions live at the call site (`#[allow(clippy::NAME)]`
 // with a justification comment) rather than crate-wide.

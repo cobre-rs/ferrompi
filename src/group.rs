@@ -60,13 +60,14 @@ pub enum GroupComparison {
     Unequal = 2,
 }
 
-/// Inclusive rank range `[first, last]` with positive stride.
+/// Inclusive rank range `[first, last]` with a nonzero stride; a stride
+/// below zero walks the range downwards.
 ///
 /// Used as input to [`Group::range_include`] and
 /// [`Group::range_exclude`] for compact specification of arithmetic
 /// progressions over rank ids.
 ///
-/// Maps to a single row of the `ranges[3][N]` array argument of
+/// Maps to a single row of the `ranges[N][3]` array argument of
 /// `MPI_Group_range_incl` / `MPI_Group_range_excl`.
 ///
 /// # Example
@@ -112,16 +113,14 @@ pub struct Group {
     pub(crate) handle: i32,
 }
 
-// SAFETY: Group handles are integer indices into a C-side table, identical
-// in nature to Communicator handles. The C MPI library manages its own
-// thread safety based on the thread level requested via MPI_Init_thread.
-// Sending a Group to another thread is safe under the same conditions as
-// Communicator (see src/comm/mod.rs); users must ensure adequate thread
-// support and serialize access when using ThreadLevel::Serialized.
+// SAFETY: Group handles are integer indices into a C-side table. Every
+// MPI call on a Group goes through the lifecycle guard (`rt::enter`, and
+// `rt::drop_guard` in Drop), which enforces the requested ThreadLevel as
+// described on Communicator's Send impl in src/comm/mod.rs.
 unsafe impl Send for Group {}
 // SAFETY: &Group exposes only reads of the immutable handle field and FFI
-// calls whose concurrent use MPI governs by the initialized thread level;
-// this type does not itself check that level.
+// calls gated by the same lifecycle guard, so its thread safety follows
+// the requested ThreadLevel as Communicator's does.
 unsafe impl Sync for Group {}
 
 impl Group {
@@ -432,9 +431,8 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// Returns an error if MPI validation rejects any triple (e.g., negative
-    /// or zero stride, `first > last` with positive stride), or if the
-    /// C-side group table is full.
+    /// Returns an error if MPI validation rejects any triple (e.g., zero
+    /// stride), or if the C-side group table is full.
     ///
     /// # Example
     ///
@@ -475,9 +473,8 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// Returns an error if MPI validation rejects any triple (e.g., negative
-    /// or zero stride, `first > last` with positive stride), or if the
-    /// C-side group table is full.
+    /// Returns an error if MPI validation rejects any triple (e.g., zero
+    /// stride), or if the C-side group table is full.
     ///
     /// # Example
     ///
