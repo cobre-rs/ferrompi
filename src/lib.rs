@@ -233,7 +233,8 @@ static ATTACHED_BUFFER: Mutex<Option<Box<[u8]>>> = Mutex::new(None);
 /// `Err(`[`Error::ThreadLevelViolation`]`)` without calling MPI. At
 /// [`Serialized`](ThreadLevel::Serialized), the caller must serialize its own
 /// calls; a debug build that detects two calls overlapping also returns that
-/// error, but a release build does not check.
+/// error (a consuming [`Request::wait`](crate::Request::wait) aborts the
+/// process instead), but a release build does not check.
 ///
 /// [`Mpi::thread_level()`] reports the level MPI actually granted, which may
 /// be lower than the level requested to [`Mpi::init_thread`]; it is the

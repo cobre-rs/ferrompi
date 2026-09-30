@@ -1,8 +1,12 @@
 //! Request handles for nonblocking MPI operations.
 
+#[cfg(debug_assertions)]
+use crate::error::FERROMPI_ERR_THREAD_LEVEL;
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::rt;
+#[cfg(debug_assertions)]
+use std::io::Write;
 
 /// Element count at or below which request-handle scratch buffers live on the
 /// stack. Draining a handful-to-few-dozen in-flight requests on the completion
@@ -190,22 +194,36 @@ impl Request {
     /// On a thread the active thread level does not allow, the wait is
     /// rejected and this call drops the still-in-flight `self` before
     /// returning, which aborts the process (see the `Drop` impl below).
+    ///
+    /// In a debug build at `Serialized`, a wait that overlaps another
+    /// thread's MPI call can neither run nor hand the request back, so it
+    /// prints a message and aborts the process.
     #[inline]
     pub fn wait(mut self) -> Result<()> {
         if self.completed {
             return Ok(());
         }
         Error::check_with_op(rt::enter(), "wait")?;
-        // Mark completed BEFORE the FFI call so that Drop does not attempt a
-        // second MPI_Wait on error.  A request handed to MPI_Wait is consumed
-        // by MPI regardless of whether MPI reports an error; re-waiting on it
-        // would be a use-after-free of the request handle.
-        self.completed = true;
         // SAFETY: self.handle is a valid MPI request handle registered in the
         // C-side request table by the nonblocking constructor that produced
         // this Request; self.completed was false on entry (checked above), so
         // MPI_Wait has not already consumed this handle.
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
+        #[cfg(debug_assertions)]
+        if ret == FERROMPI_ERR_THREAD_LEVEL {
+            // rt::enter() above already returns this same sentinel for a call
+            // from a non-init thread below Serialized, and propagates it via
+            // `?` before reaching here; so this can only be the Serialized
+            // overlap check rejecting the call before MPI saw it. `self`
+            // cannot be handed back, and letting Drop wait would overlap the
+            // other thread's MPI call.
+            let _ = std::io::stderr().write_all(
+                b"ferrompi: Request::wait overlapped another thread's MPI call at ThreadLevel::Serialized\n",
+            );
+            std::process::abort();
+        }
+        // MPI consumed the request whatever it returned; Drop must not wait on it again.
+        self.completed = true;
         Error::check_with_op(ret, "wait")
     }
 

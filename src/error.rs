@@ -232,7 +232,7 @@ fn fmt_mpi(
 /// failures on those objects return `Err` instead of aborting through MPI's
 /// default handler.
 ///
-/// Eight paths end the process instead of returning `Err`:
+/// Nine paths end the process instead of returning `Err`:
 /// - an error inside `MPI_Init_thread` itself, before any error handler is
 ///   installed: MPI's default handler is `MPI_ERRORS_ARE_FATAL`, so
 ///   [`Mpi::init`](crate::Mpi::init)/[`Mpi::init_thread`](crate::Mpi::init_thread)
@@ -260,6 +260,9 @@ fn fmt_mpi(
 /// - `Win::create` on a rank whose window table is full aborts the process
 ///   (`MPI_Abort`, falling back to `SIGABRT` if `MPI_Abort` itself returns),
 ///   since the new window already exposes the caller's buffer to its peers;
+/// - in a debug build at `ThreadLevel::Serialized`, a
+///   [`Request::wait`](crate::Request::wait) that overlaps another thread's MPI
+///   call aborts the process, since it can neither run nor hand the request back;
 /// - [`Communicator::abort`](crate::Communicator::abort) aborts the process
 ///   by design.
 ///

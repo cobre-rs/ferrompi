@@ -221,6 +221,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 - **In debug builds at `ThreadLevel::Serialized`, a `PersistentRequest::wait`
   rejected as overlapping another thread's MPI call now leaves the request
   active**, instead of marking it inactive while MPI still holds it.
+- **In debug builds at `ThreadLevel::Serialized`, a `Request::wait` that
+  overlaps another thread's MPI call now aborts the process with a
+  message**, instead of marking the request completed while MPI still holds
+  it and its buffer.
 
 ## [0.5.0] - 2026-06-18
 
