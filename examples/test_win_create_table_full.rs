@@ -45,7 +45,7 @@ fn main() {
     }
 
     let mut buf = [0f64; 4];
-    let result = Win::create(&world, &mut buf);
+    let result = Win::create(&world, &mut buf).map(|_| ());
     println!("FAIL: Win::create returned at a full window table: {result:?}");
     std::process::exit(1);
 }
