@@ -106,6 +106,10 @@ name = "test_window_table_full"
 required-features = ["rma"]
 
 [[example]]
+name = "test_win_create_table_full"
+required-features = ["rma"]
+
+[[example]]
 name = "large_count"
 required-features = ["rma"]
 
