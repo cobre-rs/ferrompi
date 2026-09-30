@@ -10,10 +10,6 @@ use crate::persistent::PersistentRequest;
 use crate::ReduceOp;
 
 impl Communicator {
-    // ========================================================================
-    // Generic Persistent Collectives (MPI 4.0, or Open MPI 5)
-    // ========================================================================
-
     /// Initialize a persistent broadcast operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
