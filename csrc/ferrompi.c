@@ -441,6 +441,32 @@ static void mark_inactive(int64_t handle) {
     request_state[slot] &= (uint8_t)~REQUEST_ACTIVE;
 }
 
+#if defined(MPIX_ERR_PROC_FAILED_PENDING)
+#define FERROMPI_PROC_FAILED_PENDING MPIX_ERR_PROC_FAILED_PENDING
+#elif defined(MPI_ERR_PROC_FAILED_PENDING)
+#define FERROMPI_PROC_FAILED_PENDING MPI_ERR_PROC_FAILED_PENDING
+#endif
+
+/* Under a fault-tolerant MPI, a receive from any source can fail with
+ * PROC_FAILED_PENDING while MPI still holds it pending and owns its
+ * buffer. No call ferrompi exposes can complete it, so reporting it done,
+ * or returning while the Rust side considers it done, would hand the
+ * buffer back to the program while MPI can still write into it. */
+static void abort_if_pending_after_failure(int err) {
+#ifdef FERROMPI_PROC_FAILED_PENDING
+    int cls;
+    if (err != MPI_SUCCESS && MPI_Error_class(err, &cls) == MPI_SUCCESS
+            && cls == FERROMPI_PROC_FAILED_PENDING) {
+        fputs("ferrompi: receive pending after a process failure "
+              "(MPI_ERR_PROC_FAILED_PENDING); fault-tolerant MPI is not "
+              "supported\n", stderr);
+        abort();
+    }
+#else
+    (void)err;
+#endif
+}
+
 /* Tear down an ACTIVE MPI request that could not be registered in the request
  * table (table full).  This is the failure path of every nonblocking initiator
  * (MPI_Isend/Irecv, the nonblocking collectives, and the RMA R-variants
@@ -452,8 +478,8 @@ static void mark_inactive(int64_t handle) {
  * after the Rust wrapper returns Err and releases the buffer borrow — a
  * use-after-free / data race.  MPI_Cancel is also unusable as a general teardown
  * here: it is erroneous for nonblocking collectives (MPI-3 §5.12) and is not
- * defined for RMA request handles, so it cannot be applied uniformly across the
- * 26 active-request call sites.
+ * defined for RMA request handles, so it cannot be applied uniformly across
+ * every active-request call site.
  *
  * MPI_Wait is the one teardown that is valid for every active request kind: it
  * drives the operation to local completion, after which MPI no longer touches
@@ -462,13 +488,16 @@ static void mark_inactive(int64_t handle) {
  * philosophy (ADR-0004): blocking on completion is preferred over leaving an
  * operation in flight against a buffer the borrow checker believes is free.
  * This path is only reached at request-table saturation, an exceptional case.
+ * Under a fault-tolerant MPI that wait can fail with PROC_FAILED_PENDING and
+ * leave a wildcard receive pending; like every completion call, this path
+ * then ends the process instead of returning while MPI owns the buffer.
  *
  * NOTE: persistent (*_init) initiators do NOT use this helper.  MPI_*_init
  * produces an INACTIVE request with no transfer in flight, for which
  * MPI_Request_free is the correct release; those sites are intentionally left
  * calling MPI_Request_free. */
 static void complete_unregistered_request(MPI_Request* req) {
-    MPI_Wait(req, MPI_STATUS_IGNORE);
+    abort_if_pending_after_failure(MPI_Wait(req, MPI_STATUS_IGNORE));
 }
 
 // Allocate a window handle (thread-safe via C11 CAS).
@@ -3339,32 +3368,6 @@ int32_t ferrompi_error_class_index(int error_class) {
 /* ============================================================
  * Request Management
  * ============================================================ */
-
-#if defined(MPIX_ERR_PROC_FAILED_PENDING)
-#define FERROMPI_PROC_FAILED_PENDING MPIX_ERR_PROC_FAILED_PENDING
-#elif defined(MPI_ERR_PROC_FAILED_PENDING)
-#define FERROMPI_PROC_FAILED_PENDING MPI_ERR_PROC_FAILED_PENDING
-#endif
-
-/* Under a fault-tolerant MPI, a receive from any source can fail with
- * PROC_FAILED_PENDING while MPI still holds it pending and owns its
- * buffer. No call ferrompi exposes can complete it, so reporting it done,
- * or returning while the Rust side considers it done, would hand the
- * buffer back to the program while MPI can still write into it. */
-static void abort_if_pending_after_failure(int err) {
-#ifdef FERROMPI_PROC_FAILED_PENDING
-    int cls;
-    if (err != MPI_SUCCESS && MPI_Error_class(err, &cls) == MPI_SUCCESS
-            && cls == FERROMPI_PROC_FAILED_PENDING) {
-        fputs("ferrompi: receive pending after a process failure "
-              "(MPI_ERR_PROC_FAILED_PENDING); fault-tolerant MPI is not "
-              "supported\n", stderr);
-        abort();
-    }
-#else
-    (void)err;
-#endif
-}
 
 // Copies each request's post-call MPI_Request value back into its handle's
 // request-table slot, whatever the batch call's return code, and frees the

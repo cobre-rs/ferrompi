@@ -120,7 +120,9 @@ One item each: the symptom, the affected library, and what to do.
   API. With the library's process-fault-tolerance mode enabled (Open MPI
   5: `mpiexec --with-ft ulfm`), a receive from any source that a process
   failure leaves pending (`MPI_ERR_PROC_FAILED_PENDING`) cannot complete
-  through ferrompi. The `wait` or `test` call that reports it prints
+  through ferrompi. The `wait` or `test` call that reports it (or `irecv`
+  itself when the request table is full, since it then waits for the
+  receive before returning `ResourceExhausted`) prints
   `ferrompi: receive pending after a process failure` to stderr and aborts
   the process instead of returning. Other failures return `Err` as usual.
 

@@ -252,7 +252,9 @@ fn fmt_mpi(
 /// - under a fault-tolerant MPI, a receive from any source that a process
 ///   failure leaves pending (`MPI_ERR_PROC_FAILED_PENDING`) makes the
 ///   completion call that reports it print a message and abort the
-///   process, since no `ferrompi` call can complete it;
+///   process, since no `ferrompi` call can complete it; so does the
+///   nonblocking receive call itself when the request table was full,
+///   since it then waits for the receive before returning;
 /// - [`Communicator::abort`](crate::Communicator::abort) aborts the process
 ///   by design.
 ///

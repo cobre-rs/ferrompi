@@ -202,6 +202,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 - **After a failed `PersistentRequest::start_all`, every request counts as
   started**, so dropping one waits for it instead of freeing a request MPI
   may have started.
+- **Under fault-tolerant MPI, a wildcard receive started while the request
+  table is full now aborts the process when a process failure leaves it
+  pending**, instead of returning `ResourceExhausted` while MPI still owns
+  its buffer.
 
 ## [0.5.0] - 2026-06-18
 
