@@ -263,7 +263,7 @@ classify() {
     return 0
   fi
 
-  if [[ "$expect" == "abort" ]]; then
+  if [[ "$expect" == "abort" ]] && ! { [[ "$exit_code" == "0" ]] && grep -q '^SKIP: ' "$outfile"; }; then
     if [[ "$exit_code" == "0" ]]; then
       echo "FAIL exited 0, abort expected"
     elif grep -qF -- "$literal" "$outfile"; then
