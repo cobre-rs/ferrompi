@@ -3,9 +3,11 @@
 //! All communication methods are generic over [`MpiDatatype`], supporting
 //! `f32`, `f64`, `i32`, `i64`, `u8`, `u32`, and `u64`.
 
+use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::rt;
+use std::ffi::c_void;
 
 mod blocking;
 mod mgmt;
@@ -47,6 +49,25 @@ fn rank_block(whole: usize, size: i32) -> Result<usize> {
         return Err(Error::InvalidBuffer);
     }
     Ok(whole / size)
+}
+
+/// Arguments of an in-place scatter as `(sendbuf, sendcount, recvbuf, recvcount, tag)`:
+/// at root, `data` is the send buffer split in `size` blocks and the NULL
+/// receive buffer is the in-place marker; elsewhere, `data` is the receive
+/// buffer and the send side is NULL and ignored.
+fn scatter_inplace_args<T: MpiDatatype>(
+    data: &mut [T],
+    is_root: bool,
+    size: i32,
+) -> Result<(*const c_void, i64, *mut c_void, i64, i32)> {
+    if is_root {
+        let per = rank_block(data.len(), size)? as i64;
+        let (sp, _, dt) = buf(data);
+        Ok((sp, per, std::ptr::null_mut::<std::ffi::c_void>(), 0i64, dt))
+    } else {
+        let (rp, rn, dt) = buf_mut(data);
+        Ok((std::ptr::null::<std::ffi::c_void>(), 0i64, rp, rn, dt))
+    }
 }
 
 /// Split types for [`Communicator::split_type`].
@@ -202,7 +223,10 @@ impl Drop for Communicator {
 
 #[cfg(test)]
 mod tests {
-    use crate::comm::{check_rank_slots, check_same_len, rank_block, SplitType};
+    use crate::comm::{
+        check_rank_slots, check_same_len, rank_block, scatter_inplace_args, SplitType,
+    };
+    use crate::datatype::DatatypeTag;
     use crate::error::Error;
 
     #[test]
@@ -240,5 +264,32 @@ mod tests {
         assert_eq!(rank_block(0, 4).unwrap(), 0);
         assert!(matches!(rank_block(8, 0), Err(Error::InvalidBuffer)));
         assert!(matches!(rank_block(8, -1), Err(Error::InvalidBuffer)));
+    }
+
+    #[test]
+    fn scatter_inplace_args_shapes() {
+        let mut root_data = [0i32, 1, 2, 3];
+        let (sendbuf, sendcount, recvbuf, recvcount, tag) =
+            scatter_inplace_args(&mut root_data, true, 2).unwrap();
+        assert!(!sendbuf.is_null());
+        assert_eq!(sendcount, 2);
+        assert!(recvbuf.is_null());
+        assert_eq!(recvcount, 0);
+        assert_eq!(tag, DatatypeTag::I32 as i32);
+
+        let mut non_root_data = [0i32];
+        let (sendbuf, sendcount, recvbuf, recvcount, tag) =
+            scatter_inplace_args(&mut non_root_data, false, 2).unwrap();
+        assert!(sendbuf.is_null());
+        assert_eq!(sendcount, 0);
+        assert!(!recvbuf.is_null());
+        assert_eq!(recvcount, 1);
+        assert_eq!(tag, DatatypeTag::I32 as i32);
+
+        let mut indivisible_data = [0i32, 1, 2];
+        assert!(matches!(
+            scatter_inplace_args(&mut indivisible_data, true, 2),
+            Err(Error::InvalidBuffer)
+        ));
     }
 }

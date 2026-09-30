@@ -1,6 +1,8 @@
 //! Blocking collective operations: barrier, broadcast, reduce, allreduce, scan, gather, scatter, alltoall.
 
-use crate::comm::{check_rank_slots, check_same_len, rank_block, Communicator};
+use crate::comm::{
+    check_rank_slots, check_same_len, rank_block, scatter_inplace_args, Communicator,
+};
 use crate::datatype::{buf, buf_mut, BytePermutable, DatatypeTag, MpiDatatype, MpiIndexedDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -773,15 +775,8 @@ impl Communicator {
     /// }
     /// ```
     pub fn scatter_inplace<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<()> {
-        let is_root = self.rank() == root;
-        let (sendbuf, sendcount, recvbuf, recvcount, dt) = if is_root {
-            let per = rank_block(data.len(), self.size)? as i64;
-            let (sp, _, dt) = buf(data);
-            (sp, per, std::ptr::null_mut::<std::ffi::c_void>(), 0i64, dt)
-        } else {
-            let (rp, rn, dt) = buf_mut(data);
-            (std::ptr::null::<std::ffi::c_void>(), 0i64, rp, rn, dt)
-        };
+        let (sendbuf, sendcount, recvbuf, recvcount, dt) =
+            scatter_inplace_args(data, self.rank() == root, self.size)?;
         // SAFETY: at root, recvbuf is NULL, the in-place marker (buf's pointer is never null,
         // so this NULL is unambiguous); ferrompi_scatter maps it to MPI_IN_PLACE so root's own
         // slot is retained. per is checked to evenly divide data.len() above. At non-root,
