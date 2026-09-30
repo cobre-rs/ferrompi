@@ -19,7 +19,7 @@ use std::time::Duration;
 
 mod common;
 
-use common::{class_of, PAYLOAD};
+use common::PAYLOAD;
 
 /// True iff `result` is a `Truncate` error whose message names `index` as the
 /// failing request's position in the caller's slice.
@@ -104,19 +104,19 @@ fn part1_and_1b(world: &Communicator, rank: i32, mpich: bool) {
 }
 
 fn part2_wait_any_truncate(world: &Communicator, rank: i32) {
-    let mut small = [0i32; 1];
     let mut other = [0i32; 1];
+    let mut small = [0i32; 1];
 
     if rank == 0 {
         let mut reqs = vec![
-            world.irecv(&mut small, 1, 11).expect("part2: irecv small"),
             world.irecv(&mut other, 1, 12).expect("part2: irecv other"),
+            world.irecv(&mut small, 1, 11).expect("part2: irecv small"),
         ];
         world.barrier().expect("part2: barrier after posting");
 
         let result = Request::wait_any(&mut reqs);
-        let mut ok = class_of(&result) == Some(MpiErrorClass::Truncate);
-        ok &= reqs[0].is_completed() && !reqs[1].is_completed();
+        let mut ok = truncated_at(&result, 1);
+        ok &= reqs[1].is_completed() && !reqs[0].is_completed();
 
         world.barrier().expect("part2: barrier before other send");
         ok &= Request::wait_all(&mut reqs).is_ok();
@@ -184,13 +184,13 @@ fn part3_wait_some_in_status(world: &Communicator, rank: i32) {
 }
 
 fn part4_test_any_truncate(world: &Communicator, rank: i32) {
-    let mut small = [0i32; 1];
     let mut other = [0i32; 1];
+    let mut small = [0i32; 1];
 
     if rank == 0 {
         let mut reqs = vec![
-            world.irecv(&mut small, 1, 31).expect("part4: irecv small"),
             world.irecv(&mut other, 1, 32).expect("part4: irecv other"),
+            world.irecv(&mut small, 1, 31).expect("part4: irecv small"),
         ];
         world.barrier().expect("part4: barrier after posting");
 
@@ -200,8 +200,8 @@ fn part4_test_any_truncate(world: &Communicator, rank: i32) {
                 other => break other,
             }
         };
-        let mut ok = class_of(&result) == Some(MpiErrorClass::Truncate);
-        ok &= reqs[0].is_completed() && !reqs[1].is_completed();
+        let mut ok = truncated_at(&result, 1);
+        ok &= reqs[1].is_completed() && !reqs[0].is_completed();
 
         world.barrier().expect("part4: barrier before other send");
         ok &= Request::wait_all(&mut reqs).is_ok();
