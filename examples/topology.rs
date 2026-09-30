@@ -35,6 +35,11 @@ fn main() -> Result<()> {
         Mpi::version()?,
         "topo.standard_version() disagrees with Mpi::version()"
     );
+    assert_eq!(
+        topo.library_version(),
+        Mpi::library_version()?,
+        "topo.library_version() disagrees with Mpi::library_version()"
+    );
 
     #[cfg(feature = "numa")]
     {
