@@ -114,28 +114,31 @@ impl TopologyInfo {
 /// `MPI_MAX_PROCESSOR_NAME` the C layer accepts at build time.
 const HOSTNAME_BUF_LEN: usize = 256;
 
-/// Gather topology information from all ranks in the communicator.
+/// Builds one rank's hostname slot for the topology allgather.
 ///
-/// This is a **collective operation** — all ranks in the communicator must call
-/// it. Every rank receives the complete topology.
-pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<TopologyInfo> {
-    let size = comm.size();
+/// `None` marks a rank whose local queries failed: the slot's first byte is
+/// `0xFF`, a byte valid UTF-8 never contains, so every rank's host-table
+/// build rejects it.
+fn hostname_slot(name: Option<&str>) -> [u8; HOSTNAME_BUF_LEN] {
+    let mut buf = [0u8; HOSTNAME_BUF_LEN];
+    match name {
+        Some(name) => {
+            let name_bytes = name.as_bytes();
+            let copy_len = name_bytes.len().min(HOSTNAME_BUF_LEN);
+            buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        }
+        None => buf[0] = 0xFF,
+    }
+    buf
+}
 
-    // Each rank fills a fixed-size hostname buffer.
-    let name = comm.processor_name()?;
-    let mut local_buf = [0u8; HOSTNAME_BUF_LEN];
-    let name_bytes = name.as_bytes();
-    let copy_len = name_bytes.len().min(HOSTNAME_BUF_LEN);
-    local_buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-
-    // Allgather the hostname buffers.
-    let mut all_bufs = vec![0u8; HOSTNAME_BUF_LEN * size as usize];
-    comm.allgather(&local_buf, &mut all_bufs)?;
-
-    // Build rank-to-host mapping, preserving insertion order (first rank seen
-    // per host). Keying a HashMap on borrowed hostname slices makes this pass
-    // O(size) rather than O(size × distinct_hosts), and allocates one `String`
-    // per distinct host instead of one per rank.
+/// Builds the rank-to-host table from the gathered hostname slots.
+///
+/// Preserves insertion order (first rank seen per host). Keying a HashMap on
+/// borrowed hostname slices makes this pass O(size) rather than O(size ×
+/// distinct_hosts), and allocates one `String` per distinct host instead of
+/// one per rank.
+fn hosts_from_slots(all_bufs: &[u8], size: i32) -> Result<Vec<HostEntry>> {
     let mut hosts: Vec<HostEntry> = Vec::new();
     let mut index: HashMap<&str, usize> = HashMap::new();
     for r in 0..size {
@@ -156,6 +159,25 @@ pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<Topology
             });
         }
     }
+    Ok(hosts)
+}
+
+/// Gather topology information from all ranks in the communicator.
+///
+/// This is a **collective operation** — all ranks in the communicator must call
+/// it. Every rank receives the complete topology.
+pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<TopologyInfo> {
+    let size = comm.size();
+
+    // Each rank fills a fixed-size hostname buffer.
+    let name = comm.processor_name()?;
+    let local_buf = hostname_slot(Some(&name));
+
+    // Allgather the hostname buffers.
+    let mut all_bufs = vec![0u8; HOSTNAME_BUF_LEN * size as usize];
+    comm.allgather(&local_buf, &mut all_bufs)?;
+
+    let hosts = hosts_from_slots(&all_bufs, size)?;
 
     // MPI_Get_library_version and MPI_Get_version are local procedures,
     // callable at any time (MPI-4.1 §10.1.1, §12.4.1), so each rank queries
@@ -243,7 +265,7 @@ impl fmt::Display for TopologyInfo {
 mod tests {
     #[cfg(feature = "numa")]
     use super::SlurmInfo;
-    use super::{HostEntry, ThreadLevel, TopologyInfo};
+    use super::{hostname_slot, hosts_from_slots, HostEntry, ThreadLevel, TopologyInfo};
 
     fn sample_topology() -> TopologyInfo {
         TopologyInfo {
@@ -351,6 +373,22 @@ mod tests {
         assert_eq!(topo.hosts().len(), 2);
         assert_eq!(topo.hosts()[0].hostname, "compute-01");
         assert_eq!(topo.hosts()[0].ranks, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn slots_group_ranks_by_host() {
+        let slots = [
+            hostname_slot(Some("node-a")),
+            hostname_slot(Some("node-b")),
+            hostname_slot(Some("node-a")),
+        ]
+        .concat();
+        let hosts = hosts_from_slots(&slots, 3).unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].hostname, "node-a");
+        assert_eq!(hosts[0].ranks, vec![0, 2]);
+        assert_eq!(hosts[1].hostname, "node-b");
+        assert_eq!(hosts[1].ranks, vec![1]);
     }
 
     #[cfg(feature = "numa")]
