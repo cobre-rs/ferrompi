@@ -204,6 +204,14 @@ f=$(mk_outfile $'no marker here\n')
 check "classify: expect=abort, exit 134, literal absent" \
   "$(classify 134 "$f" "" "abort" "boom" "unknown")" "FAIL abort marker missing"
 
+f=$(mk_outfile $'SKIP: x\n')
+check "classify: expect=abort, exit 0, registered SKIP" \
+  "$(classify 0 "$f" "openmpi-4" "abort" "boom" "openmpi-4.1.6")" "SKIP x"
+
+f=$(mk_outfile $'SKIP: x\n')
+check "classify: expect=abort, exit 0, unregistered SKIP" \
+  "$(classify 0 "$f" "" "abort" "boom" "mpich-4.2.3")" "FAIL unregistered SKIP: x"
+
 f=$(mk_outfile $'please warn user\n')
 check "classify: exit 0, no SKIP, literal present" \
   "$(classify 0 "$f" "" "" "warn" "unknown")" "PASS"
