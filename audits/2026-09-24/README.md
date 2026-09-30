@@ -163,7 +163,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-21 | `PersistentRequest::start_all` marks no request active when `MPI_Startall` fails, although MPI may have started some; `Drop` then frees a started request without waiting | minor | reading | 0.5.x | fixed (388dc16, f42fe0a, fc7bc7f) |
 | COR-22 | When a rank's communicator or window table is full, or installing `MPI_ERRORS_RETURN` on a new communicator fails, after MPI created the object on every rank, that rank frees it alone with the collective `MPI_Comm_free`/`MPI_Win_free` | minor | reading | 0.5.x | fixed (3247cea, 3527040, 6344c40) |
 | COR-23 | In debug builds at `ThreadLevel::Serialized`, `Request::wait` and `PersistentRequest::wait` rejected by the overlap check mark the request completed or inactive although MPI never saw the call | minor | repro | 0.5.x | fixed (63c6629, 6305cf2) |
-| COR-24 | `Communicator::topology` returns early on a rank whose processor-name query fails, before the hostname `MPI_Allgather`, leaving the other ranks blocked in it | minor | reading | 0.5.x | planned (ferrompi-0.6.0-correctness-fixes) |
+| COR-24 | `Communicator::topology` returns early on a rank whose processor-name query fails, before the hostname `MPI_Allgather`, leaving the other ranks blocked in it | minor | reading | 0.5.x | fixed (38082f6) |
 | COR-25 | `Mpi::wtime` calls `MPI_Wtime` before `Mpi::init` and after the `Mpi` handle is dropped; MPICH aborts the process ("Attempting to use an MPI routine (internal_Wtime) before initializing or after finalizing MPICH") | minor | repro | 0.5.x | planned (ferrompi-0.6.0-correctness-fixes) |
 
 ### Architecture / API — [03](findings/03-architecture-api.md)
