@@ -412,14 +412,16 @@ Rejected due to non-standard MPI interface dependency.
 
 - The shipped design differs from Decisions 1, 5 and 7. The closure registry lives in
   Rust (`src/op.rs`): an array of `AtomicPtr` slots, each holding a thin pointer to a
-  boxed byte-level closure. A slot is published with a release store before
+  boxed type-erased closure that receives MPI's raw buffer pointers and element
+  count. A slot is published with a release store before
   `MPI_Op_create` and read with an acquire load.
 - C keeps the op table and the per-slot trampolines, and trampoline `N` passes only `N`
   to `rust_user_op_invoke`, which runs the closure inside `catch_unwind` and aborts on
   panic.
 - `UserOp<T>` stays generic over `T: MpiDatatype`: `UserOp::new` wraps the typed closure
-  in a byte-level adapter that rebuilds `&[T]`/`&mut [T]` from MPI's element count.
-  Decision 7's rejection of a type-erased closure is reversed for storage only.
+  in an adapter that builds `&[T]`/`&mut [T]` once from MPI's buffer pointers and
+  element count. Decision 7's rejection of a type-erased closure is reversed for
+  storage only.
 - There is no datatype-tag assertion: the trampoline ignores MPI's datatype argument,
   and the only path that applies a `UserOp<T>`, `allreduce_with_op`, passes `T`'s own
   datatype.

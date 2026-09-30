@@ -55,10 +55,9 @@ use crate::rt;
 // ============================================================================
 const MAX_OPS: usize = 16;
 
-/// Type alias for the byte-level closure stored in each op slot.
-///
-/// Using an alias avoids the `clippy::type_complexity` lint at every use site.
-type ByteClosure = Box<dyn Fn(&[u8], &mut [u8]) + Send + Sync + 'static>;
+/// Type-erased closure stored in each op slot: it receives MPI's raw
+/// `invec`/`inoutvec` pointers and element count.
+type ByteClosure = Box<dyn Fn(*const c_void, *mut c_void, usize) + Send + Sync + 'static>;
 
 /// Per-slot registry of thin pointers to boxed closures.
 ///
@@ -88,8 +87,10 @@ static REGISTRY: [AtomicPtr<ByteClosure>; MAX_OPS] =
 ///
 /// * `slot` is in range `0..MAX_OPS` and was published by `UserOp::new_impl`
 ///   before `MPI_Op_create` was called for it.
-/// * `invec` is a valid read-only pointer to `len * byte_size` bytes.
-/// * `inoutvec` is a valid read-write pointer to `len * byte_size` bytes.
+/// * `invec` and `inoutvec` are the pointers MPI passed to the user
+///   function, each to `len` elements of the datatype the op was applied
+///   with.
+/// * `len` is non-negative.
 ///
 /// Called from C, so the ABI must be exactly `extern "C"`.
 #[unsafe(no_mangle)]
@@ -114,33 +115,10 @@ pub unsafe extern "C" fn rust_user_op_invoke(
     // this borrow.
     let closure: &ByteClosure = unsafe { &*ptr };
 
-    // Build byte slices from the raw MPI buffers.
-    // len is the number of *elements* (MPI's *len parameter).  The byte-level
-    // adapter stored in the registry receives slices whose .len() is the
-    // element count — it uses that to reconstruct typed &[T] / &mut [T] slices
-    // of the correct length via slice::from_raw_parts.
-    //
-    // We do NOT multiply by size_of::<T>() here; that knowledge lives entirely
-    // inside the adapter closure captured in UserOp::new_impl.  Passing the
-    // element count as the u8-slice length avoids any accidental OOB: the
-    // adapter must not interpret .len() as a byte count.
-    let len_usize = len as usize;
-    // SAFETY: Both slices span `len * size_of::<T>()` bytes at the MPI-provided
-    // addresses; the adapter casts the pointer and uses len_usize as the element
-    // count to reconstruct properly-typed slices.  The adapter must not use
-    // .len() as a byte count — it is the MPI element count.
-    let invec_bytes: &[u8] = unsafe { std::slice::from_raw_parts(invec.cast::<u8>(), len_usize) };
-    // SAFETY: inoutvec spans `len * size_of::<T>()` bytes at the MPI-provided
-    // address, aliased with no other live reference for the duration of this
-    // call; the adapter casts the pointer and uses len_usize as the element
-    // count, not a byte count.
-    let inoutvec_bytes: &mut [u8] =
-        unsafe { std::slice::from_raw_parts_mut(inoutvec.cast::<u8>(), len_usize) };
-
     // Wrap the closure call in catch_unwind (ADR-0005 Decision 6).
     // A panic across the FFI boundary is UB; abort on Err.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        closure(invec_bytes, inoutvec_bytes);
+        closure(invec, inoutvec, len as usize);
     }));
     if result.is_err() {
         // A panic inside a user-defined reduction closure is a fatal
@@ -293,7 +271,7 @@ impl<T: MpiDatatype> UserOp<T> {
         let idx = slot as usize;
         debug_assert!(idx < MAX_OPS, "slot out of range");
 
-        // Step 2: wrap the typed closure in a byte-level adapter.
+        // Step 2: wrap the typed closure in the type-erased adapter.
         let byte_closure: ByteClosure = typed_adapter::<T, F>(f);
 
         // Step 3: publish the boxed closure to the registry.  A thin
@@ -343,47 +321,32 @@ impl<T: MpiDatatype> UserOp<T> {
     }
 }
 
-/// Wraps a typed reduction closure in the byte-level form `REGISTRY` stores.
-///
-/// The C trampoline passes byte slices whose .len() field carries the
-/// MPI element count (not byte count).  The adapter uses that element
-/// count directly to reconstruct typed slices via slice::from_raw_parts.
-///
-/// Why byte-level: the Rust callback `rust_user_op_invoke` has a single
-/// signature regardless of T; it reconstructs a
-/// `dyn Fn(&[u8], &mut [u8])` trait object.  The adapter converts back
-/// to `&[T]` / `&mut [T]` via `slice::from_raw_parts`, interpreting
-/// .len() as the element count (not a byte count).
+/// Wraps a typed reduction closure in the type-erased form `REGISTRY` stores.
 fn typed_adapter<T: MpiDatatype, F>(f: F) -> ByteClosure
 where
     F: Fn(&[T], &mut [T]) + Send + Sync + 'static,
 {
-    Box::new(move |invec_bytes: &[u8], inoutvec_bytes: &mut [u8]| {
-        // `invec_bytes.len()` and `inoutvec_bytes.len()` are the MPI
-        // element count forwarded by rust_user_op_invoke.  The actual
-        // byte span is elem_count * size_of::<T>(), which MPI guarantees
-        // is valid; we use elem_count here as the slice element count.
-        let elem_count = invec_bytes.len();
-        // SAFETY:
-        //   * invec_bytes.as_ptr() points to a valid MPI-provided buffer
-        //     of at least elem_count * size_of::<T>() bytes.
-        //   * T: MpiDatatype implies T: Copy with stable layout; MPI
-        //     provides properly-aligned buffers for the registered type.
-        //   * elem_count comes from MPI's *len — the number of elements
-        //     MPI needs reduced.
-        //   * .len() is used here as element count, NOT byte count.
-        let invec: &[T] =
-            unsafe { std::slice::from_raw_parts(invec_bytes.as_ptr().cast::<T>(), elem_count) };
-        // SAFETY: inoutvec_bytes.as_mut_ptr() points to a valid MPI-provided
-        // buffer of at least elem_count * size_of::<T>() bytes, aliased with
-        // no other live reference; T: MpiDatatype implies T: Copy with stable
-        // layout, and MPI provides properly-aligned buffers for the
-        // registered type. elem_count is MPI's *len, used as element count.
-        let inoutvec: &mut [T] = unsafe {
-            std::slice::from_raw_parts_mut(inoutvec_bytes.as_mut_ptr().cast::<T>(), elem_count)
-        };
-        f(invec, inoutvec);
-    })
+    Box::new(
+        move |invec: *const c_void, inoutvec: *mut c_void, len: usize| {
+            if len == 0 {
+                // MPI may pass null buffers for an empty reduction; an empty
+                // slice needs no pointer.
+                f(&[], &mut []);
+                return;
+            }
+            // SAFETY: invec/inoutvec point to `len` elements of the datatype the
+            // op was applied with, which allreduce_with_op always passes as T's
+            // own; MPI's buffers are aligned for that datatype; the two buffers
+            // are distinct; T: MpiDatatype is Copy with a stable layout.
+            let (invec, inoutvec) = unsafe {
+                (
+                    std::slice::from_raw_parts(invec.cast::<T>(), len),
+                    std::slice::from_raw_parts_mut(inoutvec.cast::<T>(), len),
+                )
+            };
+            f(invec, inoutvec);
+        },
+    )
 }
 
 impl<T: MpiDatatype> Drop for UserOp<T> {
