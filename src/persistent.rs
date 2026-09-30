@@ -41,7 +41,7 @@
 //! // Cleanup happens automatically on drop
 //! ```
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, FERROMPI_ERR_THREAD_LEVEL};
 use crate::ffi;
 use crate::rt;
 
@@ -115,8 +115,9 @@ impl PersistentRequest {
     ///
     /// Returns an error if the wait fails. A wait that MPI ran leaves the
     /// request inactive either way: MPI completed it with that error. A call
-    /// rejected before reaching MPI (wrong thread, or after finalize) leaves
-    /// it active.
+    /// rejected before reaching MPI (wrong thread, after finalize, or, in a
+    /// debug build at `Serialized`, overlapping another thread's call)
+    /// leaves it active.
     #[inline]
     pub fn wait(&mut self) -> Result<()> {
         if !self.active {
@@ -129,9 +130,13 @@ impl PersistentRequest {
         // entry (checked above), so start() was called and MPI holds an
         // in-flight operation on this handle for ferrompi_wait to complete.
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
-        // MPI completed the request whatever it returned: it is inactive now, or
-        // freed if the library frees failed persistent requests.
-        self.active = false;
+        // A debug build's Serialized overlap check rejects the call before MPI
+        // sees it; the request is then still active. Otherwise MPI completed it
+        // whatever it returned: it is inactive now, or freed if the library
+        // frees failed persistent requests.
+        if ret != FERROMPI_ERR_THREAD_LEVEL {
+            self.active = false;
+        }
         Error::check_with_op(ret, "wait")
     }
 

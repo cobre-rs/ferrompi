@@ -218,6 +218,9 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   process** instead of freeing the new window on that rank alone, which
   could hang; the window already exposes the caller's buffer to its
   peers, so it cannot be returned.
+- **In debug builds at `ThreadLevel::Serialized`, a `PersistentRequest::wait`
+  rejected as overlapping another thread's MPI call now leaves the request
+  active**, instead of marking it inactive while MPI still holds it.
 
 ## [0.5.0] - 2026-06-18
 
