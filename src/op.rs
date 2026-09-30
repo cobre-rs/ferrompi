@@ -418,7 +418,71 @@ impl<T: MpiDatatype> Drop for UserOp<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Mutex};
+
     use crate::ffi;
+
+    use super::{ferrompi_op_drop_closure, rust_user_op_invoke, typed_adapter, MAX_OPS, REGISTRY};
+
+    /// The trampoline must hand the closure typed, full-length buffers built
+    /// from MPI's raw pointers. Uses slot `MAX_OPS - 1`, which no other test
+    /// touches, so it cannot race a concurrent trampoline call.
+    #[test]
+    fn trampoline_hands_the_closure_full_typed_buffers() {
+        let slot = (MAX_OPS - 1) as i32;
+        let adapter = typed_adapter::<f64, _>(|a: &[f64], b: &mut [f64]| {
+            for (x, y) in a.iter().zip(b.iter_mut()) {
+                *y += *x;
+            }
+        });
+        // SAFETY: publishing a freshly boxed adapter into this slot with
+        // Release, matching the protocol REGISTRY's doc comment states; slot
+        // MAX_OPS - 1 is used by no other test.
+        REGISTRY[slot as usize].store(Box::into_raw(Box::new(adapter)), Ordering::Release);
+
+        let invec = [1.0_f64, 2.0, 3.0, 4.0];
+        let mut inout = [10.0_f64, 20.0, 30.0, 40.0];
+        // SAFETY: slot was just published above with a live typed_adapter
+        // closure for f64; invec/inout are 4-element f64 buffers matching
+        // len=4, distinct from each other.
+        unsafe {
+            rust_user_op_invoke(slot, invec.as_ptr().cast(), inout.as_mut_ptr().cast(), 4);
+        }
+        // SAFETY: slot is in range and was published above by this test
+        // alone; no trampoline call for it is in flight.
+        unsafe { ferrompi_op_drop_closure(slot) };
+
+        assert_eq!(inout, [11.0, 22.0, 33.0, 44.0]);
+    }
+
+    /// The trampoline must accept null buffers when `len == 0` and still
+    /// invoke the closure, with empty slices. Uses slot `MAX_OPS - 2`, which
+    /// no other test touches.
+    #[test]
+    fn trampoline_accepts_null_buffers_of_zero_length() {
+        let slot = (MAX_OPS - 2) as i32;
+        let seen: Arc<Mutex<Option<(usize, usize)>>> = Arc::new(Mutex::new(None));
+        let seen_in_closure = Arc::clone(&seen);
+        let adapter = typed_adapter::<f64, _>(move |a: &[f64], b: &mut [f64]| {
+            *seen_in_closure.lock().unwrap() = Some((a.len(), b.len()));
+        });
+        // SAFETY: publishing a freshly boxed adapter into this slot with
+        // Release; slot MAX_OPS - 2 is used by no other test.
+        REGISTRY[slot as usize].store(Box::into_raw(Box::new(adapter)), Ordering::Release);
+
+        // SAFETY: slot was just published above; MPI may pass null buffers
+        // for an empty reduction, and len=0 means no element is read from
+        // either pointer.
+        unsafe {
+            rust_user_op_invoke(slot, std::ptr::null(), std::ptr::null_mut(), 0);
+        }
+        // SAFETY: slot is in range and was published above by this test
+        // alone; no trampoline call for it is in flight.
+        unsafe { ferrompi_op_drop_closure(slot) };
+
+        assert_eq!(*seen.lock().unwrap(), Some((0, 0)));
+    }
 
     /// `ferrompi_op_create_user` must reject a slot that was never allocated
     /// via `ferrompi_op_alloc_slot`, before it touches MPI.  Needs no MPI
