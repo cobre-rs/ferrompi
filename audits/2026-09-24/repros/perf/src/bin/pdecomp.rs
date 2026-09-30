@@ -1,7 +1,7 @@
 use ferrompi::{Mpi, PersistentRequest, ReduceOp};
 use perfprobe::*;
 extern "C" {
-    fn ferrompi_startall(n: i64, h: *mut i64) -> i32;
+    fn ferrompi_startall(n: i64, h: *const i64, started: *mut u8) -> i32;
     fn ferrompi_waitall(n: i64, h: *mut i64, done: *mut u8, failed_index: *mut i64) -> i32;
     fn ferrompi_start(h: i64) -> i32;
     fn ferrompi_wait(h: i64) -> i32;
@@ -54,6 +54,7 @@ fn main() {
             .collect();
         let mut h2: Vec<i64> = p2.iter().map(|p| p.raw_handle()).collect();
         let mut done = vec![0u8; k];
+        let mut started = vec![0u8; k];
         let mut failed_index: i64 = -1;
         let a = ab(
             reps,
@@ -63,7 +64,7 @@ fn main() {
                 MPI_Waitall(k as i32, q.as_mut_ptr(), MPI_STATUS_IGNORE);
             },
             || unsafe {
-                ferrompi_startall(k as i64, h2.as_mut_ptr());
+                ferrompi_startall(k as i64, h2.as_ptr(), started.as_mut_ptr());
                 ferrompi_waitall(
                     k as i64,
                     h2.as_mut_ptr(),
@@ -77,7 +78,7 @@ fn main() {
             reps,
             20000,
             || unsafe {
-                ferrompi_startall(k as i64, h2.as_mut_ptr());
+                ferrompi_startall(k as i64, h2.as_ptr(), started.as_mut_ptr());
                 ferrompi_waitall(
                     k as i64,
                     h2.as_mut_ptr(),
