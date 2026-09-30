@@ -81,6 +81,10 @@ and at most one:
 `mpi-test-stderr` is required when `expect=` is set; `expect=unfinalized` additionally
 requires `np=1`.
 
+Examples run in a build with debug assertions: an example may check debug-only
+diagnostics, and the runner refuses to run when cargo reports the `ferrompi`
+library built without them.
+
 Outcome rules:
 
 - A run that times out, or a `--valgrind` run whose process exits 99, fails.

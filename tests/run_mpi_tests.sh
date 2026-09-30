@@ -346,6 +346,13 @@ artifact_outcome() {
   echo "FAIL missing binary"
 }
 
+# lib_debug_assertions <cargo-json-file>
+# Prints the debug_assertions flag cargo reports for the ferrompi library
+# artifact ("true"/"false"), or nothing when the stream has no such artifact.
+lib_debug_assertions() {
+  jq -r 'select(.reason=="compiler-artifact" and .target.name=="ferrompi" and (.target.kind|index("lib"))) | .profile.debug_assertions' "$1" | head -1
+}
+
 # ==========================================================================
 # Discovery, build and execution
 # ==========================================================================
@@ -419,10 +426,11 @@ discover() {
 }
 
 # build <features>
-# Builds every example (dev profile only) and populates ARTIFACTS[name] with
-# each built target's absolute executable path, resolved from cargo's JSON
-# artifact stream so a relocated CARGO_TARGET_DIR still works. Exits 2 on a
-# build failure.
+# Builds every example (dev profile only; refuses a build whose ferrompi
+# library has debug assertions off, since several examples check debug-only
+# diagnostics) and populates ARTIFACTS[name] with each built target's
+# absolute executable path, resolved from cargo's JSON artifact stream so a
+# relocated CARGO_TARGET_DIR still works. Exits 2 on a build failure.
 build() {
   local features="$1"
   local -a build_args=(build --examples --message-format=json-render-diagnostics)
@@ -433,6 +441,11 @@ build() {
   local json_file="$TMPDIR_RUN/cargo-build.json"
   if ! cargo "${build_args[@]}" >"$json_file"; then
     echo "ERROR: cargo build --examples failed" >&2
+    exit 2
+  fi
+
+  if [[ "$(lib_debug_assertions "$json_file")" == "false" ]]; then
+    echo "ERROR: ferrompi was built without debug assertions; several examples check debug-only diagnostics" >&2
     exit 2
   fi
 

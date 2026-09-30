@@ -263,6 +263,20 @@ check "finalize-skipped marker matches the crate's warning" \
 check "feature_closure: numa pulls in rma" \
   "$(feature_closure "numa" '{"numa":["rma"],"rma":[]}')" "numa,rma"
 
+# --- lib_debug_assertions ---------------------------------------------------
+
+f=$(mk_outfile '{"reason":"compiler-artifact","target":{"name":"ferrompi","kind":["lib"]},"profile":{"debug_assertions":true}}')
+check "lib_debug_assertions: debug assertions on" \
+  "$(lib_debug_assertions "$f")" "true"
+
+f=$(mk_outfile '{"reason":"compiler-artifact","target":{"name":"ferrompi","kind":["lib"]},"profile":{"debug_assertions":false}}')
+check "lib_debug_assertions: debug assertions off" \
+  "$(lib_debug_assertions "$f")" "false"
+
+f=$(mk_outfile '{"reason":"compiler-artifact","target":{"name":"hello_world","kind":["example"]},"profile":{"debug_assertions":true}}')
+check "lib_debug_assertions: no library artifact" \
+  "$(lib_debug_assertions "$f")" ""
+
 # --- artifact_outcome (the missing-artifact replay) -----------------------
 
 check "artifact_outcome: required feature enabled -> missing binary" \
