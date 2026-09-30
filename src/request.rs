@@ -273,8 +273,9 @@ impl Request {
     /// from the vector is optional, not required for correctness.
     ///
     /// On a failed request, the returned error carries that request's own
-    /// class and code, and its message ends with `(request N)`, `N` being
-    /// its index in `requests`.
+    /// class and code. When the MPI library reports which request failed
+    /// (MPICH and Open MPI do), the message also ends with `(request N)`,
+    /// `N` being its index in `requests`.
     pub fn wait_any(requests: &mut [Request]) -> Result<Option<usize>> {
         if requests.is_empty() {
             return Ok(None);
@@ -375,8 +376,9 @@ impl Request {
     /// from the vector is optional, not required for correctness.
     ///
     /// On a failed request, the returned error carries that request's own
-    /// class and code, and its message ends with `(request N)`, `N` being
-    /// its index in `requests`.
+    /// class and code. When the MPI library reports which request failed
+    /// (MPICH and Open MPI do), the message also ends with `(request N)`,
+    /// `N` being its index in `requests`.
     pub fn test_any(requests: &mut [Request]) -> Result<Option<usize>> {
         if requests.is_empty() {
             return Ok(None);

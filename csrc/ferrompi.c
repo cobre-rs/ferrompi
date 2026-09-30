@@ -1093,10 +1093,10 @@ int ferrompi_barrier(int32_t comm_handle) {
 // Element count of a received message, -1 when MPI reports MPI_UNDEFINED.
 static int get_count64(const MPI_Status* status, MPI_Datatype dt, int64_t* count) {
 #if MPI_VERSION >= 4
-    MPI_Count cnt;
+    MPI_Count cnt = MPI_UNDEFINED;
     int ret = MPI_Get_count_c(status, dt, &cnt);
 #else
-    int cnt;
+    int cnt = MPI_UNDEFINED;
     int ret = MPI_Get_count(status, dt, &cnt);
 #endif
     *count = (cnt == MPI_UNDEFINED) ? -1 : (int64_t)cnt;
