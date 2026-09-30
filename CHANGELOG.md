@@ -206,6 +206,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   table is full now aborts the process when a process failure leaves it
   pending**, instead of returning `ResourceExhausted` while MPI still owns
   its buffer.
+- **A rank that cannot return a new communicator (the handle table is full,
+  or its error handler cannot be installed) no longer frees it alone** with
+  the collective `MPI_Comm_free`, which could hang; the communicator is left
+  for `MPI_Finalize`.
 
 ## [0.5.0] - 2026-06-18
 

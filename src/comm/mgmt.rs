@@ -193,8 +193,9 @@ impl Communicator {
     /// # Errors
     ///
     /// Returns an error if `group` contains a rank not present in the parent
-    /// communicator (`MPI_ERR_GROUP`), or if the C-side communicator table is
-    /// full (`MPI_ERR_OTHER`).
+    /// communicator (`MPI_ERR_GROUP`), or
+    /// [`Error::ResourceExhausted`](crate::Error::ResourceExhausted) if the
+    /// communicator table is full.
     ///
     /// # Example
     ///

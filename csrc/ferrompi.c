@@ -939,6 +939,11 @@ int ferrompi_comm_size(int32_t comm_handle, int32_t* size) {
     return ret;
 }
 
+/* A shim below that cannot hand a new communicator to Rust (MPI_ERRORS_RETURN
+ * cannot be installed on it, or the handle table is full) returns the error
+ * without freeing it: MPI created it on every rank, MPI_Comm_free is
+ * collective, and freeing it on this rank alone can hang or mismatch
+ * collectives. It stays allocated until MPI_Finalize. */
 int ferrompi_comm_dup(int32_t comm_handle, int32_t* newcomm_handle) {
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Comm newcomm;
@@ -946,12 +951,10 @@ int ferrompi_comm_dup(int32_t comm_handle, int32_t* newcomm_handle) {
     if (ret == MPI_SUCCESS) {
         int eh_ret = install_errors_return(newcomm);
         if (eh_ret != MPI_SUCCESS) {
-            MPI_Comm_free(&newcomm);
             return eh_ret;
         }
         *newcomm_handle = alloc_comm(newcomm);
         if (*newcomm_handle < 0) {
-            MPI_Comm_free(&newcomm);
             return FERROMPI_ERR_COMMS_FULL;
         }
     }
@@ -986,12 +989,10 @@ int ferrompi_comm_split(int32_t comm_handle, int32_t color, int32_t key, int32_t
         } else {
             int eh_ret = install_errors_return(newcomm);
             if (eh_ret != MPI_SUCCESS) {
-                MPI_Comm_free(&newcomm);
                 return eh_ret;
             }
             *newcomm_handle = alloc_comm(newcomm);
             if (*newcomm_handle < 0) {
-                MPI_Comm_free(&newcomm);
                 return FERROMPI_ERR_COMMS_FULL;
             }
         }
@@ -1017,12 +1018,10 @@ int ferrompi_comm_split_type(int32_t comm_handle, int32_t split_type, int32_t ke
         } else {
             int eh_ret = install_errors_return(newcomm);
             if (eh_ret != MPI_SUCCESS) {
-                MPI_Comm_free(&newcomm);
                 return eh_ret;
             }
             *newcomm_handle = alloc_comm(newcomm);
             if (*newcomm_handle < 0) {
-                MPI_Comm_free(&newcomm);
                 return FERROMPI_ERR_COMMS_FULL;
             }
         }
@@ -1044,9 +1043,9 @@ int ferrompi_comm_create_from_group_parent(int32_t comm_h,
         return MPI_SUCCESS;
     }
     int eh_ret = install_errors_return(new_comm);
-    if (eh_ret != MPI_SUCCESS) { MPI_Comm_free(&new_comm); return eh_ret; }
+    if (eh_ret != MPI_SUCCESS) return eh_ret;
     *out_h = alloc_comm(new_comm);
-    if (*out_h < 0) { MPI_Comm_free(&new_comm); return FERROMPI_ERR_COMMS_FULL; }
+    if (*out_h < 0) return FERROMPI_ERR_COMMS_FULL;
     return MPI_SUCCESS;
 }
 
@@ -1065,7 +1064,7 @@ int ferrompi_comm_create_from_group(int32_t group_h,
         return MPI_ERR_OTHER;
     }
     *out_h = alloc_comm(new_comm);
-    if (*out_h < 0) { MPI_Comm_free(&new_comm); return FERROMPI_ERR_COMMS_FULL; }
+    if (*out_h < 0) return FERROMPI_ERR_COMMS_FULL;
     return MPI_SUCCESS;
 #else
     (void)group_h; (void)stringtag; (void)out_h;
