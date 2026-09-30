@@ -800,21 +800,13 @@ impl Communicator {
 
 #[cfg(test)]
 mod tests {
-    use crate::comm::Communicator;
+    use crate::comm::test_comm;
     use crate::error::Error;
     use crate::ReduceOp;
 
-    fn dummy_comm() -> Communicator {
-        Communicator {
-            handle: 0,
-            rank: 0,
-            size: 1,
-        }
-    }
-
     #[test]
     fn allreduce_init_mismatched_buffers_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.allreduce_init(&send, &mut recv, ReduceOp::Sum);
@@ -823,7 +815,7 @@ mod tests {
 
     #[test]
     fn reduce_init_mismatched_buffers_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.reduce_init(&send, &mut recv, ReduceOp::Sum, 0);
@@ -832,7 +824,7 @@ mod tests {
 
     #[test]
     fn scan_init_mismatched_buffers_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.scan_init(&send, &mut recv, ReduceOp::Sum);
@@ -841,7 +833,7 @@ mod tests {
 
     #[test]
     fn exscan_init_mismatched_buffers_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.exscan_init(&send, &mut recv, ReduceOp::Sum);
@@ -850,7 +842,7 @@ mod tests {
 
     #[test]
     fn alltoall_init_mismatched_buffers_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5]; // different length → fires before self.size()
         let result = comm.alltoall_init(&send, &mut recv);
@@ -859,11 +851,7 @@ mod tests {
 
     #[test]
     fn gather_init_inplace_nonroot_returns_invalid_op() {
-        let comm = Communicator {
-            handle: 0,
-            rank: 1,
-            size: 4,
-        };
+        let comm = test_comm(1, 4);
         let mut data = vec![0u32; 4];
         let result = comm.gather_init_inplace(&mut data, 0);
         assert!(matches!(result, Err(Error::InvalidOp)));
@@ -871,11 +859,7 @@ mod tests {
 
     #[test]
     fn allgather_init_inplace_mismatched_len_returns_invalid_buffer() {
-        let comm = Communicator {
-            handle: 0,
-            rank: 0,
-            size: 4,
-        };
+        let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
         let result = comm.allgather_init_inplace(&mut data);
         assert!(matches!(result, Err(Error::InvalidBuffer)));
@@ -883,11 +867,7 @@ mod tests {
 
     #[test]
     fn alltoall_init_inplace_mismatched_len_returns_invalid_buffer() {
-        let comm = Communicator {
-            handle: 0,
-            rank: 0,
-            size: 4,
-        };
+        let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
         let result = comm.alltoall_init_inplace(&mut data);
         assert!(matches!(result, Err(Error::InvalidBuffer)));

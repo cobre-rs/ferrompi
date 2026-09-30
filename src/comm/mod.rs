@@ -221,6 +221,17 @@ impl Drop for Communicator {
     }
 }
 
+/// A `Communicator` for unit tests: wraps `WORLD_HANDLE` so `Drop` never
+/// reaches MPI, with the given rank and size.
+#[cfg(test)]
+fn test_comm(rank: i32, size: i32) -> Communicator {
+    Communicator {
+        handle: WORLD_HANDLE,
+        rank,
+        size,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::comm::{

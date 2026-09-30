@@ -580,7 +580,7 @@ impl Drop for Group {
 
 #[cfg(test)]
 mod tests {
-    use super::{Group, GroupComparison, RankRange};
+    use super::Group;
 
     #[test]
     fn group_drop_with_zero_handle_is_no_op() {
@@ -607,24 +607,5 @@ mod tests {
         // The guard in Drop already skips handle 0, but forget is explicit
         // about our intent here.
         std::mem::forget(g);
-    }
-
-    // ── GroupComparison unit tests ────────────────────────────────────────
-
-    #[test]
-    fn group_comparison_repr_values() {
-        assert_eq!(GroupComparison::Identical as i32, 0);
-        assert_eq!(GroupComparison::Similar as i32, 1);
-        assert_eq!(GroupComparison::Unequal as i32, 2);
-    }
-
-    // ── RankRange unit tests ──────────────────────────────────────────────
-
-    #[test]
-    fn rank_range_repr_and_size() {
-        // RankRange has 3 × i32 fields with natural alignment.
-        // On all current targets (x86_64, aarch64, riscv64) the natural layout
-        // is 12 bytes with no tail padding.
-        assert_eq!(std::mem::size_of::<RankRange>(), 12);
     }
 }

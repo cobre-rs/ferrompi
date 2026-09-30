@@ -702,21 +702,13 @@ impl Communicator {
 
 #[cfg(test)]
 mod tests {
-    use crate::comm::Communicator;
+    use crate::comm::test_comm;
     use crate::error::Error;
     use crate::ReduceOp;
 
-    fn dummy_comm() -> Communicator {
-        Communicator {
-            handle: 0,
-            rank: 0,
-            size: 1,
-        }
-    }
-
     #[test]
     fn iallreduce_mismatched_buffers_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.iallreduce(&send, &mut recv, ReduceOp::Sum);
@@ -725,7 +717,7 @@ mod tests {
 
     #[test]
     fn ireduce_mismatched_buffers_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.ireduce(&send, &mut recv, ReduceOp::Sum, 0);
@@ -734,7 +726,7 @@ mod tests {
 
     #[test]
     fn iscan_mismatched_buffers_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.iscan(&send, &mut recv, ReduceOp::Sum);
@@ -743,7 +735,7 @@ mod tests {
 
     #[test]
     fn iexscan_mismatched_buffers_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.iexscan(&send, &mut recv, ReduceOp::Sum);
@@ -752,11 +744,7 @@ mod tests {
 
     #[test]
     fn igather_inplace_nonroot_returns_invalid_op() {
-        let comm = Communicator {
-            handle: 0,
-            rank: 1,
-            size: 4,
-        };
+        let comm = test_comm(1, 4);
         let mut data = vec![0u32; 4];
         let result = comm.igather_inplace(&mut data, 0);
         assert!(matches!(result, Err(Error::InvalidOp)));
@@ -764,11 +752,7 @@ mod tests {
 
     #[test]
     fn iallgather_inplace_mismatched_len_returns_invalid_buffer() {
-        let comm = Communicator {
-            handle: 0,
-            rank: 0,
-            size: 4,
-        };
+        let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
         let result = comm.iallgather_inplace(&mut data);
         assert!(matches!(result, Err(Error::InvalidBuffer)));
@@ -776,11 +760,7 @@ mod tests {
 
     #[test]
     fn ialltoall_inplace_mismatched_len_returns_invalid_buffer() {
-        let comm = Communicator {
-            handle: 0,
-            rank: 0,
-            size: 4,
-        };
+        let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
         let result = comm.ialltoall_inplace(&mut data);
         assert!(matches!(result, Err(Error::InvalidBuffer)));

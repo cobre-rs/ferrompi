@@ -917,16 +917,8 @@ impl Communicator {
 #[cfg(test)]
 mod tests {
     use super::check_v_args;
-    use crate::comm::Communicator;
+    use crate::comm::test_comm;
     use crate::error::Error;
-
-    fn dummy_comm() -> Communicator {
-        Communicator {
-            handle: 0,
-            rank: 0,
-            size: 1,
-        }
-    }
 
     #[test]
     fn check_v_args_boundaries() {
@@ -968,7 +960,7 @@ mod tests {
 
     #[test]
     fn gatherv_init_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -979,7 +971,7 @@ mod tests {
 
     #[test]
     fn scatterv_init_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
@@ -990,7 +982,7 @@ mod tests {
 
     #[test]
     fn allgatherv_init_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -1001,7 +993,7 @@ mod tests {
 
     #[test]
     fn alltoallv_init_mismatched_send_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20]; // 3 elements != 4
@@ -1021,7 +1013,7 @@ mod tests {
 
     #[test]
     fn alltoallv_init_mismatched_recv_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20, 30];
@@ -1043,7 +1035,7 @@ mod tests {
 
     #[test]
     fn gatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -1054,7 +1046,7 @@ mod tests {
 
     #[test]
     fn scatterv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
@@ -1065,7 +1057,7 @@ mod tests {
 
     #[test]
     fn allgatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -1076,7 +1068,7 @@ mod tests {
 
     #[test]
     fn alltoallv_mismatched_send_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20]; // 3 elements != 4
@@ -1096,7 +1088,7 @@ mod tests {
 
     #[test]
     fn alltoallv_mismatched_recv_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20, 30];
@@ -1116,7 +1108,7 @@ mod tests {
 
     #[test]
     fn igatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -1127,7 +1119,7 @@ mod tests {
 
     #[test]
     fn iscatterv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
@@ -1138,7 +1130,7 @@ mod tests {
 
     #[test]
     fn iallgatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -1149,7 +1141,7 @@ mod tests {
 
     #[test]
     fn ialltoallv_mismatched_send_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20]; // 3 elements != 4
@@ -1169,7 +1161,7 @@ mod tests {
 
     #[test]
     fn ialltoallv_mismatched_recv_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20, 30];
