@@ -299,7 +299,7 @@ pub unsafe extern "C" fn ferrompi_op_drop_closure(slot: i32) {
 /// world.allreduce_with_op(&send, &mut recv, &op).unwrap();
 /// ```
 pub struct UserOp<T: MpiDatatype> {
-    handle: i32,
+    pub(crate) handle: i32,
     _marker: PhantomData<T>,
 }
 
@@ -397,12 +397,6 @@ impl<T: MpiDatatype> UserOp<T> {
             handle,
             _marker: PhantomData,
         })
-    }
-
-    /// Return the raw slot handle (for use by `allreduce_with_op`).
-    #[inline]
-    pub(crate) fn raw_handle(&self) -> i32 {
-        self.handle
     }
 }
 

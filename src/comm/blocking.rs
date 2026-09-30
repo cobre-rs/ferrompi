@@ -297,10 +297,9 @@ impl Communicator {
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]). op.raw_handle() is a valid MPI_Op registered by UserOp::new and
+        // (&[T] vs &mut [T]). op.handle is a valid MPI_Op registered by UserOp::new and
         // kept alive for the lifetime of `op`.
-        let ret =
-            unsafe { ffi::ferrompi_allreduce_user_op(sp, rp, n, dt, op.raw_handle(), self.handle) };
+        let ret = unsafe { ffi::ferrompi_allreduce_user_op(sp, rp, n, dt, op.handle, self.handle) };
         Error::check_with_op(ret, "allreduce_user_op")
     }
 

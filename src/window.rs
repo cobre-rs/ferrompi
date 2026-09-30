@@ -544,7 +544,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
                 size,
                 disp_unit,
                 -1, // MPI_INFO_NULL
-                comm.raw_handle(),
+                comm.handle,
                 &mut baseptr,
                 &mut win_handle,
             )
@@ -1093,7 +1093,7 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
                 size,
                 disp_unit,
                 -1, // MPI_INFO_NULL
-                comm.raw_handle(),
+                comm.handle,
                 &mut win_handle,
             )
         };
@@ -1184,7 +1184,7 @@ impl<T: MpiDatatype> Win<'static, T> {
                 size,
                 disp_unit,
                 -1, // MPI_INFO_NULL
-                comm.raw_handle(),
+                comm.handle,
                 &mut baseptr,
                 &mut win_handle,
             )
@@ -1355,12 +1355,11 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// win.wait_exposure().unwrap();
     /// ```
     pub fn post(&self, group: &Group, assert: WinPscwAssert) -> Result<()> {
-        // SAFETY: `win_handle` is a valid MPI window handle. `group.raw_handle()`
+        // SAFETY: `win_handle` is a valid MPI window handle. `group.handle`
         // returns a valid group handle from the C-layer group table.
         // `assert.bits()` is either 0 or a combination of MPI_MODE_* constants
         // returned by the MPI implementation.
-        let ret =
-            unsafe { ffi::ferrompi_win_post(group.raw_handle(), assert.bits(), self.win_handle) };
+        let ret = unsafe { ffi::ferrompi_win_post(group.handle, assert.bits(), self.win_handle) };
         Error::check_with_op(ret, "win_post")
     }
 
@@ -1397,11 +1396,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// win.complete().unwrap();
     /// ```
     pub fn start(&self, group: &Group, assert: WinPscwAssert) -> Result<()> {
-        // SAFETY: `win_handle` is a valid MPI window handle. `group.raw_handle()`
+        // SAFETY: `win_handle` is a valid MPI window handle. `group.handle`
         // returns a valid group handle from the C-layer group table.
         // `assert.bits()` is either 0 or a combination of MPI_MODE_* constants.
-        let ret =
-            unsafe { ffi::ferrompi_win_start(group.raw_handle(), assert.bits(), self.win_handle) };
+        let ret = unsafe { ffi::ferrompi_win_start(group.handle, assert.bits(), self.win_handle) };
         Error::check_with_op(ret, "win_start")
     }
 
