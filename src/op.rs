@@ -4,33 +4,6 @@
 //! Rust closure that MPI invokes during reduction collectives
 //! (`MPI_Reduce`, `MPI_Allreduce`, `MPI_Scan`, etc.).
 //!
-//! ## Safety model
-//!
-//! The closure must satisfy `Send + Sync + 'static`:
-//!
-//! * **`Send`** — the closure is moved into a static slot table accessible from
-//!   any thread (MPI may call it from an internal thread pool).
-//! * **`Sync`** — under `MPI_THREAD_MULTIPLE`, the same op may be invoked
-//!   concurrently from several threads.
-//! * **`'static`** — the closure is held until `MPI_Op_free` returns, which may
-//!   be much later than the call site.
-//!
-//! ## Panic behaviour
-//!
-//! **A panic inside the closure aborts the process immediately.**
-//!
-//! Panicking across a C FFI boundary is undefined behaviour; there is no
-//! mechanism for MPI to propagate or observe a Rust panic.  The trampoline
-//! wraps every closure call in [`std::panic::catch_unwind`]: on `Err` it calls
-//! [`std::process::abort`] before the panic can reach the C frame.  Treat a
-//! panic inside a reduction closure as a fatal programming error.
-//!
-//! ## Slot-table limit
-//!
-//! The implementation supports at most **16** concurrently live `UserOp`
-//! instances per process.  Attempting to create a seventeenth returns
-//! [`Error::Mpi`] with class `Other`.
-//!
 //! ## `compile_fail` doctest — `Send + Sync` bound
 //!
 //! ```compile_fail
@@ -266,16 +239,26 @@ pub unsafe extern "C" fn ferrompi_op_drop_closure(slot: i32) {
 /// The closure is called from whichever thread MPI uses internally for the
 /// reduction.  Under `MPI_THREAD_MULTIPLE` the same op may be invoked
 /// concurrently from multiple threads; the closure must be safe for concurrent
-/// invocation, enforced by the `Sync` bound.
+/// invocation, enforced by the `Sync` bound. The closure is moved into a
+/// static slot table accessible from any thread (MPI may call it from an
+/// internal thread pool), enforced by the `Send` bound. The closure is held
+/// until `MPI_Op_free` returns, which may be much later than the call site,
+/// enforced by the `'static` bound.
 ///
 /// # Panic behaviour
 ///
-/// A panic inside the closure **aborts the process**.  See module-level
-/// documentation for details.
+/// A panic inside the closure **aborts the process**.
+///
+/// Panicking across a C FFI boundary is undefined behaviour; there is no
+/// mechanism for MPI to propagate or observe a Rust panic.  The trampoline
+/// wraps every closure call in [`std::panic::catch_unwind`]: on `Err` it calls
+/// [`std::process::abort`] before the panic can reach the C frame.  Treat a
+/// panic inside a reduction closure as a fatal programming error.
 ///
 /// # Slot-table limit
 ///
 /// At most 16 `UserOp` instances may be live concurrently per process.
+/// Attempting to create a seventeenth returns [`Error::Mpi`] with class `Other`.
 ///
 /// If a `UserOp` outlives the `Mpi` handle, finalizing MPI frees its op and
 /// drops its closure, and dropping the `UserOp` afterwards does nothing.

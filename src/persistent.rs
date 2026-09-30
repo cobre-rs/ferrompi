@@ -1,45 +1,4 @@
-//! Persistent request handles for persistent collectives (MPI 4.0, or Open MPI 5).
-//!
-//! Persistent collectives allow you to initialize a collective operation once
-//! and then start it multiple times. This amortizes the setup cost across many
-//! iterations, which is particularly beneficial for iterative algorithms like SDDP.
-//!
-//! # Example
-//!
-//! ```no_run
-//! use ferrompi::{Mpi, ReduceOp};
-//!
-//! let mpi = Mpi::init().unwrap();
-//! let world = mpi.world();
-//!
-//! // Buffer that will be used for all broadcasts
-//! let mut data = vec![0.0f64; 1000];
-//!
-//! // Initialize persistent broadcast (MPI 4.0, or Open MPI 5)
-//! let mut persistent = world.bcast_init(&mut data, 0).unwrap();
-//!
-//! // Run many iterations
-//! for iter in 0..1000 {
-//!     // Update data on root
-//!     if world.rank() == 0 {
-//!         for (i, x) in data.iter_mut().enumerate() {
-//!             *x = (iter * 1000 + i) as f64;
-//!         }
-//!     }
-//!
-//!     // Start the broadcast
-//!     persistent.start().unwrap();
-//!
-//!     // Optionally do other work here...
-//!
-//!     // Wait for completion
-//!     persistent.wait().unwrap();
-//!
-//!     // data now contains broadcast result on all ranks
-//! }
-//!
-//! // Cleanup happens automatically on drop
-//! ```
+//! The `PersistentRequest` handle returned by the persistent `*_init` constructors.
 
 use crate::error::{Error, Result, FERROMPI_ERR_THREAD_LEVEL};
 use crate::ffi;
@@ -58,6 +17,43 @@ use crate::rt;
 /// 3. Wait for completion with `wait()`
 /// 4. Repeat steps 2-3 as needed
 /// 5. Free on drop
+///
+/// # Example
+///
+/// ```no_run
+/// use ferrompi::{Mpi, ReduceOp};
+///
+/// let mpi = Mpi::init().unwrap();
+/// let world = mpi.world();
+///
+/// // Buffer that will be used for all broadcasts
+/// let mut data = vec![0.0f64; 1000];
+///
+/// // Initialize persistent broadcast (MPI 4.0, or Open MPI 5)
+/// let mut persistent = world.bcast_init(&mut data, 0).unwrap();
+///
+/// // Run many iterations
+/// for iter in 0..1000 {
+///     // Update data on root
+///     if world.rank() == 0 {
+///         for (i, x) in data.iter_mut().enumerate() {
+///             *x = (iter * 1000 + i) as f64;
+///         }
+///     }
+///
+///     // Start the broadcast
+///     persistent.start().unwrap();
+///
+///     // Optionally do other work here...
+///
+///     // Wait for completion
+///     persistent.wait().unwrap();
+///
+///     // data now contains broadcast result on all ranks
+/// }
+///
+/// // Cleanup happens automatically on drop
+/// ```
 pub struct PersistentRequest {
     handle: i64,
     active: bool, // True if started but not yet waited

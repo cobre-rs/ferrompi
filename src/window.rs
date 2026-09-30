@@ -6,6 +6,10 @@
 //! memory without explicit message passing, enabling high-performance
 //! intra-node communication.
 //!
+//! It also provides [`Win<T>`], the general RMA window created over a caller
+//! buffer (`Win::create`) or MPI-allocated memory (`Win::allocate`), with
+//! fence, PSCW and passive-target synchronization.
+//!
 //! # Synchronization
 //!
 //! MPI shared memory windows require explicit synchronization:
