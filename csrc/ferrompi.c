@@ -3237,24 +3237,9 @@ int ferrompi_group_range_incl(int32_t g_h, int32_t n,
     if (n < 0) return MPI_ERR_ARG;
     MPI_Group g = get_group(g_h);
     if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;
-    int (*triples)[3];
-    int stack_buf[64][3];
-    int heap_alloc = 0;
-    if (n <= 64) {
-        triples = stack_buf;
-    } else {
-        triples = (int (*)[3]) malloc(sizeof(int[3]) * (size_t)n);
-        if (!triples) return MPI_ERR_NO_MEM;
-        heap_alloc = 1;
-    }
-    for (int i = 0; i < n; i++) {
-        triples[i][0] = ranges_flat[3*i + 0];
-        triples[i][1] = ranges_flat[3*i + 1];
-        triples[i][2] = ranges_flat[3*i + 2];
-    }
     MPI_Group new_grp;
-    int ret = MPI_Group_range_incl(g, n, triples, &new_grp);
-    if (heap_alloc) free(triples);
+    // int32_t is int on every supported target (as in ferrompi_group_incl); MPI does not write ranges.
+    int ret = MPI_Group_range_incl(g, n, (int (*)[3])ranges_flat, &new_grp);
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
         if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
@@ -3268,24 +3253,9 @@ int ferrompi_group_range_excl(int32_t g_h, int32_t n,
     if (n < 0) return MPI_ERR_ARG;
     MPI_Group g = get_group(g_h);
     if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;
-    int (*triples)[3];
-    int stack_buf[64][3];
-    int heap_alloc = 0;
-    if (n <= 64) {
-        triples = stack_buf;
-    } else {
-        triples = (int (*)[3]) malloc(sizeof(int[3]) * (size_t)n);
-        if (!triples) return MPI_ERR_NO_MEM;
-        heap_alloc = 1;
-    }
-    for (int i = 0; i < n; i++) {
-        triples[i][0] = ranges_flat[3*i + 0];
-        triples[i][1] = ranges_flat[3*i + 1];
-        triples[i][2] = ranges_flat[3*i + 2];
-    }
     MPI_Group new_grp;
-    int ret = MPI_Group_range_excl(g, n, triples, &new_grp);
-    if (heap_alloc) free(triples);
+    // int32_t is int on every supported target (as in ferrompi_group_incl); MPI does not write ranges.
+    int ret = MPI_Group_range_excl(g, n, (int (*)[3])ranges_flat, &new_grp);
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
         if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }

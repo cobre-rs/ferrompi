@@ -450,12 +450,10 @@ impl Group {
     /// assert_eq!(sub.size().unwrap(), 3);
     /// ```
     pub fn range_include(&self, ranges: &[RankRange]) -> Result<Group> {
-        let mut flat: Vec<i32> = Vec::with_capacity(3 * ranges.len());
-        for r in ranges {
-            flat.push(r.first);
-            flat.push(r.last);
-            flat.push(r.stride);
-        }
+        let flat: Vec<i32> = ranges
+            .iter()
+            .flat_map(|r| [r.first, r.last, r.stride])
+            .collect();
         let mut h: i32 = -1;
         // SAFETY: self.handle is owned; flat is a contiguous Vec<i32> with 3*ranges.len() elements
         // and outlives this call.
@@ -495,12 +493,10 @@ impl Group {
     /// assert_eq!(sub.size().unwrap(), 2);
     /// ```
     pub fn range_exclude(&self, ranges: &[RankRange]) -> Result<Group> {
-        let mut flat: Vec<i32> = Vec::with_capacity(3 * ranges.len());
-        for r in ranges {
-            flat.push(r.first);
-            flat.push(r.last);
-            flat.push(r.stride);
-        }
+        let flat: Vec<i32> = ranges
+            .iter()
+            .flat_map(|r| [r.first, r.last, r.stride])
+            .collect();
         let mut h: i32 = -1;
         // SAFETY: self.handle is owned; flat is a contiguous Vec<i32> with 3*ranges.len() elements
         // and outlives this call.
