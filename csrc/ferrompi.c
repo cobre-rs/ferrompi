@@ -3572,7 +3572,8 @@ int ferrompi_cancel(int64_t request_handle) {
 
 int ferrompi_waitany(int64_t count, const int64_t* request_handles,
                      int32_t* index, uint8_t* done) {
-    if (count <= 0) { *index = -1; return MPI_SUCCESS; }
+    *index = -1;
+    if (count <= 0) { return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
     MPI_Request* reqs = (count <= FERROMPI_REQ_STACK)
@@ -3680,7 +3681,8 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
 
 int ferrompi_testany(int64_t count, const int64_t* request_handles,
                      int32_t* index, int32_t* flag, uint8_t* done) {
-    if (count <= 0) { *flag = 1; *index = -1; return MPI_SUCCESS; }
+    *index = -1;
+    if (count <= 0) { *flag = 1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
     MPI_Request* reqs = (count <= FERROMPI_REQ_STACK)

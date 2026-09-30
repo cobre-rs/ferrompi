@@ -71,9 +71,9 @@ fn with_index_buf<R>(len: usize, f: impl FnOnce(&mut [i32]) -> R) -> R {
 
 /// Check a batch wait/test return code, appending the failing request's
 /// slice index to an `Error::Mpi` message. `failed` is the caller-slice
-/// index the C shim wrote on `MPI_ERR_IN_STATUS` (`-1` when it found no
-/// resolvable per-request status). Shared by `Request::wait_all`,
-/// `Request::wait_some`, `Request::test_some` and
+/// index of the failing request as the C shim wrote it (`-1` when it
+/// found none). Shared by `Request::wait_all`, `Request::wait_any`,
+/// `Request::wait_some`, `Request::test_any`, `Request::test_some` and
 /// `PersistentRequest::wait_all`.
 pub(crate) fn check_batch(ret: i32, operation: &'static str, failed: i64) -> Result<()> {
     match Error::check_with_op(ret, operation) {
@@ -271,6 +271,10 @@ impl Request {
     ///
     /// The completed `Request` is marked completed in place. Removing it
     /// from the vector is optional, not required for correctness.
+    ///
+    /// On a failed request, the returned error carries that request's own
+    /// class and code, and its message ends with `(request N)`, `N` being
+    /// its index in `requests`.
     pub fn wait_any(requests: &mut [Request]) -> Result<Option<usize>> {
         if requests.is_empty() {
             return Ok(None);
@@ -292,7 +296,7 @@ impl Request {
             },
             |r| r.completed = true,
         );
-        Error::check_with_op(ret, "waitany")?;
+        check_batch(ret, "waitany", index as i64)?;
         if index < 0 {
             return Ok(None);
         }
@@ -369,6 +373,10 @@ impl Request {
     /// entry has completed keeps returning `Ok(None)` rather than erroring.
     /// The completed `Request` is marked completed in place. Removing it
     /// from the vector is optional, not required for correctness.
+    ///
+    /// On a failed request, the returned error carries that request's own
+    /// class and code, and its message ends with `(request N)`, `N` being
+    /// its index in `requests`.
     pub fn test_any(requests: &mut [Request]) -> Result<Option<usize>> {
         if requests.is_empty() {
             return Ok(None);
@@ -392,7 +400,7 @@ impl Request {
             },
             |r| r.completed = true,
         );
-        Error::check_with_op(ret, "testany")?;
+        check_batch(ret, "testany", index as i64)?;
         if flag == 0 {
             return Ok(None);
         }

@@ -113,8 +113,9 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 - **Batch methods now skip already-completed requests left in a slice**;
   both `wait_all` implementations mark exactly the requests MPI completed,
   whether the call as a whole succeeds or fails.
-- **A failed batch completion now reports the failing request's own class
-  and code**, with the message ending in `(request N)`.
+- **A failed batch completion (`wait_all`, `wait_any`, `wait_some`, `test_any`,
+  `test_some` and `PersistentRequest::wait_all`) now reports the failing
+  request's own class and code**, with the message ending in `(request N)`.
 - **On MPI 4.0 and later, persistent point-to-point and non-v persistent
   collective inits above `INT_MAX` now use the MPI 4.0 large-count
   variants**; `gatherv_init`, `scatterv_init` and `allgatherv_init` still
