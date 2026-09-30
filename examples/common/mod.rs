@@ -69,3 +69,28 @@ pub fn has_mpi4_collectives() -> bool {
         .and_then(|major| major.parse::<u32>().ok())
         .is_some_and(|major| major >= 5)
 }
+
+/// A 4-element payload rank 1 sends into a 1-element ("small") receive
+/// buffer to force `MPI_ERR_TRUNCATE`, or into a 4-element ("big") buffer,
+/// which it fits exactly.
+pub const PAYLOAD: [i32; 4] = [1, 2, 3, 4];
+
+/// The class of `result`'s `Error::Mpi`, or `None` for `Ok` and every other error.
+pub fn class_of<T>(result: &Result<T>) -> Option<MpiErrorClass> {
+    match result {
+        Err(Error::Mpi { class, .. }) => Some(*class),
+        _ => None,
+    }
+}
+
+/// Exclusive prefix sum of `counts`: each rank's displacement in a packed buffer.
+pub fn displs_from_counts(counts: &[i32]) -> Vec<i32> {
+    counts
+        .iter()
+        .scan(0, |acc, &c| {
+            let d = *acc;
+            *acc += c;
+            Some(d)
+        })
+        .collect()
+}

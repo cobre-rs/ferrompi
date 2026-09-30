@@ -41,14 +41,7 @@ use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, PersistentRequest};
 
 mod common;
 
-const PAYLOAD: [i32; 4] = [1, 2, 3, 4];
-
-fn class_of<T>(result: &ferrompi::Result<T>) -> Option<MpiErrorClass> {
-    match result {
-        Err(Error::Mpi { class, .. }) => Some(*class),
-        _ => None,
-    }
-}
+use common::{class_of, PAYLOAD};
 
 fn part1_wait(world: &Communicator, rank: i32, mpich: bool) {
     let mut small = [0i32; 1];

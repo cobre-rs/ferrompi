@@ -19,17 +19,7 @@ use std::time::Duration;
 
 mod common;
 
-/// A 4-element payload rank 1 sends into a 1-element ("small") receive
-/// buffer to force `MPI_ERR_TRUNCATE`, or into a 4-element ("big") buffer,
-/// which it fits exactly.
-const PAYLOAD: [i32; 4] = [1, 2, 3, 4];
-
-fn class_of<T>(result: &ferrompi::Result<T>) -> Option<MpiErrorClass> {
-    match result {
-        Err(Error::Mpi { class, .. }) => Some(*class),
-        _ => None,
-    }
-}
+use common::{class_of, PAYLOAD};
 
 /// True iff `result` is a `Truncate` error whose message names `index` as the
 /// failing request's position in the caller's slice.

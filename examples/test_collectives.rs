@@ -11,6 +11,8 @@
 
 use ferrompi::{Mpi, ReduceOp};
 
+mod common;
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -319,14 +321,7 @@ fn main() {
         let send = vec![rank as f64; send_count];
 
         let recvcounts: Vec<i32> = (0..size).map(|r| r + 1).collect();
-        let displs: Vec<i32> = recvcounts
-            .iter()
-            .scan(0, |acc, &c| {
-                let d = *acc;
-                *acc += c;
-                Some(d)
-            })
-            .collect();
+        let displs = common::displs_from_counts(&recvcounts);
         let total: usize = recvcounts.iter().map(|&c| c as usize).sum();
 
         let mut recv = if rank == 0 {
@@ -363,14 +358,7 @@ fn main() {
     {
         let recv_count = (rank + 1) as usize;
         let sendcounts: Vec<i32> = (0..size).map(|r| r + 1).collect();
-        let displs: Vec<i32> = sendcounts
-            .iter()
-            .scan(0, |acc, &c| {
-                let d = *acc;
-                *acc += c;
-                Some(d)
-            })
-            .collect();
+        let displs = common::displs_from_counts(&sendcounts);
         let total: usize = sendcounts.iter().map(|&c| c as usize).sum();
 
         // Root sends: rank r gets (r+1) elements, each = r * 100.0
@@ -413,14 +401,7 @@ fn main() {
         let send = vec![rank as f64; send_count];
 
         let recvcounts: Vec<i32> = (0..size).map(|r| r + 1).collect();
-        let displs: Vec<i32> = recvcounts
-            .iter()
-            .scan(0, |acc, &c| {
-                let d = *acc;
-                *acc += c;
-                Some(d)
-            })
-            .collect();
+        let displs = common::displs_from_counts(&recvcounts);
         let total: usize = recvcounts.iter().map(|&c| c as usize).sum();
         let mut recv = vec![0.0f64; total];
 

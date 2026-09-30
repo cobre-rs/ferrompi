@@ -98,8 +98,12 @@ Outcome rules:
 
 `examples/common/mod.rs` has the shared helpers: `check` (aggregate a per-rank
 verdict via `allreduce(Min)` and report `FAIL: <name>` from rank 0), `skip` (print
-`SKIP: <reason>` from rank 0), `mpi_major` (the running library's major version)
-and `is_count` (match a `Count`-class MPI error).
+`SKIP: <reason>` from rank 0), `mpi_major` (the running library's major version),
+`is_count` (match a `Count`-class MPI error), `has_mpi4_collectives` (the MPI-4
+collectives capability, mirroring the C gate), `class_of` (the class of an
+`Error::Mpi` result), `PAYLOAD` (four elements that truncate into a one-element
+receive), and `displs_from_counts` (the exclusive prefix sum of v-collective
+counts).
 
 ## Benchmarks
 
