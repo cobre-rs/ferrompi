@@ -131,5 +131,53 @@ fn main() {
         }
     }
 
+    // ========================================================================
+    // Test 4: empty ranges → range_include size 0, range_exclude size 4
+    // ========================================================================
+    {
+        match parent.range_include(&[]) {
+            Ok(sub) => match sub.size() {
+                Ok(s) if s == 0 => {
+                    if rank == 0 {
+                        println!("PASS: Test 4 — range_include([]).size() = {s}");
+                    }
+                }
+                Ok(s) => {
+                    eprintln!("rank {rank}: FAIL Test 4: expected size 0, got {s}");
+                    local_ok = false;
+                }
+                Err(e) => {
+                    eprintln!("rank {rank}: FAIL Test 4: size() error: {e}");
+                    local_ok = false;
+                }
+            },
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL Test 4: range_include failed: {e}");
+                local_ok = false;
+            }
+        }
+        match parent.range_exclude(&[]) {
+            Ok(sub) => match sub.size() {
+                Ok(s) if s == 4 => {
+                    if rank == 0 {
+                        println!("PASS: Test 4 — range_exclude([]).size() = {s}");
+                    }
+                }
+                Ok(s) => {
+                    eprintln!("rank {rank}: FAIL Test 4: expected size 4, got {s}");
+                    local_ok = false;
+                }
+                Err(e) => {
+                    eprintln!("rank {rank}: FAIL Test 4: size() error: {e}");
+                    local_ok = false;
+                }
+            },
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL Test 4: range_exclude failed: {e}");
+                local_ok = false;
+            }
+        }
+    }
+
     common::check(&world, local_ok, "test_group_ranges");
 }
