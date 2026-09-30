@@ -145,17 +145,6 @@ check "expand_np: 2.. matches available" "$(expand_np "2.." 2 3 4)" "2 3 4"
 check "expand_np: 3.. falls back to base" "$(expand_np "3.." 2)" "3"
 check "expand_np: fixed np ignores list" "$(expand_np "4" 2 3)" "4"
 
-# --- valgrind_np -------------------------------------------------------
-
-check "valgrind_np: np=N.. gives minimal N" "$(valgrind_np "2..")" "2"
-check "valgrind_np: fixed np unchanged" "$(valgrind_np "4")" "4"
-
-# --- build_cmd -----------------------------------------------------------
-
-check "build_cmd: exact prefix" \
-  "$(build_cmd "/repo/tests/valgrind/mpich.supp")" \
-  "valgrind -q --error-exitcode=99 --track-origins=yes --leak-check=no --suppressions=/repo/tests/valgrind/mpich.supp"
-
 # --- impl_id -----------------------------------------------------------
 
 hydra_sample=$'HYDRA build details:\n    Version:                                 4.2.3\n    Release date:                            unreleased'
@@ -187,6 +176,9 @@ check "classify: exit 1 -> FAIL exit 1" "$(classify 1 "$f" "" "" "" "unknown")" 
 f=$(mk_outfile $'some output\n')
 check "classify: exit 99 -> FAIL valgrind errors" \
   "$(classify 99 "$f" "" "" "" "unknown")" "FAIL valgrind errors"
+
+check "classify: valgrind runs with the exit code classify reports" \
+  "$(contains " ${VALGRIND_ARGS[*]} " " --error-exitcode=99 ")" "yes"
 
 f=$(mk_outfile $'shutdown complete\n')
 check "classify: exit 99 with expect=unfinalized and literal present still FAIL valgrind errors" \

@@ -31,6 +31,10 @@ MPI_TEST_TIMEOUT="${MPI_TEST_TIMEOUT:-90}"
 # still alive. Only expect=unfinalized examples may print it.
 FINALIZE_SKIPPED_MARKER="MPI_Finalize skipped"
 
+# valgrind flags for --valgrind mode. classify reports exit 99 as
+# "FAIL valgrind errors", so --error-exitcode must stay 99.
+readonly -a VALGRIND_ARGS=(-q --error-exitcode=99 --track-origins=yes --leak-check=no)
+
 FEATURES=""
 IMPL_ID=""
 FEATURE_CLOSURE=""
@@ -154,21 +158,6 @@ expand_np() {
   else
     echo "${matched[*]}"
   fi
-}
-
-# valgrind_np <spec>
-# Prints the minimal np for valgrind mode: np=N and np=N.. both give N.
-valgrind_np() {
-  local spec="$1"
-  echo "${spec%..}"
-}
-
-# build_cmd <suppressions-path>
-# Prints the valgrind invocation prefix inserted between `mpiexec -n <np>`
-# and the executable.
-build_cmd() {
-  local supp="$1"
-  echo "valgrind -q --error-exitcode=99 --track-origins=yes --leak-check=no --suppressions=$supp"
 }
 
 # impl_id <mpiexec --version output>
@@ -496,7 +485,7 @@ run_all() {
 
     local -a nps
     if ((VALGRIND_MODE)); then
-      nps=("$(valgrind_np "$np_spec")")
+      nps=("${np_spec%..}")  # np=N and np=N.. both give N
     else
       read -ra nps <<<"$(expand_np "$np_spec" "${MPI_NP_LIST_ARR[@]}")"
     fi
@@ -507,9 +496,7 @@ run_all() {
       local rc=0
       local -a exec_cmd=("$MPIEXEC" "${MPIEXEC_ARGS[@]}" -n "$np")
       if ((VALGRIND_MODE)); then
-        local -a vg_prefix
-        read -ra vg_prefix <<<"$(build_cmd "$VALGRIND_SUPP")"
-        exec_cmd+=("${vg_prefix[@]}")
+        exec_cmd+=(valgrind "${VALGRIND_ARGS[@]}" "--suppressions=$VALGRIND_SUPP")
       fi
       exec_cmd+=("$exe")
       timeout --kill-after=10 "$run_timeout" "${exec_cmd[@]}" >"$outfile" 2>&1 || rc=$?
