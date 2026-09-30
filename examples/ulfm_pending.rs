@@ -60,7 +60,6 @@ fn main() {
                 let result = world.irecv(&mut buf, -1, 7).map(|_| ());
                 println!("FAIL: {mode} returned while the receive is still pending: {result:?}");
                 std::mem::forget(fillers);
-                std::mem::forget(result);
                 std::process::exit(1);
             }
 
