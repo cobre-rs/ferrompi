@@ -549,6 +549,7 @@ large-count forms stay gated on `MPI_VERSION >= 4`. Elsewhere the constructors r
 
 ## Status
 
-Accepted — 2026-05-17; amended 2026-09-24, 2026-09-29. The implementation lives in `src/persistent.rs` (the `PersistentRequest`
-type and its `Drop` impl) and `src/comm/persistent.rs` (all `*_init` constructor methods
-on `Communicator`).
+Accepted — 2026-05-17; amended 2026-09-24, 2026-09-29, 2026-09-30. The implementation lives in `src/persistent.rs` (the `PersistentRequest`
+type and its `Drop` impl) and `src/comm/persistent.rs` (the persistent collective `*_init` methods on `Communicator`;
+the persistent point-to-point constructors are in `src/comm/p2p.rs` and the persistent v-collective ones in
+`src/comm/v_collective.rs`).
