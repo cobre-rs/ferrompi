@@ -6,11 +6,17 @@
 //! table the process must abort instead of returning an error the buffer
 //! could outlive.
 //!
+//! Rank 0 prints its own marker, barriers, and sleeps briefly before the
+//! risky `Win::create` call: the launcher can tear the job down before
+//! forwarding the C shim's own stderr write once `MPI_Abort` races it
+//! (mitigation and rationale as in `test_abort.rs`).
+//!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_win_create_table_full
 // mpi-test: np=1.. expect=abort skip-ok=openmpi-4
-// mpi-test-stderr: ferrompi: window table full after MPI_Win_create
+// mpi-test-stderr: test_win_create_table_full: calling Win::create at a full window table
 
 use ferrompi::{Error, Mpi, MpiErrorClass, Win};
+use std::time::Duration;
 
 mod common;
 
@@ -40,6 +46,12 @@ fn main() {
     while let Ok(win) = Win::<f64>::allocate(&world, 1) {
         windows.push(win);
     }
+
+    if world.rank() == 0 {
+        eprintln!("test_win_create_table_full: calling Win::create at a full window table");
+    }
+    world.barrier().expect("barrier failed");
+    std::thread::sleep(Duration::from_millis(100));
 
     let mut buf = [0f64; 4];
     let result = Win::create(&world, &mut buf).map(|_| ());
