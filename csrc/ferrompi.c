@@ -1,8 +1,4 @@
-/**
- * ferrompi.c - Thin C wrapper for MPI 4.x features
- * 
- * Implementation of the FFI layer for Rust interop.
- */
+/* the implementation of ferrompi.h; see the header for the interface contract. */
 
 #include "ferrompi.h"
 #include <mpi.h>
@@ -17,6 +13,10 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
+
+// Every int32_t* to int* cast below (count, displacement and rank-array
+// arguments passed to the underlying MPI call) is safe: int is at least 32
+// bits on all MPI platforms.
 
 /* ============================================================
  * Internal State and Handle Management
@@ -53,24 +53,6 @@ _Static_assert(MAX_REQUESTS % 64 == 0,
 // 64 * sizeof(MPI_Status), and for waitsome/testsome, 64 * sizeof(int)).
 #define FERROMPI_REQ_STACK 64
 
-// Internal resource-exhaustion sentinels, returned when a fixed-size handle
-// table is full. Negative so they never collide with MPI return codes (which
-// are non-negative); src/error.rs maps each to a typed Error::ResourceExhausted.
-// These MUST stay in sync with the mirrored consts in src/error.rs.
-#define FERROMPI_ERR_REQUESTS_FULL   (-7001)
-#define FERROMPI_ERR_COMMS_FULL      (-7002)
-#define FERROMPI_ERR_DATATYPES_FULL  (-7003)
-#define FERROMPI_ERR_OPS_FULL        (-7004)
-#define FERROMPI_ERR_WINDOWS_FULL    (-7005)
-#define FERROMPI_ERR_GROUPS_FULL     (-7006)
-#define FERROMPI_ERR_INFOS_FULL      (-7007)
-
-// Returned by the persistent-collective and comm_create_from_group stubs
-// compiled without FERROMPI_HAVE_MPI4_COLLECTIVES (the library lacks the
-// MPI 4.0 operation). src/error.rs maps it to Error::NotSupported. This
-// MUST stay in sync with the mirrored const in src/error.rs.
-#define FERROMPI_ERR_NOT_SUPPORTED   (-7008)
-
 // Open MPI 5 implements the MPI 4.0 persistent collectives and
 // MPI_Comm_create_from_group while its mpi.h still reports MPI_VERSION 3.
 // The _c large-count calls stay gated on MPI_VERSION >= 4: Open MPI 5 has
@@ -78,14 +60,6 @@ _Static_assert(MAX_REQUESTS % 64 == 0,
 #if MPI_VERSION >= 4 || (defined(OMPI_MAJOR_VERSION) && OMPI_MAJOR_VERSION >= 5)
 #define FERROMPI_HAVE_MPI4_COLLECTIVES 1
 #endif
-
-// Written to a window-allocating shim's handle out-parameter when MPI
-// created the window but zeroing or registering it failed: the window is
-// never freed.
-#define FERROMPI_WIN_LEAKED (-2)
-
-// Split type constants (must match Rust SplitType enum and header defines)
-#define FERROMPI_COMM_TYPE_SHARED 0
 
 // Maximum number of concurrent MPI_Info objects
 #define MAX_INFOS 64
@@ -1606,7 +1580,6 @@ int ferrompi_gatherv(
     if (sendcount > INT_MAX) {
         return MPI_ERR_COUNT;
     }
-    /* Cast int32_t* to int* — safe since int is at least 32 bits on all MPI platforms */
     return MPI_Gatherv(sendbuf, (int)sendcount, dt,
                        recvbuf, (const int*)recvcounts, (const int*)displs, dt,
                        root, comm);
@@ -1623,7 +1596,6 @@ int ferrompi_scatterv(
     if (recvcount > INT_MAX) {
         return MPI_ERR_COUNT;
     }
-    /* Cast int32_t* to int* — safe since int is at least 32 bits on all MPI platforms */
     return MPI_Scatterv(sendbuf, (const int*)sendcounts, (const int*)displs, dt,
                         recvbuf, (int)recvcount, dt,
                         root, comm);
@@ -1640,7 +1612,6 @@ int ferrompi_allgatherv(
     if (sendcount > INT_MAX) {
         return MPI_ERR_COUNT;
     }
-    /* Cast int32_t* to int* — safe since int is at least 32 bits on all MPI platforms */
     return MPI_Allgatherv(sendbuf, (int)sendcount, dt,
                           recvbuf, (const int*)recvcounts, (const int*)displs, dt,
                           comm);
@@ -1654,7 +1625,6 @@ int ferrompi_alltoallv(
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    /* Cast int32_t* to int* — safe since int is at least 32 bits on all MPI platforms */
     return MPI_Alltoallv(sendbuf, (const int*)sendcounts, (const int*)sdispls, dt,
                          recvbuf, (const int*)recvcounts, (const int*)rdispls, dt,
                          comm);
@@ -2044,7 +2014,6 @@ int ferrompi_igatherv(
         return MPI_ERR_COUNT;
     }
     MPI_Request req;
-    /* Cast int32_t* to int* — safe since int is at least 32 bits on all MPI platforms */
     int ret = MPI_Igatherv(sendbuf, (int)sendcount, dt,
                            recvbuf, (const int*)recvcounts, (const int*)displs, dt,
                            root, comm, &req);
@@ -2073,7 +2042,6 @@ int ferrompi_iscatterv(
         return MPI_ERR_COUNT;
     }
     MPI_Request req;
-    /* Cast int32_t* to int* — safe since int is at least 32 bits on all MPI platforms */
     int ret = MPI_Iscatterv(sendbuf, (const int*)sendcounts, (const int*)displs, dt,
                             recvbuf, (int)recvcount, dt,
                             root, comm, &req);
@@ -2102,7 +2070,6 @@ int ferrompi_iallgatherv(
         return MPI_ERR_COUNT;
     }
     MPI_Request req;
-    /* Cast int32_t* to int* — safe since int is at least 32 bits on all MPI platforms */
     int ret = MPI_Iallgatherv(sendbuf, (int)sendcount, dt,
                               recvbuf, (const int*)recvcounts, (const int*)displs, dt,
                               comm, &req);
@@ -2128,7 +2095,6 @@ int ferrompi_ialltoallv(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
-    /* Cast int32_t* to int* — safe since int is at least 32 bits on all MPI platforms */
     int ret = MPI_Ialltoallv(sendbuf, (const int*)sendcounts, (const int*)sdispls, dt,
                              recvbuf, (const int*)recvcounts, (const int*)rdispls, dt,
                              comm, &req);
@@ -2336,33 +2302,11 @@ int ferrompi_ssend_init(
  * Buffered Send Buffer Management and Persistent Buffered Send (MPI 1.1+)
  * ============================================================ */
 
-/**
- * Attach a user-provided buffer for use by buffered sends.
- *
- * MPI takes ownership of the buffer between attach and detach; the caller
- * must not access it during that period. Only one buffer may be attached
- * per process at a time. The `size` parameter is cast to int; the Rust
- * caller (`Mpi::buffer_attach`) rejects buffers above INT_MAX bytes before
- * this function is called.
- *
- * @param buffer  Pointer to the buffer (must be valid until detach)
- * @param size    Size of the buffer in bytes (capped at INT_MAX)
- * @return MPI error code
- */
+/* size is cast to int; the Rust caller rejects sizes above INT_MAX. */
 int ferrompi_buffer_attach(void* buffer, int64_t size) {
     return MPI_Buffer_attach(buffer, (int)size);
 }
 
-/**
- * Detach the previously attached buffer.
- *
- * Blocks until all buffered sends using the buffer have completed.
- * Writes the detached buffer pointer and its size back to the caller.
- *
- * @param buffer  Output: pointer to the detached buffer
- * @param size    Output: size of the detached buffer in bytes
- * @return MPI error code
- */
 int ferrompi_buffer_detach(void** buffer, int64_t* size) {
     int int_size = 0;
     int ret = MPI_Buffer_detach(buffer, &int_size);
@@ -3860,8 +3804,6 @@ int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_h
     MPI_Win win;
     int ret = MPI_Win_allocate_shared((MPI_Aint)size, disp_unit, info, comm, baseptr, &win);
     if (ret == MPI_SUCCESS) {
-        /* Install MPI_ERRORS_RETURN so RMA errors are returned rather than
-         * aborting the process (mirrors the communicator error-handler pattern). */
         install_errors_return_win(win);
         ret = zero_own_segment(win, comm, *baseptr, (MPI_Aint)size);
         if (ret != MPI_SUCCESS) {
@@ -3885,8 +3827,6 @@ int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t inf
     MPI_Win win;
     int ret = MPI_Win_create(base, (MPI_Aint)size, disp_unit, info, comm, &win);
     if (ret == MPI_SUCCESS) {
-        /* Install MPI_ERRORS_RETURN so RMA errors are returned rather than
-         * aborting the process (mirrors the communicator error-handler pattern). */
         install_errors_return_win(win);
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
@@ -3914,8 +3854,6 @@ int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info_handle,
     MPI_Win win;
     int ret = MPI_Win_allocate((MPI_Aint)size, disp_unit, info, comm, baseptr, &win);
     if (ret == MPI_SUCCESS) {
-        /* Install MPI_ERRORS_RETURN so RMA errors are returned rather than
-         * aborting the process (mirrors the communicator error-handler pattern). */
         install_errors_return_win(win);
         ret = zero_own_segment(win, comm, *baseptr, (MPI_Aint)size);
         if (ret != MPI_SUCCESS) {
@@ -4694,9 +4632,8 @@ int ferrompi_op_free(int32_t handle) {
  * and the slot therefore holds MPI_OP_NULL.  Calling MPI_Op_free on
  * MPI_OP_NULL is implementation-defined; this shim avoids it entirely.
  *
- * The caller is responsible for dropping the Rust closure before calling this
- * function (ferrompi_op_drop_closure is NOT called here because the caller
- * already reconstructed and dropped the Box directly). */
+ * The caller must already have called ferrompi_op_drop_closure to drop the
+ * Rust closure before calling this function; it is not called here. */
 int ferrompi_op_free_slot_only(int32_t handle) {
     if (handle < 0 || handle >= MAX_OPS) return MPI_ERR_ARG;
     free_op_slot(handle);

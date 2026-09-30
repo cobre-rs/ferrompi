@@ -1,22 +1,17 @@
 /**
- * ferrompi.h - Thin C wrapper for MPI 4.x features
- * 
- * This header provides a stable FFI interface for Rust to access
- * MPI functionality, particularly MPI 4.0+ features not available
- * in rsmpi.
- * 
- * Design principles:
- * - Minimal logic in C, just call forwarding
- * - Use fixed-width types for FFI safety
- * - Handle table for opaque MPI objects
- * - Error codes returned directly (MPI_SUCCESS = 0)
+ * ferrompi.h - the C interface between ferrompi's Rust code and MPI. Rust
+ * calls only these functions. MPI objects are held in fixed-size C handle
+ * tables and cross the FFI as integer handles. Every status-returning
+ * function returns an MPI error code (MPI_SUCCESS = 0) or one of the
+ * negative ferrompi sentinels below. MPI 4.0 operations are compiled only
+ * where the library provides them. Fixed-width types are used at the FFI
+ * boundary.
  */
 
 #ifndef ferrompi_H
 #define ferrompi_H
 
 #include <stdint.h>
-#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,6 +49,33 @@ extern "C" {
 
 /* Must match the Rust SplitType enum discriminants. */
 #define FERROMPI_COMM_TYPE_SHARED 0
+
+/* ============================================================
+ * Return Sentinels
+ * ============================================================ */
+
+/* Internal resource-exhaustion sentinels, returned when a fixed-size handle
+ * table is full. Negative so they never collide with MPI return codes (which
+ * are non-negative); src/error.rs maps each to a typed Error::ResourceExhausted.
+ * These MUST stay in sync with the mirrored consts in src/error.rs. */
+#define FERROMPI_ERR_REQUESTS_FULL   (-7001)
+#define FERROMPI_ERR_COMMS_FULL      (-7002)
+#define FERROMPI_ERR_DATATYPES_FULL  (-7003)
+#define FERROMPI_ERR_OPS_FULL        (-7004)
+#define FERROMPI_ERR_WINDOWS_FULL    (-7005)
+#define FERROMPI_ERR_GROUPS_FULL     (-7006)
+#define FERROMPI_ERR_INFOS_FULL      (-7007)
+
+/* Returned by the persistent-collective and comm_create_from_group stubs
+ * compiled without FERROMPI_HAVE_MPI4_COLLECTIVES (the library lacks the
+ * MPI 4.0 operation). src/error.rs maps it to Error::NotSupported. This
+ * MUST stay in sync with the mirrored const in src/error.rs. */
+#define FERROMPI_ERR_NOT_SUPPORTED   (-7008)
+
+/* Written to a window-allocating shim's handle out-parameter when MPI
+ * created the window but zeroing or registering it failed: the window is
+ * never freed. */
+#define FERROMPI_WIN_LEAKED (-2)
 
 /* ============================================================
  * Initialization and Finalization
@@ -100,7 +122,8 @@ int ferrompi_comm_create_from_group_parent(int32_t comm_handle,
  * Create a communicator from a group without a parent communicator
  * (MPI_Comm_create_from_group, MPI 4.0, or Open MPI 5). Collective only over the processes
  * sharing the same group and stringtag, not over an existing communicator.
- * Returns MPI_ERR_OTHER on MPI < 4.0.
+ * Returns FERROMPI_ERR_NOT_SUPPORTED when built against a library without
+ * MPI_Comm_create_from_group.
  */
 int ferrompi_comm_create_from_group(int32_t group_handle,
                                     const char* stringtag,
@@ -350,6 +373,10 @@ int ferrompi_ssend_init(
     int64_t* request_handle
 );
 
+/* ============================================================
+ * Buffered Send Buffer Management and Persistent Buffered Send (MPI 1.1+)
+ * ============================================================ */
+
 /**
  * Attach a user buffer for buffered sends (MPI_Buffer_attach). Only one
  * buffer may be attached at a time; it must remain valid until detach.
@@ -420,6 +447,49 @@ int ferrompi_info_set(int32_t info_handle, const char* key, const char* value);
 int ferrompi_info_get(int32_t info_handle, const char* key, char* value, int32_t* valuelen, int32_t* flag);
 
 /* ============================================================
+ * Group Operations
+ * ============================================================ */
+
+int ferrompi_comm_group(int32_t comm_handle, int32_t* group_handle);
+
+int ferrompi_group_incl(int32_t group_handle, int32_t n, const int32_t* ranks, int32_t* newgroup_handle);
+
+int ferrompi_group_excl(int32_t group_handle, int32_t n, const int32_t* ranks, int32_t* newgroup_handle);
+
+int ferrompi_group_free(int32_t group_handle);
+
+int ferrompi_group_size(int32_t group_handle, int32_t* size);
+
+/** Get the calling process's rank in a group (MPI_Group_rank). Returns MPI_UNDEFINED (-1) if not a member. */
+int ferrompi_group_rank(int32_t group_handle, int32_t* rank);
+
+int ferrompi_group_union(int32_t group1_handle, int32_t group2_handle, int32_t* newgroup_handle);
+
+int ferrompi_group_intersection(int32_t group1_handle, int32_t group2_handle, int32_t* newgroup_handle);
+
+int ferrompi_group_difference(int32_t group1_handle, int32_t group2_handle, int32_t* newgroup_handle);
+
+int ferrompi_group_range_incl(int32_t group_handle, int32_t n,
+                               const int32_t* ranges_flat,
+                               int32_t* newgroup_handle);
+
+int ferrompi_group_range_excl(int32_t group_handle, int32_t n,
+                               const int32_t* ranges_flat,
+                               int32_t* newgroup_handle);
+
+int ferrompi_group_compare(int32_t group1_handle, int32_t group2_handle,
+                           int32_t* result);
+
+/**
+ * Translate ranks between groups (MPI_Group_translate_ranks). Ranks present in
+ * group1 but not group2 are written as -1 (normalised from MPI_UNDEFINED).
+ */
+int ferrompi_group_translate_ranks(int32_t group1_handle, int32_t n,
+                                   const int32_t* ranks1,
+                                   int32_t group2_handle,
+                                   int32_t* ranks2);
+
+/* ============================================================
  * Error Information
  * ============================================================ */
 
@@ -471,11 +541,11 @@ int ferrompi_startall(int64_t count, const int64_t* requests, uint8_t* started);
  * RMA Window Operations (MPI 3.0+)
  * ============================================================ */
 
-/* Lock type constants for MPI_Win_lock / MPI_Win_lock_all. Must match the LockType -> FERROMPI_LOCK_* mapping in src/window.rs. */
+/* Lock type constants for MPI_Win_lock / MPI_Win_lock_all. Must match the FERROMPI_LOCK_* consts in src/ffi.rs. */
 #define FERROMPI_LOCK_EXCLUSIVE 0
 #define FERROMPI_LOCK_SHARED    1
 
-/* Both allocating shims leave *win unchanged when MPI created no window, and set it to -2 when MPI created the window but zeroing it failed or the handle table was full (that window is never freed). *win holds the real non-negative handle only on success. */
+/* Both allocating shims leave *win unchanged when MPI created no window, and set it to FERROMPI_WIN_LEAKED when MPI created the window but zeroing it failed or the handle table was full (that window is never freed). *win holds the real non-negative handle only on success. */
 int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info,
                                   int32_t comm, void** baseptr, int32_t* win);
 
@@ -576,51 +646,6 @@ int ferrompi_get_processor_name(char* name, int32_t* len);
 double ferrompi_wtime(void);
 
 int ferrompi_abort(int32_t comm, int32_t errorcode);
-
-/* ============================================================
- * Group Operations
- * ============================================================ */
-
-#define FERROMPI_GROUP_EMPTY 0
-
-int ferrompi_comm_group(int32_t comm_handle, int32_t* group_handle);
-
-int ferrompi_group_incl(int32_t group_handle, int32_t n, const int32_t* ranks, int32_t* newgroup_handle);
-
-int ferrompi_group_excl(int32_t group_handle, int32_t n, const int32_t* ranks, int32_t* newgroup_handle);
-
-int ferrompi_group_free(int32_t group_handle);
-
-int ferrompi_group_size(int32_t group_handle, int32_t* size);
-
-/** Get the calling process's rank in a group (MPI_Group_rank). Returns MPI_UNDEFINED (-1) if not a member. */
-int ferrompi_group_rank(int32_t group_handle, int32_t* rank);
-
-int ferrompi_group_union(int32_t group1_handle, int32_t group2_handle, int32_t* newgroup_handle);
-
-int ferrompi_group_intersection(int32_t group1_handle, int32_t group2_handle, int32_t* newgroup_handle);
-
-int ferrompi_group_difference(int32_t group1_handle, int32_t group2_handle, int32_t* newgroup_handle);
-
-int ferrompi_group_range_incl(int32_t group_handle, int32_t n,
-                               const int32_t* ranges_flat,
-                               int32_t* newgroup_handle);
-
-int ferrompi_group_range_excl(int32_t group_handle, int32_t n,
-                               const int32_t* ranges_flat,
-                               int32_t* newgroup_handle);
-
-int ferrompi_group_compare(int32_t group1_handle, int32_t group2_handle,
-                           int32_t* result);
-
-/**
- * Translate ranks between groups (MPI_Group_translate_ranks). Ranks present in
- * group1 but not group2 are written as -1 (normalised from MPI_UNDEFINED).
- */
-int ferrompi_group_translate_ranks(int32_t group1_handle, int32_t n,
-                                   const int32_t* ranks1,
-                                   int32_t group2_handle,
-                                   int32_t* ranks2);
 
 /* ============================================================
  * Custom Datatype Operations

@@ -12,7 +12,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 // fixed-size handle table is full. Negative so they never collide with MPI
 // return codes (which are non-negative); intercepted in [`Error::from_code`]
 // and mapped to [`Error::ResourceExhausted`]. These MUST match the
-// `FERROMPI_ERR_*_FULL` defines in `csrc/ferrompi.c`.
+// `FERROMPI_ERR_*_FULL` defines in `csrc/ferrompi.h`.
 const FERROMPI_ERR_REQUESTS_FULL: i32 = -7001;
 const FERROMPI_ERR_COMMS_FULL: i32 = -7002;
 const FERROMPI_ERR_DATATYPES_FULL: i32 = -7003;
@@ -25,7 +25,7 @@ const FERROMPI_ERR_INFOS_FULL: i32 = -7007;
 // compiled without FERROMPI_HAVE_MPI4_COLLECTIVES (the library lacks the
 // MPI 4.0 operation). Intercepted in [`Error::from_code`]/
 // [`Error::from_code_with_op`] and mapped to [`Error::NotSupported`]. This
-// MUST match `FERROMPI_ERR_NOT_SUPPORTED` in `csrc/ferrompi.c`.
+// MUST match `FERROMPI_ERR_NOT_SUPPORTED` in `csrc/ferrompi.h`.
 const FERROMPI_ERR_NOT_SUPPORTED: i32 = -7008;
 
 // Rust-only lifecycle-guard sentinels. Produced only by the Rust lifecycle

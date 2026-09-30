@@ -386,7 +386,7 @@ fn win_size_and_disp_unit<T>(count: usize) -> Result<(i64, i32)> {
 
 // Sentinel an allocating shim writes to its handle out-parameter when MPI
 // created the window but zeroing or registering it failed. This MUST stay
-// in sync with `FERROMPI_WIN_LEAKED` in `csrc/ferrompi.c`.
+// in sync with `FERROMPI_WIN_LEAKED` in `csrc/ferrompi.h`.
 const FERROMPI_WIN_LEAKED: i32 = -2;
 
 /// Count of live windows of any kind (`Win::create`, `Win::allocate`,
