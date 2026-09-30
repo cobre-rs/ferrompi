@@ -15,8 +15,9 @@
 #include <stdint.h>
 
 // Every int32_t* to int* cast below (count, displacement and rank-array
-// arguments passed to the underlying MPI call) is safe: int is at least 32
-// bits on all MPI platforms.
+// arguments passed to the underlying MPI call, and the rank-range triples
+// passed as int (*)[3]) is safe: int is at least 32 bits on all MPI
+// platforms, and MPI does not write through these IN arguments.
 
 /* ============================================================
  * Internal State and Handle Management
@@ -3178,7 +3179,6 @@ int ferrompi_group_range_incl(int32_t g_h, int32_t n,
     MPI_Group g = get_group(g_h);
     if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    // int32_t is int on every supported target (as in ferrompi_group_incl); MPI does not write ranges.
     int ret = MPI_Group_range_incl(g, n, (int (*)[3])ranges_flat, &new_grp);
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
@@ -3194,7 +3194,6 @@ int ferrompi_group_range_excl(int32_t g_h, int32_t n,
     MPI_Group g = get_group(g_h);
     if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    // int32_t is int on every supported target (as in ferrompi_group_incl); MPI does not write ranges.
     int ret = MPI_Group_range_excl(g, n, (int (*)[3])ranges_flat, &new_grp);
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);

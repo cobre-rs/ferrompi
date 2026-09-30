@@ -272,7 +272,4 @@ check "artifact_outcome: required feature enabled -> missing binary" \
 check "artifact_outcome: required feature outside closure -> skip" \
   "$(artifact_outcome "numa" "rma")" "SKIP(feature)"
 
-if ((FAILED)); then
-  exit 1
-fi
-exit 0
+exit "$FAILED"

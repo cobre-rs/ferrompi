@@ -712,11 +712,12 @@ impl Communicator {
         let mut request_handle: i64 = 0;
         // SAFETY: at root, recvbuf is NULL, the in-place marker (buf's pointer is never null,
         // so this NULL is unambiguous); ferrompi_scatter_init maps it to MPI_IN_PLACE so
-        // root's own slot is retained. per is checked to evenly divide data.len() above. At
-        // non-root, sendbuf is null, which the MPI standard ignores on non-root scatter. The
-        // returned PersistentRequest records `data`'s pointer until the request is freed and
-        // does not borrow it; keeping it alive and untouched between start() and completion
-        // is the caller's documented obligation, which this signature does not enforce.
+        // root's own slot is retained. scatter_inplace_args checks that the block size evenly
+        // divides data.len(). At non-root, sendbuf is null, which the MPI standard ignores on
+        // non-root scatter. The returned PersistentRequest records `data`'s pointer until the
+        // request is freed and does not borrow it; keeping it alive and untouched between
+        // start() and completion is the caller's documented obligation, which this signature
+        // does not enforce.
         let ret = unsafe {
             ffi::ferrompi_scatter_init(
                 sendbuf,

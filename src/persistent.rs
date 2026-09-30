@@ -117,7 +117,6 @@ impl PersistentRequest {
     #[inline]
     pub fn wait(&mut self) -> Result<()> {
         if !self.active {
-            // Not started, nothing to wait for
             return Ok(());
         }
         Error::check_with_op(rt::enter(), "wait")?;
@@ -174,7 +173,6 @@ impl PersistentRequest {
             return Ok(());
         }
 
-        // Check none are already active
         if requests.iter().any(|req| req.active) {
             return Err(Error::Internal(
                 "One or more requests already active".into(),
@@ -248,7 +246,6 @@ impl Drop for PersistentRequest {
         if !rt::drop_guard("PersistentRequest") {
             return;
         }
-        // If active, wait for completion first
         if self.active {
             // SAFETY: self.handle is a valid MPI request handle registered in the
             // C-side request table by the *_init constructor. self.active is true,
@@ -260,7 +257,6 @@ impl Drop for PersistentRequest {
             // this call must still attempt the wait once reached.
             unsafe { ffi::raw::ferrompi_wait(self.handle) };
         }
-        // Free the persistent request
         // SAFETY: self.handle is a valid persistent MPI request handle. If it was
         // active, ferrompi_wait above has already completed the operation, so
         // MPI_Request_free is safe to call. If it was inactive, no operation is

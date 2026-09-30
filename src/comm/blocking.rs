@@ -779,8 +779,9 @@ impl Communicator {
             scatter_inplace_args(data, self.rank() == root, self.size)?;
         // SAFETY: at root, recvbuf is NULL, the in-place marker (buf's pointer is never null,
         // so this NULL is unambiguous); ferrompi_scatter maps it to MPI_IN_PLACE so root's own
-        // slot is retained. per is checked to evenly divide data.len() above. At non-root,
-        // sendbuf is null, which the MPI standard ignores on non-root scatter.
+        // slot is retained. scatter_inplace_args checks that the block size evenly divides
+        // data.len(). At non-root, sendbuf is null, which the MPI standard ignores on non-root
+        // scatter.
         let ret = unsafe {
             ffi::ferrompi_scatter(
                 sendbuf,
