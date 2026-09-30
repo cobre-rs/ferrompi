@@ -126,6 +126,10 @@ unsafe impl Send for Communicator {}
 // follows the requested `ThreadLevel` the same way.
 unsafe impl Sync for Communicator {}
 
+/// Handle of `MPI_COMM_WORLD`: slot 0 of the C communicator table, set at
+/// init and never freed.
+const WORLD_HANDLE: i32 = 0;
+
 impl Communicator {
     /// Constant for opting out of a communicator split.
     ///
@@ -135,10 +139,7 @@ impl Communicator {
 
     /// Get a handle to `MPI_COMM_WORLD`.
     pub(crate) fn world() -> Self {
-        // SAFETY: ferrompi_comm_world() returns the well-known COMM_WORLD handle.
-        // MPI must be initialized before this is called (enforced by Mpi::world()).
-        let handle = unsafe { ffi::ferrompi_comm_world() };
-        Self::from_handle(handle).expect("COMM_WORLD must be valid post-init")
+        Self::from_handle(WORLD_HANDLE).expect("COMM_WORLD must be valid post-init")
     }
 
     /// Construct a `Communicator` by querying rank and size once from MPI.
@@ -185,8 +186,8 @@ impl Communicator {
 
 impl Drop for Communicator {
     fn drop(&mut self) {
-        // Don't free COMM_WORLD (handle 0)
-        if self.handle != 0 {
+        // Don't free COMM_WORLD
+        if self.handle != WORLD_HANDLE {
             if !rt::drop_guard("Communicator") {
                 return;
             }

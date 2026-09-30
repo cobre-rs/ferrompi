@@ -93,8 +93,6 @@ int ferrompi_finalized(int* flag);
  * Communicator Operations
  * ============================================================ */
 
-int32_t ferrompi_comm_world(void);
-
 int ferrompi_comm_rank(int32_t comm, int32_t* rank);
 
 int ferrompi_comm_size(int32_t comm, int32_t* size);

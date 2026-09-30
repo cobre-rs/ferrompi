@@ -898,10 +898,6 @@ int ferrompi_finalized(int* flag) {
  * Communicator Operations
  * ============================================================ */
 
-int32_t ferrompi_comm_world(void) {
-    return 0;  // COMM_WORLD is always handle 0
-}
-
 int ferrompi_comm_rank(int32_t comm_handle, int32_t* rank) {
     MPI_Comm comm = get_comm(comm_handle);
     int r;

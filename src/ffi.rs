@@ -17,7 +17,7 @@ pub const FERROMPI_LOCK_EXCLUSIVE: int32_t = 0;
 pub const FERROMPI_LOCK_SHARED: int32_t = 1;
 
 // Legal before init or after finalize (lifecycle queries), a non-status
-// return with no MPI call to guard (constants, handle 0, wtime, op-table
+// return with no MPI call to guard (constants, wtime, op-table
 // bookkeeping), or called only from a `Drop` impl — never routed through
 // the `crate::rt` lifecycle guard.
 extern "C" {
@@ -25,7 +25,6 @@ extern "C" {
     pub fn ferrompi_finalize(active_requests: *mut int32_t) -> c_int;
     pub fn ferrompi_initialized(flag: *mut c_int) -> c_int;
     pub fn ferrompi_finalized(flag: *mut c_int) -> c_int;
-    pub fn ferrompi_comm_world() -> int32_t;
     pub fn ferrompi_comm_free(comm: int32_t) -> c_int;
     pub fn ferrompi_group_free(group_handle: int32_t) -> c_int;
     pub fn ferrompi_info_free(info_handle: int32_t) -> c_int;
