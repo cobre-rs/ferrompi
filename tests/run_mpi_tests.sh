@@ -67,6 +67,14 @@ RUNS_EXECUTED=0
 # Pure functions
 # ==========================================================================
 
+# die <message>
+# Prints "ERROR: <message>" on stderr and exits 2 (a usage or build
+# error, not a test failure).
+die() {
+  echo "ERROR: $*" >&2
+  exit 2
+}
+
 # parse_directive <line>
 # Parses the content of a `// mpi-test: ` line into
 # np/timeout/skip-ok/expect/valgrind fields. Prints
@@ -360,33 +368,28 @@ discover() {
     directive_count=$(grep -c '^// mpi-test: ' "$f" || true)
 
     if ((directive_count > 1)); then
-      echo "ERROR: $f: more than one // mpi-test: line" >&2
-      exit 2
+      die "$f: more than one // mpi-test: line"
     fi
 
     if [[ -z "$line" ]]; then
       if ((stderr_count > 0)); then
-        echo "ERROR: $f: // mpi-test-stderr line without a // mpi-test: line" >&2
-        exit 2
+        die "$f: // mpi-test-stderr line without a // mpi-test: line"
       fi
       if [[ "$base" == test_* ]]; then
-        echo "ERROR: $f: missing // mpi-test: directive" >&2
-        exit 2
+        die "$f: missing // mpi-test: directive"
       fi
       continue
     fi
 
     local parsed
     if ! parsed=$(parse_directive "$line"); then
-      echo "ERROR: $f: invalid // mpi-test: directive: $line" >&2
-      exit 2
+      die "$f: invalid // mpi-test: directive: $line"
     fi
     local np tmo skip_ok expect valgrind
     IFS='|' read -r np tmo skip_ok expect valgrind <<<"$parsed"
 
     if ((stderr_count > 1)); then
-      echo "ERROR: $f: more than one // mpi-test-stderr line" >&2
-      exit 2
+      die "$f: more than one // mpi-test-stderr line"
     fi
 
     local stderr_literal=""
@@ -395,13 +398,11 @@ discover() {
     fi
 
     if [[ -n "$expect" && "$stderr_count" -eq 0 ]]; then
-      echo "ERROR: $f: expect=$expect requires a // mpi-test-stderr line" >&2
-      exit 2
+      die "$f: expect=$expect requires a // mpi-test-stderr line"
     fi
 
     if [[ "$expect" == "unfinalized" && "$np" != "1" ]]; then
-      echo "ERROR: $f: expect=unfinalized requires np=1" >&2
-      exit 2
+      die "$f: expect=unfinalized requires np=1"
     fi
 
     DIRECTIVE_ORDER+=("$base")
@@ -429,13 +430,11 @@ build() {
 
   local json_file="$TMPDIR_RUN/cargo-build.json"
   if ! cargo "${build_args[@]}" >"$json_file"; then
-    echo "ERROR: cargo build --examples failed" >&2
-    exit 2
+    die "cargo build --examples failed"
   fi
 
   if [[ "$(lib_debug_assertions "$json_file")" == "false" ]]; then
-    echo "ERROR: ferrompi was built without debug assertions; several examples check debug-only diagnostics" >&2
-    exit 2
+    die "ferrompi was built without debug assertions; several examples check debug-only diagnostics"
   fi
 
   local name exe
@@ -553,8 +552,7 @@ main() {
     command -v valgrind >/dev/null 2>&1 || missing+=("valgrind")
   fi
   if ((${#missing[@]} > 0)); then
-    echo "ERROR: missing required tool(s): ${missing[*]}" >&2
-    exit 2
+    die "missing required tool(s): ${missing[*]}"
   fi
 
   if ((VALGRIND_MODE)); then

@@ -50,6 +50,14 @@ mk_dir() {
   mktemp -d -p "$SELFTEST_TMP"
 }
 
+# check_discover_rejects <case> <dir>
+# Checks that discover exits 2 on <dir>.
+check_discover_rejects() {
+  local rc=0
+  (discover "$2") >/dev/null 2>&1 || rc=$?
+  check "$1" "$rc" "2"
+}
+
 # --- parse_directive -----------------------------------------------------
 
 check "parse_directive: full directive" \
@@ -75,18 +83,14 @@ cat >"$d/example_abort_no_stderr.rs" <<'EOF'
 // mpi-test: np=1 expect=abort
 fn main() {}
 EOF
-rc=0
-(discover "$d") >/dev/null 2>&1 || rc=$?
-check "discover: expect=abort without stderr line rejected" "$rc" "2"
+check_discover_rejects "discover: expect=abort without stderr line rejected" "$d"
 
 d=$(mk_dir)
 cat >"$d/example_unfin_no_stderr.rs" <<'EOF'
 // mpi-test: np=1 expect=unfinalized
 fn main() {}
 EOF
-rc=0
-(discover "$d") >/dev/null 2>&1 || rc=$?
-check "discover: expect=unfinalized np=1 without stderr line rejected" "$rc" "2"
+check_discover_rejects "discover: expect=unfinalized np=1 without stderr line rejected" "$d"
 
 d=$(mk_dir)
 cat >"$d/example_unfin_np2.rs" <<'EOF'
@@ -94,9 +98,7 @@ cat >"$d/example_unfin_np2.rs" <<'EOF'
 // mpi-test-stderr: done
 fn main() {}
 EOF
-rc=0
-(discover "$d") >/dev/null 2>&1 || rc=$?
-check "discover: expect=unfinalized requires np=1 rejected" "$rc" "2"
+check_discover_rejects "discover: expect=unfinalized requires np=1 rejected" "$d"
 
 # --- discover: file-grammar rejections ------------------------------------
 
@@ -116,18 +118,14 @@ cat >"$d/example_two_stderr.rs" <<'EOF'
 // mpi-test-stderr: bar
 fn main() {}
 EOF
-rc=0
-(discover "$d") >/dev/null 2>&1 || rc=$?
-check "discover: two stderr lines rejected" "$rc" "2"
+check_discover_rejects "discover: two stderr lines rejected" "$d"
 
 d=$(mk_dir)
 cat >"$d/example_orphan_stderr.rs" <<'EOF'
 // mpi-test-stderr: foo
 fn main() {}
 EOF
-rc=0
-(discover "$d") >/dev/null 2>&1 || rc=$?
-check "discover: stderr line without directive rejected" "$rc" "2"
+check_discover_rejects "discover: stderr line without directive rejected" "$d"
 
 d=$(mk_dir)
 cat >"$d/example_two_directives.rs" <<'EOF'
@@ -135,9 +133,7 @@ cat >"$d/example_two_directives.rs" <<'EOF'
 // mpi-test: np=2
 fn main() {}
 EOF
-rc=0
-(discover "$d") >/dev/null 2>&1 || rc=$?
-check "discover: two mpi-test lines rejected" "$rc" "2"
+check_discover_rejects "discover: two mpi-test lines rejected" "$d"
 
 # --- expand_np -------------------------------------------------------------
 
