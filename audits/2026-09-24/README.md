@@ -95,6 +95,7 @@ The crate has a solid core (sealed datatype traits, sound UserOp trampolines,
 | D-20 | **Discriminant "semver contract"** retracted now in docs only (architecture.md + ADR-0003 amendment note). | **accepted 2026-09-24** | 0.5.x — DOC-01, ARC-03 |
 | D-21 | **0.6.0 close-out:** COR-17, COR-19, COR-20, SND-17, INF-22, ARC-18 and the `WinKind` part of ARC-13 move to the `0.5.x` milestone and ship in 0.6.0; for COR-19 this supersedes the 2026-09-28 ruling that kept the gap as a tracked open row; for SND-17 the fix contract becomes an abort of the process, replacing the finding's still-pending fix direction. | **accepted 2026-09-29** | 0.5.x — COR-17, COR-19, COR-20, SND-17, INF-22, ARC-18, ARC-13, COR-21 |
 | D-22 | **0.6.0 follow-ups:** SND-18, COR-22 and COR-23 are opened for gaps the close-out reviews found and ship in 0.6.0; for COR-22, a rank-local failure after MPI created a communicator or window on every rank leaks that object instead of freeing it on one rank (the COR-19 leak policy generalized). | **accepted 2026-09-29** | 0.5.x — SND-18, COR-22, COR-23 |
+| D-23 | **0.6.0 correctness fixes:** COR-24, COR-25, SND-19 and SND-20 are opened for pre-existing gaps the follow-up reviews found and ship in 0.6.0; `Communicator::topology` returns `Err` on every rank when a local query fails on any rank; `Mpi::wtime` takes `&self` (breaking); `allreduce_with_op` returns `Err(Count)` above `INT_MAX` elements on every MPI; the fixed string buffers are checked against the `MPI_MAX_*` constants at build time. | **accepted 2026-09-30** | 0.5.x — COR-24, COR-25, SND-19, SND-20 |
 
 ## Roadmap (accepted 2026-09-24)
 
@@ -132,6 +133,8 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | SND-16 | `Mpi` drop racing a concurrent guarded call at `Serialized`/`Multiple` reaches MPI after finalize | major | reading | 0.6 | open (0.6: thread-safety API redesign) |
 | SND-17 | Under fault-tolerant MPI, a receive failing with MPIX_ERR_PROC_FAILED_PENDING is treated as complete while MPI still owns its buffer | major | reading | 0.5.x | fixed (20db67d) |
 | SND-18 | Under fault-tolerant MPI, a wildcard receive started while the request table is full returns `ResourceExhausted` after its internal wait fails with MPI_ERR_PROC_FAILED_PENDING, while MPI still owns its buffer | major | repro | 0.5.x | fixed (105eb34) |
+| SND-19 | `allreduce_with_op` above `INT_MAX` elements on MPI 4.0 calls `MPI_Allreduce_c` with a classic user function; MPICH narrows the count to `int` without splitting (its assertion compiles out under NDEBUG), so the Rust callback can receive a negative or wrapped length and build slices past the buffers | major | reading | 0.5.x | planned (ferrompi-0.6.0-correctness-fixes) |
+| SND-20 | The processor-name (256 B), library-version (8192 B) and error-string (512 B) Rust buffers are not checked against `MPI_MAX_PROCESSOR_NAME`, `MPI_MAX_LIBRARY_VERSION_STRING` and `MPI_MAX_ERROR_STRING`; a library with a larger constant would write past them | minor | reading | 0.5.x | planned (ferrompi-0.6.0-correctness-fixes) |
 
 ### Correctness — [02](findings/02-correctness.md)
 
@@ -160,6 +163,8 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-21 | `PersistentRequest::start_all` marks no request active when `MPI_Startall` fails, although MPI may have started some; `Drop` then frees a started request without waiting | minor | reading | 0.5.x | fixed (388dc16, f42fe0a, fc7bc7f) |
 | COR-22 | When a rank's communicator or window table is full, or installing `MPI_ERRORS_RETURN` on a new communicator fails, after MPI created the object on every rank, that rank frees it alone with the collective `MPI_Comm_free`/`MPI_Win_free` | minor | reading | 0.5.x | fixed (3247cea, 3527040, 6344c40) |
 | COR-23 | In debug builds at `ThreadLevel::Serialized`, `Request::wait` and `PersistentRequest::wait` rejected by the overlap check mark the request completed or inactive although MPI never saw the call | minor | repro | 0.5.x | fixed (63c6629, 6305cf2) |
+| COR-24 | `Communicator::topology` returns early on a rank whose processor-name query fails, before the hostname `MPI_Allgather`, leaving the other ranks blocked in it | minor | reading | 0.5.x | planned (ferrompi-0.6.0-correctness-fixes) |
+| COR-25 | `Mpi::wtime` calls `MPI_Wtime` before `Mpi::init` and after the `Mpi` handle is dropped; MPICH aborts the process ("Attempting to use an MPI routine (internal_Wtime) before initializing or after finalizing MPICH") | minor | repro | 0.5.x | planned (ferrompi-0.6.0-correctness-fixes) |
 
 ### Architecture / API — [03](findings/03-architecture-api.md)
 
