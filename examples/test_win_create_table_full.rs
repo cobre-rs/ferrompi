@@ -37,11 +37,8 @@ fn main() {
     }
 
     let mut windows = Vec::new();
-    loop {
-        match Win::<f64>::allocate(&world, 1) {
-            Ok(win) => windows.push(win),
-            Err(_) => break,
-        }
+    while let Ok(win) = Win::<f64>::allocate(&world, 1) {
+        windows.push(win);
     }
 
     let mut buf = [0f64; 4];
