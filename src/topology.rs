@@ -109,7 +109,6 @@ const HOSTNAME_BUF_LEN: usize = 256;
 /// it. Every rank receives the complete topology.
 pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<TopologyInfo> {
     let size = comm.size();
-    let rank = comm.rank();
 
     // Each rank fills a fixed-size hostname buffer.
     let name = comm.processor_name()?;
@@ -147,23 +146,11 @@ pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<Topology
         }
     }
 
-    // Gather metadata — only rank 0 strictly needs these, but they're cheap
-    // and having them on every rank avoids conditional logic for the caller.
-    let library_version = if rank == 0 {
-        Mpi::library_version()?
-    } else {
-        String::new()
-    };
-    let standard_version = if rank == 0 {
-        Mpi::version()?
-    } else {
-        String::new()
-    };
-
-    // Broadcast the version strings from rank 0 so all ranks have them.
-    // We encode as a fixed-size buffer to keep things simple.
-    let library_version = broadcast_string(comm, &library_version, 0)?;
-    let standard_version = broadcast_string(comm, &standard_version, 0)?;
+    // MPI_Get_library_version and MPI_Get_version are local queries (no MPI
+    // call involved), so every rank can call them directly instead of
+    // gathering them from rank 0.
+    let library_version = Mpi::library_version()?;
+    let standard_version = Mpi::version()?;
 
     let thread_level = mpi.thread_level();
 
@@ -187,23 +174,6 @@ pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<Topology
         #[cfg(feature = "numa")]
         slurm,
     })
-}
-
-/// Broadcast a string from `root` to all ranks using a fixed-size buffer.
-fn broadcast_string(comm: &Communicator, s: &str, root: i32) -> Result<String> {
-    // Use a generous buffer — library version strings can be long.
-    const BUF_LEN: usize = 512;
-    let mut buf = [0u8; BUF_LEN];
-    if comm.rank() == root {
-        let bytes = s.as_bytes();
-        let copy_len = bytes.len().min(BUF_LEN);
-        buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
-    }
-    comm.broadcast(&mut buf, root)?;
-    let nul_pos = buf.iter().position(|&b| b == 0).unwrap_or(BUF_LEN);
-    let result = std::str::from_utf8(&buf[..nul_pos])
-        .map_err(|_| Error::Internal("Invalid UTF-8 in broadcast string".into()))?;
-    Ok(result.to_string())
 }
 
 impl fmt::Display for TopologyInfo {

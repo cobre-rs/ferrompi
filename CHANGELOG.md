@@ -228,9 +228,14 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   message**, instead of marking the request completed while MPI still holds
   it and its buffer.
 - **The `# Errors` documentation of `Win::rput`, `Win::rget` and
-  `Win::raccumulate` now names `Error::ResourceExhausted` (resource
-  `Request`) for a full request table**; it previously named `Error::Mpi`
-  with class `Other`, which these methods never return for that case.
+  `Win::raccumulate` now names `Error::ResourceExhausted` (resource `Request`)
+  for a full request table**; it previously named `Error::Mpi` with class
+  `Other`, which these methods never return for that case.
+- **`TopologyInfo::library_version()` now holds the full library version
+  string on every rank**, instead of rank 0's string truncated to 512 bytes and broadcast;
+  `Communicator::topology` no longer broadcasts the version strings, so a
+  version query that fails on rank 0 can no longer leave the other ranks
+  blocked.
 
 ## [0.5.0] - 2026-06-18
 
