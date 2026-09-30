@@ -803,8 +803,12 @@ int ferrompi_init_thread(int required, int* provided) {
         if (eh_ret != MPI_SUCCESS) {
             /* MPI is initialized and cannot be initialized again, and
              * MPI_Finalize is collective while this failure is local:
-             * end the job as MPI's default error handler would. */
+             * end the job as MPI's default error handler would. MPI_Abort
+             * is only required to make a "best attempt"; it can return
+             * (measured: MPICH before the launcher kills the other ranks),
+             * so abort() guarantees this rank never falls through. */
             MPI_Abort(MPI_COMM_WORLD, eh_ret);
+            abort();
         }
     }
 
@@ -3908,8 +3912,17 @@ int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t inf
         install_errors_return_win(win);
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
-            MPI_Win_free(&win);
-            return FERROMPI_ERR_WINDOWS_FULL;
+            /* The window exposes the caller's buffer, which the caller gets
+             * back once this returns an error while peers can still reach
+             * it: it can be neither leaked nor freed on this rank alone
+             * (MPI_Win_free is collective). MPI_Abort is only required to
+             * make a "best attempt"; it can return (measured: MPICH before
+             * the launcher kills the other ranks), so this must not fall
+             * through to a return that hands the buffer back to Rust. */
+            fputs("ferrompi: window table full after MPI_Win_create; aborting "
+                  "because the window exposes the caller's buffer\n", stderr);
+            MPI_Abort(comm, MPI_ERR_OTHER);
+            abort();
         }
     }
     return ret;

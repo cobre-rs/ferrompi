@@ -1061,6 +1061,12 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// - The length exchange fails (`Error::Mpi` with `operation: Some("allgather")`).
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_create")`).
     ///
+    /// If this rank's window table is full, the process is aborted instead
+    /// (`MPI_Abort`, falling back to `SIGABRT` if `MPI_Abort` itself returns
+    /// on a non-conforming implementation): the new window already exposes
+    /// `buf` to every peer, so it can be neither returned nor freed on this
+    /// rank alone.
+    ///
     /// # Example
     ///
     /// ```no_run

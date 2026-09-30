@@ -6,8 +6,8 @@
 //! table the process must abort instead of returning an error the buffer
 //! could outlive.
 //!
-//! Run with: mpiexec -n 1 ./target/debug/examples/test_win_create_table_full
-// mpi-test: np=1 expect=abort skip-ok=openmpi-4
+//! Run with: mpiexec -n 2 ./target/debug/examples/test_win_create_table_full
+// mpi-test: np=1.. expect=abort skip-ok=openmpi-4
 // mpi-test-stderr: ferrompi: window table full after MPI_Win_create
 
 use ferrompi::{Error, Mpi, MpiErrorClass, Win};

@@ -266,10 +266,12 @@ classify() {
   if [[ "$expect" == "abort" ]] && ! { [[ "$exit_code" == "0" ]] && grep -q '^SKIP: ' "$outfile"; }; then
     if [[ "$exit_code" == "0" ]]; then
       echo "FAIL exited 0, abort expected"
-    elif grep -qF -- "$literal" "$outfile"; then
-      echo "PASS"
-    else
+    elif ! grep -qF -- "$literal" "$outfile"; then
       echo "FAIL abort marker missing"
+    elif grep -q '^FAIL: ' "$outfile"; then
+      echo "FAIL output contains a FAIL: line"
+    else
+      echo "PASS"
     fi
     return 0
   fi

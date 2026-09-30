@@ -232,7 +232,7 @@ fn fmt_mpi(
 /// failures on those objects return `Err` instead of aborting through MPI's
 /// default handler.
 ///
-/// Seven paths end the process instead of returning `Err`:
+/// Eight paths end the process instead of returning `Err`:
 /// - an error inside `MPI_Init_thread` itself, before any error handler is
 ///   installed: MPI's default handler is `MPI_ERRORS_ARE_FATAL`, so
 ///   [`Mpi::init`](crate::Mpi::init)/[`Mpi::init_thread`](crate::Mpi::init_thread)
@@ -240,7 +240,9 @@ fn fmt_mpi(
 ///   instead of aborting;
 /// - a failure to install `MPI_ERRORS_RETURN` on `MPI_COMM_WORLD` or
 ///   `MPI_COMM_SELF` right after `MPI_Init_thread` succeeds calls
-///   `MPI_Abort`, since MPI cannot be initialized a second time;
+///   `MPI_Abort`, since MPI cannot be initialized a second time; if
+///   `MPI_Abort` itself returns on a non-conforming implementation, the
+///   process ends by `SIGABRT` from a fallback abort instead;
 /// - a window whose own `MPI_Win_set_errhandler` call failed (a stderr
 ///   warning is printed; a known Open MPI 4.x quirk) keeps MPI's default
 ///   handler, so a later RMA error on that window aborts instead of
@@ -255,6 +257,9 @@ fn fmt_mpi(
 ///   process, since no `ferrompi` call can complete it; so does the
 ///   nonblocking receive call itself when the request table was full,
 ///   since it then waits for the receive before returning;
+/// - `Win::create` on a rank whose window table is full aborts the process
+///   (`MPI_Abort`, falling back to `SIGABRT` if `MPI_Abort` itself returns),
+///   since the new window already exposes the caller's buffer to its peers;
 /// - [`Communicator::abort`](crate::Communicator::abort) aborts the process
 ///   by design.
 ///

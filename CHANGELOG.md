@@ -214,6 +214,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   window on one rank alone when the window table is full**; the window is
   leaked and counted as alive, so `Mpi` skips `MPI_Finalize`, as for a
   window whose zeroing failed.
+- **`Win::create` on a rank whose window table is full now aborts the
+  process** instead of freeing the new window on that rank alone, which
+  could hang; the window already exposes the caller's buffer to its
+  peers, so it cannot be returned.
 
 ## [0.5.0] - 2026-06-18
 
