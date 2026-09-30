@@ -159,7 +159,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | COR-20 | `Mpi::init_thread` resets to uninitialized when installing `MPI_ERRORS_RETURN` on `MPI_COMM_WORLD`/`MPI_COMM_SELF` fails after `MPI_Init_thread` succeeded, so a retry calls `MPI_Init_thread` twice | minor | reading | 0.5.x | fixed (762e841) |
 | COR-21 | `PersistentRequest::start_all` marks no request active when `MPI_Startall` fails, although MPI may have started some; `Drop` then frees a started request without waiting | minor | reading | 0.5.x | fixed (388dc16, f42fe0a, fc7bc7f) |
 | COR-22 | When a rank's communicator or window table is full, or installing `MPI_ERRORS_RETURN` on a new communicator fails, after MPI created the object on every rank, that rank frees it alone with the collective `MPI_Comm_free`/`MPI_Win_free` | minor | reading | 0.5.x | fixed (3247cea, 3527040, 6344c40) |
-| COR-23 | In debug builds at `ThreadLevel::Serialized`, `Request::wait` and `PersistentRequest::wait` rejected by the overlap check mark the request completed or inactive although MPI never saw the call | minor | repro | 0.5.x | planned (ferrompi-0.6.0-followups) |
+| COR-23 | In debug builds at `ThreadLevel::Serialized`, `Request::wait` and `PersistentRequest::wait` rejected by the overlap check mark the request completed or inactive although MPI never saw the call | minor | repro | 0.5.x | fixed (63c6629, 6305cf2) |
 
 ### Architecture / API — [03](findings/03-architecture-api.md)
 
