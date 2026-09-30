@@ -3239,6 +3239,7 @@ int ferrompi_group_translate_ranks(int32_t g1_h, int32_t n,
  * Error Information
  * ============================================================ */
 
+_Static_assert(MPI_MAX_ERROR_STRING <= 512, "MPI_MAX_ERROR_STRING exceeds the 512-byte buffer of Error::from_code");
 int ferrompi_error_info(int code, int32_t* error_class, char* message, int32_t* msg_len) {
     int cls;
     int ret = MPI_Error_class(code, &cls);
@@ -4230,6 +4231,7 @@ int ferrompi_compare_and_swap(const void* origin, const void* compare, void* res
  * Utility Functions
  * ============================================================ */
 
+_Static_assert(MPI_MAX_LIBRARY_VERSION_STRING <= 8192, "MPI_MAX_LIBRARY_VERSION_STRING exceeds the 8192-byte buffer of Mpi::library_version");
 int ferrompi_get_library_version(char* buf, int32_t* len) {
     int l = 0;
     int ret = MPI_Get_library_version(buf, &l);
@@ -4252,6 +4254,7 @@ int ferrompi_get_version(char* version, int32_t* len) {
     return ret;
 }
 
+_Static_assert(MPI_MAX_PROCESSOR_NAME <= 256, "MPI_MAX_PROCESSOR_NAME exceeds the 256-byte buffer of Communicator::processor_name");
 int ferrompi_get_processor_name(char* name, int32_t* len) {
     int l = 0;
     int ret = MPI_Get_processor_name(name, &l);

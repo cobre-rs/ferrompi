@@ -10,8 +10,8 @@ impl Communicator {
     pub fn processor_name(&self) -> Result<String> {
         let mut buf = [0u8; 256];
         let mut len: i32 = 0;
-        // SAFETY: buf is a 256-byte stack array, exclusively writable; the C shim writes at most
-        // MPI_MAX_PROCESSOR_NAME bytes and sets len to the actual length.
+        // SAFETY: buf is a 256-byte stack array, exclusively writable; MPI writes at most
+        // MPI_MAX_PROCESSOR_NAME bytes, which the C layer asserts at build time is at most 256.
         let ret = unsafe {
             ffi::ferrompi_get_processor_name(buf.as_mut_ptr().cast::<std::ffi::c_char>(), &mut len)
         };

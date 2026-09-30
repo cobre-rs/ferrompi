@@ -400,8 +400,9 @@ impl Error {
         let mut msg_len: i32 = 0;
 
         // SAFETY: class and msg_len are local out-parameters; msg_buf is a
-        // local 512-byte buffer and the C layer writes at most msg_buf.len()
-        // bytes into it, reporting the written length through msg_len.
+        // local 512-byte buffer; MPI writes at most MPI_MAX_ERROR_STRING bytes,
+        // which the C layer asserts at build time is at most 512, reporting
+        // the written length through msg_len.
         let ret = unsafe {
             ffi::ferrompi_error_info(
                 code,

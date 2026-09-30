@@ -421,13 +421,11 @@ impl Mpi {
     /// Returns a string such as `"Open MPI v4.1.6"` or `"Intel(R) MPI Library 2021.7"`.
     /// This wraps `MPI_Get_library_version`.
     pub fn library_version() -> Result<String> {
-        // MPI_MAX_LIBRARY_VERSION_STRING is 8192 in most implementations.
         let mut buf = [0u8; 8192];
         let mut len: i32 = 0;
-        // SAFETY: buf is a local 8192-byte buffer sized to
-        // MPI_MAX_LIBRARY_VERSION_STRING; the C layer writes at most buf.len()
-        // bytes into it and reports the written length through the local `len`
-        // out-parameter.
+        // SAFETY: buf is a local 8192-byte buffer; MPI writes at most
+        // MPI_MAX_LIBRARY_VERSION_STRING bytes, which the C layer asserts at build time
+        // is at most 8192, and reports the length through the local `len`.
         let ret = unsafe {
             ffi::ferrompi_get_library_version(buf.as_mut_ptr().cast::<c_char>(), &mut len)
         };

@@ -110,7 +110,8 @@ impl TopologyInfo {
 }
 
 /// Maximum hostname length used for the fixed-size allgather buffer.
-/// Matches `MPI_MAX_PROCESSOR_NAME` (256 in all major implementations).
+/// It equals the size of `Communicator::processor_name`'s buffer, which holds any
+/// `MPI_MAX_PROCESSOR_NAME` the C layer accepts at build time.
 const HOSTNAME_BUF_LEN: usize = 256;
 
 /// Gather topology information from all ranks in the communicator.
