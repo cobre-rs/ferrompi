@@ -146,8 +146,11 @@ fn hosts_from_slots(all_bufs: &[u8], size: i32) -> Result<Vec<HostEntry>> {
         let raw = &all_bufs[start..start + HOSTNAME_BUF_LEN];
         // Find the first null byte or take the whole buffer.
         let nul_pos = raw.iter().position(|&b| b == 0).unwrap_or(HOSTNAME_BUF_LEN);
-        let hostname = std::str::from_utf8(&raw[..nul_pos])
-            .map_err(|_| Error::Internal("Invalid UTF-8 in gathered hostname".into()))?;
+        let hostname = std::str::from_utf8(&raw[..nul_pos]).map_err(|_| {
+            Error::Internal(format!(
+                "rank {r} could not query its processor name or MPI version"
+            ))
+        })?;
 
         if let Some(&i) = index.get(hostname) {
             hosts[i].ranks.push(r);
@@ -169,21 +172,20 @@ fn hosts_from_slots(all_bufs: &[u8], size: i32) -> Result<Vec<HostEntry>> {
 pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<TopologyInfo> {
     let size = comm.size();
 
-    // Each rank fills a fixed-size hostname buffer.
-    let name = comm.processor_name()?;
-    let local_buf = hostname_slot(Some(&name));
+    // Both version queries are local procedures (MPI-4.1 §9.1.1): each rank reports its own library.
+    let local = comm
+        .processor_name()
+        .and_then(|name| Ok((name, Mpi::library_version()?, Mpi::version()?)));
+    let local_buf = hostname_slot(local.as_ref().ok().map(|(name, _, _)| name.as_str()));
 
     // Allgather the hostname buffers.
     let mut all_bufs = vec![0u8; HOSTNAME_BUF_LEN * size as usize];
     comm.allgather(&local_buf, &mut all_bufs)?;
 
+    // A failing rank reports its own error here, after every rank has
+    // already reached the allgather.
+    let (_, library_version, standard_version) = local?;
     let hosts = hosts_from_slots(&all_bufs, size)?;
-
-    // MPI_Get_library_version and MPI_Get_version are local procedures,
-    // callable at any time (MPI-4.1 §10.1.1, §12.4.1), so each rank queries
-    // its own library instead of gathering the strings from rank 0.
-    let library_version = Mpi::library_version()?;
-    let standard_version = Mpi::version()?;
 
     let thread_level = mpi.thread_level();
 
@@ -265,7 +267,7 @@ impl fmt::Display for TopologyInfo {
 mod tests {
     #[cfg(feature = "numa")]
     use super::SlurmInfo;
-    use super::{hostname_slot, hosts_from_slots, HostEntry, ThreadLevel, TopologyInfo};
+    use super::{hostname_slot, hosts_from_slots, Error, HostEntry, ThreadLevel, TopologyInfo};
 
     fn sample_topology() -> TopologyInfo {
         TopologyInfo {
@@ -389,6 +391,20 @@ mod tests {
         assert_eq!(hosts[0].ranks, vec![0, 2]);
         assert_eq!(hosts[1].hostname, "node-b");
         assert_eq!(hosts[1].ranks, vec![1]);
+    }
+
+    #[test]
+    fn a_failed_rank_fails_the_host_table() {
+        let slots = [
+            hostname_slot(Some("node-a")),
+            hostname_slot(None),
+            hostname_slot(None),
+        ]
+        .concat();
+        let Err(Error::Internal(m)) = hosts_from_slots(&slots, 3) else {
+            panic!("expected Error::Internal");
+        };
+        assert!(m.contains("rank 1"));
     }
 
     #[cfg(feature = "numa")]

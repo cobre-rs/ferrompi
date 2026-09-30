@@ -31,6 +31,12 @@ impl Communicator {
     ///
     /// [`TopologyInfo`]: crate::TopologyInfo
     ///
+    /// # Errors
+    ///
+    /// If the processor-name or version query fails on any rank, every rank
+    /// returns `Err`: that rank its own error, every other rank
+    /// [`Error::Internal`] naming the lowest such rank.
+    ///
     /// # Example
     ///
     /// ```no_run

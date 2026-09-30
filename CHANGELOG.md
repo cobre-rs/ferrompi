@@ -236,6 +236,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   truncated to 512 bytes and broadcast; `Communicator::topology` no longer
   broadcasts the version strings, so a version query that fails on rank 0
   can no longer leave the other ranks blocked.
+- **`Communicator::topology` now returns `Err` on every rank when the
+  processor-name or version query fails on any rank**, instead of leaving
+  the other ranks blocked in the hostname exchange or returning `Ok` on
+  them.
 
 ## [0.5.0] - 2026-06-18
 
