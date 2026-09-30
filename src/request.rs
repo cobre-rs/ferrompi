@@ -56,6 +56,21 @@ pub(crate) fn with_handles<E, R>(
     }
 }
 
+/// The handle a batch call passes for `r`: `-1` (the C layer's null
+/// handle) once `r` has completed.
+fn handle_or_skip(r: &Request) -> i64 {
+    if r.completed {
+        -1
+    } else {
+        r.handle
+    }
+}
+
+/// Records that MPI completed `r`.
+fn mark_completed(r: &mut Request) {
+    r.completed = true;
+}
+
 /// Run `f` with a zeroed `i32` index scratch buffer of length `len`,
 /// stack-allocated when small. Used for the `*some` output indices.
 #[inline]
@@ -286,7 +301,7 @@ impl Request {
         // pass; index is a valid stack-allocated i32 output parameter.
         let ret = with_handles(
             requests,
-            |r| if r.completed { -1 } else { r.handle },
+            handle_or_skip,
             |handles, done| unsafe {
                 ffi::ferrompi_waitany(
                     handles.len() as i64,
@@ -295,7 +310,7 @@ impl Request {
                     done.as_mut_ptr(),
                 )
             },
-            |r| r.completed = true,
+            mark_completed,
         );
         check_batch(ret, "waitany", index as i64)?;
         if index < 0 {
@@ -326,7 +341,7 @@ impl Request {
         let mut failed: i64 = -1;
         let (ret, completed) = with_handles(
             requests,
-            |r| if r.completed { -1 } else { r.handle },
+            handle_or_skip,
             |handles, done| {
                 with_index_buf(len, |indices| {
                     // SAFETY: with_handles / with_index_buf supply valid,
@@ -359,7 +374,7 @@ impl Request {
                     (ret, completed)
                 })
             },
-            |r| r.completed = true,
+            mark_completed,
         );
         check_batch(ret, "waitsome", failed)?;
         Ok(completed)
@@ -390,7 +405,7 @@ impl Request {
         // pass; index and flag are valid stack-allocated i32 output parameters.
         let ret = with_handles(
             requests,
-            |r| if r.completed { -1 } else { r.handle },
+            handle_or_skip,
             |handles, done| unsafe {
                 ffi::ferrompi_testany(
                     handles.len() as i64,
@@ -400,7 +415,7 @@ impl Request {
                     done.as_mut_ptr(),
                 )
             },
-            |r| r.completed = true,
+            mark_completed,
         );
         check_batch(ret, "testany", index as i64)?;
         if flag == 0 {
@@ -434,7 +449,7 @@ impl Request {
         let mut failed: i64 = -1;
         let (ret, completed) = with_handles(
             requests,
-            |r| if r.completed { -1 } else { r.handle },
+            handle_or_skip,
             |handles, done| {
                 with_index_buf(len, |indices| {
                     // SAFETY: with_handles / with_index_buf supply valid,
@@ -466,7 +481,7 @@ impl Request {
                     (ret, completed)
                 })
             },
-            |r| r.completed = true,
+            mark_completed,
         );
         check_batch(ret, "testsome", failed)?;
         Ok(completed)
@@ -571,7 +586,7 @@ impl Request {
         // pass; failed is a valid stack-allocated i64 output parameter.
         let ret = with_handles(
             requests,
-            |r| if r.completed { -1 } else { r.handle },
+            handle_or_skip,
             |handles, done| unsafe {
                 ffi::ferrompi_waitall(
                     handles.len() as i64,
@@ -580,7 +595,7 @@ impl Request {
                     &mut failed,
                 )
             },
-            |r| r.completed = true,
+            mark_completed,
         );
 
         check_batch(ret, "waitall", failed)
