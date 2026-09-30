@@ -5,9 +5,11 @@ use crate::{Communicator, Error, Mpi, Result, ThreadLevel};
 
 /// MPI topology information gathered across all ranks in a communicator.
 ///
-/// This is produced by a collective operation ([`Communicator::topology`]) and
-/// contains the rank-to-host mapping, MPI library metadata, and optional SLURM
-/// job information.
+/// This is produced by a collective operation ([`Communicator::topology`]).
+/// The rank-to-host mapping is gathered across all ranks; the MPI library
+/// metadata is each rank's own local value (see
+/// [`library_version`](Self::library_version) and
+/// [`standard_version`](Self::standard_version)).
 ///
 /// # Display
 ///
@@ -68,11 +70,19 @@ impl TopologyInfo {
     }
 
     /// MPI library version string (implementation-specific).
+    ///
+    /// The calling process's own value, as returned by
+    /// [`Mpi::library_version`]; it is not gathered, so ranks linked against
+    /// differently built libraries may report different strings.
     pub fn library_version(&self) -> &str {
         &self.library_version
     }
 
     /// MPI standard version string.
+    ///
+    /// The calling process's own value, as returned by [`Mpi::version`]; it
+    /// is not gathered, so ranks linked against differently built libraries
+    /// may report different strings.
     pub fn standard_version(&self) -> &str {
         &self.standard_version
     }
@@ -146,9 +156,9 @@ pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<Topology
         }
     }
 
-    // MPI_Get_library_version and MPI_Get_version are local queries (no MPI
-    // call involved), so every rank can call them directly instead of
-    // gathering them from rank 0.
+    // MPI_Get_library_version and MPI_Get_version are local procedures,
+    // callable at any time (MPI-4.1 §10.1.1, §12.4.1), so each rank queries
+    // its own library instead of gathering the strings from rank 0.
     let library_version = Mpi::library_version()?;
     let standard_version = Mpi::version()?;
 

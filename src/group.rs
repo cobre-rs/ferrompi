@@ -89,7 +89,8 @@ pub struct RankRange {
     pub first: i32,
     /// Last rank in the range (inclusive).
     pub last: i32,
-    /// Step between consecutive ranks (must be positive).
+    /// Step between consecutive ranks (non-zero; a negative stride walks
+    /// the ranks downwards).
     pub stride: i32,
 }
 
