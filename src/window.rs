@@ -381,8 +381,8 @@ fn win_size_and_disp_unit<T>(count: usize) -> Result<(i64, i32)> {
 }
 
 // Sentinel an allocating shim writes to its handle out-parameter when MPI
-// created the window but zeroing it failed. This MUST stay in sync with
-// `FERROMPI_WIN_LEAKED` in `csrc/ferrompi.c`.
+// created the window but zeroing or registering it failed. This MUST stay
+// in sync with `FERROMPI_WIN_LEAKED` in `csrc/ferrompi.c`.
 const FERROMPI_WIN_LEAKED: i32 = -2;
 
 /// Count of live windows of any kind (`Win::create`, `Win::allocate`,
@@ -513,12 +513,14 @@ impl<T: MpiDatatype> SharedWindow<T> {
     ///
     /// Returns an error if:
     /// - The MPI window allocation fails (e.g., insufficient shared memory)
+    /// - The window table is full (`Error::ResourceExhausted`; the window is
+    ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
     /// - An error occurs while zeroing the new segment (the window is
     ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
     /// - The MPI implementation returns a null base pointer for a non-zero count
     ///   (the window is then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
     ///
-    /// In the latter two cases, a peer whose own zeroing succeeded blocks in its
+    /// In the last three cases, a peer whose own call succeeded blocks in its
     /// collective `Drop` (`MPI_Win_free`) waiting for this rank.
     ///
     /// # Example
@@ -548,7 +550,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
             )
         };
         if ret != 0 && win_handle == FERROMPI_WIN_LEAKED {
-            // MPI created the window but could not zero it; it is never freed.
+            // MPI created the window but could not zero or register it; it is never freed.
             mark_window_alive();
         }
         Error::check_with_op(ret, "win_allocate_shared")?;
@@ -1140,6 +1142,8 @@ impl<T: MpiDatatype> Win<'static, T> {
     ///   (`Error::InvalidBuffer` on every rank).
     /// - The length exchange fails (`Error::Mpi` with `operation: Some("allgather")`).
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_allocate")`).
+    /// - The window table is full (`Error::ResourceExhausted`; the window is
+    ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`).
     /// - An error occurs while zeroing the new segment (`Error::Mpi` with
     ///   `operation: Some("win_allocate")`; the window is
     ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`).
@@ -1147,7 +1151,7 @@ impl<T: MpiDatatype> Win<'static, T> {
     ///   the window is then leaked: never freed, and counted as alive so `Mpi`
     ///   skips `MPI_Finalize`).
     ///
-    /// In the latter two cases, a peer whose own zeroing succeeded blocks in its
+    /// In the last three cases, a peer whose own call succeeded blocks in its
     /// collective `Drop` (`MPI_Win_free`) waiting for this rank.
     ///
     /// # Example
@@ -1180,7 +1184,7 @@ impl<T: MpiDatatype> Win<'static, T> {
             )
         };
         if ret != 0 && win_handle == FERROMPI_WIN_LEAKED {
-            // MPI created the window but could not zero it; it is never freed.
+            // MPI created the window but could not zero or register it; it is never freed.
             mark_window_alive();
         }
         Error::check_with_op(ret, "win_allocate")?;

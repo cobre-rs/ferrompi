@@ -80,7 +80,8 @@ _Static_assert(MAX_REQUESTS % 64 == 0,
 #endif
 
 // Written to a window-allocating shim's handle out-parameter when MPI
-// created the window but zeroing it failed: the window is never freed.
+// created the window but zeroing or registering it failed: the window is
+// never freed.
 #define FERROMPI_WIN_LEAKED (-2)
 
 // Split type constants (must match Rust SplitType enum and header defines)
@@ -3887,7 +3888,7 @@ int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_h
         }
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
-            MPI_Win_free(&win);
+            *win_handle = FERROMPI_WIN_LEAKED;
             return FERROMPI_ERR_WINDOWS_FULL;
         }
     }
@@ -3932,7 +3933,7 @@ int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info_handle,
         }
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
-            MPI_Win_free(&win);
+            *win_handle = FERROMPI_WIN_LEAKED;
             return FERROMPI_ERR_WINDOWS_FULL;
         }
     }
