@@ -401,8 +401,7 @@ impl Communicator {
     /// # Errors
     ///
     /// - [`Error::InvalidOp`] if `op` is not one of the three bitwise ops
-    /// - [`Error::InvalidBuffer`] if `send.len() != recv.len()` or the total
-    ///   byte count overflows `i64::MAX`
+    /// - [`Error::InvalidBuffer`] if `send.len() != recv.len()`
     /// - [`Error::Mpi`] if the MPI layer rejects the call
     ///
     /// # Example
@@ -436,19 +435,14 @@ impl Communicator {
             return Err(Error::InvalidOp);
         }
         check_same_len(send.len(), recv.len())?;
-        let byte_count = send
-            .len()
-            .checked_mul(std::mem::size_of::<T>())
-            .ok_or(Error::InvalidBuffer)?;
-        if byte_count > i64::MAX as usize {
-            return Err(Error::InvalidBuffer);
-        }
+        let byte_count = std::mem::size_of_val(send);
         // SAFETY:
         // - send and recv are valid slices of T where T: BytePermutable (Copy + Send + 'static).
-        // - byte_count = send.len() * size_of::<T>() bytes, which is the exact memory
-        //   footprint of each slice. The cast to *const c_void / *mut c_void is safe
-        //   because we pass the byte count to MPI (MPI_BYTE datatype), so MPI treats
-        //   the buffer as raw bytes matching exactly the memory of the slices.
+        // - byte_count = size_of_val(send), which equals send.len() * size_of::<T>() and is
+        //   the exact memory footprint of each slice, at most isize::MAX. The cast to
+        //   *const c_void / *mut c_void is safe because we pass the byte count to MPI
+        //   (MPI_BYTE datatype), so MPI treats the buffer as raw bytes matching exactly
+        //   the memory of the slices.
         // - DatatypeTag::Byte maps to MPI_BYTE in the C layer (case FERROMPI_BYTE).
         // - send and recv do not alias (send is &[T], recv is &mut [T]).
         let ret = unsafe {
