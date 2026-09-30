@@ -294,48 +294,7 @@ impl<T: MpiDatatype> UserOp<T> {
         debug_assert!(idx < MAX_OPS, "slot out of range");
 
         // Step 2: wrap the typed closure in a byte-level adapter.
-        //
-        // The C trampoline passes byte slices whose .len() field carries the
-        // MPI element count (not byte count).  The adapter uses that element
-        // count directly to reconstruct typed slices via slice::from_raw_parts.
-        //
-        // Why byte-level: the Rust callback `rust_user_op_invoke` has a single
-        // signature regardless of T; it reconstructs a
-        // `dyn Fn(&[u8], &mut [u8])` trait object.  The adapter converts back
-        // to `&[T]` / `&mut [T]` via `slice::from_raw_parts`, interpreting
-        // .len() as the element count (not a byte count).
-        // Wrap in a ByteClosure (byte-level adapter over the typed closure).
-        let byte_closure: ByteClosure =
-            Box::new(move |invec_bytes: &[u8], inoutvec_bytes: &mut [u8]| {
-                // `invec_bytes.len()` and `inoutvec_bytes.len()` are the MPI
-                // element count forwarded by rust_user_op_invoke.  The actual
-                // byte span is elem_count * size_of::<T>(), which MPI guarantees
-                // is valid; we use elem_count here as the slice element count.
-                let elem_count = invec_bytes.len();
-                // SAFETY:
-                //   * invec_bytes.as_ptr() points to a valid MPI-provided buffer
-                //     of at least elem_count * size_of::<T>() bytes.
-                //   * T: MpiDatatype implies T: Copy with stable layout; MPI
-                //     provides properly-aligned buffers for the registered type.
-                //   * elem_count comes from MPI's *len — the number of elements
-                //     MPI needs reduced.
-                //   * .len() is used here as element count, NOT byte count.
-                let invec: &[T] = unsafe {
-                    std::slice::from_raw_parts(invec_bytes.as_ptr().cast::<T>(), elem_count)
-                };
-                // SAFETY: inoutvec_bytes.as_mut_ptr() points to a valid MPI-provided
-                // buffer of at least elem_count * size_of::<T>() bytes, aliased with
-                // no other live reference; T: MpiDatatype implies T: Copy with stable
-                // layout, and MPI provides properly-aligned buffers for the
-                // registered type. elem_count is MPI's *len, used as element count.
-                let inoutvec: &mut [T] = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        inoutvec_bytes.as_mut_ptr().cast::<T>(),
-                        elem_count,
-                    )
-                };
-                f(invec, inoutvec);
-            });
+        let byte_closure: ByteClosure = typed_adapter::<T, F>(f);
 
         // Step 3: publish the boxed closure to the registry.  A thin
         // `*mut ByteClosure` — no fat-pointer decomposition needed.  This
@@ -382,6 +341,49 @@ impl<T: MpiDatatype> UserOp<T> {
     pub(crate) fn raw_handle(&self) -> i32 {
         self.handle
     }
+}
+
+/// Wraps a typed reduction closure in the byte-level form `REGISTRY` stores.
+///
+/// The C trampoline passes byte slices whose .len() field carries the
+/// MPI element count (not byte count).  The adapter uses that element
+/// count directly to reconstruct typed slices via slice::from_raw_parts.
+///
+/// Why byte-level: the Rust callback `rust_user_op_invoke` has a single
+/// signature regardless of T; it reconstructs a
+/// `dyn Fn(&[u8], &mut [u8])` trait object.  The adapter converts back
+/// to `&[T]` / `&mut [T]` via `slice::from_raw_parts`, interpreting
+/// .len() as the element count (not a byte count).
+fn typed_adapter<T: MpiDatatype, F>(f: F) -> ByteClosure
+where
+    F: Fn(&[T], &mut [T]) + Send + Sync + 'static,
+{
+    Box::new(move |invec_bytes: &[u8], inoutvec_bytes: &mut [u8]| {
+        // `invec_bytes.len()` and `inoutvec_bytes.len()` are the MPI
+        // element count forwarded by rust_user_op_invoke.  The actual
+        // byte span is elem_count * size_of::<T>(), which MPI guarantees
+        // is valid; we use elem_count here as the slice element count.
+        let elem_count = invec_bytes.len();
+        // SAFETY:
+        //   * invec_bytes.as_ptr() points to a valid MPI-provided buffer
+        //     of at least elem_count * size_of::<T>() bytes.
+        //   * T: MpiDatatype implies T: Copy with stable layout; MPI
+        //     provides properly-aligned buffers for the registered type.
+        //   * elem_count comes from MPI's *len — the number of elements
+        //     MPI needs reduced.
+        //   * .len() is used here as element count, NOT byte count.
+        let invec: &[T] =
+            unsafe { std::slice::from_raw_parts(invec_bytes.as_ptr().cast::<T>(), elem_count) };
+        // SAFETY: inoutvec_bytes.as_mut_ptr() points to a valid MPI-provided
+        // buffer of at least elem_count * size_of::<T>() bytes, aliased with
+        // no other live reference; T: MpiDatatype implies T: Copy with stable
+        // layout, and MPI provides properly-aligned buffers for the
+        // registered type. elem_count is MPI's *len, used as element count.
+        let inoutvec: &mut [T] = unsafe {
+            std::slice::from_raw_parts_mut(inoutvec_bytes.as_mut_ptr().cast::<T>(), elem_count)
+        };
+        f(invec, inoutvec);
+    })
 }
 
 impl<T: MpiDatatype> Drop for UserOp<T> {
