@@ -11,10 +11,8 @@
 //! 2. **flush_local_all and sync inside a lock_all epoch** — all ranks call
 //!    `lock_all()`, invoke `win.flush_local_all()` and `win.sync()`, then drop
 //!    the guard (→ unlock_all).
-//!    Note: `MPI_Win_sync` is defined by the MPI standard as a local operation
-//!    valid at any point, but MPICH 4.2.x enforces it only within a
-//!    passive-target epoch. The test therefore calls `sync` inside `lock_all`
-//!    to be portable across all conformant implementations.
+//!    Note: the MPI standard allows `MPI_Win_sync` only within a passive-target
+//!    epoch, so the test calls `sync` inside `lock_all`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_flush_sync
 // mpi-test: np=2
@@ -48,9 +46,14 @@ fn main() {
         }
     };
 
-    // Opening fence to satisfy MPI epoch rules before passive-target use.
-    if let Err(e) = win.fence(WinFenceAssert::none()) {
+    // `no_succeed` says no fence epoch follows; the barrier puts every rank's
+    // fence before any rank's lock.
+    if let Err(e) = win.fence(WinFenceAssert::no_succeed()) {
         eprintln!("rank {rank}: FAIL: initial fence failed: {e}");
+        local_ok = false;
+    }
+    if let Err(e) = world.barrier() {
+        eprintln!("rank {rank}: FAIL: barrier before lock failed: {e}");
         local_ok = false;
     }
 
@@ -89,10 +92,8 @@ fn main() {
     // All ranks call lock_all(), invoke flush_local_all() and sync(), then
     // drop the guard (→ unlock_all).
     //
-    // Note: MPI_Win_sync is a local memory barrier that the MPI standard
-    // defines as valid outside any epoch, but MPICH 4.2.x rejects it unless
-    // a passive-target epoch is active. The test therefore calls sync() inside
-    // the lock_all epoch to be portable across all conformant implementations.
+    // Note: the MPI standard allows MPI_Win_sync only within a passive-target
+    // epoch, so the test calls sync() inside the lock_all epoch.
     // ========================================================================
     {
         let guard = match win.lock_all() {

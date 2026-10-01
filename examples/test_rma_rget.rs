@@ -2,8 +2,9 @@
 //!
 //! Verifies that:
 //!
-//! 1. Rank 1 initializes its local window to `[100, 200, 300, 400]` and
-//!    participates in a fence to make the write visible.
+//! 1. Rank 1 initializes its local window to `[100, 200, 300, 400]`; a
+//!    fence with `no_succeed` and a barrier make the write visible before
+//!    rank 0 locks.
 //! 2. Rank 0 acquires a shared passive-target lock on rank 1, calls
 //!    `Win::rget` to post a read, waits on the returned `Request` (local
 //!    completion), then drops the lock guard. After `req.wait()` returns,
@@ -12,7 +13,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_rget
 // mpi-test: np=2
 
-use ferrompi::{LockType, Mpi, Win};
+use ferrompi::{LockType, Mpi, Win, WinFenceAssert};
 
 mod common;
 
@@ -34,7 +35,7 @@ fn main() {
     //
     // Protocol:
     //   Rank 1: initialize window to [100, 200, 300, 400]
-    //   All:    fence (write phase — makes rank 1's init visible)
+    //   All:    fence(no_succeed) + barrier (rank 1's init visible before the lock)
     //   Rank 0: lock(Shared, rank=1) → rget(&mut buf, 1, 0, 4)
     //           → req.wait() → assert buf == [100, 200, 300, 400]
     //           → drop guard (unlock)
@@ -53,9 +54,11 @@ fn main() {
             local[3] = 400;
         }
 
-        // Active-target fence: make rank 1's initialization visible to all.
-        win.fence(ferrompi::WinFenceAssert::default())
-            .expect("fence (write phase) failed");
+        // Make rank 1's stores visible in its window; `no_succeed` says no fence
+        // epoch follows. The barrier orders the stores before rank 0's lock.
+        win.fence(WinFenceAssert::no_succeed())
+            .expect("fence failed");
+        world.barrier().expect("barrier before lock failed");
 
         if rank == 0 {
             let mut local_buf = [0i32; N];

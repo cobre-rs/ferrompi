@@ -45,9 +45,14 @@ fn main() {
         }
     };
 
-    // Opening fence to satisfy MPI epoch rules before passive-target use.
-    if let Err(e) = win.fence(WinFenceAssert::none()) {
+    // `no_succeed` says no fence epoch follows; the barrier puts every rank's
+    // fence before any rank's lock.
+    if let Err(e) = win.fence(WinFenceAssert::no_succeed()) {
         eprintln!("rank {rank}: FAIL: initial fence failed: {e}");
+        local_ok = false;
+    }
+    if let Err(e) = world.barrier() {
+        eprintln!("rank {rank}: FAIL: barrier before lock failed: {e}");
         local_ok = false;
     }
 

@@ -3,14 +3,14 @@
 //!
 //! Verifies that:
 //!
-//! 1. Rank 1 initializes its local window to `[1, 2, 3, 4]` and participates
-//!    in a fence to make the write visible.
+//! 1. Rank 1 initializes its local window to `[1, 2, 3, 4]`; a fence with
+//!    `no_succeed` and a barrier make the write visible before rank 0 locks.
 //! 2. Rank 0 acquires an exclusive passive-target lock on rank 1, calls
 //!    `Win::raccumulate` with `ReduceOp::Sum`, waits on the returned `Request`
 //!    (local completion — origin buffer safe to reuse), then drops the lock
 //!    guard (remote completion — accumulation visible at rank 1).
-//! 3. After a barrier, rank 1 reads its local window and asserts it equals
-//!    `[11, 22, 33, 44]`.
+//! 3. After a barrier, rank 1 locks its own window, reads it and asserts it
+//!    equals `[11, 22, 33, 44]`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_raccumulate
 // mpi-test: np=2
@@ -36,17 +36,18 @@ fn main() {
     // Test: rank 1 initialises its window to [1, 2, 3, 4]; rank 0 locks rank 1
     // (Exclusive), raccumulates [10, 20, 30, 40] with ReduceOp::Sum, waits on
     // the Request (local completion), then unlocks (remote completion).
-    // After a barrier, rank 1 asserts its window equals [11, 22, 33, 44].
+    // After a barrier, rank 1 locks its own window and asserts it equals
+    // [11, 22, 33, 44].
     //
     // Protocol:
     //   Rank 1: initialize window to [1, 2, 3, 4]
-    //   All:    fence (write phase — makes rank 1's init visible)
+    //   All:    fence(no_succeed) + barrier (rank 1's init visible before the lock)
     //   Rank 0: lock(Exclusive, rank=1)
     //           → raccumulate(&[10, 20, 30, 40], 1, 0, 4, ReduceOp::Sum)
     //           → req.wait()  (local completion — origin buffer safe to reuse)
     //           → drop guard  (remote completion — visible at rank 1)
     //   All:    barrier
-    //   Rank 1: assert local window == [11, 22, 33, 44]
+    //   Rank 1: lock(Shared, 1) → assert local window == [11, 22, 33, 44]
     //   All:    `common::check` verdict
     // ========================================================================
     const N: usize = 4;
@@ -57,9 +58,11 @@ fn main() {
         win.local_slice_mut().copy_from_slice(&[1i32, 2, 3, 4]);
     }
 
-    // Active-target fence: make rank 1's initialization visible to all.
-    win.fence(WinFenceAssert::default())
-        .expect("fence (write phase) failed");
+    // Make rank 1's stores visible in its window; `no_succeed` says no fence
+    // epoch follows. The barrier orders the stores before rank 0's lock.
+    win.fence(WinFenceAssert::no_succeed())
+        .expect("fence failed");
+    world.barrier().expect("barrier before lock failed");
 
     if rank == 0 {
         let buf = [10i32, 20, 30, 40];
@@ -102,6 +105,10 @@ fn main() {
     // Rank 1 verifies its local window contains the accumulated result.
     if rank == 1 {
         let expected = [11i32, 22, 33, 44];
+        // Locking its own window makes rank 0's update visible to this rank's loads.
+        let _guard = win
+            .lock(LockType::Shared, 1)
+            .expect("lock(Shared, 1) failed");
         let local = win.local_slice();
         if local != expected {
             eprintln!(
