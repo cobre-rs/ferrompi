@@ -144,7 +144,6 @@ fn hosts_from_slots(all_bufs: &[u8], size: i32) -> Result<Vec<HostEntry>> {
     for r in 0..size {
         let start = r as usize * HOSTNAME_BUF_LEN;
         let raw = &all_bufs[start..start + HOSTNAME_BUF_LEN];
-        // Find the first null byte or take the whole buffer.
         let nul_pos = raw.iter().position(|&b| b == 0).unwrap_or(HOSTNAME_BUF_LEN);
         let hostname = std::str::from_utf8(&raw[..nul_pos]).map_err(|_| {
             Error::Internal(format!(
@@ -178,7 +177,6 @@ pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<Topology
         .and_then(|name| Ok((name, Mpi::library_version()?, Mpi::version()?)));
     let local_buf = hostname_slot(local.as_ref().ok().map(|(name, _, _)| name.as_str()));
 
-    // Allgather the hostname buffers.
     let mut all_bufs = vec![0u8; HOSTNAME_BUF_LEN * size as usize];
     comm.allgather(&local_buf, &mut all_bufs)?;
 

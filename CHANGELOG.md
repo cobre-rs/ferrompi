@@ -245,7 +245,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   processor-name or version query fails on any rank**, instead of leaving
   the other ranks blocked in the hostname exchange or returning `Ok` on
   them.
-- **`Mpi::library_version()` and `TopologyInfo::library_version()` no longer end in a NUL character on Open MPI**, whose `MPI_Get_library_version` counts the terminator in the length it reports; processor names and MPI error messages also end at the first NUL.
+- **`Mpi::library_version()` and `TopologyInfo::library_version()` no longer
+  end in a NUL character on Open MPI**, whose `MPI_Get_library_version`
+  counts the terminator in the length it reports; processor names and MPI
+  error messages also end at the first NUL.
 
 ## [0.5.0] - 2026-06-18
 
