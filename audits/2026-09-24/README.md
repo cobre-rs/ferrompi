@@ -262,7 +262,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | DOC-13 | `benches/README.md` claims | minor | 0.5.x | fixed (15d570c) |
 | DOC-14 | Missing docs: lifecycle, error reporting, runtime lib path, Open MPI build | minor | 0.5.x | fixed (98236f8, 90c95c6) |
 | DOC-15 | Wrong C comments | nit | 0.5.x | fixed (01866f1) |
-| DOC-16 | No doc says an error from a collective can reach only some ranks; the private `exchange_window_words` comment claims every rank sees the same error, so after a rank-local `MPI_Allgather` failure `Win::create`/`Win::allocate` can leave the other ranks blocked in `MPI_Win_create`/`MPI_Win_allocate` (`Communicator` docs cover local validation failures only) | minor | 0.6.0 | planned (ferrompi-0.6.0-final-fixes) |
+| DOC-16 | No doc says an error from a collective can reach only some ranks; the private `exchange_window_words` comment claims every rank sees the same error, so after a rank-local `MPI_Allgather` failure `Win::create`/`Win::allocate` can leave the other ranks blocked in `MPI_Win_create`/`MPI_Win_allocate` (`Communicator` docs cover local validation failures only) | minor | 0.6.0 | fixed (fa071ed) |
 
 ### Build / CI / tests — [08](findings/08-build-ci-tests.md)
 
