@@ -445,10 +445,11 @@ fn window_word<T>(count: usize) -> u64 {
 
 /// Exchanges one window word per rank over `comm` via `Communicator::allgather`.
 ///
-/// Every rank passes the same collective, so every rank observes the same
-/// `words` (or the same error): if any word is [`WINDOW_WORD_REJECT`], every
-/// rank returns `Err(Error::InvalidBuffer)`, before any rank has created a
-/// window.
+/// When the allgather succeeds on every rank, every rank holds the same
+/// `words`: if any word is [`WINDOW_WORD_REJECT`], every rank returns
+/// `Err(Error::InvalidBuffer)` before any rank has created a window. An
+/// allgather error can reach some ranks only; the other ranks can then
+/// block in the window-creation call.
 fn exchange_window_words(comm: &Communicator, word: u64) -> Result<Box<[u64]>> {
     let mut words = vec![0u64; comm.size() as usize];
     comm.allgather(&[word], &mut words)?;
@@ -516,7 +517,9 @@ impl<T: MpiDatatype> SharedWindow<T> {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The MPI window allocation fails (e.g., insufficient shared memory)
+    /// - The MPI window allocation fails (e.g., insufficient shared memory);
+    ///   this can happen on some ranks only, and the other ranks can then
+    ///   block in the barrier after the new segment is zeroed
     /// - The window table is full (`Error::ResourceExhausted`; the window is
     ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
     /// - An error occurs while zeroing the new segment (the window is
@@ -1062,7 +1065,9 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// Returns an error if:
     /// - Any rank's exposed byte length does not fit in 56 bits
     ///   (`Error::InvalidBuffer` on every rank).
-    /// - The length exchange fails (`Error::Mpi` with `operation: Some("allgather")`).
+    /// - The length exchange fails (`Error::Mpi` with
+    ///   `operation: Some("allgather")`); this can happen on some ranks only,
+    ///   and the other ranks can then block creating the window.
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_create")`).
     ///
     /// If this rank's window table is full, the process is aborted instead
@@ -1147,8 +1152,12 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// Returns an error if:
     /// - Any rank's exposed byte length does not fit in 56 bits
     ///   (`Error::InvalidBuffer` on every rank).
-    /// - The length exchange fails (`Error::Mpi` with `operation: Some("allgather")`).
-    /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_allocate")`).
+    /// - The length exchange fails (`Error::Mpi` with
+    ///   `operation: Some("allgather")`); this can happen on some ranks only,
+    ///   and the other ranks can then block creating the window.
+    /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_allocate")`);
+    ///   this can happen on some ranks only, and the other ranks can then
+    ///   block in the barrier after the new segment is zeroed.
     /// - The window table is full (`Error::ResourceExhausted`; the window is
     ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`).
     /// - An error occurs while zeroing the new segment (`Error::Mpi` with

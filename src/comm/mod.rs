@@ -111,6 +111,14 @@ pub enum SplitType {
 /// on the calling rank before any MPI call. The check is local: ranks that already
 /// entered the collective are not told about the failure and may block.
 ///
+/// # Errors in collective calls
+///
+/// MPI may return an error from a collective call on some ranks only. The
+/// ranks that returned `Ok` go on to their next collective call and can
+/// block there, waiting for a rank that returned `Err`. Methods that
+/// document an error "on every rank" guarantee that for their own checks
+/// once their collective calls have succeeded on every rank.
+///
 /// # Example
 ///
 /// ```no_run

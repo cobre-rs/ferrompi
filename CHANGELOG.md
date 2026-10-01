@@ -254,6 +254,11 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   or count outside the request slice (or read past the scratch arrays)**;
   they return `Error::Mpi` instead, with class `Intern` unless MPI itself
   returned an error.
+- **The `Communicator` documentation now states that MPI may return an
+  error from a collective call on some ranks only**, which can leave the
+  others blocked in their next collective call; `Win::create`,
+  `Win::allocate` and `SharedWindow::allocate` say so for the calls they
+  make.
 
 ## [0.5.0] - 2026-06-18
 

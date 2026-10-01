@@ -338,11 +338,11 @@ pub enum Error {
     /// release handles, back off, or retry rather than treating it as fatal.
     ///
     /// A communicator or window constructor that returns this error ran its
-    /// collective MPI call first: MPI created the object on every rank, and
-    /// this rank leaks its copy (never freed; a window counts as alive, so
-    /// [`Mpi`](crate::Mpi) skips `MPI_Finalize`). Peers hold theirs, so
-    /// collective calls on it cannot complete; retrying is a new collective
-    /// call on every rank.
+    /// collective MPI call first: MPI created the object on every rank whose
+    /// call succeeded, and this rank leaks its copy (never freed; a window
+    /// counts as alive, so [`Mpi`](crate::Mpi) skips `MPI_Finalize`). Peers
+    /// whose call succeeded hold theirs, so collective calls on it cannot
+    /// complete; retrying is a new collective call on every rank.
     #[error("ferrompi {resource} table is full")]
     ResourceExhausted {
         /// Which internal handle table overflowed.
