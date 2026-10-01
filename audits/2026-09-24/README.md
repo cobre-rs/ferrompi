@@ -128,7 +128,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | SND-10 | Window memory used after finalize | critical | repro | 0.5.x (D-8) | fixed (90d9544) |
 | SND-11 | `Communicator` Send+Sync regardless of thread level | critical | repro | 0.5.x (D-3, D-9) | fixed (49cb30c) |
 | SND-12 | Uninitialised window memory exposed as `&[T]` | major | repro | 0.5.x | fixed (4747cd1) |
-| SND-13 | `SharedWindow` slices over concurrently-written memory (observed miscompile) | critical | repro | 0.7.0 (D-5); 0.5.x doc warning | fixed (31e6514): doc warning; API fix open (0.7.0) |
+| SND-13 | `SharedWindow` slices over concurrently-written memory (observed miscompile) | critical | repro | 0.7.0 (D-5); 0.5.x doc warning | fixed (31e6514): doc warning; API fix open (0.7.0; design input: issue #28, per-region slice guards) |
 | SND-14 | `UserOp` fat-pointer transmute relies on unspecified layout | minor | reading | 0.5.x† | fixed (2d53b18) |
 | SND-15 | `fetch_and_op`/`compare_and_swap` result pointer derived from a shared borrow | minor | reading | 0.5.x | fixed (9777b12) |
 | SND-16 | `Mpi` drop racing a concurrent guarded call at `Serialized`/`Multiple` reaches MPI after finalize | major | reading | 0.7.0 | open (0.7.0: thread-safety API redesign) |
@@ -186,7 +186,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | ARC-10 | Copy-pasted families drifted (root of SND-06) | major | two-way | 0.5.x (validators) | fixed (c402d59) |
 | ARC-11 | Capability gaps (in-place nonblocking, mprobe, HW_GUIDED…) | minor | additive | 0.7.0+ | open |
 | ARC-12 | `Info` public but unused | minor | one-way | 0.7.0 (D-4) | open |
-| ARC-13 | `SharedWindow` duplicates `Win`; `WinKind` dead | minor | one-way | 0.5.x WinKind / 0.7.0 (D-5) | fixed (b39adfb): WinKind removed; SharedWindow merge open (0.7.0) |
+| ARC-13 | `SharedWindow` duplicates `Win`; `WinKind` dead | minor | one-way | 0.5.x WinKind / 0.7.0 (D-5) | fixed (b39adfb): WinKind removed; SharedWindow merge open (0.7.0; design input: issue #28) |
 | ARC-14 | `numa` feature has no NUMA code, implies `rma` | minor | one-way | 0.7.0 | open |
 | ARC-15 | Naming/coverage asymmetries | minor | one-way | 0.7.0 | open |
 | ARC-16 | Magic `-1` sentinels; no typed source/tag | minor | one-way | 0.7.0 | open |
