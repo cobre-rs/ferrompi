@@ -3602,7 +3602,8 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
     int out = MPI_UNDEFINED;
     int ret = MPI_Waitsome((int)count, reqs, &out, tmp_indices, sts);
     abort_if_pending_after_failure(ret);
-    if (!some_result_in_range(count, out, tmp_indices)) {
+    // MPI_Waitsome returns only after a completion (MPI-4.1 §3.7.5).
+    if (out == 0 || !some_result_in_range(count, out, tmp_indices)) {
         out = MPI_UNDEFINED;
         if (ret == MPI_SUCCESS) ret = MPI_ERR_INTERN;
     }

@@ -259,6 +259,9 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   others blocked in their next collective call; `Win::create`,
   `Win::allocate` and `SharedWindow::allocate` say so for the calls they
   make.
+- **`Request::wait_some` returns `Error::Mpi` instead of `Ok(vec![])` when
+  the MPI library reports zero completions**, which `MPI_Waitsome` never
+  may; the class is `Intern` unless MPI itself returned an error.
 
 ## [0.5.0] - 2026-06-18
 

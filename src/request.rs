@@ -358,8 +358,7 @@ impl Request {
                             &mut failed,
                         )
                     };
-                    // outcount == -1 means all null; 0 means none completed (should
-                    // not happen for waitsome, but guard defensively). outcount and
+                    // outcount == -1 means all null or a rejected result. outcount and
                     // indices are written whatever ret is, so collect from them
                     // unconditionally. Only collect the completed indices while the
                     // index buffer is in scope.
