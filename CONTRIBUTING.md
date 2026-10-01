@@ -41,6 +41,7 @@ cargo clippy --all-targets --features numa -- -D warnings
 cargo test --lib --features numa
 cargo test --doc
 cargo test --doc --all-features
+cargo +nightly-2026-09-30 test --doc --all-features   # enforces compile_fail error codes
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
 bash tests/runner_selftest.sh
