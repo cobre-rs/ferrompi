@@ -92,12 +92,7 @@ mpiexec -n 4 ./target/release/my_program
 
 ## License
 
-Licensed under either of:
-
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-
-at your option.
+Licensed under the Apache License, Version 2.0 ([LICENSE](LICENSE)).
 
 ## Contributing
 

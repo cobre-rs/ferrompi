@@ -162,4 +162,4 @@ Include:
 ## License
 
 By contributing, you agree that your contributions will be licensed under the
-same license as the project (MIT OR Apache-2.0).
+same license as the project (Apache-2.0).

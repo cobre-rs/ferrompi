@@ -6,7 +6,7 @@ rust-version = "1.85"
 links = "ferrompi"
 authors = ["Rogerio Alves"]
 description = "Safe, generic Rust bindings for MPI, with MPI 4.0 persistent collectives, RMA and shared-memory windows, and hybrid MPI + threads"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 repository = "https://github.com/cobre-rs/ferrompi"
 keywords = ["mpi", "hpc", "parallel", "distributed"]
 categories = ["science", "concurrency"]
@@ -17,8 +17,7 @@ include = [
     "/build.rs",
     "/README.md",
     "/CHANGELOG.md",
-    "/LICENSE-MIT",
-    "/LICENSE-APACHE",
+    "/LICENSE",
 ]
 
 [[example]]

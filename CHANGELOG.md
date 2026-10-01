@@ -15,6 +15,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 
 ### Breaking Changes
 
+- **ferrompi is now licensed under Apache-2.0 only.** Earlier releases
+  were dual-licensed MIT OR Apache-2.0 and remain so; from 0.6.0 the MIT
+  option is dropped, so ferrompi can no longer be combined with
+  GPL-2.0-only code.
 - **`Error` is now `#[non_exhaustive]`** and gains two new variants,
   `Finalized` and `ThreadLevelViolation`. Migration: an exhaustive `match`
   on `Error` now needs a trailing `_` arm.
