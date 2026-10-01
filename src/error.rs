@@ -413,7 +413,8 @@ impl Error {
         };
 
         if ret == 0 {
-            let len = msg_len.max(0) as usize;
+            let len = (msg_len.max(0) as usize).min(msg_buf.len());
+            let len = msg_buf[..len].iter().position(|&b| b == 0).unwrap_or(len);
             let message = std::str::from_utf8(&msg_buf[..len])
                 .unwrap_or("unknown error")
                 .to_string();

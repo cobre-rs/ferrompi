@@ -17,6 +17,7 @@ impl Communicator {
         };
         Error::check_with_op(ret, "get_processor_name")?;
         let len = (len.max(0) as usize).min(buf.len());
+        let len = buf[..len].iter().position(|&b| b == 0).unwrap_or(len);
         let s = std::str::from_utf8(&buf[..len])
             .map_err(|_| Error::Internal("Invalid UTF-8 in processor name".into()))?;
         Ok(s.to_string())

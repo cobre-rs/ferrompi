@@ -423,6 +423,7 @@ impl Mpi {
     ///
     /// Returns a string such as `"Open MPI v4.1.6"` or `"Intel(R) MPI Library 2021.7"`.
     /// This wraps `MPI_Get_library_version`.
+    /// The string ends before the first NUL character, with trailing whitespace removed.
     pub fn library_version() -> Result<String> {
         let mut buf = [0u8; 8192];
         let mut len: i32 = 0;
@@ -434,7 +435,9 @@ impl Mpi {
         };
         Error::check_with_op(ret, "get_library_version")?;
         let len = (len.max(0) as usize).min(buf.len());
-        // Trim trailing whitespace/newlines that some implementations append.
+        // Open MPI counts the terminating NUL in `len`; some implementations
+        // append trailing whitespace.
+        let len = buf[..len].iter().position(|&b| b == 0).unwrap_or(len);
         let s = std::str::from_utf8(&buf[..len])
             .map_err(|_| Error::Internal("Invalid UTF-8 in library version string".into()))?;
         Ok(s.trim_end().to_string())

@@ -1,7 +1,7 @@
 //! Integration test for MPI lifecycle functions.
 //!
-//! Exercises Mpi::init, version, wtime, is_initialized, is_finalized,
-//! thread_level, and world.
+//! Exercises Mpi::init, version, library_version, wtime, is_initialized,
+//! is_finalized, thread_level, and world.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_lifecycle
 // mpi-test: np=2
@@ -39,6 +39,15 @@ fn main() {
     assert!(!version.is_empty(), "version string should not be empty");
     println!("PASS: version = {}", version);
 
+    // Test library_version
+    let library = Mpi::library_version().expect("library_version failed");
+    assert!(!library.is_empty(), "library_version should not be empty");
+    assert!(
+        !library.contains('\0'),
+        "library_version contains a NUL: {library:?}"
+    );
+    println!("PASS: library_version has no NUL");
+
     // Test wtime
     let t1 = mpi.wtime();
     assert!(t1 >= 0.0, "wtime should return non-negative value");
@@ -57,6 +66,10 @@ fn main() {
     // Test processor_name
     let name = world.processor_name().expect("processor_name failed");
     assert!(!name.is_empty(), "processor_name should not be empty");
+    assert!(
+        !name.contains('\0'),
+        "processor_name contains a NUL: {name:?}"
+    );
     println!("PASS: processor_name = {}", name);
 
     // Test raw_handle
