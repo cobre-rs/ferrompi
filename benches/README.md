@@ -115,17 +115,33 @@ and reports each arm's median ns/call plus their delta. The first case,
 `A/A direct iallreduce+wait`, runs the direct call on both arms to give the noise floor
 the other cases' deltas are judged against.
 
-**Eleven cases,** in run order: `A/A direct iallreduce+wait` (noise floor), then the
-blocking collectives `allreduce f64 sum`, `allreduce u64 bor`, `allgatherv u8 x64`,
-`broadcast f64` and `barrier`, then `isend+irecv+wait`, `8x(isend+irecv)+waitall`,
-`iallreduce+wait`, `persistent start+wait`, and `8x persistent start_all+wait_all`.
+**Seventeen cases** (13 at `funneled`, see Thread level), in run order:
+`A/A direct iallreduce+wait` (noise floor), then the blocking collectives
+`allreduce f64 sum`, `allreduce u64 bor`, `allgatherv u8 x64`, `broadcast f64` and
+`barrier`, then `isend+irecv+wait`, `8x(isend+irecv)+waitall`, `iallreduce+wait`,
+`persistent start+wait`, and `8x persistent start_all+wait_all`, then the six group-query
+cases `group size T=1`, `group rank T=1`, `group size T=4`, `group size T=8`,
+`group rank T=4` and `group rank T=8`.
+
+The group-query cases compare `MPI_Group_size` / `MPI_Group_rank` with `Group::size` /
+`Group::rank` on one shared group, 20 000 calls per thread. `T=n` is the thread count:
+each round runs one arm on `n` scoped threads released together by a barrier, and the
+round's value is the median of the threads' ns/call. The `T=4` and `T=8` cases run only at
+`multiple`: at `funneled` a thread other than the initializing one cannot call MPI through
+ferrompi. The `T=8` cases are meant to run pinned, for example under `taskset -c 0-7`.
+
+Y and Z, the thread-level overhead figures, are read from the group cases:
+
+- Y is the T=1 delta at multiple minus the same case's multiple delta recorded for 0.6.0, with the sum of both sessions' A/A deltas as tolerance; it is never a same-session multiple-minus-funneled difference.
+- Z is the T=8 ferrompi per-call cost against T=1.
 
 **Thread level.** The environment variable `FERROMPI_BENCH_LEVEL` selects the level MPI
 is initialized with: `funneled` (the default when unset) or `multiple`. Any other value
 panics with `FERROMPI_BENCH_LEVEL must be funneled or multiple, got <value>`. If the
 library grants a different level than requested, the bench prints
-`ffi_overhead: <level> not provided; skipped` and exits 0. All eleven cases run at either
-level.
+`ffi_overhead: <level> not provided; skipped` and exits 0. The eleven original cases and
+the two `T=1` group cases run at either level, 13 case lines at `funneled`; `multiple`
+adds the four `T=4` and `T=8` group cases, 17 case lines.
 
 ```
 FERROMPI_BENCH_LEVEL=multiple mpiexec -n 1 target/release/deps/ffi_overhead-<hash>

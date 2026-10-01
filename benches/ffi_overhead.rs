@@ -23,6 +23,7 @@
 use ferrompi::{Mpi, PersistentRequest, ReduceOp, Request, ThreadLevel};
 use std::ffi::{c_int, c_void};
 use std::hint::black_box;
+use std::sync::Barrier;
 use std::time::Instant;
 
 /// MPICH's `MPI_Request` is a plain `int`.
@@ -113,6 +114,10 @@ extern "C" {
         comm: c_int,
     ) -> c_int;
     fn MPI_Barrier(comm: c_int) -> c_int;
+    fn MPI_Comm_group(comm: c_int, group: *mut c_int) -> c_int;
+    fn MPI_Group_size(group: c_int, size: *mut c_int) -> c_int;
+    fn MPI_Group_rank(group: c_int, rank: *mut c_int) -> c_int;
+    fn MPI_Group_free(group: *mut c_int) -> c_int;
     fn MPI_Start(request: *mut MpiRequest) -> c_int;
     fn MPI_Startall(count: c_int, requests: *mut MpiRequest) -> c_int;
     fn MPI_Wait(request: *mut MpiRequest, status: *mut c_void) -> c_int;
@@ -177,6 +182,59 @@ fn compare(name: &str, iters: usize, mut direct: impl FnMut(), mut ferrompi: imp
         } else {
             ferrompi_ns.push(ns_per_call(iters, &mut ferrompi));
             direct_ns.push(ns_per_call(iters, &mut direct));
+        }
+    }
+
+    let a = median(&mut direct_ns);
+    let b = median(&mut ferrompi_ns);
+    println!(
+        "{name:<34} direct {a:>8.1} ns   ferrompi {b:>8.1} ns   delta {:>+7.1} ns",
+        b - a
+    );
+}
+
+/// Run `f` on `threads` scoped threads released together by a barrier; each worker
+/// times its own `iters` calls and the result is the median of their ns/call. A
+/// single thread runs on the caller, the one thread that may call MPI at `Funneled`.
+fn ns_per_call_threads(threads: usize, iters: usize, f: &(impl Fn() + Sync)) -> f64 {
+    if threads == 1 {
+        return ns_per_call(iters, f);
+    }
+    let barrier = Barrier::new(threads);
+    let mut per_thread: Vec<f64> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    barrier.wait();
+                    ns_per_call(iters, f)
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().unwrap()).collect()
+    });
+    median(&mut per_thread)
+}
+
+/// `compare` with each round run on `threads` threads (see `ns_per_call_threads`).
+fn compare_threads(
+    name: &str,
+    threads: usize,
+    iters: usize,
+    direct: impl Fn() + Sync,
+    ferrompi: impl Fn() + Sync,
+) {
+    ns_per_call_threads(threads, iters / 4 + 1, &direct);
+    ns_per_call_threads(threads, iters / 4 + 1, &ferrompi);
+
+    let mut direct_ns = Vec::with_capacity(ROUNDS);
+    let mut ferrompi_ns = Vec::with_capacity(ROUNDS);
+    for round in 0..ROUNDS {
+        if round % 2 == 0 {
+            direct_ns.push(ns_per_call_threads(threads, iters, &direct));
+            ferrompi_ns.push(ns_per_call_threads(threads, iters, &ferrompi));
+        } else {
+            ferrompi_ns.push(ns_per_call_threads(threads, iters, &ferrompi));
+            direct_ns.push(ns_per_call_threads(threads, iters, &direct));
         }
     }
 
@@ -620,6 +678,59 @@ fn main() {
             for req in &mut reqs_d {
                 MPI_Request_free(req);
             }
+        }
+    }
+
+    // group size / group rank: local group queries with no peer. One shared
+    // ferrompi Group; the direct arm's handle is copied into each closure. T>1 runs
+    // only at Multiple: at Funneled a non-init thread gets ThreadLevelViolation.
+    {
+        let mut g: c_int = 0;
+        // SAFETY: MPI_COMM_WORLD is valid while `mpi` is alive; g is an exclusive
+        // output.
+        unsafe {
+            MPI_Comm_group(MPI_COMM_WORLD, &mut g);
+        }
+        let group = world.group().unwrap();
+
+        let size_direct = move || {
+            let mut n: c_int = 0;
+            // SAFETY: g names the group created above, freed only after the last
+            // case; n is an exclusive output.
+            unsafe {
+                MPI_Group_size(g, &mut n);
+            }
+            black_box(n);
+        };
+        let size_ferrompi = || {
+            black_box(group.size().unwrap());
+        };
+        let rank_direct = move || {
+            let mut r: c_int = 0;
+            // SAFETY: g names the group created above, freed only after the last
+            // case; r is an exclusive output.
+            unsafe {
+                MPI_Group_rank(g, &mut r);
+            }
+            black_box(r);
+        };
+        let rank_ferrompi = || {
+            black_box(group.rank().unwrap());
+        };
+
+        compare_threads("group size T=1", 1, 20_000, size_direct, size_ferrompi);
+        compare_threads("group rank T=1", 1, 20_000, rank_direct, rank_ferrompi);
+        if level == ThreadLevel::Multiple {
+            compare_threads("group size T=4", 4, 20_000, size_direct, size_ferrompi);
+            compare_threads("group size T=8", 8, 20_000, size_direct, size_ferrompi);
+            compare_threads("group rank T=4", 4, 20_000, rank_direct, rank_ferrompi);
+            compare_threads("group rank T=8", 8, 20_000, rank_direct, rank_ferrompi);
+        }
+
+        // SAFETY: g is a live group handle and every thread that used it has been
+        // joined.
+        unsafe {
+            MPI_Group_free(&mut g);
         }
     }
 }
