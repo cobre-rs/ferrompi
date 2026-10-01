@@ -172,6 +172,38 @@ The noise floor ranged from 3.5 ns locally to 0.9 ns under UCX, and every other 
 minimum delta cleared its floor on both. On Open MPI 4.1.6 and 5.0.7 the bench prints the
 skip line.
 
+**Blocking and thread-level results.** The 0.6.0 library on local MPICH 4.2.3 (`ch4:ofi`),
+run as a singleton pinned with `taskset -c 0-7`: three runs per level, taken alternately at
+`funneled` and `multiple`. Values are the median of the three runs' deltas, ferrompi minus
+direct, in ns per call, for the 13 cases at `funneled` and the 17 at `multiple`; `n/a` marks
+a case the level does not run.
+
+| Case | funneled | multiple |
+|---|---|---|
+| A/A direct iallreduce+wait | +0.3 | −0.8 |
+| allreduce f64 sum | +1.7 | +1.4 |
+| allreduce u64 bor | +1.5 | +1.4 |
+| allgatherv u8 x64 | +3.6 | +3.4 |
+| broadcast f64 | +0.8 | +1.0 |
+| barrier | +1.2 | +1.2 |
+| isend+irecv+wait | +36.9 | +38.8 |
+| 8x(isend+irecv)+waitall | +359.0 | +374.4 |
+| iallreduce+wait | +12.2 | +12.3 |
+| persistent start+wait | +8.6 | +5.6 |
+| 8x persistent start_all+wait_all | +135.7 | +124.9 |
+| group size T=1 | +2.0 | +1.8 |
+| group rank T=1 | +2.0 | +2.0 |
+| group size T=4 | n/a | +1.8 |
+| group size T=8 | n/a | +3.3 |
+| group rank T=4 | n/a | +2.0 |
+| group rank T=8 | n/a | +3.0 |
+
+The `A/A direct iallreduce+wait` delta of the three runs was +0.4, +0.2 and +0.3 ns at
+`funneled` and −0.1, −0.8 and −1.3 ns at `multiple`. A run whose A/A delta exceeded 2 ns in
+absolute value would have been re-run; none was. On the measuring machine (an i7-12700KF)
+CPUs 0-7 are four physical cores with two hardware threads each, so the `T=8` cases run two
+threads per core.
+
 ## Design notes
 
 - `criterion_main!` is intentionally **not** used. That macro defines its own `fn main`
