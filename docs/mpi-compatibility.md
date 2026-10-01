@@ -21,7 +21,9 @@ that, Open MPI 5 included, a count above `i32::MAX` returns `Error::Mpi` with
 class `Count`. The variable-count collectives (`gatherv`, `scatterv`,
 `allgatherv`, `alltoallv` and their persistent forms) take their counts as
 `i32` arrays; a count above `i32::MAX` returns that same `Count` error on every
-MPI, including one with `MPI_VERSION >= 4`.
+MPI, including one with `MPI_VERSION >= 4`. `Communicator::allreduce_with_op`
+does too: a `UserOp` is a classic MPI user function with an `int` length, which
+MPICH narrows a larger count into without splitting.
 
 The table below is the outcome of ferrompi's three CI builds: MPICH 4.2.1
 (`ubuntu-24.04`, the Noble package hotfixed to that version, np 2/3/4,

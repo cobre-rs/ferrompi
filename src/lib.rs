@@ -13,10 +13,11 @@
 //! - **Persistent collectives** (MPI 4.0, or Open MPI 5): `*_init` forms of every blocking collective except
 //!   `barrier`, plus five in-place forms, with [`PersistentRequest`] handles
 //! - **Large counts**: with an MPI 4.0 library, a count above `i32::MAX` uses MPI's `_c` call
-//!   (point-to-point, collectives including persistent ones, RMA, user-op reductions); below
+//!   (point-to-point, collectives including persistent ones, RMA); below
 //!   MPI 4.0 it returns [`Error::Mpi`] with class [`MpiErrorClass::Count`]. The V-collectives
-//!   (`gatherv`, `scatterv`, `allgatherv`, `alltoallv`, and their persistent forms) take counts
-//!   as `i32` arrays and return that error on every MPI version.
+//!   (`gatherv`, `scatterv`, `allgatherv`, `alltoallv`, and their persistent forms), which take
+//!   counts as `i32` arrays, and `allreduce_with_op`, whose user function takes an `int` length,
+//!   return that error on every MPI version.
 //! - **Scalar and in-place variants**: `reduce_scalar`, `allreduce_scalar`, `reduce_inplace`,
 //!   `allreduce_inplace`, `scan_scalar`, `exscan_scalar`
 //! - **Point-to-point**: `send`, `recv`, `isend`, `irecv`, `sendrecv`, `probe`, `iprobe`

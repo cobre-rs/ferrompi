@@ -177,9 +177,10 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 - **`SharedWindow::allocate(comm, 0)` now succeeds** (it used to return
   `Err(Internal)` and leak the window).
 - **Counts above `INT_MAX` no longer truncate.** Below MPI 4.0, an
-  oversized count now returns `Err(Count)`; the v-collectives return
-  `Err(Count)` on every MPI version; RMA calls now use the MPI 4.0
-  large-count variants on MPI 4.0 and later.
+  oversized count now returns `Err(Count)`; the v-collectives and
+  `allreduce_with_op` return `Err(Count)` on every MPI version (MPICH
+  narrowed a user op's length to `int` without splitting the reduction);
+  RMA calls now use the MPI 4.0 large-count variants on MPI 4.0 and later.
 - **A `UserOp` still alive at finalize is now freed and its closure
   dropped** instead of leaking.
 - **The finalize sweep now frees only inactive persistent requests**; a

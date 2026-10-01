@@ -268,6 +268,8 @@ impl Communicator {
     /// # Errors
     ///
     /// - [`Error::InvalidBuffer`] if `send.len() != recv.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `send.len()` exceeds `i32::MAX`, on every MPI version
     /// - An MPI error if the library rejects the call
     ///
     /// # Example

@@ -4653,17 +4653,9 @@ int ferrompi_allreduce_user_op(
     if (op_handle < 0 || op_handle >= MAX_OPS) return MPI_ERR_ARG;
     MPI_Op op = atomic_load_explicit(&op_table[op_handle], memory_order_acquire);
     if (op == MPI_OP_NULL) return MPI_ERR_OP;
-    /* MPI-4.0 section 6.9.5: when a large count is narrowed to the classic
-     * MPI_User_function's int len, MPI calls that function multiple times
-     * with a sequence of len values summing to count, so an op created with
-     * the classic MPI_Op_create remains valid for a large-count reduction. */
-    if (count > INT_MAX) {
-#if MPI_VERSION >= 4
-        return MPI_Allreduce_c(sendbuf, recvbuf, (MPI_Count)count, dt, op, comm);
-#else
-        return MPI_ERR_COUNT;
-#endif
-    }
+    /* A user op is a classic MPI_User_function with an int length; MPICH
+     * narrows a larger count into it without splitting the reduction. */
+    if (count > INT_MAX) return MPI_ERR_COUNT;
     return MPI_Allreduce(sendbuf, recvbuf, (int)count, dt, op, comm);
 }
 

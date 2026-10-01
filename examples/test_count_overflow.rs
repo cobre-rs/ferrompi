@@ -9,11 +9,12 @@
 //! instead (covered by the MPICH large-count job), so this test SKIPs
 //! before allocating the two 4 GiB buffers a full run would otherwise need.
 //!
-//! V-collectives have no `_c` path on any MPI version, so they are checked
-//! before that skip. RMA is exercised through a raw `extern "C"` call to
-//! `ferrompi_put`, not the safe `Win::put` API: the window's bounds check
-//! rejects a mismatched `target_count` in Rust before the C guard is ever
-//! reached, so only a direct C call can observe it — and only on MPI < 4,
+//! V-collectives have no `_c` path on any MPI version, and a user op's classic
+//! function takes an `int` length, so both are checked before that skip. RMA
+//! is exercised through a raw `extern "C"` call to `ferrompi_put`, not the
+//! safe `Win::put` API: the window's bounds check rejects a mismatched
+//! `target_count` in Rust before the C guard is ever reached, so only a
+//! direct C call can observe it — and only on MPI < 4,
 //! since on MPI >= 4 the fixed shim would hand the oversized count to
 //! `MPI_Put_c` over a four-element window.
 //!
@@ -128,12 +129,36 @@ fn rma_put(world: &Communicator) {
     );
 }
 
+/// A user op's classic function takes an `int` length: `allreduce_with_op`
+/// must reject a count above `INT_MAX` on every MPI version.
+fn user_op_reduction(world: &Communicator) {
+    // Zeroed allocations whose pages the fixed shim never touches: the guard
+    // must fire before any MPI call reads or writes them.
+    let send = vec![0u8; N];
+    let mut recv = vec![0u8; N];
+
+    let max_op: UserOp<u8> = UserOp::new(|invec: &[u8], inoutvec: &mut [u8]| {
+        for (x, y) in invec.iter().zip(inoutvec.iter_mut()) {
+            *y = (*x).max(*y);
+        }
+    })
+    .expect("UserOp::new failed");
+    let allreduce_with_op_ok =
+        common::is_count(&world.allreduce_with_op(&send, &mut recv, &max_op));
+    common::check(
+        world,
+        allreduce_with_op_ok,
+        "allreduce_with_op of 2^32+16 bytes returns Count",
+    );
+}
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
     let rank = world.rank();
 
     v_collectives(&world);
+    user_op_reduction(&world);
 
     if common::mpi_major() >= 4 {
         common::skip(&world, "MPI >= 4 takes the _c large-count path");
@@ -169,20 +194,6 @@ fn main() {
         &world,
         allreduce_ok,
         "allreduce of 2^32+16 bytes returns Count",
-    );
-
-    let max_op: UserOp<u8> = UserOp::new(|invec: &[u8], inoutvec: &mut [u8]| {
-        for (x, y) in invec.iter().zip(inoutvec.iter_mut()) {
-            *y = (*x).max(*y);
-        }
-    })
-    .expect("UserOp::new failed");
-    let allreduce_with_op_ok =
-        common::is_count(&world.allreduce_with_op(&send, &mut recv, &max_op));
-    common::check(
-        &world,
-        allreduce_with_op_ok,
-        "allreduce_with_op of 2^32+16 bytes returns Count",
     );
 
     // A red run's ferrompi_ibcast truncates the count and actually issues a
