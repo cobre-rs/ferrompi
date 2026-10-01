@@ -349,7 +349,9 @@ impl Mpi {
     /// once MPI has been finalized, or `Err(`[`Error::Mpi`]`)` if
     /// `MPI_Init_thread` itself fails. An error inside `MPI_Init_thread`
     /// itself usually aborts the process before `Err(`[`Error::Mpi`]`)` can
-    /// be returned; see [`Error`].
+    /// be returned; see [`Error`]. That error's class is
+    /// [`MpiErrorClass::Unknown`], because MPI cannot be asked for the class
+    /// of an error from its own initialization.
     pub fn init_thread(required: ThreadLevel) -> Result<Self> {
         rt::begin_init()?;
 
@@ -374,7 +376,7 @@ impl Mpi {
         if ret != 0 {
             rt::abandon_init();
             return Err(Error::Mpi {
-                class: MpiErrorClass::Raw(ret),
+                class: MpiErrorClass::Unknown,
                 code: ret,
                 message: format!("MPI_Init_thread failed with code {ret}"),
                 operation: Some("init_thread"),

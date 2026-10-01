@@ -296,8 +296,41 @@ pub enum Error {
     #[error("MPI call not permitted on this thread at the provided thread level")]
     ThreadLevelViolation,
 
+    /// An argument outside what the call accepts, detected before any MPI call.
+    #[error("invalid argument `{arg}`: {reason}")]
+    #[non_exhaustive]
+    InvalidArgument {
+        /// The name of the offending argument.
+        arg: &'static str,
+        /// Why the call rejects the argument.
+        reason: &'static str,
+    },
+
+    /// A buffer whose length does not match what the call needs, detected
+    /// before any MPI call.
+    #[error("buffer `{arg}` has {actual} elements, {required} required")]
+    #[non_exhaustive]
+    BufferSize {
+        /// The name of the offending buffer argument.
+        arg: &'static str,
+        /// The exact length the call needs, or the minimum when the method
+        /// documents that a longer buffer is accepted.
+        required: usize,
+        /// The length the caller passed.
+        actual: usize,
+    },
+
+    /// The object is not in a state that allows the call.
+    #[error("invalid state: {reason}")]
+    #[non_exhaustive]
+    InvalidState {
+        /// Why the object's current state rejects the call.
+        reason: &'static str,
+    },
+
     /// MPI error with class, code, descriptive message, and optional operation name.
     #[error("{}", fmt_mpi(.class, .code, .message, .operation))]
+    #[non_exhaustive]
     Mpi {
         /// The error class (category of error).
         class: MpiErrorClass,
@@ -344,6 +377,7 @@ pub enum Error {
     /// whose call succeeded hold theirs, so collective calls on it cannot
     /// complete; retrying is a new collective call on every rank.
     #[error("ferrompi {resource} table is full")]
+    #[non_exhaustive]
     ResourceExhausted {
         /// Which internal handle table overflowed.
         resource: ResourceKind,
@@ -709,5 +743,32 @@ mod tests {
             resource: ResourceKind::Window,
         };
         assert_eq!(format!("{err}"), "ferrompi window table is full");
+    }
+
+    #[test]
+    fn invalid_argument_display() {
+        let err = Error::InvalidArgument {
+            arg: "root",
+            reason: "negative rank",
+        };
+        assert_eq!(format!("{err}"), "invalid argument `root`: negative rank");
+    }
+
+    #[test]
+    fn buffer_size_display() {
+        let err = Error::BufferSize {
+            arg: "recv",
+            required: 4,
+            actual: 3,
+        };
+        assert_eq!(format!("{err}"), "buffer `recv` has 3 elements, 4 required");
+    }
+
+    #[test]
+    fn invalid_state_display() {
+        let err = Error::InvalidState {
+            reason: "request is already active",
+        };
+        assert_eq!(format!("{err}"), "invalid state: request is already active");
     }
 }

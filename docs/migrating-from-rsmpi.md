@@ -562,7 +562,7 @@ on every fallible call. `ferrompi::Error::Mpi` carries four fields:
 if let Err(err) = world.allreduce(&send, &mut recv, ferrompi::ReduceOp::Sum) {
     // Error is #[non_exhaustive], so a match needs a wildcard arm.
     match err {
-        Error::Mpi { class, code, message, operation } => {
+        Error::Mpi { class, code, message, operation, .. } => {
             eprintln!("{operation:?} failed: {class:?} (code {code}): {message}");
         }
         _ => eprintln!("{err}"),

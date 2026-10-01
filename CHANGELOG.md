@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **`Error` gains `InvalidArgument`, `BufferSize` and `InvalidState`, and
+  its struct variants are `#[non_exhaustive]`.** Migration: patterns on
+  `Error::Mpi { … }` and `Error::ResourceExhausted { … }` need a trailing
+  `..`.
+
+### Fixed
+
+- **A full user-op table returns `Error::ResourceExhausted` with resource
+  `Operation` instead of `Error::Mpi` with class `Other`; an
+  `MPI_Init_thread` failure reports class `Unknown` instead of its return
+  code.**
+
 ## [0.6.0] - 2026-10-01
 
 This release hardens soundness and MPI correctness: argument validation,

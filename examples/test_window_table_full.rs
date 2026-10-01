@@ -27,7 +27,8 @@ fn main() {
                     matches!(
                         err,
                         Error::ResourceExhausted {
-                            resource: ResourceKind::Window
+                            resource: ResourceKind::Window,
+                            ..
                         }
                     ),
                     "Win::allocate table-full error",
@@ -45,7 +46,8 @@ fn main() {
         matches!(
             shared_err,
             Err(Error::ResourceExhausted {
-                resource: ResourceKind::Window
+                resource: ResourceKind::Window,
+                ..
             })
         ),
         "SharedWindow::allocate table-full error",

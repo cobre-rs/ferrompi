@@ -19,7 +19,7 @@ use std::os::raw::c_void;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::datatype::MpiDatatype;
-use crate::error::{Error, MpiErrorClass, Result};
+use crate::error::{Error, Result};
 use crate::ffi;
 use crate::rt;
 
@@ -258,7 +258,8 @@ pub unsafe extern "C" fn ferrompi_op_drop_closure(slot: i32) {
 /// # Slot-table limit
 ///
 /// At most 16 `UserOp` instances may be live concurrently per process.
-/// Attempting to create a seventeenth returns [`Error::Mpi`] with class `Other`.
+/// Attempting to create a seventeenth returns [`Error::ResourceExhausted`] with
+/// resource [`ResourceKind::Operation`](crate::ResourceKind::Operation).
 ///
 /// If a `UserOp` outlives the `Mpi` handle, finalizing MPI frees its op and
 /// drops its closure, and dropping the `UserOp` afterwards does nothing.
@@ -329,12 +330,7 @@ impl<T: MpiDatatype> UserOp<T> {
         // before this function reads it below (guarded by the `ret != 0` check).
         let ret = unsafe { ffi::ferrompi_op_alloc_slot(&mut slot) };
         if ret != 0 {
-            return Err(Error::Mpi {
-                class: MpiErrorClass::Other,
-                code: ret,
-                message: "op-slot table is full (MAX_OPS=16 concurrent UserOps)".to_string(),
-                operation: Some("op_create"),
-            });
+            return Err(Error::from_code_with_op(ret, "op_create"));
         }
         let idx = slot as usize;
         debug_assert!(idx < MAX_OPS, "slot out of range");
