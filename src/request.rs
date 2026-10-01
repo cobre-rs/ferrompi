@@ -1,35 +1,78 @@
 //! Request handles for nonblocking MPI operations.
 
+#[cfg(debug_assertions)]
+use crate::error::FERROMPI_ERR_THREAD_LEVEL;
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::rt;
+#[cfg(debug_assertions)]
+use std::io::Write;
 
 /// Element count at or below which request-handle scratch buffers live on the
 /// stack. Draining a handful-to-few-dozen in-flight requests on the completion
 /// path (halo exchange, ping-pong, progress loops) then incurs no allocator
-/// traffic; larger batches fall back to the heap. Mirrors `FERROMPI_REQ_STACK`
-/// in `csrc/ferrompi.c`.
+/// traffic; larger batches fall back to the heap. Used by both `Request` and
+/// `PersistentRequest`. Mirrors `FERROMPI_REQ_STACK` in `csrc/ferrompi.c`.
 const HANDLE_STACK_CAP: usize = 64;
 
-/// Run `f` with the request handles copied into a stack buffer when the batch is
-/// small, falling back to a heap `Vec` only for large batches. Removes the
-/// per-call `Vec<i64>` allocation on the completion path (PERF-03).
+/// Run `f` with the handles of `items` copied into a stack buffer when the
+/// batch is small, falling back to a heap `Vec` only for large batches, and
+/// a same-length zeroed `done` buffer for `f` to report completions into.
+/// After `f` returns, calls `on_done` on every item whose `done` byte is
+/// non-zero, whatever `f`'s result. Removes the per-call `Vec<i64>`
+/// allocation on the completion path. Shared by `Request` and
+/// `PersistentRequest`.
 #[inline]
-fn with_handles<R>(requests: &[Request], f: impl FnOnce(&mut [i64]) -> R) -> R {
-    let len = requests.len();
+pub(crate) fn with_handles<E, R>(
+    items: &mut [E],
+    handle: impl Fn(&E) -> i64,
+    f: impl FnOnce(&[i64], &mut [u8]) -> R,
+    on_done: impl Fn(&mut E),
+) -> R {
+    let len = items.len();
     if len <= HANDLE_STACK_CAP {
-        let mut buf = [0i64; HANDLE_STACK_CAP];
-        for (slot, req) in buf[..len].iter_mut().zip(requests) {
-            *slot = req.handle;
+        let mut hbuf = [0i64; HANDLE_STACK_CAP];
+        let mut dbuf = [0u8; HANDLE_STACK_CAP];
+        for (slot, item) in hbuf[..len].iter_mut().zip(items.iter()) {
+            *slot = handle(item);
         }
-        f(&mut buf[..len])
+        let result = f(&hbuf[..len], &mut dbuf[..len]);
+        for (item, &done) in items.iter_mut().zip(&dbuf[..len]) {
+            if done != 0 {
+                on_done(item);
+            }
+        }
+        result
     } else {
-        let mut buf: Vec<i64> = requests.iter().map(|r| r.handle).collect();
-        f(&mut buf)
+        let hvec: Vec<i64> = items.iter().map(&handle).collect();
+        let mut dvec = vec![0u8; len];
+        let result = f(&hvec, &mut dvec);
+        for (item, &done) in items.iter_mut().zip(&dvec) {
+            if done != 0 {
+                on_done(item);
+            }
+        }
+        result
     }
 }
 
+/// The handle a batch call passes for `r`: `-1` (the C layer's null
+/// handle) once `r` has completed.
+fn handle_or_skip(r: &Request) -> i64 {
+    if r.completed {
+        -1
+    } else {
+        r.handle
+    }
+}
+
+/// Records that MPI completed `r`.
+fn mark_completed(r: &mut Request) {
+    r.completed = true;
+}
+
 /// Run `f` with a zeroed `i32` index scratch buffer of length `len`,
-/// stack-allocated when small (PERF-03). Used for the `*some` output indices.
+/// stack-allocated when small. Used for the `*some` output indices.
 #[inline]
 fn with_index_buf<R>(len: usize, f: impl FnOnce(&mut [i32]) -> R) -> R {
     if len <= HANDLE_STACK_CAP {
@@ -39,6 +82,38 @@ fn with_index_buf<R>(len: usize, f: impl FnOnce(&mut [i32]) -> R) -> R {
         let mut buf = vec![0i32; len];
         f(&mut buf)
     }
+}
+
+/// Check a batch wait/test return code, appending the failing request's
+/// slice index to an `Error::Mpi` message. `failed` is the caller-slice
+/// index of the failing request as the C shim wrote it (`-1` when it
+/// found none). Shared by `Request::wait_all`, `Request::wait_any`,
+/// `Request::wait_some`, `Request::test_any`, `Request::test_some` and
+/// `PersistentRequest::wait_all`.
+pub(crate) fn check_batch(ret: i32, operation: &'static str, failed: i64) -> Result<()> {
+    match Error::check_with_op(ret, operation) {
+        Err(Error::Mpi {
+            class,
+            code,
+            message,
+            operation,
+        }) if failed >= 0 => Err(Error::Mpi {
+            class,
+            code,
+            message: format!("{message} (request {failed})"),
+            operation,
+        }),
+        other => other,
+    }
+}
+
+/// The operation family a [`Request`] came from; only point-to-point
+/// requests can be cancelled.
+pub(crate) enum RequestKind {
+    PointToPoint,
+    Collective,
+    #[cfg(feature = "rma")]
+    Rma,
 }
 
 /// A handle to a nonblocking MPI operation.
@@ -74,9 +149,6 @@ fn with_index_buf<R>(len: usize, f: impl FnOnce(&mut [i32]) -> R) -> R {
 /// so that failure modes remain observable.** See also the migration guide note
 /// in [`doc::migrating_from_rsmpi`](crate::doc::migrating_from_rsmpi).
 ///
-/// A `MPI_Cancel`-then-`MPI_Wait`-with-timeout approach to make drop non-blocking
-/// is under consideration and planned for v0.5.
-///
 /// # Example
 ///
 /// ```no_run
@@ -102,18 +174,24 @@ fn with_index_buf<R>(len: usize, f: impl FnOnce(&mut [i32]) -> R) -> R {
 pub struct Request {
     handle: i64,
     completed: bool,
+    kind: RequestKind,
 }
 
 impl Request {
     /// Create a new request from a raw handle.
-    pub(crate) fn new(handle: i64) -> Self {
+    pub(crate) fn new(handle: i64, kind: RequestKind) -> Self {
         Request {
             handle,
             completed: false,
+            kind,
         }
     }
 
     /// Get the raw request handle (for advanced use).
+    ///
+    /// The value is an opaque table handle carrying a generation counter in
+    /// its high bits; it names no request once this `Request` completes,
+    /// because completion frees the underlying table slot for reuse.
     pub fn raw_handle(&self) -> i64 {
         self.handle
     }
@@ -127,17 +205,40 @@ impl Request {
     ///
     /// Blocks until the operation is finished. After this returns successfully,
     /// the associated buffers can be safely accessed.
+    ///
+    /// On a thread the active thread level does not allow, the wait is
+    /// rejected and this call drops the still-in-flight `self` before
+    /// returning, which aborts the process (see the `Drop` impl below).
+    ///
+    /// In a debug build at `Serialized`, a wait that overlaps another
+    /// thread's MPI call can neither run nor hand the request back, so it
+    /// prints a message and aborts the process.
     #[inline]
     pub fn wait(mut self) -> Result<()> {
         if self.completed {
             return Ok(());
         }
-        // Mark completed BEFORE the FFI call so that Drop does not attempt a
-        // second MPI_Wait on error.  A request handed to MPI_Wait is consumed
-        // by MPI regardless of whether MPI reports an error; re-waiting on it
-        // would be a use-after-free of the request handle.
-        self.completed = true;
+        Error::check_with_op(rt::enter(), "wait")?;
+        // SAFETY: self.handle is a valid MPI request handle registered in the
+        // C-side request table by the nonblocking constructor that produced
+        // this Request; self.completed was false on entry (checked above), so
+        // MPI_Wait has not already consumed this handle.
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
+        #[cfg(debug_assertions)]
+        if ret == FERROMPI_ERR_THREAD_LEVEL {
+            // rt::enter() above already returns this same sentinel for a call
+            // from a non-init thread below Serialized, and propagates it via
+            // `?` before reaching here; so this can only be the Serialized
+            // overlap check rejecting the call before MPI saw it. `self`
+            // cannot be handed back, and letting Drop wait would overlap the
+            // other thread's MPI call.
+            let _ = std::io::stderr().write_all(
+                b"ferrompi: Request::wait overlapped another thread's MPI call at ThreadLevel::Serialized\n",
+            );
+            std::process::abort();
+        }
+        // MPI consumed the request whatever it returned; Drop must not wait on it again.
+        self.completed = true;
         Error::check_with_op(ret, "wait")
     }
 
@@ -148,92 +249,133 @@ impl Request {
     /// # Note
     ///
     /// If this returns `true`, the request is consumed and you should not call
-    /// `wait()` or `test()` again.
+    /// `wait()` or `test()` again. A test that fails with an error still marks
+    /// the request completed when MPI completed it (e.g. a truncated
+    /// receive), so a later `Drop` does not attempt a second `MPI_Wait` on the
+    /// same slot.
     #[inline]
     pub fn test(&mut self) -> Result<bool> {
         if self.completed {
             return Ok(true);
         }
         let mut flag: i32 = 0;
+        // SAFETY: self.handle is a valid MPI request handle registered in the
+        // C-side request table; self.completed was false on entry (checked
+        // above), so MPI_Test has not already consumed this handle. flag is a
+        // local out-parameter written before this function reads it below.
         let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag) };
-        Error::check_with_op(ret, "test")?;
+        // Set completed from flag BEFORE the `?` below: ferrompi_test frees
+        // the slot and reports flag=1 whenever MPI completed the request,
+        // even when it returns an error (e.g. MPI_ERR_TRUNCATE), so Drop must
+        // not re-wait on that now-freed handle.
         if flag != 0 {
             self.completed = true;
         }
+        Error::check_with_op(ret, "test")?;
         Ok(flag != 0)
     }
 
     /// Wait for any one request in a collection to complete.
     ///
-    /// Blocks until at least one request completes and returns its index. Returns
-    /// `Ok(None)` when all requests were already `MPI_REQUEST_NULL` on entry.
+    /// Blocks until at least one not-yet-completed request completes and
+    /// returns its index. Completed entries are skipped; `wait_any` returns
+    /// `Ok(None)` once every entry in the slice is completed (or the slice
+    /// was empty), which is what lets the standard MPI Waitany loop idiom —
+    /// calling `wait_any` repeatedly on the same slice without removing
+    /// completed entries — terminate.
     ///
-    /// The completed `Request` is marked `completed = true` in place. Removing it
-    /// from the vector is the caller's responsibility.
+    /// The completed `Request` is marked completed in place. Removing it
+    /// from the vector is optional, not required for correctness.
+    ///
+    /// On a failed request, the returned error carries that request's own
+    /// class and code. When the MPI library reports which request failed
+    /// (MPICH and Open MPI do), the message also ends with `(request N)`,
+    /// `N` being its index in `requests`.
     pub fn wait_any(requests: &mut [Request]) -> Result<Option<usize>> {
         if requests.is_empty() {
             return Ok(None);
         }
         let mut index: i32 = 0;
         // SAFETY: with_handles provides a valid, contiguous [i64] of the request
-        // handles whose length we pass as count; index is a valid stack-allocated
-        // i32 output parameter.
-        let ret = with_handles(requests, |handles| unsafe {
-            ffi::ferrompi_waitany(handles.len() as i64, handles.as_mut_ptr(), &mut index)
-        });
-        Error::check_with_op(ret, "waitany")?;
+        // handles and a same-length [u8] done buffer, both sized to the count we
+        // pass; index is a valid stack-allocated i32 output parameter.
+        let ret = with_handles(
+            requests,
+            handle_or_skip,
+            |handles, done| unsafe {
+                ffi::ferrompi_waitany(
+                    handles.len() as i64,
+                    handles.as_ptr(),
+                    &mut index,
+                    done.as_mut_ptr(),
+                )
+            },
+            mark_completed,
+        );
+        check_batch(ret, "waitany", index as i64)?;
         if index < 0 {
             return Ok(None);
         }
-        let idx = index as usize;
-        requests[idx].completed = true;
-        Ok(Some(idx))
+        Ok(Some(index as usize))
     }
 
     /// Wait until at least one request in a collection completes.
     ///
     /// Returns the indices of all requests that completed in this call.
-    /// Returns `Ok(vec![])` when no requests were active (all null or all already done).
+    /// Returns `Ok(vec![])` when no requests were active (all null, all
+    /// already completed, or a mix of the two).
     ///
-    /// The completed `Request`s are marked `completed = true` in place. Removing
-    /// them from the vector is the caller's responsibility.
+    /// Completed entries are skipped. The completed `Request`s are marked
+    /// completed in place. Removing them from the vector is optional, not
+    /// required for correctness.
+    ///
+    /// On a failed request, the returned error carries that request's own
+    /// class and code, and its message ends with `(request N)`, `N` being
+    /// its index in `requests`.
     pub fn wait_some(requests: &mut [Request]) -> Result<Vec<usize>> {
         if requests.is_empty() {
             return Ok(vec![]);
         }
         let len = requests.len();
         let mut outcount: i64 = 0;
-        // SAFETY: with_handles / with_index_buf supply valid, appropriately-sized
-        // [i64] handle and [i32] index buffers whose lengths match `count`;
-        // outcount is a valid stack-allocated output parameter.
-        let (ret, completed) = with_handles(requests, |handles| {
-            with_index_buf(len, |indices| {
-                let ret = unsafe {
-                    ffi::ferrompi_waitsome(
-                        handles.len() as i64,
-                        handles.as_mut_ptr(),
-                        &mut outcount,
-                        indices.as_mut_ptr(),
-                    )
-                };
-                // outcount == -1 means all null; 0 means none completed (should
-                // not happen for waitsome, but guard defensively). Only collect
-                // the completed indices while the index buffer is in scope.
-                let completed: Vec<usize> = if ret == 0 && outcount > 0 {
-                    indices[..outcount as usize]
-                        .iter()
-                        .map(|&i| i as usize)
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                (ret, completed)
-            })
-        });
-        Error::check_with_op(ret, "waitsome")?;
-        for &idx in &completed {
-            requests[idx].completed = true;
-        }
+        let mut failed: i64 = -1;
+        let (ret, completed) = with_handles(
+            requests,
+            handle_or_skip,
+            |handles, done| {
+                with_index_buf(len, |indices| {
+                    // SAFETY: with_handles / with_index_buf supply valid,
+                    // appropriately-sized [i64] handle, [u8] done and [i32] index
+                    // buffers whose lengths match `count`; outcount and failed are
+                    // valid stack-allocated output parameters.
+                    let ret = unsafe {
+                        ffi::ferrompi_waitsome(
+                            handles.len() as i64,
+                            handles.as_ptr(),
+                            &mut outcount,
+                            indices.as_mut_ptr(),
+                            done.as_mut_ptr(),
+                            &mut failed,
+                        )
+                    };
+                    // outcount == -1 means all null or a rejected result. outcount and
+                    // indices are written whatever ret is, so collect from them
+                    // unconditionally. Only collect the completed indices while the
+                    // index buffer is in scope.
+                    let completed: Vec<usize> = if outcount > 0 {
+                        indices[..outcount as usize]
+                            .iter()
+                            .map(|&i| i as usize)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    (ret, completed)
+                })
+            },
+            mark_completed,
+        );
+        check_batch(ret, "waitsome", failed)?;
         Ok(completed)
     }
 
@@ -242,8 +384,15 @@ impl Request {
     /// Returns `Ok(Some(idx))` if a request completed, `Ok(None)` if no request
     /// has completed yet or all requests were already null.
     ///
-    /// The completed `Request` is marked `completed = true` in place. Removing it
-    /// from the vector is the caller's responsibility.
+    /// Completed entries are skipped, so calling `test_any` again after every
+    /// entry has completed keeps returning `Ok(None)` rather than erroring.
+    /// The completed `Request` is marked completed in place. Removing it
+    /// from the vector is optional, not required for correctness.
+    ///
+    /// On a failed request, the returned error carries that request's own
+    /// class and code. When the MPI library reports which request failed
+    /// (MPICH and Open MPI do), the message also ends with `(request N)`,
+    /// `N` being its index in `requests`.
     pub fn test_any(requests: &mut [Request]) -> Result<Option<usize>> {
         if requests.is_empty() {
             return Ok(None);
@@ -251,17 +400,23 @@ impl Request {
         let mut index: i32 = 0;
         let mut flag: i32 = 0;
         // SAFETY: with_handles provides a valid, contiguous [i64] of the request
-        // handles whose length we pass as count; index and flag are valid
-        // stack-allocated i32 output parameters.
-        let ret = with_handles(requests, |handles| unsafe {
-            ffi::ferrompi_testany(
-                handles.len() as i64,
-                handles.as_mut_ptr(),
-                &mut index,
-                &mut flag,
-            )
-        });
-        Error::check_with_op(ret, "testany")?;
+        // handles and a same-length [u8] done buffer, both sized to the count we
+        // pass; index and flag are valid stack-allocated i32 output parameters.
+        let ret = with_handles(
+            requests,
+            handle_or_skip,
+            |handles, done| unsafe {
+                ffi::ferrompi_testany(
+                    handles.len() as i64,
+                    handles.as_ptr(),
+                    &mut index,
+                    &mut flag,
+                    done.as_mut_ptr(),
+                )
+            },
+            mark_completed,
+        );
+        check_batch(ret, "testany", index as i64)?;
         if flag == 0 {
             return Ok(None);
         }
@@ -269,9 +424,7 @@ impl Request {
             // All requests were null — nothing to mark.
             return Ok(None);
         }
-        let idx = index as usize;
-        requests[idx].completed = true;
-        Ok(Some(idx))
+        Ok(Some(index as usize))
     }
 
     /// Test how many requests in a collection have completed (non-blocking).
@@ -279,44 +432,57 @@ impl Request {
     /// Returns the indices of all requests that have completed at the moment of
     /// the call. Returns `Ok(vec![])` when none have completed or all were null.
     ///
-    /// The completed `Request`s are marked `completed = true` in place. Removing
-    /// them from the vector is the caller's responsibility.
+    /// Completed entries are skipped. The completed `Request`s are marked
+    /// completed in place. Removing them from the vector is optional, not
+    /// required for correctness.
+    ///
+    /// On a failed request, the returned error carries that request's own
+    /// class and code, and its message ends with `(request N)`, `N` being
+    /// its index in `requests`.
     pub fn test_some(requests: &mut [Request]) -> Result<Vec<usize>> {
         if requests.is_empty() {
             return Ok(vec![]);
         }
         let len = requests.len();
         let mut outcount: i64 = 0;
-        // SAFETY: with_handles / with_index_buf supply valid, appropriately-sized
-        // [i64] handle and [i32] index buffers whose lengths match `count`;
-        // outcount is a valid stack-allocated output parameter.
-        let (ret, completed) = with_handles(requests, |handles| {
-            with_index_buf(len, |indices| {
-                let ret = unsafe {
-                    ffi::ferrompi_testsome(
-                        handles.len() as i64,
-                        handles.as_mut_ptr(),
-                        &mut outcount,
-                        indices.as_mut_ptr(),
-                    )
-                };
-                // outcount == -1 means all null; 0 means none completed yet.
-                // Collect completed indices only while the index buffer is alive.
-                let completed: Vec<usize> = if ret == 0 && outcount > 0 {
-                    indices[..outcount as usize]
-                        .iter()
-                        .map(|&i| i as usize)
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                (ret, completed)
-            })
-        });
-        Error::check_with_op(ret, "testsome")?;
-        for &idx in &completed {
-            requests[idx].completed = true;
-        }
+        let mut failed: i64 = -1;
+        let (ret, completed) = with_handles(
+            requests,
+            handle_or_skip,
+            |handles, done| {
+                with_index_buf(len, |indices| {
+                    // SAFETY: with_handles / with_index_buf supply valid,
+                    // appropriately-sized [i64] handle, [u8] done and [i32] index
+                    // buffers whose lengths match `count`; outcount and failed are
+                    // valid stack-allocated output parameters.
+                    let ret = unsafe {
+                        ffi::ferrompi_testsome(
+                            handles.len() as i64,
+                            handles.as_ptr(),
+                            &mut outcount,
+                            indices.as_mut_ptr(),
+                            done.as_mut_ptr(),
+                            &mut failed,
+                        )
+                    };
+                    // outcount == -1 means all null; 0 means none completed yet.
+                    // outcount and indices are written whatever ret is, so collect
+                    // from them unconditionally. Collect completed indices only
+                    // while the index buffer is alive.
+                    let completed: Vec<usize> = if outcount > 0 {
+                        indices[..outcount as usize]
+                            .iter()
+                            .map(|&i| i as usize)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    (ret, completed)
+                })
+            },
+            mark_completed,
+        );
+        check_batch(ret, "testsome", failed)?;
         Ok(completed)
     }
 
@@ -339,7 +505,15 @@ impl Request {
         Ok(flag != 0)
     }
 
-    /// Request cancellation of a pending nonblocking operation.
+    /// Request cancellation of a pending point-to-point operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NotSupported`] without calling into MPI when `self`
+    /// is a nonblocking-collective or RMA request: the MPI standard defines
+    /// `MPI_Cancel` only for point-to-point requests, and both MPICH and
+    /// Open MPI reject it for other request kinds. The request is left
+    /// pending; follow up with [`wait`](Request::wait) as usual.
     ///
     /// # Portability
     ///
@@ -365,6 +539,18 @@ impl Request {
     /// # Ok(()) }
     /// ```
     pub fn cancel(&mut self) -> Result<()> {
+        match self.kind {
+            RequestKind::PointToPoint => {}
+            RequestKind::Collective => {
+                return Err(Error::NotSupported(
+                    "cancel of a nonblocking collective request".into(),
+                ));
+            }
+            #[cfg(feature = "rma")]
+            RequestKind::Rma => {
+                return Err(Error::NotSupported("cancel of an RMA request".into()));
+            }
+        }
         if self.completed {
             return Ok(());
         }
@@ -380,34 +566,38 @@ impl Request {
     /// Takes the requests by `&mut [Request]` (rather than consuming a
     /// `Vec<Request>`) so a caller can reuse one backing buffer across a drain
     /// loop, mirroring
-    /// [`PersistentRequest::wait_all`](crate::PersistentRequest::wait_all). On
-    /// success every request is marked completed in place, so the caller's later
-    /// `Drop` of each is a no-op; on error the requests are left active so their
-    /// `Drop` re-waits each one (preserving the prior cleanup semantics).
+    /// [`PersistentRequest::wait_all`](crate::PersistentRequest::wait_all).
+    /// Whatever the result, every request MPI completed — one that completed
+    /// with an error included — is marked completed in place; the others
+    /// stay pending. The same policy applies to `PersistentRequest::wait_all`.
+    ///
+    /// On a failed request, the returned error carries that request's own
+    /// class and code, and its message ends with `(request N)`, `N` being
+    /// its index in `requests`.
     pub fn wait_all(requests: &mut [Request]) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
         }
 
+        let mut failed: i64 = -1;
         // SAFETY: with_handles provides a valid, contiguous [i64] of the request
-        // handles whose length we pass as count.
-        let ret = with_handles(requests, |handles| unsafe {
-            ffi::ferrompi_waitall(handles.len() as i64, handles.as_mut_ptr())
-        });
+        // handles and a same-length [u8] done buffer, both sized to the count we
+        // pass; failed is a valid stack-allocated i64 output parameter.
+        let ret = with_handles(
+            requests,
+            handle_or_skip,
+            |handles, done| unsafe {
+                ffi::ferrompi_waitall(
+                    handles.len() as i64,
+                    handles.as_ptr(),
+                    done.as_mut_ptr(),
+                    &mut failed,
+                )
+            },
+            mark_completed,
+        );
 
-        if ret == 0 {
-            // Success: MPI consumed and freed every handle. Mark each completed
-            // so the caller's eventual Drop does not re-wait it (which would be a
-            // use-after-free of an already-freed request handle).
-            for req in requests.iter_mut() {
-                req.completed = true;
-            }
-            Ok(())
-        } else {
-            // Error: leave requests active so each one's Drop re-waits it,
-            // matching the prior by-value behavior's cleanup path.
-            Err(Error::from_code_with_op(ret, "waitall"))
-        }
+        check_batch(ret, "waitall", failed)
     }
 }
 
@@ -423,45 +613,38 @@ impl Drop for Request {
     /// `wait()` must preserve that assignment, or this `Drop` impl becomes
     /// unsound (double-freeing the request handle).
     ///
-    /// The `MPI_Cancel`-then-`MPI_Wait`-with-timeout alternative is deferred
-    /// to v0.5 (see ADR-0004 §"Drop behavior for nonblocking Request").
+    /// After `Mpi` is dropped this does nothing; below `Serialized` on a
+    /// non-init thread it aborts the process.
     fn drop(&mut self) {
         if !self.completed {
+            if !rt::drop_guard("Request") {
+                return;
+            }
             // SAFETY: self.handle is a valid MPI request handle registered in the
             // C-side request table by the nonblocking constructor (e.g., iallreduce).
             // The handle has not been freed because self.completed is false, meaning
             // wait() was never called. ferrompi_wait calls MPI_Wait which frees the
             // handle on success; the completed flag guards against a double-free.
-            unsafe { ffi::ferrompi_wait(self.handle) };
+            // Calls the unguarded raw wrapper (not the lifecycle-guarded one):
+            // rt::drop_guard above already handles the FFI lifecycle check, so
+            // this call must still attempt the wait once reached.
+            unsafe { ffi::raw::ferrompi_wait(self.handle) };
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{with_handles, Request, RequestKind, HANDLE_STACK_CAP};
+    use crate::error::Error;
     use std::mem::forget;
-
-    #[test]
-    fn new_request_is_not_completed() {
-        let req = Request::new(0);
-        assert!(!req.is_completed());
-        assert_eq!(req.raw_handle(), 0);
-        forget(req);
-    }
-
-    #[test]
-    fn raw_handle_returns_constructor_value() {
-        let req = Request::new(99);
-        assert_eq!(req.raw_handle(), 99);
-        forget(req);
-    }
 
     #[test]
     fn test_when_already_completed_returns_true() {
         let mut req = Request {
             handle: 0,
             completed: true,
+            kind: RequestKind::PointToPoint,
         };
         let result = req.test();
         assert!(matches!(result, Ok(true)));
@@ -471,11 +654,12 @@ mod tests {
     #[test]
     fn wait_when_already_completed_returns_ok() {
         // wait() takes self by value (consuming).
-        // With completed: true, it returns Ok(()) on line 63 before any FFI.
+        // With completed: true, it returns Ok(()) before any FFI call.
         // Drop then runs, but !self.completed is false, so Drop is a no-op.
         let req = Request {
             handle: 0,
             completed: true,
+            kind: RequestKind::PointToPoint,
         };
         let result = req.wait();
         assert!(result.is_ok());
@@ -486,6 +670,50 @@ mod tests {
     fn wait_all_empty_slice_returns_ok() {
         let result = Request::wait_all(&mut []);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn with_handles_passes_every_handle_in_order() {
+        let mut stack: Vec<i64> = (0..3).collect();
+        let expected = stack.clone();
+        let seen = with_handles(
+            &mut stack,
+            |h| *h,
+            |handles, _done| handles.to_vec(),
+            |_| {},
+        );
+        assert_eq!(seen, expected);
+
+        let mut heap: Vec<i64> = (0..(HANDLE_STACK_CAP as i64 + 1)).collect();
+        let expected = heap.clone();
+        let seen = with_handles(&mut heap, |h| *h, |handles, _done| handles.to_vec(), |_| {});
+        assert_eq!(seen, expected);
+    }
+
+    #[test]
+    fn with_handles_calls_on_done_for_done_items() {
+        // Stack path (len=3): the C side reports index 1 done.
+        let mut marks = vec![0u8; 3];
+        with_handles(
+            &mut marks,
+            |_| 0i64,
+            |_handles, done| done[1] = 1,
+            |item| *item = 1,
+        );
+        assert_eq!(marks, vec![0, 1, 0]);
+
+        // Heap path (len=HANDLE_STACK_CAP+1=65): the C side reports index 64 done.
+        let len = HANDLE_STACK_CAP + 1;
+        let mut marks = vec![0u8; len];
+        with_handles(
+            &mut marks,
+            |_| 0i64,
+            |_handles, done| done[len - 1] = 1,
+            |item| *item = 1,
+        );
+        let mut expected = vec![0u8; len];
+        expected[len - 1] = 1;
+        assert_eq!(marks, expected);
     }
 
     #[test]
@@ -517,6 +745,7 @@ mod tests {
         let req = Request {
             handle: 0,
             completed: true,
+            kind: RequestKind::PointToPoint,
         };
         let result = req.get_status();
         assert!(matches!(result, Ok(true)));
@@ -528,9 +757,32 @@ mod tests {
         let mut req = Request {
             handle: 0,
             completed: true,
+            kind: RequestKind::PointToPoint,
         };
         let result = req.cancel();
         assert!(matches!(result, Ok(())));
         forget(req);
+    }
+
+    fn assert_cancel_not_supported(kind: RequestKind) {
+        let mut req = Request {
+            handle: 0,
+            completed: false,
+            kind,
+        };
+        let result = req.cancel();
+        assert!(matches!(result, Err(Error::NotSupported(_))));
+        forget(req);
+    }
+
+    #[test]
+    fn cancel_on_collective_request_returns_not_supported_without_ffi() {
+        assert_cancel_not_supported(RequestKind::Collective);
+    }
+
+    #[cfg(feature = "rma")]
+    #[test]
+    fn cancel_on_rma_request_returns_not_supported_without_ffi() {
+        assert_cancel_not_supported(RequestKind::Rma);
     }
 }

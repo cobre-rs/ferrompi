@@ -5,9 +5,11 @@ use crate::{Communicator, Error, Mpi, Result, ThreadLevel};
 
 /// MPI topology information gathered across all ranks in a communicator.
 ///
-/// This is produced by a collective operation ([`Communicator::topology`]) and
-/// contains the rank-to-host mapping, MPI library metadata, and optional SLURM
-/// job information.
+/// This is produced by a collective operation ([`Communicator::topology`]).
+/// The rank-to-host mapping is gathered across all ranks; the MPI library
+/// metadata is each rank's own local value (see
+/// [`library_version`](Self::library_version) and
+/// [`standard_version`](Self::standard_version)).
 ///
 /// # Display
 ///
@@ -68,11 +70,19 @@ impl TopologyInfo {
     }
 
     /// MPI library version string (implementation-specific).
+    ///
+    /// The calling process's own value, as returned by
+    /// [`Mpi::library_version`]; it is not gathered, so ranks linked against
+    /// differently built libraries may report different strings.
     pub fn library_version(&self) -> &str {
         &self.library_version
     }
 
     /// MPI standard version string.
+    ///
+    /// The calling process's own value, as returned by [`Mpi::version`]; it
+    /// is not gathered, so ranks linked against differently built libraries
+    /// may report different strings.
     pub fn standard_version(&self) -> &str {
         &self.standard_version
     }
@@ -100,41 +110,46 @@ impl TopologyInfo {
 }
 
 /// Maximum hostname length used for the fixed-size allgather buffer.
-/// Matches `MPI_MAX_PROCESSOR_NAME` (256 in all major implementations).
+/// It equals the size of `Communicator::processor_name`'s buffer, which holds any
+/// `MPI_MAX_PROCESSOR_NAME` the C layer accepts at build time.
 const HOSTNAME_BUF_LEN: usize = 256;
 
-/// Gather topology information from all ranks in the communicator.
+/// Builds one rank's hostname slot for the topology allgather.
 ///
-/// This is a **collective operation** — all ranks in the communicator must call
-/// it. Every rank receives the complete topology.
-pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<TopologyInfo> {
-    let size = comm.size();
-    let rank = comm.rank();
+/// `None` marks a rank whose local queries failed: the slot's first byte is
+/// `0xFF`, a byte valid UTF-8 never contains, so every rank's host-table
+/// build rejects it.
+fn hostname_slot(name: Option<&str>) -> [u8; HOSTNAME_BUF_LEN] {
+    let mut buf = [0u8; HOSTNAME_BUF_LEN];
+    match name {
+        Some(name) => {
+            let name_bytes = name.as_bytes();
+            let copy_len = name_bytes.len().min(HOSTNAME_BUF_LEN);
+            buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+        }
+        None => buf[0] = 0xFF,
+    }
+    buf
+}
 
-    // Each rank fills a fixed-size hostname buffer.
-    let name = comm.processor_name()?;
-    let mut local_buf = [0u8; HOSTNAME_BUF_LEN];
-    let name_bytes = name.as_bytes();
-    let copy_len = name_bytes.len().min(HOSTNAME_BUF_LEN);
-    local_buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-
-    // Allgather the hostname buffers.
-    let mut all_bufs = vec![0u8; HOSTNAME_BUF_LEN * size as usize];
-    comm.allgather(&local_buf, &mut all_bufs)?;
-
-    // Build rank-to-host mapping, preserving insertion order (first rank seen
-    // per host). Keying a HashMap on borrowed hostname slices makes this pass
-    // O(size) rather than O(size × distinct_hosts), and allocates one `String`
-    // per distinct host instead of one per rank.
+/// Builds the rank-to-host table from the gathered hostname slots.
+///
+/// Preserves insertion order (first rank seen per host). Keying a HashMap on
+/// borrowed hostname slices makes this pass O(size) rather than O(size ×
+/// distinct_hosts), and allocates one `String` per distinct host instead of
+/// one per rank.
+fn hosts_from_slots(all_bufs: &[u8], size: i32) -> Result<Vec<HostEntry>> {
     let mut hosts: Vec<HostEntry> = Vec::new();
     let mut index: HashMap<&str, usize> = HashMap::new();
     for r in 0..size {
         let start = r as usize * HOSTNAME_BUF_LEN;
         let raw = &all_bufs[start..start + HOSTNAME_BUF_LEN];
-        // Find the first null byte or take the whole buffer.
         let nul_pos = raw.iter().position(|&b| b == 0).unwrap_or(HOSTNAME_BUF_LEN);
-        let hostname = std::str::from_utf8(&raw[..nul_pos])
-            .map_err(|_| Error::Internal("Invalid UTF-8 in gathered hostname".into()))?;
+        let hostname = std::str::from_utf8(&raw[..nul_pos]).map_err(|_| {
+            Error::Internal(format!(
+                "rank {r} could not query its processor name or MPI version"
+            ))
+        })?;
 
         if let Some(&i) = index.get(hostname) {
             hosts[i].ranks.push(r);
@@ -146,24 +161,29 @@ pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<Topology
             });
         }
     }
+    Ok(hosts)
+}
 
-    // Gather metadata — only rank 0 strictly needs these, but they're cheap
-    // and having them on every rank avoids conditional logic for the caller.
-    let library_version = if rank == 0 {
-        Mpi::library_version()?
-    } else {
-        String::new()
-    };
-    let standard_version = if rank == 0 {
-        Mpi::version()?
-    } else {
-        String::new()
-    };
+/// Gather topology information from all ranks in the communicator.
+///
+/// This is a **collective operation** — all ranks in the communicator must call
+/// it. Every rank receives the complete topology.
+pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<TopologyInfo> {
+    let size = comm.size();
 
-    // Broadcast the version strings from rank 0 so all ranks have them.
-    // We encode as a fixed-size buffer to keep things simple.
-    let library_version = broadcast_string(comm, &library_version, 0)?;
-    let standard_version = broadcast_string(comm, &standard_version, 0)?;
+    // Both version queries are local procedures (MPI-4.1 §9.1.1): each rank reports its own library.
+    let local = comm
+        .processor_name()
+        .and_then(|name| Ok((name, Mpi::library_version()?, Mpi::version()?)));
+    let local_buf = hostname_slot(local.as_ref().ok().map(|(name, _, _)| name.as_str()));
+
+    let mut all_bufs = vec![0u8; HOSTNAME_BUF_LEN * size as usize];
+    comm.allgather(&local_buf, &mut all_bufs)?;
+
+    // A failing rank reports its own error here, after every rank has
+    // already reached the allgather.
+    let (_, library_version, standard_version) = local?;
+    let hosts = hosts_from_slots(&all_bufs, size)?;
 
     let thread_level = mpi.thread_level();
 
@@ -187,23 +207,6 @@ pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<Topology
         #[cfg(feature = "numa")]
         slurm,
     })
-}
-
-/// Broadcast a string from `root` to all ranks using a fixed-size buffer.
-fn broadcast_string(comm: &Communicator, s: &str, root: i32) -> Result<String> {
-    // Use a generous buffer — library version strings can be long.
-    const BUF_LEN: usize = 512;
-    let mut buf = [0u8; BUF_LEN];
-    if comm.rank() == root {
-        let bytes = s.as_bytes();
-        let copy_len = bytes.len().min(BUF_LEN);
-        buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
-    }
-    comm.broadcast(&mut buf, root)?;
-    let nul_pos = buf.iter().position(|&b| b == 0).unwrap_or(BUF_LEN);
-    let result = std::str::from_utf8(&buf[..nul_pos])
-        .map_err(|_| Error::Internal("Invalid UTF-8 in broadcast string".into()))?;
-    Ok(result.to_string())
 }
 
 impl fmt::Display for TopologyInfo {
@@ -260,7 +263,9 @@ impl fmt::Display for TopologyInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(feature = "numa")]
+    use super::SlurmInfo;
+    use super::{hostname_slot, hosts_from_slots, Error, HostEntry, ThreadLevel, TopologyInfo};
 
     fn sample_topology() -> TopologyInfo {
         TopologyInfo {
@@ -368,6 +373,36 @@ mod tests {
         assert_eq!(topo.hosts().len(), 2);
         assert_eq!(topo.hosts()[0].hostname, "compute-01");
         assert_eq!(topo.hosts()[0].ranks, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn slots_group_ranks_by_host() {
+        let slots = [
+            hostname_slot(Some("node-a")),
+            hostname_slot(Some("node-b")),
+            hostname_slot(Some("node-a")),
+        ]
+        .concat();
+        let hosts = hosts_from_slots(&slots, 3).unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].hostname, "node-a");
+        assert_eq!(hosts[0].ranks, vec![0, 2]);
+        assert_eq!(hosts[1].hostname, "node-b");
+        assert_eq!(hosts[1].ranks, vec![1]);
+    }
+
+    #[test]
+    fn a_failed_rank_fails_the_host_table() {
+        let slots = [
+            hostname_slot(Some("node-a")),
+            hostname_slot(None),
+            hostname_slot(None),
+        ]
+        .concat();
+        let Err(Error::Internal(m)) = hosts_from_slots(&slots, 3) else {
+            panic!("expected Error::Internal");
+        };
+        assert!(m.contains("rank 1"));
     }
 
     #[cfg(feature = "numa")]

@@ -9,8 +9,11 @@
 //!    window memory and asserts the correct values.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_rput
+// mpi-test: np=2
 
-use ferrompi::{LockType, Mpi, ReduceOp, Win};
+use ferrompi::{LockType, Mpi, Win};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -22,24 +25,6 @@ fn main() {
         size >= 2,
         "test_rma_rput requires exactly 2 processes, got {size}"
     );
-
-    // ========================================================================
-    // Probe: Win::rput requires MPI >= 3. Skip gracefully on older builds.
-    // ========================================================================
-    let version_str = Mpi::version().unwrap_or_default();
-    let major: u32 = version_str
-        .split_whitespace()
-        .nth(1)
-        .and_then(|v| v.split('.').next())
-        .and_then(|m| m.parse().ok())
-        .unwrap_or(0);
-
-    if major < 3 {
-        if rank == 0 {
-            println!("SKIP: Win::rput requires MPI >= 3 (got {version_str})");
-        }
-        return;
-    }
 
     let mut local_ok = true;
 
@@ -60,9 +45,7 @@ fn main() {
                 Ok(g) => g,
                 Err(e) => {
                     eprintln!("rank 0: FAIL: Win::lock(Exclusive, 1) failed: {e}");
-                    local_ok = false;
-                    let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                    return;
+                    world.abort(1);
                 }
             };
 
@@ -73,11 +56,9 @@ fn main() {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("rank 0: FAIL: Win::rput returned error: {e}");
-                    local_ok = false;
-                    // Drop the guard to release the lock before the barrier.
+                    // Release the lock before aborting.
                     drop(guard);
-                    let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                    return;
+                    world.abort(1);
                 }
             };
 
@@ -113,22 +94,5 @@ fn main() {
         println!("PASS: Win::rput with local completion");
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — confirms no rank diverged silently.
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    assert!(
-        global_ok != 0,
-        "test_rma_rput: one or more ranks reported failure"
-    );
-
-    world.barrier().expect("final barrier failed");
-    if rank == 0 {
-        println!("\n========================================");
-        println!("All Win::rput tests passed! (1 test)");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_rma_rput");
 }

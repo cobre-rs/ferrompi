@@ -1,6 +1,6 @@
 //! Integration test for `Group::translate_ranks`.
 //!
-//! Exercises the acceptance criteria from ticket-049:
+//! Checks:
 //!
 //! 1. `gw.translate_ranks(&[0, 1, 2, 3], &gsub)` where `gsub = gw.include(&[1, 3])`
 //!    → `[None, Some(0), None, Some(1)]`.
@@ -12,8 +12,11 @@
 //! collective calls.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_group_translate
+// mpi-test: np=4
 
 use ferrompi::{Mpi, ReduceOp};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -120,24 +123,5 @@ fn main() {
         }
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — gate process::exit so no rank exits early.
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("allreduce_scalar failed");
-
-    if global_ok == 0 {
-        if rank == 0 {
-            eprintln!("FAIL: at least one rank failed a group_translate_ranks assertion");
-        }
-        std::process::exit(1);
-    }
-
-    if rank == 0 {
-        println!();
-        println!("========================================");
-        println!("All group_translate_ranks tests passed!");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_group_translate");
 }

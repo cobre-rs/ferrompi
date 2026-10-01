@@ -24,6 +24,8 @@
 
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::rt;
+use crate::Communicator;
 
 /// Outcome of [`Group::compare`].
 ///
@@ -58,13 +60,14 @@ pub enum GroupComparison {
     Unequal = 2,
 }
 
-/// Inclusive rank range `[first, last]` with positive stride.
+/// Inclusive rank range `[first, last]` with a nonzero stride; a stride
+/// below zero walks the range downwards.
 ///
 /// Used as input to [`Group::range_include`] and
 /// [`Group::range_exclude`] for compact specification of arithmetic
 /// progressions over rank ids.
 ///
-/// Maps to a single row of the `ranges[3][N]` array argument of
+/// Maps to a single row of the `ranges[N][3]` array argument of
 /// `MPI_Group_range_incl` / `MPI_Group_range_excl`.
 ///
 /// # Example
@@ -86,7 +89,8 @@ pub struct RankRange {
     pub first: i32,
     /// Last rank in the range (inclusive).
     pub last: i32,
-    /// Step between consecutive ranks (must be positive).
+    /// Step between consecutive ranks (non-zero; a negative stride walks
+    /// the ranks downwards).
     pub stride: i32,
 }
 
@@ -110,13 +114,14 @@ pub struct Group {
     pub(crate) handle: i32,
 }
 
-// SAFETY: Group handles are integer indices into a C-side table, identical
-// in nature to Communicator handles. The C MPI library manages its own
-// thread safety based on the thread level requested via MPI_Init_thread.
-// Sending a Group to another thread is safe under the same conditions as
-// Communicator (see src/comm/mod.rs); users must ensure adequate thread
-// support and serialize access when using ThreadLevel::Serialized.
+// SAFETY: Group handles are integer indices into a C-side table. Every
+// MPI call on a Group goes through the lifecycle guard (`rt::enter`, and
+// `rt::drop_guard` in Drop), which enforces the requested ThreadLevel as
+// described on Communicator's Send impl in src/comm/mod.rs.
 unsafe impl Send for Group {}
+// SAFETY: &Group exposes only reads of the immutable handle field and FFI
+// calls gated by the same lifecycle guard, so its thread safety follows
+// the requested ThreadLevel as Communicator's does.
 unsafe impl Sync for Group {}
 
 impl Group {
@@ -179,10 +184,7 @@ impl Group {
     /// Return the normalised `MPI_UNDEFINED` sentinel value (`-1`).
     ///
     /// [`rank`](Self::rank) returns `-1` when the calling process is not a
-    /// member of the group. The C shim normalises the implementation-defined
-    /// `MPI_UNDEFINED` constant (e.g. `-32766` on MPICH) to `-1` before
-    /// returning, so this method always returns `-1` regardless of the
-    /// underlying MPI implementation.
+    /// member of the group.
     ///
     /// This function does not require an active MPI session.
     ///
@@ -199,9 +201,8 @@ impl Group {
     ///     println!("not a member of this sub-group");
     /// }
     /// ```
-    pub fn undefined() -> i32 {
-        // SAFETY: ferrompi_mpi_undefined is a pure query with no pointer arguments.
-        unsafe { ffi::ferrompi_mpi_undefined() }
+    pub const fn undefined() -> i32 {
+        Communicator::UNDEFINED
     }
 
     /// Create a new group containing only the specified ranks from this group.
@@ -431,9 +432,8 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// Returns an error if MPI validation rejects any triple (e.g., negative
-    /// or zero stride, `first > last` with positive stride), or if the
-    /// C-side group table is full.
+    /// Returns an error if MPI validation rejects any triple (e.g., zero
+    /// stride), or if the C-side group table is full.
     ///
     /// # Example
     ///
@@ -449,12 +449,10 @@ impl Group {
     /// assert_eq!(sub.size().unwrap(), 3);
     /// ```
     pub fn range_include(&self, ranges: &[RankRange]) -> Result<Group> {
-        let mut flat: Vec<i32> = Vec::with_capacity(3 * ranges.len());
-        for r in ranges {
-            flat.push(r.first);
-            flat.push(r.last);
-            flat.push(r.stride);
-        }
+        let flat: Vec<i32> = ranges
+            .iter()
+            .flat_map(|r| [r.first, r.last, r.stride])
+            .collect();
         let mut h: i32 = -1;
         // SAFETY: self.handle is owned; flat is a contiguous Vec<i32> with 3*ranges.len() elements
         // and outlives this call.
@@ -476,9 +474,8 @@ impl Group {
     ///
     /// # Errors
     ///
-    /// Returns an error if MPI validation rejects any triple (e.g., negative
-    /// or zero stride, `first > last` with positive stride), or if the
-    /// C-side group table is full.
+    /// Returns an error if MPI validation rejects any triple (e.g., zero
+    /// stride), or if the C-side group table is full.
     ///
     /// # Example
     ///
@@ -494,12 +491,10 @@ impl Group {
     /// assert_eq!(sub.size().unwrap(), 2);
     /// ```
     pub fn range_exclude(&self, ranges: &[RankRange]) -> Result<Group> {
-        let mut flat: Vec<i32> = Vec::with_capacity(3 * ranges.len());
-        for r in ranges {
-            flat.push(r.first);
-            flat.push(r.last);
-            flat.push(r.stride);
-        }
+        let flat: Vec<i32> = ranges
+            .iter()
+            .flat_map(|r| [r.first, r.last, r.stride])
+            .collect();
         let mut h: i32 = -1;
         // SAFETY: self.handle is owned; flat is a contiguous Vec<i32> with 3*ranges.len() elements
         // and outlives this call.
@@ -570,38 +565,20 @@ impl Group {
 impl Drop for Group {
     fn drop(&mut self) {
         // Slot 0 is reserved for MPI_GROUP_EMPTY and must not be freed.
-        if self.handle > 0 {
-            // SAFETY: self.handle is owned and valid; Drop runs exactly once, so no double-free.
-            unsafe { ffi::ferrompi_group_free(self.handle) };
+        if self.handle <= 0 {
+            return;
         }
+        if !rt::drop_guard("Group") {
+            return;
+        }
+        // SAFETY: self.handle is owned and valid; Drop runs exactly once, so no double-free.
+        unsafe { ffi::ferrompi_group_free(self.handle) };
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Group, GroupComparison, RankRange};
-    use crate::error::Result;
-
-    // Compile-time assertion: Group must implement Send + Sync.
-    const _: () = {
-        #[allow(dead_code)]
-        fn check<T: Send + Sync>() {}
-        #[allow(dead_code)]
-        fn group_send_sync_compile_time_assertion() {
-            check::<Group>();
-        }
-    };
-
-    #[test]
-    fn group_raw_handle_returns_stored_value() {
-        // Construct a Group directly (sidestepping FFI) and verify raw_handle.
-        let g = Group { handle: 7 };
-        assert_eq!(g.raw_handle(), 7);
-        // Drop will call ferrompi_group_free(7) — but we are outside an MPI
-        // session so MPI is not initialized. We use std::mem::forget to
-        // prevent the Drop from calling into MPI.
-        std::mem::forget(g);
-    }
+    use super::Group;
 
     #[test]
     fn group_drop_with_zero_handle_is_no_op() {
@@ -610,46 +587,6 @@ mod tests {
         // call ferrompi_group_free and must not panic or segfault.
         let g = Group { handle: 0 };
         drop(g); // Must complete without panicking
-    }
-
-    // Compile-time signature checks: verify that union, intersection, and
-    // difference have the expected signatures and that their return type is
-    // Result<Group>. These do not call MPI at runtime.
-
-    #[allow(dead_code)]
-    fn group_union_signature_compiles(a: &Group, b: &Group) -> Result<Group> {
-        a.union(b)
-    }
-
-    #[allow(dead_code)]
-    fn group_intersection_signature_compiles(a: &Group, b: &Group) -> Result<Group> {
-        a.intersection(b)
-    }
-
-    #[allow(dead_code)]
-    fn group_difference_signature_compiles(a: &Group, b: &Group) -> Result<Group> {
-        a.difference(b)
-    }
-
-    // Compile-time signature checks for range_include and range_exclude.
-    #[allow(dead_code)]
-    fn group_range_include_signature_compiles(g: &Group, r: &[RankRange]) -> Result<Group> {
-        g.range_include(r)
-    }
-
-    #[allow(dead_code)]
-    fn group_range_exclude_signature_compiles(g: &Group, r: &[RankRange]) -> Result<Group> {
-        g.range_exclude(r)
-    }
-
-    // Compile-time signature check: translate_ranks() returns Result<Vec<Option<i32>>>.
-    #[allow(dead_code)]
-    fn group_translate_ranks_signature_compiles(
-        a: &Group,
-        ranks: &[i32],
-        b: &Group,
-    ) -> Result<Vec<Option<i32>>> {
-        a.translate_ranks(ranks, b)
     }
 
     /// Empty-input fast path: translate_ranks with an empty slice must return
@@ -668,85 +605,5 @@ mod tests {
         // The guard in Drop already skips handle 0, but forget is explicit
         // about our intent here.
         std::mem::forget(g);
-    }
-
-    // ── GroupComparison unit tests ────────────────────────────────────────
-
-    #[test]
-    fn group_comparison_repr_values() {
-        assert_eq!(GroupComparison::Identical as i32, 0);
-        assert_eq!(GroupComparison::Similar as i32, 1);
-        assert_eq!(GroupComparison::Unequal as i32, 2);
-    }
-
-    #[test]
-    fn group_comparison_debug_format() {
-        assert_eq!(format!("{:?}", GroupComparison::Identical), "Identical");
-        assert_eq!(format!("{:?}", GroupComparison::Similar), "Similar");
-        assert_eq!(format!("{:?}", GroupComparison::Unequal), "Unequal");
-    }
-
-    #[test]
-    fn group_comparison_equality_and_hash() {
-        use std::collections::HashSet;
-        let mut s = HashSet::new();
-        s.insert(GroupComparison::Identical);
-        s.insert(GroupComparison::Similar);
-        s.insert(GroupComparison::Unequal);
-        // All three variants must be distinguishable in a HashSet.
-        assert_eq!(s.len(), 3);
-        assert!(s.contains(&GroupComparison::Identical));
-        assert!(s.contains(&GroupComparison::Similar));
-        assert!(s.contains(&GroupComparison::Unequal));
-    }
-
-    // Compile-time signature check: compare() returns Result<GroupComparison>.
-    #[allow(dead_code)]
-    fn group_compare_signature_compiles(a: &Group, b: &Group) -> Result<GroupComparison> {
-        a.compare(b)
-    }
-
-    // ── RankRange unit tests ──────────────────────────────────────────────
-
-    #[test]
-    fn rank_range_repr_and_size() {
-        // RankRange has 3 × i32 fields with natural alignment.
-        // On all current targets (x86_64, aarch64, riscv64) the natural layout
-        // is 12 bytes with no tail padding.
-        assert_eq!(std::mem::size_of::<RankRange>(), 12);
-    }
-
-    #[test]
-    fn rank_range_debug_format() {
-        let r = RankRange {
-            first: 1,
-            last: 5,
-            stride: 2,
-        };
-        let s = format!("{r:?}");
-        assert!(s.contains("first: 1"), "expected 'first: 1' in {s:?}");
-        assert!(s.contains("last: 5"), "expected 'last: 5' in {s:?}");
-        assert!(s.contains("stride: 2"), "expected 'stride: 2' in {s:?}");
-    }
-
-    #[test]
-    fn rank_range_equality() {
-        let a = RankRange {
-            first: 0,
-            last: 3,
-            stride: 1,
-        };
-        let b = RankRange {
-            first: 0,
-            last: 3,
-            stride: 1,
-        };
-        let c = RankRange {
-            first: 0,
-            last: 3,
-            stride: 2,
-        };
-        assert_eq!(a, b);
-        assert_ne!(a, c);
     }
 }

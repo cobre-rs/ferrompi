@@ -2,14 +2,18 @@
 //! latency and throughput for three `f64` buffer sizes: 2, 131 072, and 2 097 152 elements.
 //!
 //! **MPI synchronization**: Rank 0 drives Criterion. Non-root ranks are kept in lockstep via
-//! a sentinel `u64[2]` allreduce issued before each data allreduce. See `benches/README.md`
+//! a `common::lead` allreduce issued before each data allreduce. See `benches/README.md`
 //! for context and output details.
 
-use criterion::{black_box, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput};
 use ferrompi::{Communicator, ReduceOp};
+use std::hint::black_box;
 use std::time::Duration;
 
 mod common;
+
+/// Run one f64 allreduce of the size in the command's argument.
+const ALLREDUCE: u64 = 1;
 
 /// Sizes in number of f64 elements: 16 B, 1 MiB, 16 MiB.
 const SIZES: &[usize] = &[2, 131_072, 2_097_152];
@@ -30,14 +34,7 @@ fn allreduce_f64(c: &mut Criterion, world: &Communicator) {
         group.throughput(Throughput::Bytes(bytes));
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
             b.iter(|| {
-                // Sentinel: tell non-root ranks "continue; size = n".
-                // stop=0 means "keep going", size encodes which f64 buffer
-                // to use so rank 1 allocates the right buffer.
-                let ctl_send = [0u64, n as u64];
-                let mut ctl_recv = [0u64; 2];
-                world
-                    .allreduce(&ctl_send, &mut ctl_recv, ReduceOp::Sum)
-                    .unwrap();
+                common::lead(world, [ALLREDUCE, n as u64]);
 
                 // Data allreduce — this is what we want to measure.
                 world
@@ -62,21 +59,8 @@ fn run_follower(world: &Communicator) {
     let mut send: Vec<f64> = Vec::new();
     let mut recv: Vec<f64> = Vec::new();
 
-    loop {
-        // Mirror the sentinel allreduce that rank 0 issues inside b.iter.
-        let ctl_send = [0u64, 0u64]; // non-root contributes zeros; rank 0 sets the values
-        let mut ctl_recv = [0u64; 2];
-        world
-            .allreduce(&ctl_send, &mut ctl_recv, ReduceOp::Sum)
-            .unwrap();
-
-        // ctl_recv[0] is the sum of stop flags.  Rank 0 sends 1 when done.
-        if ctl_recv[0] > 0 {
-            break;
-        }
-
-        // ctl_recv[1] is the size hint from rank 0.
-        let n = ctl_recv[1] as usize;
+    common::follow(world, |[_, n]| {
+        let n = n as usize;
 
         // Reallocate buffers only when the size changes.
         if n != cached_n {
@@ -87,7 +71,7 @@ fn run_follower(world: &Communicator) {
 
         // Mirror the f64 data allreduce that rank 0 issues inside b.iter.
         world.allreduce(&send, &mut recv, ReduceOp::Sum).unwrap();
-    }
+    });
 }
 
 fn main() {
@@ -100,7 +84,7 @@ fn main() {
     }
 
     if world.rank() == 0 {
-        // ── Rank 0: sole Criterion driver ──────────────────────────────────
+        // Rank 0: sole Criterion driver.
         let mut c = Criterion::default()
             .configure_from_args()
             .measurement_time(Duration::from_secs(5))
@@ -110,14 +94,10 @@ fn main() {
 
         c.final_summary();
 
-        // Send the stop sentinel so non-root ranks exit their mirror loop.
-        let stop_send = [1u64, 0u64];
-        let mut stop_recv = [0u64; 2];
-        world
-            .allreduce(&stop_send, &mut stop_recv, ReduceOp::Sum)
-            .unwrap();
+        // Send the stop command so non-root ranks exit their mirror loop.
+        common::lead(&world, common::STOP);
     } else {
-        // ── Non-root ranks: mirror loop ─────────────────────────────────────
+        // Non-root ranks: mirror loop.
         run_follower(&world);
     }
 

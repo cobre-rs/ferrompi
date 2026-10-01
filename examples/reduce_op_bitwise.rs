@@ -12,6 +12,7 @@
 //!   - `BitwiseXor`: `0b0110` (6u32) — bits set in exactly one rank
 //!
 //! Run with: mpiexec -n 2 cargo run --example reduce_op_bitwise
+// mpi-test: np=2
 
 use ferrompi::{Mpi, ReduceOp, Result};
 

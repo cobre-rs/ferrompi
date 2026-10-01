@@ -7,6 +7,274 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-01
+
+This release hardens soundness and MPI correctness: argument validation,
+request completion, error classes, RMA bounds, large counts and the
+finalize lifecycle. It also makes MPI selection at build time explicit.
+
+### Breaking Changes
+
+- **ferrompi is now licensed under Apache-2.0 only.** Earlier releases
+  were dual-licensed MIT OR Apache-2.0 and remain so; from 0.6.0 the MIT
+  option is dropped, so ferrompi can no longer be combined with
+  GPL-2.0-only code.
+- **`Error` is now `#[non_exhaustive]`** and gains two new variants,
+  `Finalized` and `ThreadLevelViolation`. Migration: an exhaustive `match`
+  on `Error` now needs a trailing `_` arm.
+- **`send_custom`, `recv_custom`, `isend_custom` and `irecv_custom` now
+  require `T: PlainData`**, a new public `unsafe trait PlainData: Copy +
+  'static`, implemented for every `MpiDatatype` and for `[T; N]`.
+  Migration: `unsafe impl PlainData for MyType {}` for a `#[repr(C)]` type
+  with no padding-sensitive invariants.
+- **The `*_custom` methods now return `Err(InvalidBuffer)`** unless the
+  datatype's extent equals `size_of::<T>()` and its true bounds lie within
+  one `T` (a smaller extent also fails).
+- **`LongInt`/`LongDoubleInt` now exist only on Linux x86_64, aarch64 and
+  little-endian powerpc64**; the `DatatypeTag` variants stay. Linux is the
+  supported platform; macOS builds but is untested and lacks the two pair
+  types; Windows is not a supported target.
+- **MSRV is now 1.85** (the previously declared 1.74 did not build the
+  crate).
+- **The crate now declares `links = "ferrompi"`**, so two
+  semver-incompatible ferrompi versions in one build now fail at dependency
+  resolution instead of silently linking one of them.
+- **Below `ThreadLevel::Serialized`, a call from a thread other than the
+  one that initialized MPI now returns `Err(ThreadLevelViolation)`**
+  without calling MPI. The provided thread level is honored, `Single` is
+  enforced like `Funneled`, and `Mpi::init()` now requests `Single`.
+- **Below `Serialized`, dropping an MPI-calling handle on a non-init
+  thread now prints `ferrompi: <Type> dropped on thread <name or id>` to
+  stderr and aborts the process.**
+- **Feature `rma`: dropping `Mpi` while any window is still alive now
+  skips `MPI_Finalize`**, printing `ferrompi: MPI_Finalize skipped: N
+  window(s) still alive; …` to stderr; those windows are never freed, and
+  `Mpi::is_finalized()` still returns `true`.
+- **MPI selection at build time is now explicit.** The first set,
+  non-empty variable among `MPI_PKG_CONFIG`, `MPICC` and `CRAY_MPICH_DIR`
+  selects the MPI installation; if it fails, the build now fails naming
+  that variable instead of falling back to auto-detection.
+- **`CRAY_MPICH_DIR` now outranks auto-detection** (pkg-config, `mpicc` on
+  `PATH`, fixed prefixes). `MPICC` set to the Cray `cc` driver now fails
+  the build, because `cc` answers neither `-show` nor `--showme`.
+- **An RMA call with target rank `-1` now returns `Err(InvalidBuffer)`**;
+  MPICH used to treat `-1` as `MPI_PROC_NULL`, a silent no-op.
+- **Invalid arguments that used to reach MPI unchecked now return `Err`**
+  in more cases; see Fixed below for the specific checks.
+- **`WinKind` is removed.** No function returned or accepted it; code that
+  only named the type can drop the reference.
+- **`Mpi::wtime` now takes `&self`**, so it runs only while MPI is
+  initialized; MPICH aborted the process when `MPI_Wtime` was called before
+  init or after finalize. Migration: `Mpi::wtime()` becomes `mpi.wtime()`;
+  code without the `Mpi` handle, such as worker threads, can use
+  `std::time::Instant`.
+
+### Added
+
+- **`Group::undefined` is now a `const fn`.**
+- **docs.rs now builds with all features** and badges feature- and
+  target-gated items, so `Win`, `SharedWindow` and `slurm` now appear in
+  the published documentation.
+- **The build script now queries a compiler wrapper with `-show`, then
+  `--showme`**, passes every `-D` define from the wrapper or pkg-config
+  through to the C shim's compile, and strips surrounding quotes from
+  paths.
+- **The build script now reruns when `MPI_PKG_CONFIG`, `MPICC`,
+  `CRAY_MPICH_DIR` or `PATH` changes** (any `PATH` change now rebuilds the
+  crate).
+- **`CRAY_MPICH_DIR` now resolves through its `lib/pkgconfig/mpich.pc`**,
+  falling back to `include/mpi.h` with `libmpich` or `libmpi` present
+  under `lib` or `lib64`.
+- **Building against the draft MPI ABI is now a compile error.**
+  `MPI_ABI_VERSION` defined with `MPI_VERSION < 5` (as produced by MPICH
+  4.3 built with `-DMPI_ABI`) fails to compile; native headers and the
+  ratified MPI 5.0 ABI still build (the latter untested at run time).
+- **New `ferrompi::doc::adr_0006_mpi5_abi_direction` module** documents
+  ADR-0006, the MPI 5.0 standard-ABI direction.
+- **Persistent collectives and `Mpi::create_from_group` work on Open MPI
+  5**, which implements them while its `mpi.h` reports MPI 3.1. A count
+  above `i32::MAX` there returns `Err(Count)`, as on any library below
+  MPI 4.0.
+
+### Changed
+
+- **After `Mpi` is dropped, MPI-calling methods now return
+  `Err(Finalized)` instead of calling MPI**, and their own drops become
+  silent no-ops. `version`, `library_version`, `is_initialized` and
+  `is_finalized` still answer.
+- **`Mpi::init`/`init_thread` called after finalize now returns
+  `Err(Finalized)`** (MPICH used to abort).
+- **In debug builds at `ThreadLevel::Serialized`, two overlapping MPI
+  calls now return `Err(ThreadLevelViolation)`**; release builds do not
+  perform this check.
+- **`MPI_ERRORS_RETURN` is now also installed on `MPI_COMM_SELF`**, so
+  errors the MPI standard does not attribute to any communicator or
+  window now return `Err` on MPI-4 libraries instead of aborting.
+- **`Request::cancel` on a nonblocking-collective or RMA request now
+  returns `Err(NotSupported)`** without calling MPI.
+- **Built against MPI older than 4.0 (other than Open MPI 5), the
+  persistent collectives and `create_from_group` now return
+  `Err(NotSupported(op))`.**
+- **`Status.count` is now `-1` when the message is not a whole number of
+  elements** (MPI reports `MPI_UNDEFINED`).
+- **`Request::raw_handle()` values now carry a generation counter** and
+  name no request once that request completes, because completion frees
+  the underlying table slot for reuse.
+- **Batch methods now skip already-completed requests left in a slice**;
+  both `wait_all` implementations mark exactly the requests MPI completed,
+  whether the call as a whole succeeds or fails.
+- **A failed batch completion (`wait_all`, `wait_any`, `wait_some`, `test_any`,
+  `test_some` and `PersistentRequest::wait_all`) now reports the failing
+  request's own class and code**; when the MPI library reports which request
+  failed, the message also ends in `(request N)`.
+- **On MPI 4.0 and later, persistent point-to-point and non-v persistent
+  collective inits above `INT_MAX` now use the MPI 4.0 large-count
+  variants**; `gatherv_init`, `scatterv_init` and `allgatherv_init` still
+  return `Err(Count)`.
+- **Window creation now runs one allgather of the window lengths across
+  the communicator**; `Win::allocate` and `SharedWindow::allocate` add two
+  barriers and zero the whole segment, committing every page at
+  construction.
+- **`Win::sync` must now be called inside a passive-target epoch** (the
+  documentation used to say the opposite).
+- **The `SharedWindow` slice accessors now document that other ranks may
+  write the memory concurrently.**
+- **The published crates.io package now holds only `src`, `csrc`, `docs`,
+  `build.rs`, the README, the CHANGELOG and the license files.**
+- **The `DatatypeTag`/`ReduceOp` discriminant stability promise is
+  withdrawn.** The discriminant values are an internal contract between
+  the Rust enums and the C shim; any future release may change them. No
+  discriminant value changed in this release.
+- **Documentation corrected to the shipped behavior.** `ADR-0001` through
+  `ADR-0005` carry dated amendments; the architecture guide, the rsmpi
+  migration guide and the MPI compatibility reference are corrected; the
+  `numa` feature is documented as the SLURM job-topology helpers only,
+  with no NUMA or hwloc code; the README is trimmed, with the API tables
+  living on docs.rs.
+- **Dependencies refreshed:** `criterion` dev-dependency 0.5 → 0.7 (the
+  newest release that builds on Rust 1.85; the benches now use
+  `std::hint::black_box`), `cargo update` to the latest Rust 1.85
+  compatible versions (thiserror 2.0.21, cc 1.5.1, pkg-config 0.3.34,
+  rand 0.10.3, …), and CI actions bumped (checkout v7, cache v6,
+  labeler v7, dependency-review-action v5, codecov-action v7).
+
+### Removed
+
+- **The `[profile.release]` section added in 0.5.0 is gone.** Cargo never
+  applied a dependency's own profile settings to its dependents, so it had
+  no effect outside this repository's own builds.
+
+### Fixed
+
+- **`MpiErrorClass` now decodes correctly on MPICH-derived libraries.** 13
+  of 19 classes previously used Open MPI's numbering.
+- **A stale request handle can no longer act on an unrelated request that
+  reused its slot.**
+- **A failed batch completion no longer leaves freed MPI requests that
+  can be waited or tested on again.**
+- **`gather`, `allgather` and `scatter` (blocking, nonblocking and
+  persistent) now return `Err(InvalidBuffer)` for a buffer too small to
+  hold one slot per rank.**
+- **The v-collectives (all three families) now validate the arrays MPI
+  reads on the calling rank**: array length equal to the communicator
+  size, non-negative counts, and each non-empty block inside the buffer.
+- **`CustomDatatype::create_struct` with an empty field list now returns
+  an error before calling MPI.**
+- **The nine RMA data calls now bounds-check target rank, displacement
+  and count against the target's window.**
+- **A `Win::create`/`Win::allocate` with an unrepresentable length now
+  fails on every rank** instead of hanging or aborting.
+- **Freshly allocated `Win::allocate`/`SharedWindow::allocate` memory now
+  reads as zero.**
+- **`SharedWindow::allocate(comm, 0)` now succeeds** (it used to return
+  `Err(Internal)` and leak the window).
+- **Counts above `INT_MAX` no longer truncate.** Below MPI 4.0, an
+  oversized count now returns `Err(Count)`; the v-collectives and
+  `allreduce_with_op` return `Err(Count)` on every MPI version (MPICH
+  narrowed a user op's length to `int` without splitting the reduction);
+  RMA calls now use the MPI 4.0 large-count variants on MPI 4.0 and later.
+- **A `UserOp` still alive at finalize is now freed and its closure
+  dropped** instead of leaking.
+- **The finalize sweep now frees only inactive persistent requests**; a
+  debug build prints `ferrompi: MPI_Finalize leaves N active request(s)
+  unfreed`.
+- **A failure to install `MPI_ERRORS_RETURN` right after `MPI_Init_thread`
+  now aborts the process** instead of returning `Err` with MPI left
+  initialized, where a retry called `MPI_Init_thread` a second time.
+- **A window that `Win::allocate` or `SharedWindow::allocate` fails to
+  zero, or gets a null base for, now counts as alive**, so dropping `Mpi`
+  skips `MPI_Finalize` instead of finalizing with the leaked window still
+  live.
+- **Under fault-tolerant MPI, a receive that a process failure leaves
+  pending now aborts the process** instead of being reported complete
+  while MPI still owns its buffer.
+- **`PersistentRequest::wait_all` and `Request::wait_all` now report a
+  failed request that the MPI library completed behind a success return**
+  (seen with Open MPI's persistent requests).
+- **A `PersistentRequest` whose `wait` or `test` fails is no longer left
+  active.** MPI completed it with the error; on Open MPI, which frees it,
+  `start` now reports `Err` with class `Request` instead of "already
+  active".
+- **`PersistentRequest::wait_all` skips inactive requests**, so it
+  completes the others even when Open MPI freed a request whose earlier
+  `wait` failed.
+- **After a failed `PersistentRequest::start_all`, every request counts as
+  started**, so dropping one waits for it instead of freeing a request MPI
+  may have started.
+- **Under fault-tolerant MPI, a wildcard receive started while the request
+  table is full now aborts the process when a process failure leaves it
+  pending**, instead of returning `ResourceExhausted` while MPI still owns
+  its buffer.
+- **A rank that cannot return a new communicator (the handle table is full,
+  or its error handler cannot be installed) no longer frees it alone** with
+  the collective `MPI_Comm_free`, which could hang; the communicator is left
+  for `MPI_Finalize`.
+- **`Win::allocate` and `SharedWindow::allocate` no longer free the new
+  window on one rank alone when the window table is full**; the window is
+  leaked and counted as alive, so `Mpi` skips `MPI_Finalize`, as for a
+  window whose zeroing failed.
+- **`Win::create` on a rank whose window table is full now aborts the
+  process** instead of freeing the new window on that rank alone, which
+  could hang; the window already exposes the caller's buffer to its
+  peers, so it cannot be returned.
+- **In debug builds at `ThreadLevel::Serialized`, a `PersistentRequest::wait`
+  rejected as overlapping another thread's MPI call now leaves the request
+  active**, instead of marking it inactive while MPI still holds it.
+- **In debug builds at `ThreadLevel::Serialized`, a `Request::wait` that
+  overlaps another thread's MPI call now aborts the process with a
+  message**, instead of marking the request completed while MPI still holds
+  it and its buffer.
+- **The `# Errors` documentation of `Win::rput`, `Win::rget` and
+  `Win::raccumulate` now names `Error::ResourceExhausted` (resource `Request`)
+  for a full request table**; it previously named `Error::Mpi` with class
+  `Other`, which these methods never return for that case.
+- **`TopologyInfo::library_version()` now holds each rank's own full
+  library version string**, instead of rank 0's string
+  truncated to 512 bytes and broadcast; `Communicator::topology` no longer
+  broadcasts the version strings, so a version query that fails on rank 0
+  can no longer leave the other ranks blocked.
+- **`Communicator::topology` now returns `Err` on every rank when the
+  processor-name or version query fails on any rank**, instead of leaving
+  the other ranks blocked in the hostname exchange or returning `Ok` on
+  them.
+- **`Mpi::library_version()` and `TopologyInfo::library_version()` no longer
+  end in a NUL character on Open MPI**, whose `MPI_Get_library_version`
+  counts the terminator in the length it reports; processor names and MPI
+  error messages also end at the first NUL.
+- **`Request::wait_any`, `test_any`, `wait_some` and `test_some` no longer
+  write past their buffers when the MPI library reports a completed index
+  or count outside the request slice (or read past the scratch arrays)**;
+  they return `Error::Mpi` instead, with class `Intern` unless MPI itself
+  returned an error.
+- **The `Communicator` documentation now states that MPI may return an
+  error from a collective call on some ranks only**, which can leave the
+  others blocked in their next collective call; `Win::create`,
+  `Win::allocate` and `SharedWindow::allocate` say so for the calls they
+  make.
+- **`Request::wait_some` returns `Error::Mpi` instead of `Ok(vec![])` when
+  the MPI library reports zero completions**, which `MPI_Waitsome` never
+  may; the class is `Intern` unless MPI itself returned an error.
+
 ## [0.5.0] - 2026-06-18
 
 This release resolves all 11 findings from a 2026 architecture & performance
@@ -28,32 +296,32 @@ dependency refreshes and documentation work.
 
 ### Added
 
-- **Typed handle-table-exhaustion errors (F2-004).** Each internal handle table
+- **Typed handle-table-exhaustion errors.** Each internal handle table
   now returns a distinct sentinel on overflow, surfaced as
   `Error::ResourceExhausted { resource }` instead of an opaque
   `Error::Mpi { class: Other, .. }`, so a long-running job can distinguish an
   internal cap from a genuine MPI fault and back off.
-- **`[profile.release]`** with `lto = "thin"` and `codegen-units = 1` (PERF-01),
-  letting wrapper bodies inline across codegen units; the `bench` profile
-  inherits it.
+- **`[profile.release]`** with `lto = "thin"` and `codegen-units = 1` for
+  this repository's own release builds and benches. Cargo ignores a
+  dependency's profiles, so crates depending on ferrompi were unaffected.
 
 ### Changed
 
-- **Request handle table is now a lock-free 64-bit occupancy bitmap**
-  (F2-002 / F2-006), replacing the dense `atomic_int` slot array. Removes the
-  cache-line false sharing and O(N) scan that affected concurrent posting under
+- **Request handle table is now a lock-free 64-bit occupancy bitmap**,
+  replacing the dense `atomic_int` slot array. Removes the cache-line false
+  sharing and O(N) scan that affected concurrent posting under
   `MPI_THREAD_MULTIPLE`; allocation uses an `acq_rel` `fetch_or` claim with a
   hardware find-first-zero. The six small fixed tables keep the simpler
   CAS-scan design.
-- **Hot paths are now inlinable (F3-001 / F2-005):** `#[inline]` on
-  `Error::check`/`check_with_op` and the non-generic `Request` /
-  `PersistentRequest` completion methods; `#[cold]` + `#[inline(never)]` on the
-  cold error-construction helpers.
-- **Per-call allocations removed from completion paths (PERF-02 / PERF-03):**
-  `start_all` / `wait_all` / `wait_any` / `wait_some` / `test_any` / `test_some`
-  use stack scratch buffers (both the Rust and C sides) instead of allocating on
-  every call.
-- **`gather_topology` host de-duplication is now O(size)** (PERF-04), down from
+- **Hot paths are now inlinable:** `#[inline]` on `Error::check`/
+  `check_with_op` and the non-generic `Request` / `PersistentRequest`
+  completion methods; `#[cold]` + `#[inline(never)]` on the cold
+  error-construction helpers.
+- **Per-call allocations removed from completion paths:** `start_all` /
+  `wait_all` / `wait_any` / `wait_some` / `test_any` / `test_some` use stack
+  scratch buffers (both the Rust and C sides) instead of allocating on every
+  call.
+- **`gather_topology` host de-duplication is now O(size)**, down from
   O(size × distinct_hosts), allocating one `String` per distinct host.
 - **Dependencies refreshed:** `rand` dev-dependency 0.9 → 0.10 (uses the new
   `RngExt` trait), `cargo update` to latest compatible (cc 1.2.64,
@@ -64,16 +332,16 @@ dependency refreshes and documentation work.
 
 ### Fixed
 
-- **Use-after-free window on request-table exhaustion closed (F2-001).** When a
-  nonblocking/RMA initiator had already started a transfer but the request table
-  was full, the C shim called `MPI_Request_free` — which does not cancel an
-  active operation — and returned an error, letting the caller drop a buffer MPI
-  was still using. It now drives the orphaned request to completion with
-  `MPI_Wait` before returning. Persistent `*_init` shims, whose requests are
-  inactive, still use `MPI_Request_free`.
-- **ADR-0002 memory-ordering claim corrected (F2-003):** the alloc-path
-  rationale wrongly stated the `acq_rel` claim publishes the subsequent table
-  write; the real (external-happens-before) contract is now documented.
+- **Use-after-free window on request-table exhaustion closed.** When a
+  nonblocking/RMA initiator had already started a transfer but the request
+  table was full, the C shim called `MPI_Request_free` — which does not
+  cancel an active operation — and returned an error, letting the caller
+  drop a buffer MPI was still using. It now drives the orphaned request to
+  completion with `MPI_Wait` before returning. Persistent `*_init` shims,
+  whose requests are inactive, still use `MPI_Request_free`.
+- **ADR-0002 memory-ordering claim corrected:** the alloc-path rationale
+  wrongly stated the `acq_rel` claim publishes the subsequent table write;
+  the real (external-happens-before) contract is now documented.
 - **Broken intra-doc link** in `Error::from_code` that failed the `-D warnings`
   documentation build.
 - **CHANGELOG comparison links** repaired: the `[0.4.1]` link was missing and
@@ -83,10 +351,36 @@ dependency refreshes and documentation work.
 
 ### Added
 
-- **`buffer_attach` now rejects oversized buffers.** `Mpi::buffer_attach`
-  returns `Err(Error::InvalidBuffer)` when the buffer exceeds `i32::MAX`
-  bytes, instead of silently truncating the size passed to
-  `MPI_Buffer_attach`.
+- **Groups.** `Group` (from `Communicator::group()`, freed on drop) with
+  `size`, `rank`, the set operations (`include`, `exclude`, `union`,
+  `intersection`, `difference`, `range_include`, `range_exclude` over
+  `RankRange` progressions), `compare` (returning `GroupComparison`) and
+  `translate_ranks`. `Mpi::create_from_group` builds a communicator from a
+  group on MPI 4.0 and later.
+- **Custom datatypes.** `CustomDatatype`, committed on construction and
+  freed on drop, built with `contiguous`, `vector`, `create_struct` (from
+  `StructField`s) and `resized`. `send_custom`, `recv_custom`,
+  `isend_custom` and `irecv_custom` send and receive with it; the sealed
+  `BytePermutable` trait marks the types they accept.
+- **User-defined reductions.** `UserOp<T>` registers a
+  `Fn(&[T], &mut [T]) + Send + Sync + 'static` closure with `MPI_Op_create`
+  (commutative or not, at most 16 live per process), used by
+  `Communicator::allreduce_with_op`.
+- **RMA windows (feature `rma`).** `Win<T>` over caller-owned or
+  MPI-allocated memory: fence, post/start/complete/wait and passive-target
+  lock/lock-all epochs (`WinFenceAssert`, `WinPscwAssert`, `LockType`,
+  `WinLockGuard`, `WinLockAllGuard`), flush and sync, blocking and
+  request-based put, get and accumulate, and the atomic `get_accumulate`,
+  `fetch_and_op` and `compare_and_swap`. `fetch_and_op` and
+  `compare_and_swap` return a `PendingFetchResult<T>`; `compare_and_swap`
+  takes integer types only (`AtomicMpiDatatype`).
+- **Buffered and persistent point-to-point.** `Mpi::buffer_attach` (buffers
+  above `i32::MAX` bytes return `Err(InvalidBuffer)`) and `buffer_detach`,
+  and the persistent `send_init`, `bsend_init`, `rsend_init`, `ssend_init`
+  and `recv_init`.
+- **Documentation.** `docs/architecture.md`, `docs/migrating-from-rsmpi.md`,
+  `docs/mpi-compatibility.md`, ADR-0001, ADR-0003, ADR-0004 and ADR-0005,
+  published in rustdoc under `ferrompi::doc`.
 - **V-collective length validation.** `gatherv`, `scatterv`,
   `allgatherv`, `alltoallv`, and their nonblocking variants now return
   `Err(Error::InvalidBuffer)` when `counts.len() != displs.len()`. The
@@ -107,7 +401,7 @@ dependency refreshes and documentation work.
   every public type's auto-trait status and rationale (see lib.rs
   "Send/Sync Status of Public Types").
 - **37 new SAFETY comments** across `src/comm/{blocking,persistent,
-v_collective}.rs` documenting pointer validity, type-tag mapping,
+  v_collective}.rs` documenting pointer validity, type-tag mapping,
   and handle ownership at each `unsafe` FFI block.
 
 ### Changed
@@ -128,7 +422,7 @@ v_collective}.rs` documenting pointer validity, type-tag mapping,
   and `Error` now derive `thiserror::Error`. All existing `Display`
   strings preserved byte-for-byte (cobre parsers are safe).
 - **Request::Drop documented as blocking.** Added loud `# Drop
-Behavior` rustdoc sections to `Request` and `PersistentRequest`
+  Behavior` rustdoc sections to `Request` and `PersistentRequest`
   explaining the `MPI_Wait`-in-Drop semantics and deadlock risk.
   ADR-0004 gained a Drop-behavior subsection. Cancel-then-wait is
   deferred to v0.5.
@@ -144,9 +438,7 @@ Behavior` rustdoc sections to `Request` and `PersistentRequest`
   it; MPICH 4.2.x exhibited the UB as zeroed returns. The fix boxes
   origin (and `compare`, for CAS) and result on the heap; the returned
   `PendingFetchResult<T>` owns the `Box`es so MPI's pointers remain
-  valid until `resolve()` is called. Closes architecture-review SG-1
-  for these two methods (the broader RMA buffer-lifetime story for
-  put/get/accumulate remains a v0.5 design item).
+  valid until `resolve()` is called.
 - **`install_errors_return_win` is now best-effort.** Per MPI-3 §9.4.4,
   newly-created windows default to `MPI_ERRORS_ARE_FATAL`. The C shim
   attempts to upgrade to `MPI_ERRORS_RETURN`, but OpenMPI 4.x has been
@@ -235,190 +527,6 @@ Behavior` rustdoc sections to `Request` and `PersistentRequest`
   new prefix.
 
 ### Added
-
-#### Groups & Custom Datatypes (epic-06)
-
-- **`Group`** -- RAII handle to an `MPI_Group` with automatic free on drop.
-  Obtain from `Communicator::group()` or by calling the set-operation
-  methods below.
-- **`GroupComparison`** -- `#[repr(i32)]` enum with ferrompi-stable
-  discriminants (`Identical = 0`, `Similar = 1`, `Unequal = 2`)
-  returned by `Group::compare`.
-- **`RankRange`** -- Plain `{ first, last, stride }` struct for compact
-  specification of arithmetic rank progressions; used by
-  `Group::range_include` and `Group::range_exclude`.
-- **`Group::size()`** -- Returns the number of processes in the group.
-- **`Group::rank()`** -- Returns the calling rank within the group, or
-  `Group::undefined()` (`-1`) when not a member.
-- **`Group::undefined()`** -- Returns the normalised `MPI_UNDEFINED`
-  sentinel (`-1`) without requiring an active MPI session.
-- **`Group::include(ranks)`** -- Creates a sub-group from the given rank
-  indices.
-- **`Group::exclude(ranks)`** -- Creates a sub-group omitting the given
-  rank indices.
-- **`Group::union(other)`** -- Set-union of two groups.
-- **`Group::intersection(other)`** -- Set-intersection of two groups.
-- **`Group::difference(other)`** -- Set-difference (`self` minus `other`).
-- **`Group::range_include(ranges)`** -- Sub-group formed from arithmetic
-  rank progressions.
-- **`Group::range_exclude(ranges)`** -- Sub-group formed by removing
-  arithmetic rank progressions.
-- **`Group::compare(other)`** -- Structural comparison of two groups;
-  returns `GroupComparison`.
-- **`Group::translate_ranks(ranks, other)`** -- Translates ranks from
-  this group's rank space into `other`'s; returns
-  `Vec<Option<i32>>` (`None` for non-members).
-- **`Communicator::group()`** -- Returns the `Group` associated with this
-  communicator.
-- **`Mpi::create_from_group(group, tag)`** -- Creates a new communicator
-  from a `Group` using `MPI_Comm_create_from_group` (MPI 4.0+). Returns
-  `Err(Error::NotSupported)` on older MPI runtimes detected at runtime
-  via a cached `OnceLock<bool>` version probe.
-- **`CustomDatatype`** -- RAII handle to a committed derived `MPI_Datatype`;
-  always committed on construction, freed automatically on drop. Not
-  `Clone`; share via `&CustomDatatype`.
-- **`StructField`** -- Field descriptor (`blocklength`, `displacement`,
-  `basetype`) used as input to `CustomDatatype::create_struct`.
-- **`BytePermutable`** -- Sealed trait marking types whose byte
-  representation may be reinterpreted by custom-datatype operations
-  (in `src/datatype.rs`).
-- **`CustomDatatype::contiguous(count, basetype)`** -- Wraps
-  `MPI_Type_contiguous` + `MPI_Type_commit`; creates a block of `count`
-  identical base elements.
-- **`CustomDatatype::vector(count, blocklength, stride, basetype)`** --
-  Wraps `MPI_Type_vector` + `MPI_Type_commit`; creates a strided
-  block type.
-- **`CustomDatatype::create_struct(fields)`** -- Wraps
-  `MPI_Type_create_struct` + `MPI_Type_commit`; creates a
-  heterogeneous struct type from a slice of `StructField` descriptors.
-- **`CustomDatatype::resized(lb, extent)`** -- Wraps
-  `MPI_Type_create_resized` + `MPI_Type_commit`; produces a new type
-  with adjusted lower bound and extent, leaving the original intact.
-- **`Communicator::send_custom` / `recv_custom` / `isend_custom` / `irecv_custom`** --
-  Point-to-point methods that accept a `&CustomDatatype` handle for
-  user-defined derived types.
-
-Reference: plans/ferrompi-gap-closure/learnings/epic-06-summary.md
-
-#### Full RMA + Op_create + Persistent P2P (epic-07)
-
-- **`UserOp<T>`** -- Safe wrapper around a user-supplied
-  `Fn(&[T], &mut [T]) + Send + Sync + 'static` closure registered with
-  `MPI_Op_create`. Backed by 16 pre-compiled trampolines; at most 16
-  `UserOp` instances may be live concurrently per process.
-- **`UserOp::new(f)`** -- Creates a commutative user-defined reduction op.
-- **`UserOp::new_noncommutative(f)`** -- Creates a non-commutative
-  user-defined reduction op; MPI will not reorder operands.
-- **`Communicator::allreduce_with_op(send, recv, op)`** -- Allreduce
-  driven by a `&UserOp<T>`.
-- **`Win<T>`** -- Full-featured RMA window (`Win<'a, T: MpiDatatype>`)
-  owning either a `Created` or `Allocated` window kind; freed
-  automatically on drop. Complements the pre-existing
-  `SharedWindow<T>`.
-- **`WinFenceAssert`** -- Bitflag type for active-target fence assertions
-  (`MPI_MODE_NOSTORE`, `MPI_MODE_NOPUT`, etc.); mode values cached via
-  `OnceLock` at first use.
-- **`WinPscwAssert`** -- Bitflag type for PSCW (`post`/`start`/
-  `complete`/`wait_exposure`) epoch assertions.
-- **`LockType`** -- Enum (`Exclusive`, `Shared`) for passive-target
-  `Win::lock`.
-- **`PendingFetchResult<T>`** -- Wraps `MaybeUninit<T>`; produced by
-  `fetch_and_op` and `compare_and_swap` and resolved to `T` after the
-  epoch completes.
-- **`Win::fence(assert)`** -- Active-target epoch delimiter.
-- **`Win::post(group, assert)`** -- PSCW: starts an exposure epoch on
-  the target side.
-- **`Win::start(group, assert)`** -- PSCW: starts an access epoch on
-  the origin side.
-- **`Win::complete()`** -- PSCW: ends the origin access epoch.
-- **`Win::wait_exposure()`** -- PSCW: waits for the exposure epoch to
-  finish (`MPI_Win_wait`; named to avoid collision with `Request::wait`).
-- **`Win::lock(lock_type, rank)`** -- Passive-target: acquires a lock on
-  a remote window and returns a `WinLockGuard` RAII guard.
-- **`Win::lock_all()`** -- Passive-target: locks all ranks and returns a
-  `WinLockAllGuard` RAII guard.
-- **`Win::flush_local(rank)`** -- Completes locally-initiated RMA
-  operations to `rank` without synchronising the remote side.
-- **`Win::flush_local_all()`** -- `flush_local` across all ranks.
-- **`Win::sync()`** -- Memory synchronisation fence for passive-target
-  epochs.
-- **`Win::put(origin, target_rank, target_disp)`** -- Blocking RMA put.
-- **`Win::get(target_rank, target_disp, count)`** -- Blocking RMA get.
-- **`Win::accumulate(origin, op, target_rank, target_disp)`** -- RMA
-  accumulate with a predefined `ReduceOp`.
-- **`Win::get_accumulate(origin, op, target_rank, target_disp)`** -- RMA
-  fetch-and-accumulate; atomic on types implementing `AtomicMpiDatatype`.
-- **`Win::fetch_and_op(value, op, target_rank, target_disp)`** -- Atomic
-  fetch-and-op on a single element; returns `PendingFetchResult<T>`.
-- **`Win::compare_and_swap(compare, value, target_rank, target_disp)`** --
-  Atomic compare-and-swap; restricted to `AtomicMpiDatatype` (i32, i64,
-  u32, u64, u8 — no f32/f64).
-- **`Win::rput(origin, target_rank, target_disp)`** -- Non-blocking RMA
-  put; returns a `Request`.
-- **`Win::rget(target_rank, target_disp, count)`** -- Non-blocking RMA
-  get; returns a `Request`.
-- **`Win::raccumulate(origin, op, target_rank, target_disp)`** -- Non-blocking
-  RMA accumulate; returns a `Request`.
-- **`WinLockGuard`** -- RAII passive-target lock guard on a single rank;
-  exposes `flush()` (flushes the locked rank captured at `Win::lock`).
-- **`WinLockAllGuard`** -- RAII passive-target lock-all guard; exposes
-  `flush(rank)` and `flush_all()`.
-- **`AtomicMpiDatatype`** -- Sealed trait restricting atomic RMA
-  operations (`compare_and_swap`, `get_accumulate`) to safe integer
-  types: i32, i64, u32, u64, u8. f32 and f64 are excluded.
-- **`Mpi::buffer_attach(buffer)`** -- Registers a `Box<[u8]>` with MPI
-  for buffered-send mode; returns `Error::InvalidOp` on double-attach.
-- **`Mpi::buffer_detach()`** -- Unregisters the attached buffer and
-  returns ownership of the `Box<[u8]>`; blocks until all buffered sends
-  complete.
-- **`Communicator::send_init(buf, dest, tag)`** -- Creates a persistent
-  send request (standard mode); returns `Result<PersistentRequest>`.
-- **`Communicator::bsend_init(buf, dest, tag)`** -- Persistent buffered
-  send request; returns `Result<PersistentRequest>`.
-- **`Communicator::rsend_init(buf, dest, tag)`** -- Persistent ready-send
-  request; returns `Result<PersistentRequest>`.
-- **`Communicator::ssend_init(buf, dest, tag)`** -- Persistent
-  synchronous-send request; returns `Result<PersistentRequest>`.
-- **`Communicator::recv_init(buf, source, tag)`** -- Persistent receive
-  request; returns `Result<PersistentRequest>`.
-
-Reference: plans/ferrompi-gap-closure/learnings/epic-07-summary.md
-
-#### Documentation (epic-08)
-
-- **`docs/architecture.md`** -- Nine-section contributor reference
-  (3 078 words): six-layer Mermaid architecture diagram, handle-table
-  catalog for all seven tables, thread-safety model, C layer scope,
-  FFI/ABI invariants, sealed-trait families, error handling model, and
-  ADR cross-reference index.
-- **`docs/migrating-from-rsmpi.md`** -- Function-for-function migration
-  guide from rsmpi (3 238 words): 96-row pipe-table mapping rsmpi
-  expressions to ferrompi equivalents, three side-by-side code samples,
-  "Not supported" section, and a migration checklist.
-- **`docs/mpi-compatibility.md`** -- Feature compatibility matrix
-  (3 697 words): 82 five-column rows covering MPICH 3.x/4.x, Open MPI
-  4/5, Intel MPI, and Cray MPI with footnoted MPICH 4.2.x quirks.
-- **`docs/adr/0001-why-c-wrapper.md`** -- ADR justifying the hand-written
-  C shim layer over `bindgen` (ABI portability) and Boost.MPI/MPL
-  (dependency weight).
-- **`docs/adr/0003-generic-mpi-datatype.md`** -- ADR documenting the
-  four sealed-trait families (`MpiDatatype`, `AtomicMpiDatatype`,
-  `MpiIndexedDatatype`, `BytePermutable`) and the hybrid
-  `CustomDatatype` model for user types.
-- **`docs/adr/0004-persistent-collective-approach.md`** -- ADR covering
-  `PersistentRequest<'a, T>` lifetime enforcement and the unified design
-  shared by persistent collectives and all five P2P `_init` variants.
-- **`docs/adr/0005-mpi-op-create.md`** -- ADR covering the seven design
-  decisions for the `MPI_Op_create` FFI-callback trampoline (closure
-  storage, `Send+Sync+'static`, lifetime ordering, commutativity,
-  dispatch, panic handling, datatype contract).
-- **`docs/README.md`** -- Landing page for the `docs/` directory with
-  GitHub-relative links and rustdoc/Mermaid rendering caveats.
-- **`src/doc.rs`** -- Eight `#[doc = include_str!(...)]` modules that
-  publish all long-form documentation files into rustdoc under
-  `ferrompi::doc::*`.
-
-Reference: plans/ferrompi-gap-closure/learnings/epic-08-summary.md
 
 - **`Error::from_code_with_op(code, op)`** -- Constructs `Error::Mpi`
   with the operation tag pre-populated. Replaces the pattern of
@@ -525,8 +633,8 @@ Reference: plans/ferrompi-gap-closure/learnings/epic-08-summary.md
 - V-collectives: `gatherv`, `scatterv`, `allgatherv`, `alltoallv` (blocking, nonblocking, persistent)
 - Alltoall: `alltoall` (blocking, nonblocking, persistent)
 - Reduce-scatter-block: `reduce_scatter_block` (blocking, nonblocking, persistent)
-- All 15 nonblocking collective variants: `ibroadcast`, `iallreduce`, `ireduce`, `igather`, `iallgather`, `iscatter`, `ibarrier`, `iscan`, `iexscan`, `ialltoall`, `igatherv`, `iscatterv`, `iallgatherv`, `ialltoallv`, `ireduce_scatter_block`
-- All 15 persistent collective variants (MPI 4.0+): `bcast_init`, `allreduce_init`, `allreduce_init_inplace`, `reduce_init`, `gather_init`, `scatter_init`, `allgather_init`, `scan_init`, `exscan_init`, `alltoall_init`, `gatherv_init`, `scatterv_init`, `allgatherv_init`, `alltoallv_init`, `reduce_scatter_block_init`
+- All 15 nonblocking collective variants (`i`-prefixed)
+- All 15 persistent collective variants (`*_init`, MPI 4.0+)
 - Shared memory windows: `SharedWindow<T>` with RAII lock guards (`LockGuard`, `LockAllGuard`) (feature: `rma`)
 - Window synchronization: `fence`, `lock`, `lock_all`, `flush`, `flush_all`
 - SLURM environment helpers: `is_slurm_job`, `job_id`, `local_rank`, `local_size`, `num_nodes`, `cpus_per_task`, `node_name`, `node_list` (feature: `numa`)
@@ -551,7 +659,8 @@ Reference: plans/ferrompi-gap-closure/learnings/epic-08-summary.md
 - Comprehensive documentation
 - Initial CI/CD setup with GitHub Actions
 
-[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/cobre-rs/ferrompi/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/cobre-rs/ferrompi/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/cobre-rs/ferrompi/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/cobre-rs/ferrompi/compare/v0.3.0...v0.4.0

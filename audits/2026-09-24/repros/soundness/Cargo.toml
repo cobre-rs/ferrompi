@@ -1,0 +1,13 @@
+[package]
+name = "ferrompi-audit-soundness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ferrompi = { path = "../../../..", features = ["rma"] }
+
+[profile.release]
+debug = true
+
+[workspace]

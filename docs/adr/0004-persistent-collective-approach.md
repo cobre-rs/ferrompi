@@ -1,6 +1,6 @@
 # ADR-0004: PersistentRequest Lifecycle and Buffer-Lifetime Invariants
 
-**Status:** Accepted — 2026-05-17
+**Status:** Accepted — 2026-05-17; amended 2026-09-24
 **Date:** 2026-05-17
 **Deciders:** Rogerio Alves
 
@@ -38,6 +38,8 @@ Subsequent iterations pay only the marginal data-movement cost. In practice this
 produces the 10–30% per-iteration speedup quoted in the ferrompi README for
 representative MPI 4.0–capable runtimes.
 
+> **Amended 2026-09-24 — Measured persistent speed-up.** See [Amendments](#amendments).
+
 ### The buffer-lifetime problem
 
 `MPI_Send_init` and all `*_init` variants capture the buffer address at registration
@@ -74,7 +76,7 @@ The buffer-lifetime problem and the active-state problem are identical for all
 persistent operations regardless of whether the underlying MPI call is a collective or a
 point-to-point send or receive. The decision made here applies uniformly to:
 
-- All 11 collective `_init` variants added in epics 3–4 (`bcast_init`,
+- All 11 collective `_init` variants (`bcast_init`,
   `allreduce_init`, `reduce_init`, `gather_init`, `scatter_init`, `allgather_init`,
   `alltoall_init`, `scan_init`, `exscan_init`, `reduce_scatter_block_init`,
   `barrier_init`).
@@ -82,12 +84,13 @@ point-to-point send or receive. The decision made here applies uniformly to:
   `alltoallv_init`).
 - In-place variants (`allreduce_init_inplace`, `gather_init_inplace`,
   `scatter_init_inplace`, `allgather_init_inplace`, `alltoall_init_inplace`).
-- The five P2P `_init` variants added in epic 7 (`send_init`, `recv_init`,
+- The five P2P `_init` variants (`send_init`, `recv_init`,
   `bsend_init`, `rsend_init`, `ssend_init`).
 
-This ADR therefore covers both persistent collectives and persistent P2P. The
-`epic-07-summary.md` Persistent P2P Conventions section confirms that the P2P variants
-share the lifecycle design and use the same `PersistentRequest` type. Splitting into two
+> **Amended 2026-09-24 — Constructor set and MPI version gates.** See [Amendments](#amendments).
+
+This ADR therefore covers both persistent collectives and persistent P2P, which share the
+lifecycle design and the `PersistentRequest` type. Splitting into two
 ADRs would document the same design twice; one ADR covers both.
 
 ---
@@ -269,6 +272,8 @@ owners. A single `'a` parameter cannot capture this without either overly restri
 caller or introducing multiple lifetime parameters per constructor. The resulting
 signatures become harder to use than the invariant they protect is dangerous.
 
+> **Amended 2026-09-24 — Lifetime-bound requests.** See [Amendments](#amendments).
+
 The practical safety improvement over well-documented SAFETY comments on every
 constructor is also limited: callers who read and follow the SAFETY documentation write
 correct code; callers who do not will violate either the lifetime-parameterized or the
@@ -331,19 +336,23 @@ Rationale against the decision drivers:
 
 `PersistentRequest` is the return type of every constructor variant across the entire
 persistent operation surface: the 11 collective `_init` functions, the 4 V-variants, the
-5 in-place variants, and the 5 P2P `_init` functions added in epic 7 (`send_init`,
+5 in-place variants, and the 5 P2P `_init` functions (`send_init`,
 `recv_init`, `bsend_init`, `rsend_init`, `ssend_init`). Because the type carries no
 buffer type parameter, the same type is used uniformly regardless of whether the
 underlying operation is a broadcast over `f64` or a synchronous-mode send of `i32`.
+
+> **Amended 2026-09-24 — Constructor set and MPI version gates.** See [Amendments](#amendments).
 
 ### Persistent P2P shares `PersistentRequest` with no special casing
 
 The five P2P variants (`send_init`, `recv_init`, `bsend_init`, `rsend_init`,
 `ssend_init`) return `PersistentRequest` with the same lifecycle semantics as any
 collective `_init` variant. The only difference between P2P and collective constructors
-is the MPI version requirement: persistent P2P is available since MPI 1.1 (gated via
-`#if MPI_VERSION >= 3` in the C shims), whereas persistent collectives require MPI 4.0
+is the MPI version requirement: persistent P2P is available since MPI 1.1 (its shims have
+no version gate), whereas persistent collectives require MPI 4.0
 (gated via `#if MPI_VERSION >= 4`). At the Rust level both families look identical.
+
+> **Amended 2026-09-24 — Constructor set and MPI version gates.** See [Amendments](#amendments).
 
 ### Runtime active-state check: `start()` returns `Err`, not `panic!`
 
@@ -374,6 +383,8 @@ not propagatable). This is an accepted trade-off: if `MPI_Wait` fails inside `Dr
 `MPI_Request_free` still runs, ensuring the slot is released. The failure is effectively
 swallowed, which is consistent with Rust's convention that `Drop` must not panic.
 
+> **Amended 2026-09-24 — Drop after finalize and on another thread.** See [Amendments](#amendments).
+
 ### Drop behavior for nonblocking `Request`
 
 `Drop for Request` calls `ferrompi_wait(self.handle)` (which invokes `MPI_Wait`) when
@@ -399,6 +410,8 @@ The rationale for blocking over alternatives:
 The future evolution path: a `MPI_Cancel`-then-`MPI_Wait`-with-timeout approach is being
 considered to make `Drop` non-blocking on error paths. This is out of scope for v0.4.1
 and planned for v0.5.
+
+> **Amended 2026-09-24 — Drop after finalize and on another thread.** See [Amendments](#amendments).
 
 ### Buffer-lifetime invariant: documented in SAFETY comments
 
@@ -439,12 +452,13 @@ same lifetime rules apply.
 
 ### Persistent collectives require MPI 4.0; persistent P2P requires MPI 1.1
 
-Collective `_init` constructors are conditionally compiled with `#if MPI_VERSION >= 4`
-in the C shims. On a pre-4.0 MPI installation the shims return `MPI_ERR_UNSUPPORTED_OPERATION`
-and ferrompi surfaces this as `Error::Mpi { class: MpiErrorClass::UnsupportedOperation, ... }`.
-The persistent P2P variants are gated at `#if MPI_VERSION >= 3` — available on all
-current MPICH, Open MPI, and Cray MPT installations. No runtime version probe is
-required for P2P; the compile-time gate is sufficient.
+Collective `_init` constructors are compiled with `#if MPI_VERSION >= 4` in the C
+shims. On an MPI older than 4.0 the shims return a ferrompi sentinel that surfaces as
+`Err(Error::NotSupported(_))` naming the operation. The persistent P2P shims have no
+version gate, and no runtime version probe is required.
+
+> **Amended 2026-09-24 — Constructor set and MPI version gates.** See [Amendments](#amendments).
+> **Amended 2026-09-29 — Open MPI 5 capability gate.** See [Amendments](#amendments).
 
 ---
 
@@ -485,9 +499,57 @@ A single `PersistentRequest` that serves all variants is strictly preferable.
 
 ---
 
+## Amendments
+
+### 2026-09-24 — Lifetime-bound requests
+
+Option C's second argument does not hold. One lifetime parameter can bound several
+borrows in one signature (`&'a [T]` and `&'a mut [T]`), as `Win<'a, T>` bounds
+`Win::create`'s buffer, and `'a` limits how long the borrows last, not what they point
+to. A lifetime alone would still not make the API sound, because `std::mem::forget` on a
+request ends the borrow while MPI keeps using the buffer. The buffer-safety model of this
+ADR is superseded in 0.7.0 by a new ADR on buffer ownership.
+
+### 2026-09-24 — Drop after finalize and on another thread
+
+- Every `Drop` described here first calls ferrompi's lifecycle guard.
+- After the `Mpi` handle is dropped, `Drop` for `Request` and `PersistentRequest` makes
+  no MPI call, including when `MPI_Finalize` was skipped because a window was still
+  alive.
+- Before `MPI_Finalize`, `Mpi`'s drop frees every inactive persistent request and leaves
+  active requests to MPI; debug builds print their count.
+- Below `ThreadLevel::Serialized`, a request dropped on a thread other than the one that
+  initialised MPI aborts the process with a message naming the type and the thread,
+  since it can neither call MPI there nor return an error.
+- The cancel-with-timeout change considered for 0.5 was not made: `Drop` still waits.
+
+### 2026-09-24 — Constructor set and MPI version gates
+
+- There are ten persistent collective constructors; the persistent barrier constructor
+  listed in the scope was never added.
+- On an MPI older than 4.0 the collective constructors return `Err(Error::NotSupported(_))`
+  naming the operation. The paragraph that named a nonexistent error class was corrected
+  in place.
+- The persistent point-to-point shims have no version gate.
+
+### 2026-09-24 — Measured persistent speed-up
+
+The 10–30% per-iteration figure above was not measured. On MPICH at 2 ranks, a
+persistent allreduce was 20–58 % faster per call than `iallreduce` up to 4 KiB, at most
+8 % faster at 32 KiB, and no faster from 256 KiB.
+
+### 2026-09-29 — Open MPI 5 capability gate
+
+The collective constructors are compiled when `mpi.h` reports `MPI_VERSION >= 4` or the
+library is Open MPI 5 or later, which implements them while reporting MPI 3.1. Their
+large-count forms stay gated on `MPI_VERSION >= 4`. Elsewhere the constructors return
+`Err(Error::NotSupported(_))` as before.
+
+---
+
 ## Status
 
-Accepted — 2026-05-17. Implemented across epics 3–4 (persistent collectives) and epic 7
-(persistent P2P). The implementation lives in `src/persistent.rs` (the `PersistentRequest`
-type and its `Drop` impl) and `src/comm/persistent.rs` (all `*_init` constructor methods
-on `Communicator`).
+Accepted — 2026-05-17; amended 2026-09-24, 2026-09-29, 2026-09-30. The implementation lives in `src/persistent.rs` (the `PersistentRequest`
+type and its `Drop` impl) and `src/comm/persistent.rs` (the persistent collective `*_init` methods on `Communicator`;
+the persistent point-to-point constructors are in `src/comm/p2p.rs` and the persistent v-collective ones in
+`src/comm/v_collective.rs`).

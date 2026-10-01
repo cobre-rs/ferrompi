@@ -2,7 +2,7 @@
 //!
 //! Verifies that `Win::lock`, `Win::lock_all`, `WinLockGuard::flush`, and
 //! `WinLockAllGuard::flush` / `flush_all` work correctly without issuing any
-//! RMA data operations. Data-movement tests are deferred to ticket-034 / 057–058.
+//! RMA data operations.
 //!
 //! Test matrix (all on a 2-rank world):
 //!
@@ -14,8 +14,11 @@
 //!    and `guard.flush_all()`, then drop the guard (→ unlock_all).
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_lock
+// mpi-test: np=2
 
 use ferrompi::{LockType, Mpi, ReduceOp, Win, WinFenceAssert};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -42,9 +45,14 @@ fn main() {
         }
     };
 
-    // Opening fence to satisfy MPI epoch rules before passive-target use.
-    if let Err(e) = win.fence(WinFenceAssert::none()) {
+    // `no_succeed` says no fence epoch follows; the barrier puts every rank's
+    // fence before any rank's lock.
+    if let Err(e) = win.fence(WinFenceAssert::no_succeed()) {
         eprintln!("rank {rank}: FAIL: initial fence failed: {e}");
+        local_ok = false;
+    }
+    if let Err(e) = world.barrier() {
+        eprintln!("rank {rank}: FAIL: barrier before lock failed: {e}");
         local_ok = false;
     }
 
@@ -60,12 +68,7 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: Win::lock(Shared, 0) failed: {e}");
-                local_ok = false;
-                // Still need to participate in test-2 and test-3 barriers, so
-                // we synthesise a dummy guard path by jumping ahead.
-                // Use a sentinel allreduce and return.
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 
@@ -92,9 +95,7 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: Win::lock(Exclusive, 0) failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 
@@ -121,9 +122,7 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: Win::lock_all failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 
@@ -144,22 +143,5 @@ fn main() {
         println!("PASS: Win::lock_all with WinLockAllGuard");
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — confirms no rank diverged silently.
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    assert!(
-        global_ok != 0,
-        "test_rma_win_lock: one or more ranks reported failure"
-    );
-
-    world.barrier().expect("final barrier failed");
-    if rank == 0 {
-        println!("\n========================================");
-        println!("All Win lock tests passed! (3 tests)");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_rma_win_lock");
 }

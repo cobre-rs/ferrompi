@@ -1,4 +1,4 @@
-# ADR 0002: Handle-Table Concurrency Strategy (Request Table)
+# ADR-0002: Handle-Table Concurrency Strategy (Request Table)
 
 ## Context
 
@@ -34,9 +34,7 @@ request with no error signal. ThreadSanitizer would flag this as a data race.
 
 The `comm_table` allocation at lines 87-96 has the same structural race via its
 `MPI_COMM_NULL` sentinel, and `win_table`/`info_table` share the same `int used[]`
-pattern. **The scope of this ADR and its implementing ticket (ticket-023) is the
-request table only.** The comm/win/info tables are addressed in later epics per
-the master plan's Confirmed Decision 3.
+pattern. **The scope of this ADR is the request table only.**
 
 Current state (verified 2026-04-24):
 
@@ -84,6 +82,9 @@ Pros:
 - No ABA problem: slots are indexed integers, not pointer-linked nodes. Two
   threads racing on the same index produce a deterministic outcome — exactly one
   CAS succeeds and claims the slot; the loser moves to the next index.
+
+  > **Amended 2026-09-24 — Reused slots and handle generations.** See [Amendments](#amendments).
+
 - The `get_request_ptr` read path reduces to a single acquire atomic load — no
   lock acquisition, no memory bus arbitration beyond cache-line coherence.
 - `<stdatomic.h>` is part of the C11 standard library. No new dependency, no
@@ -193,8 +194,8 @@ provides no measurable benefit at ferrompi's target workload scale.
 
 ## Consequences
 
-The following eight steps constitute the complete implementation specification for
-ticket-023. Every file path, line number, and function name refers to
+The following eight steps constitute the complete implementation specification.
+Every file path, line number, and function name refers to
 `csrc/ferrompi.c` as it exists at the time this ADR was accepted (commit 06b4044).
 
 **Step 1 — Add `<stdatomic.h>`**
@@ -281,7 +282,7 @@ static int64_t alloc_request(MPI_Request req) {
 Key memory-ordering decisions:
 
 - The CAS uses `memory_order_acq_rel` on success to atomically claim the slot.
-  **Correction (F2-003):** the original wording here claimed this release
+  **Amended 2026-06-18 — memory ordering.** the original wording here claimed this release
   "publishes" the _subsequent_ `request_table[idx] = req` store. That is
   incorrect under C11 — a release orders stores sequenced _before_ it, not
   after — and the code never actually relied on it. The slot write is
@@ -289,7 +290,7 @@ Key memory-ordering decisions:
   program order (same-thread use) or the caller-established happens-before of
   whatever transfers the handle across threads (channel, `Arc`, join). The one
   publish/consume edge this layer owns itself is `free_request`'s release store
-  paired with `get_request_ptr`'s acquire load. See the Update section below.
+  paired with `get_request_ptr`'s acquire load. See [Amendments](#amendments).
 - The hint load and store are `memory_order_relaxed` because the hint is
   advisory: an inaccurate hint never produces an incorrect result, only
   a slightly longer scan.
@@ -362,80 +363,71 @@ operations can be in flight, so the acquire/release here is defensive rather
 than strictly necessary — but it keeps the access pattern consistent with the
 rest of the implementation and avoids triggering TSan's finalizer checks.
 
-### Follow-up: TSan Verification
+## Amendments
 
-Ticket-023 must add a ThreadSanitizer verification step. The preferred form is a
-new script or target in `tests/` (e.g. `tests/run_tsan_tests.sh`) that compiles
-`csrc/ferrompi.c` with `-fsanitize=thread` and runs a multi-threaded non-blocking
-send/receive test that exercises concurrent `alloc_request` and `free_request`
-calls, exiting 0 with no TSan diagnostics.
+### 2026-06-18 — Request-table occupancy bitmap
 
-If TSan is not practical in the CI environment (e.g., Cray's system MPI
-libraries are not instrumented and produce false positives), ticket-023 must
-document this in a code comment adjacent to the atomic declarations and register
-the multi-threaded isend scenario as a mandatory manual pre-release step in
-`CONTRIBUTING.md` or a dedicated `docs/testing.md` entry.
+The dense `atomic_int request_used[16384]` array (Steps 2-8) was replaced with
+an occupancy bitmap: `_Atomic(uint64_t) request_bits[MAX_REQUESTS / 64]`
+(256 words, 2 KiB vs 64 KiB).
 
-### Out of Scope (at time of ticket-023)
-
-The `comm_table`, `win_table`, and `info_table` had the same structural race
-under `MPI_THREAD_MULTIPLE`. They were excluded from this ADR and from ticket-023
-per the master plan's Confirmed Decision 3.
-
-**Update (ticket-006, v0.4.1-hardening epic-02):** All seven handle tables —
-`comm_table`, `request_table`, `win_table`, `info_table`, `group_table`,
-`datatype_table`, and `op_table` — now use the C11 atomic-CAS pattern described
-in this ADR. Slot 0 of `comm_table` is permanently reserved for `MPI_COMM_WORLD`
-and is marked used via `atomic_store_explicit(&comm_used[0], 1, ...)` in both
-`ferrompi_init` and `ferrompi_init_thread`; `alloc_comm` skips slot 0 explicitly.
-
-## Update (v0.4.x assessment hardening — F2-002, F2-003, F2-006)
-
-A 2026 architecture/performance assessment raised three follow-ups against the
-Option A design above.
-
-**F2-003 — memory-ordering documentation.** The Step 5 rationale incorrectly
-stated that the `acq_rel` CAS publishes the subsequent `request_table[idx]`
-write; a release orders stores sequenced _before_ it, not after. The in-code
-comments were already correct; the bullet under Step 5 is now corrected. The
-real contract: the allocating thread's slot write reaches another thread by
-program order (same-thread use) or by the caller-established happens-before of
-whatever transfers the handle across threads. The only publish/consume edge
-this layer owns is `free_request`'s release store paired with
-`get_request_ptr`'s acquire load (so a re-acquirer observes the nulled slot).
-This contract is unchanged by the bitmap rewrite below.
-
-**F2-002 / F2-006 — request-table occupancy bitmap.** The dense
-`atomic_int request_used[16384]` array (Steps 2-8) packed ~16 slots per 64-byte
-cache line, so concurrent `alloc_request` calls false-shared the line (F2-002),
-and allocation scanned the array one slot at a time from a single shared hint,
-degrading toward O(N) at high occupancy (F2-006). The request table now tracks
-occupancy with a bitmap of 64-bit words —
-`_Atomic(uint64_t) request_bits[MAX_REQUESTS / 64]` (256 words, 2 KiB vs 64 KiB):
-
-- `alloc_request` scans words from an advisory _word_ hint; within a non-full
-  word it selects the lowest free slot with `__builtin_ctzll(~word)` (hardware
-  find-first-zero, skipping 64 slots per probe) and claims it with an `acq_rel`
-  `atomic_fetch_or`. `fetch_or` is idempotent, so a lost race (the returned word
-  already had the chosen bit set) just means another thread took that slot — it
-  retries the next free bit, never corrupting occupancy. Because slots are
-  indexed bits rather than pointer-linked nodes, this is ABA-free, so it gains
-  near-O(1) allocation and ~64× less metadata to false-share **without** Option
-  C's generational-counter complexity (driver 2) or wide-atomic needs (driver 5).
+- `alloc_request` scans words from an advisory word hint; within a non-full
+  word it selects the lowest free slot with a hardware find-first-zero and
+  claims it with an `acq_rel` `atomic_fetch_or`. `fetch_or` is idempotent, so a
+  lost race (the returned word already had the chosen bit set) just means
+  another thread took that slot — it retries the next free bit.
 - `free_request` clears the bit with a `release` `atomic_fetch_and`;
   `get_request_ptr` tests it with an `acquire` load — the same publish/consume
   edge as before.
+- The six small fixed tables (comm, win, datatype, info, group, op) keep the
+  dense `atomic_int used[]` + CAS-scan design from Steps 2-8.
+- This amendment also corrected the Step 5 memory-ordering rationale (see the
+  inline note above).
+- The bitmap was expected to reduce false sharing and scan cost. It did not:
+  see "Measured contention" below.
 
-The six small fixed tables (comm 256, win 256, datatype/info/group 64, op 16)
-**keep** the dense `atomic_int used[]` + CAS-scan design from Steps 2-8: at ≤256
-slots the scan cost and false sharing the bitmap addresses are negligible, and
-the simpler code stays auditable by inspection (driver 2).
+### 2026-09-24 — Reused slots and handle generations
 
-**TSan.** `examples/test_request_table_concurrency.rs` (4 threads/rank × 100
-iterations of isend+irecv+wait) exercises the bitmap under `MPI_THREAD_MULTIPLE`
-and documents the `-Zsanitizer=thread` invocation for data-race verification.
+The Option A "No ABA problem" claim above holds for allocation only: two
+threads racing to claim the same slot index do produce a deterministic winner.
+It does not hold for the full request lifecycle. A freed slot is reused by a
+later `alloc_request` call, so a request handle kept past the point its
+request completed named whatever request the slot was reused for next.
+
+A request handle now carries a 31-bit per-slot generation counter:
+`handle = (generation << 32) | slot`. Freeing a slot bumps its generation, and
+every lookup and free rejects a handle whose generation does not match the
+slot's current generation — a stale handle now fails instead of silently
+acting on another request.
+
+### 2026-09-24 — Measured contention
+
+The "reduce false sharing and scan cost" expectation above does not hold
+either. Measured: every thread starts its scan at the same hint word and
+read-modify-writes the same 64-bit word, so the bitmap concentrates
+contention on one cache line rather than reducing it.
+
+Per-thread alloc+free pairs pinned to distinct cores, measured on the 0.5.0
+request table: 14.8 ns (bitmap) vs 5.2 ns (dense) at one thread, 91 vs 70 ns
+at two, 169 vs 142 ns at four, 473 vs 261 ns at eight.
+
+The table code is unchanged; this amendment corrects the ADR's claim about it.
+
+### 2026-09-24 — ThreadSanitizer requirement withdrawn
+
+The original Consequences required a ThreadSanitizer CI step, or, failing
+that, a mandatory manual pre-release step recorded in `CONTRIBUTING.md` or a
+`docs/testing.md` entry. Neither was added; the requirement is withdrawn.
+
+Reason: the MPI libraries ferrompi links are not built with ThreadSanitizer,
+so TSan reports from inside MPI cannot be told apart from real races in the
+ferrompi table code.
+
+Instead, the table concurrency examples (`test_request_table_concurrency`,
+`test_comm_table_concurrency`) run in every CI test job. The
+`Valgrind (mpich)` job runs the soundness regression examples under valgrind
+memcheck, which finds memory errors, not data races.
 
 ## Status
 
-Accepted — 2026-04-24. Implemented by ticket-023. Amended 2026-06-18 for the
-v0.4.x assessment hardening (request-table bitmap; F2-002 / F2-003 / F2-006).
+Accepted — 2026-04-24; amended 2026-06-18 and 2026-09-24.

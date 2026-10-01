@@ -5,6 +5,7 @@
 //! without leaking MPI state.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_p2p
+// mpi-test: np=2
 
 use ferrompi::Mpi;
 
@@ -30,13 +31,6 @@ fn main() {
             .send_init(&send, 1, TAG)
             .expect("send_init failed on rank 0");
 
-        // Synchronize both ranks past the init phase before any start().
-        // Required for OpenMPI 4.x compatibility — without this, rank 0's
-        // first start() may issue before rank 1 has finished recv_init,
-        // and OpenMPI's progress engine may deadlock under --btl=self,tcp
-        // (MPICH 4.x progresses without the barrier).
-        world.barrier().expect("post-init barrier failed on rank 0");
-
         for iter in 0..ITERS {
             // Fill send buffer: send[i] = iter * N + i
             for (i, x) in send.iter_mut().enumerate() {
@@ -54,9 +48,6 @@ fn main() {
         let mut req = world
             .recv_init(&mut recv, 0, TAG)
             .expect("recv_init failed on rank 1");
-
-        // See companion comment on rank 0.
-        world.barrier().expect("post-init barrier failed on rank 1");
 
         for iter in 0..ITERS {
             req.start().expect("start failed on rank 1");

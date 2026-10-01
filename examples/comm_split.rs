@@ -6,6 +6,7 @@
 //! the split is correct.
 //!
 //! Run with: mpiexec -n 4 cargo run --example comm_split
+// mpi-test: np=2..
 
 use ferrompi::{Mpi, ReduceOp, Result};
 

@@ -6,8 +6,11 @@
 //! exits while others are still inside MPI collective calls.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_group_basic
+// mpi-test: np=4
 
 use ferrompi::{Group, Mpi, ReduceOp};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -189,24 +192,5 @@ fn main() {
         }
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — gate process::exit so no rank exits early
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("allreduce_scalar failed");
-
-    if global_ok == 0 {
-        if rank == 0 {
-            eprintln!("FAIL: at least one rank failed a group assertion");
-        }
-        std::process::exit(1);
-    }
-
-    if rank == 0 {
-        println!();
-        println!("========================================");
-        println!("All group tests passed!");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_group_basic");
 }

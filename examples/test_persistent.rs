@@ -1,7 +1,9 @@
-//! Integration test for ALL persistent collective operations (MPI 4.0+).
+//! Integration test for ALL persistent collective operations (MPI 4.0, or Open MPI 5).
 //!
 //! Tests the full PersistentRequest lifecycle: init, start, wait, test,
-//! start_all, wait_all, and drop. Gracefully skips if MPI < 4.0.
+//! start_all, wait_all, and drop. Where the library lacks persistent
+//! collectives (below MPI 4.0, except Open MPI 5), asserts that bcast_init
+//! refuses with Error::NotSupported instead of running the suite.
 //!
 //! Exercises all 15 persistent collective `_init` methods in `Comm`:
 //! bcast_init, allreduce_init, allreduce_init_inplace, gather_init,
@@ -14,8 +16,11 @@
 //! (active path) for full Drop coverage.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_persistent
+// mpi-test: np=2..
 
-use ferrompi::{Mpi, PersistentRequest, ReduceOp};
+use ferrompi::{Error, Mpi, PersistentRequest, ReduceOp};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -28,18 +33,16 @@ fn main() {
         "test_persistent requires at least 2 processes, got {size}"
     );
 
-    // ========================================================================
-    // Probe: check if persistent collectives are supported (MPI 4.0+)
-    // ========================================================================
-    let mut probe_data = vec![0.0f64; 1];
-    match world.bcast_init(&mut probe_data, 0) {
-        Ok(req) => drop(req),
-        Err(_) => {
-            if rank == 0 {
-                println!("SKIP: Persistent collectives not supported (requires MPI 4.0+)");
-            }
-            return;
-        }
+    if !common::has_mpi4_collectives() {
+        let mut data = vec![0.0f64; 10];
+        let result = world.bcast_init(&mut data, 0);
+        let ok = matches!(&result, Err(Error::NotSupported(op)) if op == "bcast_init");
+        common::check(
+            &world,
+            ok,
+            "bcast_init refuses without persistent collectives",
+        );
+        return;
     }
 
     let mut test_count = 0u32;
@@ -394,14 +397,7 @@ fn main() {
         let send = vec![rank as f64; send_count];
 
         let recvcounts: Vec<i32> = (0..size).map(|r| r + 1).collect();
-        let displs: Vec<i32> = recvcounts
-            .iter()
-            .scan(0, |acc, &c| {
-                let d = *acc;
-                *acc += c;
-                Some(d)
-            })
-            .collect();
+        let displs = common::displs_from_counts(&recvcounts);
         let total: usize = recvcounts.iter().map(|&c| c as usize).sum();
 
         let mut recv = vec![0.0f64; total];
@@ -442,14 +438,7 @@ fn main() {
     {
         let recv_count = (rank + 1) as usize;
         let sendcounts: Vec<i32> = (0..size).map(|r| r + 1).collect();
-        let displs: Vec<i32> = sendcounts
-            .iter()
-            .scan(0, |acc, &c| {
-                let d = *acc;
-                *acc += c;
-                Some(d)
-            })
-            .collect();
+        let displs = common::displs_from_counts(&sendcounts);
         let total: usize = sendcounts.iter().map(|&c| c as usize).sum();
 
         // Root sends: rank r gets (r+1) elements, each = r * 100.0
@@ -498,14 +487,7 @@ fn main() {
         let send = vec![rank as f64; send_count];
 
         let recvcounts: Vec<i32> = (0..size).map(|r| r + 1).collect();
-        let displs: Vec<i32> = recvcounts
-            .iter()
-            .scan(0, |acc, &c| {
-                let d = *acc;
-                *acc += c;
-                Some(d)
-            })
-            .collect();
+        let displs = common::displs_from_counts(&recvcounts);
         let total: usize = recvcounts.iter().map(|&c| c as usize).sum();
         let mut recv = vec![0.0f64; total];
 

@@ -6,8 +6,11 @@
 //! others are still inside MPI collective calls.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_group_ranges
+// mpi-test: np=4
 
 use ferrompi::{Mpi, RankRange, ReduceOp};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -129,23 +132,52 @@ fn main() {
     }
 
     // ========================================================================
-    // Sentinel allreduce(Min) — gate process::exit so no rank exits early
+    // Test 4: empty ranges → range_include size 0, range_exclude size 4
     // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("allreduce_scalar failed");
-
-    if global_ok == 0 {
-        if rank == 0 {
-            eprintln!("FAIL: at least one rank failed a group-ranges assertion");
+    {
+        match parent.range_include(&[]) {
+            Ok(sub) => match sub.size() {
+                Ok(s) if s == 0 => {
+                    if rank == 0 {
+                        println!("PASS: Test 4 — range_include([]).size() = {s}");
+                    }
+                }
+                Ok(s) => {
+                    eprintln!("rank {rank}: FAIL Test 4: expected size 0, got {s}");
+                    local_ok = false;
+                }
+                Err(e) => {
+                    eprintln!("rank {rank}: FAIL Test 4: size() error: {e}");
+                    local_ok = false;
+                }
+            },
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL Test 4: range_include failed: {e}");
+                local_ok = false;
+            }
         }
-        std::process::exit(1);
+        match parent.range_exclude(&[]) {
+            Ok(sub) => match sub.size() {
+                Ok(s) if s == 4 => {
+                    if rank == 0 {
+                        println!("PASS: Test 4 — range_exclude([]).size() = {s}");
+                    }
+                }
+                Ok(s) => {
+                    eprintln!("rank {rank}: FAIL Test 4: expected size 4, got {s}");
+                    local_ok = false;
+                }
+                Err(e) => {
+                    eprintln!("rank {rank}: FAIL Test 4: size() error: {e}");
+                    local_ok = false;
+                }
+            },
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL Test 4: range_exclude failed: {e}");
+                local_ok = false;
+            }
+        }
     }
 
-    if rank == 0 {
-        println!();
-        println!("========================================");
-        println!("All group range tests passed!");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_group_ranges");
 }

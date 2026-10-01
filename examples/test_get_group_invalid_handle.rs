@@ -1,15 +1,12 @@
 //! Integration test for the corrected `get_group` sentinel contract.
 //!
 //! Calls `ferrompi_group_size` directly via `extern "C"` with an out-of-range
-//! group handle (999), which must NOT return `MPI_SUCCESS`.  Before ticket-012,
-//! `get_group` returned `MPI_GROUP_EMPTY` for invalid handles, so `group_size`
-//! would silently succeed with size=0.  After the fix it returns
-//! `MPI_GROUP_NULL`, and MPI itself returns `MPI_ERR_GROUP`.
-//!
-//! Acceptance criterion (ticket-012): the call returns a non-zero MPI error
-//! code that maps to `MpiErrorClass::Group` or `MpiErrorClass::Arg`.
+//! group handle (999), which must NOT return `MPI_SUCCESS`. An out-of-range
+//! handle yields `MPI_GROUP_NULL`, so `MPI_Group_size` returns a non-zero
+//! error code that maps to `MpiErrorClass::Group`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_get_group_invalid_handle
+// mpi-test: np=2
 
 use ferrompi::{Error, Mpi, MpiErrorClass};
 
@@ -19,7 +16,6 @@ use ferrompi::{Error, Mpi, MpiErrorClass};
 //   - group_handle 999 is deliberately out-of-range (MAX_GROUPS == 64).
 //   - size points to a valid i32 on the stack; it is only written if the
 //     call succeeds (which it must not).
-#[allow(dead_code)]
 extern "C" {
     fn ferrompi_group_size(group_handle: i32, size: *mut i32) -> std::ffi::c_int;
 }
@@ -36,11 +32,12 @@ fn main() {
     );
 
     // ========================================================================
-    // Test: ferrompi_group_size with an out-of-range handle returns an error
+    // Test: ferrompi_group_size with an out-of-range handle returns
+    //       Err(class: Group)
     //
-    // Handle 999 is well past MAX_GROUPS (64).  After ticket-012 get_group
-    // returns MPI_GROUP_NULL for this input, and MPI_Group_size returns
-    // MPI_ERR_GROUP (or similar implementation-specific error).
+    // Handle 999 is well past MAX_GROUPS (64), so get_group returns
+    // MPI_GROUP_NULL for this input, and MPI_Group_size returns
+    // MPI_ERR_GROUP.
     // ========================================================================
 
     let mut out_size: i32 = 0;
@@ -57,29 +54,18 @@ fn main() {
         std::process::exit(1);
     }
 
-    let err = Error::from_code(raw_ret);
-    match err {
+    match Error::from_code(raw_ret) {
         Error::Mpi {
             class: MpiErrorClass::Group,
             ..
-        }
-        | Error::Mpi {
-            class: MpiErrorClass::Arg,
-            ..
         } => {
             if rank == 0 {
-                println!(
-                    "PASS: group_size with handle=999 returns non-SUCCESS error class: {err:?}"
-                );
+                println!("PASS: group_size with handle=999 returns Err(class: Group)");
             }
         }
         other => {
-            // Any non-SUCCESS error is acceptable here — different MPI
-            // implementations may return different classes when passed
-            // MPI_GROUP_NULL.  Log but do not fail.
-            if rank == 0 {
-                println!("PASS (non-MPI_SUCCESS): group_size with handle=999 returned: {other:?}");
-            }
+            eprintln!("rank {rank}: FAIL: group_size with handle=999 returned {other:?}");
+            std::process::exit(1);
         }
     }
 

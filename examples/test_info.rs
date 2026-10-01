@@ -4,6 +4,7 @@
 //! and implicit drop for both created and null info objects.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_info
+// mpi-test: np=2
 
 use ferrompi::{Info, Mpi};
 

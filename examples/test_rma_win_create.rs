@@ -5,8 +5,11 @@
 //! `Drop` implementation does not produce MPI errors.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_create
+// mpi-test: np=2 skip-ok=openmpi-4
 
 use ferrompi::{Mpi, Win};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -20,26 +23,6 @@ fn main() {
     );
 
     // ========================================================================
-    // Probe: Win::create and Win::allocate require MPI >= 3.
-    // Check the MPI version and skip gracefully on older implementations.
-    // ========================================================================
-    let version_str = Mpi::version().unwrap_or_default();
-    // version_str is like "MPI 3.1" or "MPI 4.0"
-    let major: u32 = version_str
-        .split_whitespace()
-        .nth(1)
-        .and_then(|v| v.split('.').next())
-        .and_then(|m| m.parse().ok())
-        .unwrap_or(0);
-
-    if major < 3 {
-        if rank == 0 {
-            println!("SKIP: Win::create and Win::allocate require MPI >= 3 (got {version_str})");
-        }
-        return;
-    }
-
-    // ========================================================================
     // Test 1: Win::create with a caller-supplied i32 buffer
     //
     // OpenMPI 4.x with `--btl=self,tcp` (the configuration used in CI when
@@ -51,43 +34,41 @@ fn main() {
     // supported.  Skip Test 1 gracefully when this OpenMPI-CI quirk fires.
     // ========================================================================
     let mut buf = vec![0i32; 16];
-    let test1_skipped = {
-        match Win::create(&world, &mut buf) {
-            Ok(win) => {
-                let handle = win.raw_handle();
-                assert!(
-                    handle >= 0,
-                    "Win::create raw_handle() = {handle}, expected >= 0"
-                );
+    let test1_skipped = match Win::create(&world, &mut buf) {
+        Ok(win) => {
+            let handle = win.raw_handle();
+            assert!(
+                handle >= 0,
+                "Win::create raw_handle() = {handle}, expected >= 0"
+            );
 
-                let cs = win.comm_size();
-                assert_eq!(cs, size, "Win::create comm_size() mismatch");
+            assert_eq!(win.comm_size(), size, "Win::create comm_size() mismatch");
 
-                // Verify local_slice / local_slice_mut round-trip
-                let slice = win.local_slice();
-                assert_eq!(slice.len(), 16, "Win::create local_slice len mismatch");
+            // Verify local_slice / local_slice_mut round-trip
+            assert_eq!(
+                win.local_slice().len(),
+                16,
+                "Win::create local_slice len mismatch"
+            );
 
-                // Win dropped at end of arm — exercises MPI_Win_free for
-                // WinKind::Created.
-                drop(win);
-                false
-            }
-            Err(ferrompi::Error::Mpi {
-                class: ferrompi::MpiErrorClass::Win,
-                ..
-            }) => {
-                if rank == 0 {
-                    println!(
-                        "SKIP: Win::create returned MPI_ERR_WIN — likely OpenMPI 4.x \
-                         with a BTL that does not support one-sided over caller-owned \
-                         memory (e.g., --btl=self,tcp in CI). Win::allocate (Test 2) \
-                         still tested."
-                    );
-                }
-                true
-            }
-            Err(e) => panic!("Win::create failed: {e}"),
+            // Win dropped at end of arm — frees a window over caller memory.
+            drop(win);
+            false
         }
+        Err(ferrompi::Error::Mpi {
+            class: ferrompi::MpiErrorClass::Win,
+            ..
+        }) => {
+            common::skip(
+                &world,
+                "Win::create returned MPI_ERR_WIN — likely OpenMPI 4.x \
+                 with a BTL that does not support one-sided over caller-owned \
+                 memory (e.g., --btl=self,tcp in CI). Win::allocate (Test 2) \
+                 still tested.",
+            );
+            true
+        }
+        Err(e) => panic!("Win::create failed: {e}"),
     };
 
     world.barrier().expect("barrier after test 1 failed");
@@ -108,8 +89,7 @@ fn main() {
             "Win::allocate raw_handle() = {handle}, expected >= 0"
         );
 
-        let cs = win.comm_size();
-        assert_eq!(cs, size, "Win::allocate comm_size() mismatch");
+        assert_eq!(win.comm_size(), size, "Win::allocate comm_size() mismatch");
 
         // Verify local_slice_mut write-then-read round-trip
         {
@@ -136,7 +116,7 @@ fn main() {
             }
         }
 
-        // Win dropped here — exercises MPI_Win_free for WinKind::Allocated
+        // Win dropped here — frees a window over MPI-allocated memory.
     }
 
     world.barrier().expect("barrier after test 2 failed");

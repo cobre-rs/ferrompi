@@ -4,6 +4,7 @@
 //! nonblocking collectives.
 //!
 //! Run with: mpiexec -n 4 cargo run --example nonblocking
+// mpi-test: np=2..
 
 use ferrompi::{Mpi, ReduceOp, Request, Result};
 
@@ -27,7 +28,7 @@ fn main() -> Result<()> {
         };
 
         // Start nonblocking broadcast
-        let start_time = Mpi::wtime();
+        let start_time = mpi.wtime();
         let request = world.ibroadcast(&mut data, 0)?;
 
         // Simulate some computation while communication proceeds
@@ -38,7 +39,7 @@ fn main() -> Result<()> {
 
         // Wait for broadcast to complete
         request.wait()?;
-        let elapsed = Mpi::wtime() - start_time;
+        let elapsed = mpi.wtime() - start_time;
 
         // Verify the result
         let expected = vec![1.0, 2.0, 3.0, 4.0, 5.0];
@@ -67,7 +68,7 @@ fn main() -> Result<()> {
         let mut recv = vec![0.0; 100];
 
         // Start nonblocking all-reduce
-        let start_time = Mpi::wtime();
+        let start_time = mpi.wtime();
         let request = world.iallreduce(&send, &mut recv, ReduceOp::Sum)?;
 
         // Do some work
@@ -78,7 +79,7 @@ fn main() -> Result<()> {
 
         // Wait for completion
         request.wait()?;
-        let elapsed = Mpi::wtime() - start_time;
+        let elapsed = mpi.wtime() - start_time;
 
         // Verify: sum should be 1 + 2 + ... + size
         let expected_sum: f64 = (1..=size).map(|x| x as f64).sum();

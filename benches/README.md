@@ -1,222 +1,157 @@
 # ferrompi Benchmarks
 
-This directory contains [Criterion](https://github.com/bheisler/criterion.rs) benchmarks
-for ferrompi. Because every benchmark may call MPI collective operations, all benches
-**must** be launched via `mpiexec` — running `cargo bench` directly will hang or abort.
+This directory holds three [Criterion](https://github.com/bheisler/criterion.rs)-adjacent
+benchmarks for ferrompi's MPI paths. They measure ferrompi on MPICH, are not packaged with
+the crate, and are not run by CI.
 
-## Prerequisites
+## Requirements
 
-- MPICH 4.0+ or Open MPI 5.0+ installed and available as `mpiexec` in `PATH`.
-- Rust toolchain (stable).
+- An MPI implementation as `mpiexec` in `PATH`:
+  - `persistent_vs_iallreduce` needs persistent collectives (MPICH 4.x or Open MPI 5).
+    On Open MPI 4.1 the bench exits with an `allreduce_init needs persistent collectives`
+    error.
+  - `ffi_overhead`'s direct-MPI arm needs MPICH; on any other library it prints a skip
+    line and exits 0.
+  - `allreduce_roundtrip` runs on any MPI implementation.
+- A stable Rust toolchain.
 
-## Running the benchmarks
+## Build and run
 
-```
-mpiexec -n 2 cargo bench --bench bench_smoke
-```
-
-Replace `bench_smoke` with the name of the benchmark binary you want to run
-(e.g. `allreduce_roundtrip`, `persistent_vs_iallreduce`, `ffi_overhead`).
-
-To run a quick measurement with fewer samples (useful during development):
-
-```
-mpiexec -n 2 cargo bench --bench bench_smoke -- --quick
-```
-
-To run all registered bench binaries in one pass:
+Build the bench binaries first, then launch the printed executable under `mpiexec`:
 
 ```
-mpiexec -n 2 cargo bench
+cargo bench --no-run
 ```
 
-### Open MPI note
-
-Open MPI may refuse to oversubscribe cores on a single-host machine.
-If you see `There are not enough slots available`, add `--oversubscribe`:
-
 ```
-mpiexec --oversubscribe -n 2 cargo bench --bench bench_smoke
+mpiexec -n 2 target/release/deps/allreduce_roundtrip-<hash> --bench [--quick] [--noplot]
+mpiexec -n 2 target/release/deps/persistent_vs_iallreduce-<hash> --bench [--quick] [--noplot]
+mpiexec -n 1 target/release/deps/ffi_overhead-<hash>
 ```
 
-## Output directories
+`ffi_overhead` can also run as a singleton with `cargo bench --bench ffi_overhead`.
 
-| Rank                   | Location                       |
-| ---------------------- | ------------------------------ |
-| Rank 0 (authoritative) | `target/criterion/`            |
-| Rank N (N > 0)         | `/tmp/ferrompi-bench-rank<N>/` |
+Launching `cargo bench` itself under `mpiexec` is **wrong**: each rank would start its own
+`cargo` process (and its own Criterion driver) instead of two ranks of one MPI job running
+the same binary, so `cargo bench` must never be the command handed to `mpiexec`.
 
-Only rank 0 produces the full Criterion HTML report. Output from other ranks is
-written to `/tmp/` so it does not interfere with rank 0's results and is not
-committed to version control.
-
-To inspect the HTML report after a run:
+If Open MPI refuses to oversubscribe cores on a single-host machine, add `--oversubscribe`
+to the binary invocation:
 
 ```
-xdg-open target/criterion/report/index.html   # Linux
-open target/criterion/report/index.html        # macOS
+mpiexec --oversubscribe -n 2 target/release/deps/allreduce_roundtrip-<hash> --bench
 ```
 
-Individual benchmark reports are at `target/criterion/<bench-name>/report/index.html`,
-for example `target/criterion/noop/report/index.html`.
+Only rank 0 constructs a `Criterion` instance and writes output, under
+`target/criterion/<group>/`; non-root ranks run a mirror loop and produce no output.
 
-## Benchmark list
+## Bench table
 
-| Binary                     | Measures                                                  |
-| -------------------------- | --------------------------------------------------------- |
-| `bench_smoke`              | No-op (harness correctness / compile check)               |
-| `allreduce_roundtrip`      | `allreduce` latency/throughput for f64                    |
-| `persistent_vs_iallreduce` | 100-iteration persistent allreduce vs iallreduce at 1 MiB |
-| `ffi_overhead`             | Fixed per-call FFI cost: field reads vs MPI collectives   |
+| Binary                     | Measures                                                         | Ranks |
+| --------------------------- | ----------------------------------------------------------------- | ----- |
+| `allreduce_roundtrip`      | `allreduce` latency/throughput for `f64`, three sizes             | 2+    |
+| `persistent_vs_iallreduce` | 100-iteration persistent allreduce vs. `iallreduce`, seven sizes  | 2+    |
+| `ffi_overhead`             | Fixed per-call FFI cost, ferrompi vs. direct `MPI_*`               | 1     |
 
-### Allreduce roundtrip
+## `allreduce_roundtrip`
 
-Measures `world.allreduce(&send, &mut recv, ReduceOp::Sum)` for three `f64`
-buffer sizes:
+Group `allreduce_f64` measures `world.allreduce(&send, &mut recv, ReduceOp::Sum)` for
+three `f64` buffer sizes: 2 elements (16 B), 131 072 elements (1 MiB), and 2 097 152
+elements (16 MiB).
 
-| Size label | Elements  | Bytes  |
-| ---------- | --------- | ------ |
-| 2          | 2         | 16 B   |
-| 131072     | 131 072   | 1 MiB  |
-| 2097152    | 2 097 152 | 16 MiB |
+**Command caveat.** Each `b.iter` sample issues one 16 B `u64` sentinel allreduce (via
+`common::lead`) before the measured `f64` allreduce, to keep non-root ranks in lockstep
+with rank 0's Criterion driver. At the 16 B size point the sentinel is comparable to the
+measured call, so read that point as a relative trend, not an absolute latency.
 
-Run the benchmark:
+## `persistent_vs_iallreduce`
 
-```
-mpiexec -n 2 cargo bench --bench allreduce_roundtrip
-```
+Group `iterative_allreduce_100x` sweeps seven `f64` sizes — 8, 64, 512, 4 096, 32 768,
+262 144 and 1 048 576 bytes (8 B to 256 KiB in steps of 8x, then 1 MiB) — and compares 100
+consecutive iterations of two strategies per size: `persistent` (one `allreduce_init`
+outside the loop, then 100x `start`+`wait`) against `iallreduce` (100x fresh
+`iallreduce`+`wait`). This produces 14 benchmark ids:
+`iterative_allreduce_100x/persistent/<bytes>` and
+`iterative_allreduce_100x/iallreduce/<bytes>`.
 
-For a quick measurement with fewer samples (useful during development):
+**SETUP ordering.** Rank 0 sends a `SETUP` command before each size's `allreduce_init`,
+and every rank re-initializes its persistent request only in response to that command, so
+every `allreduce_init` call is issued in the same collective order on every rank.
+MPI-4.1 §7.13 requires this: initialization calls for persistent collective operations are
+nonlocal and follow the existing collective-operation ordering rules.
 
-```
-mpiexec -n 2 cargo bench --bench allreduce_roundtrip -- --quick
-```
+**Measured results.** np 2, 3 full runs each, local MPICH 4.2.3 (`ch4:ofi`, shm) and an
+apt MPICH 4.2.1 + UCX container (`UCX_TLS=self,sm,tcp`). ns per allreduce is Criterion's
+middle `time:` estimate divided by 100. "Faster by" is reported only when all three
+persistent runs are below all three iallreduce runs; otherwise "none".
 
-Criterion reports land in `target/criterion/allreduce_f64/`. Each of the three
-size points produces a subdirectory (e.g. `target/criterion/allreduce_f64/2/`,
-`target/criterion/allreduce_f64/131072/`,
-`target/criterion/allreduce_f64/2097152/`) containing `report/index.html` and
-`new/estimates.json`.
+| Size | MPICH 4.2.3 ch4:ofi (shm): persistent / iallreduce | faster by | MPICH 4.2.1 + UCX (`self,sm,tcp`) | faster by |
+|---|---|---|---|---|
+| 8 B | 305 / 499 ns | 39 % | 239 / 564 ns | 58 % |
+| 64 B | 323 / 507 ns | 36 % | 247 / 572 ns | 57 % |
+| 512 B | 403 / 586 ns | 31 % | 369 / 711 ns | 48 % |
+| 4 KiB | 1.14 / 1.43 µs | 20 % | 1.08 / 1.51 µs | 28 % |
+| 32 KiB | 5.94 / 6.17 µs | none | 6.10 / 6.60 µs | 8 % |
+| 256 KiB | 28.21 / 28.47 µs | none | 26.49 / 27.59 µs | none |
+| 1 MiB | 148.75 / 148.61 µs | none | 113.23 / 114.39 µs | none |
 
-The bench asserts `world.size() >= 2` at startup and panics with a clear
-message if launched with fewer than two ranks.
+On MPICH at 2 ranks, a persistent allreduce was 20–58 % faster per call than
+`iallreduce` up to 4 KiB, at most 8 % faster at 32 KiB, and no faster from 256 KiB. The
+table above shows the 8 % separation at 32 KiB holds only over UCX; the local `ch4:ofi`
+run shows no separation at that size.
 
-**Measurement caveat.** Each `b.iter` sample issues one 16 B `u64` sentinel
-`allreduce` before the measured `f64` `allreduce`, so non-root ranks stay in
-lockstep with rank 0's Criterion driver. At `n = 2` (16 B) the sentinel adds
-roughly 50% to the reported time — read that size point as a relative-trend
-indicator, not absolute single-call latency. At 1 MiB and 16 MiB the sentinel
-is < 0.01% of the data payload and effectively invisible.
+The bench also runs on Open MPI 5, but its regime there is unmeasured: the table above
+was measured on MPICH only. Open MPI 4.1 lacks the MPI 4.0 `MPI_*_init` entry points, so
+ferrompi does not enable persistent collectives there.
 
-### Persistent vs iallreduce
+This benchmark is not a pass/fail gate — the reported numbers are inspected by a human.
 
-Measures the cost of 100 consecutive `allreduce` operations at 1 MiB (131 072
-`f64` elements) using two strategies side by side:
+## `ffi_overhead`
 
-| Benchmark    | Strategy                                                      |
-| ------------ | ------------------------------------------------------------- |
-| `persistent` | One `allreduce_init` outside the loop; 100 × `start` + `wait` |
-| `iallreduce` | 100 × `iallreduce` + `wait` (fresh `Request` each iteration)  |
+A plain, `harness = false` program run at one rank. It alternates 21 interleaved rounds
+of a direct `MPI_*` call and the matching ferrompi call per case (ABBA order: direct then
+ferrompi on even rounds, the reverse on odd rounds), after a warm-up round of each arm,
+and reports each arm's median ns/call plus their delta. The first case,
+`A/A direct iallreduce+wait`, runs the direct call on both arms to give the noise floor
+the other cases' deltas are judged against.
 
-Run the benchmark:
+**Six cases:** `A/A direct iallreduce+wait` (noise floor), `isend+irecv+wait`,
+`8x(isend+irecv)+waitall`, `iallreduce+wait`, `persistent start+wait`, and
+`8x persistent start_all+wait_all`.
 
-```
-mpiexec -n 2 cargo bench --bench persistent_vs_iallreduce
-```
+**Output.** A header line, `# <library line>; 21 interleaved rounds per arm; median ns
+per call`, then one line per case:
+`<case> direct X ns   ferrompi Y ns   delta ±Z ns`.
 
-For a quick measurement with fewer samples (useful during development):
+**MPICH-only direct arm.** The direct arm declares MPICH's integer handle values and
+calls only MPI-1/MPI-3 symbols, so the binary links on every MPI implementation. At run
+time it checks `Mpi::library_version()`; on any library other than MPICH it prints
+`ffi_overhead: the direct arm needs MPICH's handle values; skipped on <line>` and exits 0.
 
-```
-mpiexec -n 2 cargo bench --bench persistent_vs_iallreduce -- --quick
-```
+**Measured results.** `mpiexec -n 1`, 7 runs. Values are the median delta, ferrompi minus
+direct, in ns per call:
 
-Criterion reports land in `target/criterion/iterative_allreduce_1mib_100x/`.
-Two subdirectories are produced:
+| Case | MPICH 4.2.3 ch4:ofi | MPICH 4.2.1 + UCX |
+|---|---|---|
+| A/A iallreduce+wait (noise floor) | −0.1 | +0.2 |
+| isend+irecv+wait | +37.5 | +37.5 |
+| 8x(isend+irecv)+waitall | +387.9 | +402.1 |
+| iallreduce+wait | +12.2 | +15.5 |
+| persistent start+wait | +10.1 | +6.4 |
+| 8x persistent start_all+wait_all | +113.6 | +103.6 |
 
-- `target/criterion/iterative_allreduce_1mib_100x/persistent/`
-- `target/criterion/iterative_allreduce_1mib_100x/iallreduce/`
-
-Each contains `report/index.html` and `new/estimates.json`.
-A side-by-side comparison is available at
-`target/criterion/iterative_allreduce_1mib_100x/report/index.html`.
-
-Per MPICH 4.2.3, the expected outcome is that `persistent` runs faster than
-`iallreduce` by roughly 10-30% for iterative reduction workloads, because
-persistent collectives amortize MPI setup cost across many iterations. The
-exact speedup is MPI-implementation-dependent and hardware-dependent. This
-benchmark is not a pass/fail gate — the reported numbers are inspected by a
-human to validate (or refute) the README claim.
-
-The bench asserts `world.size() >= 2` at startup and panics with a clear
-message if launched with fewer than two ranks.
-
-### FFI overhead
-
-Measures the fixed per-call cost at the ferrompi/MPI FFI boundary for five
-representative operations:
-
-| Bench             | What it measures                                         |
-| ----------------- | -------------------------------------------------------- |
-| `rank_cached`     | `world.rank()` — cached field read, zero FFI calls       |
-| `size_cached`     | `world.size()` — cached field read, zero FFI calls       |
-| `barrier`         | `MPI_Barrier` — one FFI round-trip per call              |
-| `broadcast_1elem` | `MPI_Bcast` on 1 × f64 — smallest possible bcast payload |
-| `allreduce_1elem` | `MPI_Allreduce` on 1 × f64 — smallest possible payload   |
-
-`rank_cached` and `size_cached` are expected to be nanosecond-scale because
-they are field reads that never enter the MPI library (epic-02 ticket-007
-cached `rank` and `size` as `pub(crate) i32` fields on `Communicator`).
-`barrier` and the single-element collectives expose the fixed FFI + MPI
-dispatch cost independent of payload size.
-
-Ticket-013 uses the numbers produced by this benchmark to decide which FFI
-trampolines warrant `#[inline]`.
-
-Run the benchmark:
-
-```
-mpiexec -n 2 cargo bench --bench ffi_overhead
-```
-
-For a quick measurement with fewer samples (useful during development):
-
-```
-mpiexec -n 2 cargo bench --bench ffi_overhead -- --quick
-```
-
-Criterion reports land in `target/criterion/ffi_overhead/`. Five subdirectories
-are produced:
-
-- `target/criterion/ffi_overhead/rank_cached/`
-- `target/criterion/ffi_overhead/size_cached/`
-- `target/criterion/ffi_overhead/barrier/`
-- `target/criterion/ffi_overhead/broadcast_1elem/`
-- `target/criterion/ffi_overhead/allreduce_1elem/`
-
-Each contains `report/index.html` and `new/estimates.json`.
-
-The bench asserts `world.size() >= 2` at startup and panics with a clear
-message if launched with fewer than two ranks.
-
-**Measurement caveat.** `rank_cached` and `size_cached` are pure local reads
-and their numbers are accurate. The three collective benches (`barrier`,
-`broadcast_1elem`, `allreduce_1elem`) each prepend a coordinating 8 B
-sentinel `allreduce` inside `b.iter` so non-root ranks stay in lockstep with
-rank 0's Criterion driver. Because the sentinel's payload is comparable to
-the measured operations, each sample reports roughly `latency(sentinel) +
-latency(target_op)` — the `allreduce_1elem` number in particular is close to
-**twice** the bare single-call cost. Use these numbers as _relative_ trend
-indicators between the three collective points (e.g. ticket-013 inlining
-decisions) rather than absolute single-op latencies.
+The noise floor ranged from 3.5 ns locally to 0.9 ns under UCX, and every other case's
+minimum delta cleared its floor on both. On Open MPI 4.1.6 and 5.0.7 the bench prints the
+skip line.
 
 ## Design notes
 
-- `criterion_main!` is intentionally **not** used. That macro defines its own
-  `fn main` which calls `Criterion::default()` before `Mpi::init()` can run.
-  Collective operations in subsequent benchmarks would then deadlock on non-root
-  ranks because MPI was never initialized on them.
-- Criterion's `rayon` feature is disabled (`default-features = false`). Rayon
-  worker threads calling MPI without `MPI_THREAD_MULTIPLE` will abort.
-- The shared helper `benches/common/mod.rs` is re-exported via `mod common;`
-  in each bench file. It handles MPI initialization and `CRITERION_HOME`
-  redirection for non-root ranks.
+- `criterion_main!` is intentionally **not** used. That macro defines its own `fn main`
+  which calls `Criterion::default()` before `Mpi::init()` can run. Collective operations
+  in subsequent benchmarks would then deadlock on non-root ranks because MPI was never
+  initialized on them.
+- Criterion's `rayon` feature is disabled (`default-features = false`). Rayon worker
+  threads calling MPI without `MPI_THREAD_MULTIPLE` will abort.
+- `benches/common` provides `init_mpi_for_bench` and the `lead`/`follow`/`STOP` command
+  protocol: rank 0 sends a command via `lead` before each measured call, and non-root
+  ranks run `follow`'s loop to stay in step with rank 0's Criterion driver until `STOP`.

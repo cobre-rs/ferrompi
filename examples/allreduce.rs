@@ -3,6 +3,7 @@
 //! Tests various collective operations including broadcast, reduce, and all-reduce.
 //!
 //! Run with: mpiexec -n 4 cargo run --example allreduce
+// mpi-test: np=2..
 
 use ferrompi::{Mpi, ReduceOp, Result};
 

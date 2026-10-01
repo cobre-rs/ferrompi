@@ -23,10 +23,13 @@
 //!     ./target/x86_64-unknown-linux-gnu/debug/examples/test_comm_table_concurrency
 //! Expected result: no TSan diagnostics from ferrompi C code; any reports
 //! from libmpi internals are known benign.
+// mpi-test: np=1
 
 use ferrompi::{Communicator, Mpi, ThreadLevel};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+
+mod common;
 
 const NUM_THREADS: usize = 4;
 const DUPS_PER_THREAD: usize = 50;
@@ -34,18 +37,20 @@ const TOTAL_HANDLES: usize = NUM_THREADS * DUPS_PER_THREAD;
 
 fn main() {
     let mpi = Mpi::init_thread(ThreadLevel::Multiple).expect("MPI init failed");
+    let world = mpi.world();
 
     // If the MPI library cannot provide MPI_THREAD_MULTIPLE, skip gracefully.
     // Some builds (e.g. certain Cray MPT configurations) deliberately refuse it.
     if mpi.thread_level() < ThreadLevel::Multiple {
-        println!(
-            "SKIP: MPI provided {:?}, MPI_THREAD_MULTIPLE required; skipping test",
-            mpi.thread_level()
+        common::skip(
+            &world,
+            &format!(
+                "MPI provided {:?}, MPI_THREAD_MULTIPLE required; skipping test",
+                mpi.thread_level()
+            ),
         );
         return;
     }
-
-    let world = mpi.world();
 
     // Shared collection: each thread appends its Communicators (still live) so
     // all 200 slots are simultaneously occupied when we check for duplicates.
@@ -87,8 +92,7 @@ fn main() {
         collected.len()
     );
 
-    let handles: Vec<i32> = collected.iter().map(|c| c.raw_handle()).collect();
-    let unique: HashSet<i32> = handles.iter().copied().collect();
+    let unique: HashSet<i32> = collected.iter().map(|c| c.raw_handle()).collect();
     assert_eq!(
         unique.len(),
         TOTAL_HANDLES,

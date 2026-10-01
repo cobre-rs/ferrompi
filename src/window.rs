@@ -6,6 +6,10 @@
 //! memory without explicit message passing, enabling high-performance
 //! intra-node communication.
 //!
+//! It also provides [`Win<T>`], the general RMA window created over a caller
+//! buffer (`Win::create`) or MPI-allocated memory (`Win::allocate`), with
+//! fence, PSCW and passive-target synchronization.
+//!
 //! # Synchronization
 //!
 //! MPI shared memory windows require explicit synchronization:
@@ -50,12 +54,15 @@
 
 use std::ops::{BitOr, BitOrAssign};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
+use crate::datatype::{buf, buf_mut};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::group::Group;
-use crate::request::Request;
+use crate::request::{Request, RequestKind};
+use crate::rt;
 use crate::Communicator;
 use crate::MpiDatatype;
 use crate::ReduceOp;
@@ -95,22 +102,13 @@ pub struct WinFenceAssert(i32);
 static FENCE_MODE_VALUES: OnceLock<[i32; 4]> = OnceLock::new();
 
 /// Query the four MPI fence mode constants, caching the result.
-///
-/// On MPI < 3 builds the C shim returns `MPI_ERR_OTHER`; in that case we fall
-/// back to `[0; 4]` (all bits zero, meaning "no assertion"), which is safe —
-/// `MPI_Win_fence(0, win)` is always valid.
 fn fence_mode_values() -> [i32; 4] {
     *FENCE_MODE_VALUES.get_or_init(|| {
         let mut out = [0i32; 4];
         // SAFETY: `out` is a stack-allocated 4-element array; we pass a valid
         // pointer to its first element. The C shim writes exactly 4 i32 values.
-        let ret = unsafe { ffi::ferrompi_win_fence_mode_values(out.as_mut_ptr()) };
-        if ret != 0 {
-            // MPI_ERR_OTHER from the <MPI_3 stub — keep the [0; 4] sentinel.
-            [0i32; 4]
-        } else {
-            out
-        }
+        unsafe { ffi::ferrompi_win_fence_mode_values(out.as_mut_ptr()) };
+        out
     })
 }
 
@@ -223,22 +221,13 @@ pub struct WinPscwAssert(i32);
 static PSCW_MODE_VALUES: OnceLock<[i32; 3]> = OnceLock::new();
 
 /// Query the three MPI PSCW mode constants, caching the result.
-///
-/// On MPI < 3 builds the C shim returns `MPI_ERR_OTHER`; in that case we fall
-/// back to `[0; 3]` (all bits zero, meaning "no assertion"), which is safe —
-/// `MPI_Win_post(group, 0, win)` is always valid.
 fn pscw_mode_values() -> [i32; 3] {
     *PSCW_MODE_VALUES.get_or_init(|| {
         let mut out = [0i32; 3];
         // SAFETY: `out` is a stack-allocated 3-element array; we pass a valid
         // pointer to its first element. The C shim writes exactly 3 i32 values.
-        let ret = unsafe { ffi::ferrompi_win_pscw_mode_values(out.as_mut_ptr()) };
-        if ret != 0 {
-            // MPI_ERR_OTHER from the <MPI_3 stub — keep the [0; 3] sentinel.
-            [0i32; 3]
-        } else {
-            out
-        }
+        unsafe { ffi::ferrompi_win_pscw_mode_values(out.as_mut_ptr()) };
+        out
     })
 }
 
@@ -338,6 +327,9 @@ pub enum LockType {
 ///
 /// The underlying MPI window is freed automatically when the `SharedWindow`
 /// is dropped. The shared memory region becomes invalid after the window is freed.
+/// If a `SharedWindow` outlives the [`Mpi`](crate::Mpi) handle, `MPI_Finalize`
+/// is skipped instead: the shared memory stays valid until the process exits
+/// and is never freed.
 ///
 /// # Thread Safety
 ///
@@ -383,6 +375,130 @@ pub struct SharedWindow<T: MpiDatatype> {
     comm_size: i32,
 }
 
+fn win_size_and_disp_unit<T>(count: usize) -> Result<(i64, i32)> {
+    let byte_size = count
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or(Error::InvalidBuffer)?;
+    let size = i64::try_from(byte_size).map_err(|_| Error::InvalidBuffer)?;
+    let disp_unit = std::mem::size_of::<T>() as i32;
+    Ok((size, disp_unit))
+}
+
+// Sentinel an allocating shim writes to its handle out-parameter when MPI
+// created the window but zeroing or registering it failed. This MUST stay
+// in sync with `FERROMPI_WIN_LEAKED` in `csrc/ferrompi.h`.
+const FERROMPI_WIN_LEAKED: i32 = -2;
+
+/// Count of live windows of any kind (`Win::create`, `Win::allocate`,
+/// `SharedWindow::allocate`). `Mpi::drop` reads this through
+/// [`live_windows`] to decide whether `MPI_Finalize` is safe to call: some
+/// MPI implementations free MPI-allocated window memory inside
+/// `MPI_Finalize` itself, and some tear down internal state that still
+/// tracks a caller-supplied window's buffer, aborting the process. Either
+/// way, `MPI_Finalize` is unsafe while any window is still alive.
+static LIVE_WINDOWS: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of windows of any kind currently alive.
+pub(crate) fn live_windows() -> usize {
+    // Acquire: pairs with the Release decrement in `Drop for Win`/`Drop for
+    // SharedWindow`, so a zero read here cannot precede a window's in-flight
+    // teardown; the existing caller contract on `Mpi::drop` (no thread may be
+    // mid-MPI-call through this crate when `Mpi` is dropped) covers the rest.
+    LIVE_WINDOWS.load(Ordering::Acquire)
+}
+
+/// Marks a newly constructed window (`SharedWindow::allocate`, `Win::create`,
+/// or `Win::allocate`) as live in [`LIVE_WINDOWS`].
+fn mark_window_alive() {
+    // Relaxed: the caller contract that `Mpi` is not dropped while another
+    // thread is inside an MPI call through this crate already orders this
+    // construction before any `Mpi::drop` that reads the counter; the store
+    // itself needs no ordering beyond the counter's own modification order.
+    LIVE_WINDOWS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Bit position of the displacement-unit field in a window word (see
+/// [`window_word`]). The low 56 bits hold the exposed byte length.
+const WINDOW_WORD_DISP_SHIFT: u32 = 56;
+
+/// Mask for the exposed-byte-length field of a window word: the largest
+/// length that can be packed into the low 56 bits.
+const WINDOW_WORD_LEN_MASK: u64 = (1u64 << WINDOW_WORD_DISP_SHIFT) - 1;
+
+/// Sentinel word for a rank whose exposed length cannot be packed. No real
+/// window has a displacement unit of 255 (`MpiDatatype` is sealed to types
+/// of at most 8 bytes), so this cannot collide with a real word.
+const WINDOW_WORD_REJECT: u64 = u64::MAX;
+
+/// Packs `size_of::<T>()` and `count * size_of::<T>()` into one word:
+/// displacement unit in bits 56..63, exposed byte length in bits 0..55.
+/// Returns [`WINDOW_WORD_REJECT`] if the byte length does not fit in 56 bits.
+fn window_word<T>(count: usize) -> u64 {
+    let disp_unit = std::mem::size_of::<T>();
+    match count.checked_mul(disp_unit) {
+        Some(len) if len as u64 <= WINDOW_WORD_LEN_MASK => {
+            ((disp_unit as u64) << WINDOW_WORD_DISP_SHIFT) | len as u64
+        }
+        _ => WINDOW_WORD_REJECT,
+    }
+}
+
+/// Exchanges one window word per rank over `comm` via `Communicator::allgather`.
+///
+/// When the allgather succeeds on every rank, every rank holds the same
+/// `words`: if any word is [`WINDOW_WORD_REJECT`], every rank returns
+/// `Err(Error::InvalidBuffer)` before any rank has created a window. An
+/// allgather error can reach some ranks only; the other ranks can then
+/// block in the window-creation call.
+fn exchange_window_words(comm: &Communicator, word: u64) -> Result<Box<[u64]>> {
+    let mut words = vec![0u64; comm.size() as usize];
+    comm.allgather(&[word], &mut words)?;
+    if words.contains(&WINDOW_WORD_REJECT) {
+        return Err(Error::InvalidBuffer);
+    }
+    Ok(words.into_boxed_slice())
+}
+
+/// Validates an RMA target against `words` (see [`window_word`]): rejects a
+/// `target_rank` outside `0..words.len()`, a negative `target_count` or a
+/// `buffer_lens` entry unequal to it, a negative `target_disp`, and an access
+/// `target_disp * disp_unit(target_rank) + target_count * elem_size` that
+/// overflows `u64` or exceeds the target's exposed byte length.
+fn check_rma_target(
+    words: &[u64],
+    elem_size: usize,
+    target_rank: i32,
+    target_disp: i64,
+    target_count: i64,
+    buffer_lens: &[usize],
+) -> Result<()> {
+    if target_rank < 0 || target_rank as usize >= words.len() {
+        return Err(Error::InvalidBuffer);
+    }
+    if target_count < 0 || buffer_lens.iter().any(|&len| len as i64 != target_count) {
+        return Err(Error::InvalidBuffer);
+    }
+    if target_disp < 0 {
+        return Err(Error::InvalidBuffer);
+    }
+    let word = words[target_rank as usize];
+    let disp_unit = word >> WINDOW_WORD_DISP_SHIFT;
+    let len = word & WINDOW_WORD_LEN_MASK;
+    let disp_bytes = (target_disp as u64)
+        .checked_mul(disp_unit)
+        .ok_or(Error::InvalidBuffer)?;
+    let count_bytes = (target_count as u64)
+        .checked_mul(elem_size as u64)
+        .ok_or(Error::InvalidBuffer)?;
+    let total = disp_bytes
+        .checked_add(count_bytes)
+        .ok_or(Error::InvalidBuffer)?;
+    if total > len {
+        return Err(Error::InvalidBuffer);
+    }
+    Ok(())
+}
+
 impl<T: MpiDatatype> SharedWindow<T> {
     /// Allocate a shared memory window.
     ///
@@ -390,6 +506,8 @@ impl<T: MpiDatatype> SharedWindow<T> {
     /// in a shared memory segment accessible by all processes in the communicator.
     /// The communicator should be a shared-memory communicator (e.g., from
     /// [`Communicator::split_shared()`]).
+    ///
+    /// The local segment reads as zero when the call returns.
     ///
     /// # Arguments
     ///
@@ -399,8 +517,18 @@ impl<T: MpiDatatype> SharedWindow<T> {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The MPI window allocation fails (e.g., insufficient shared memory)
-    /// - The MPI implementation returns a null base pointer
+    /// - The MPI window allocation fails (e.g., insufficient shared memory);
+    ///   this can happen on some ranks only, and the other ranks can then
+    ///   block in the barrier after the new segment is zeroed
+    /// - The window table is full (`Error::ResourceExhausted`; the window is
+    ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
+    /// - An error occurs while zeroing the new segment (the window is
+    ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
+    /// - The MPI implementation returns a null base pointer for a non-zero count
+    ///   (the window is then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
+    ///
+    /// In the last three cases, a peer whose own call succeeded blocks in its
+    /// collective `Drop` (`MPI_Win_free`) waiting for this rank.
     ///
     /// # Example
     ///
@@ -412,13 +540,9 @@ impl<T: MpiDatatype> SharedWindow<T> {
     /// let win = SharedWindow::<f64>::allocate(&node, 1024).unwrap();
     /// ```
     pub fn allocate(comm: &Communicator, local_count: usize) -> Result<Self> {
-        let byte_size = local_count
-            .checked_mul(std::mem::size_of::<T>())
-            .ok_or(Error::InvalidBuffer)?;
-        let size = i64::try_from(byte_size).map_err(|_| Error::InvalidBuffer)?;
-        let disp_unit = std::mem::size_of::<T>() as i32;
+        let (size, disp_unit) = win_size_and_disp_unit::<T>(local_count)?;
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let mut win_handle: i32 = 0;
+        let mut win_handle: i32 = -1;
 
         // SAFETY: We pass valid pointers for out-parameters. The C layer
         // allocates shared memory and returns a window handle + base pointer.
@@ -427,15 +551,27 @@ impl<T: MpiDatatype> SharedWindow<T> {
                 size,
                 disp_unit,
                 -1, // MPI_INFO_NULL
-                comm.raw_handle(),
+                comm.handle,
                 &mut baseptr,
                 &mut win_handle,
             )
         };
+        if ret != 0 && win_handle == FERROMPI_WIN_LEAKED {
+            // MPI created the window but could not zero or register it; it is never freed.
+            mark_window_alive();
+        }
         Error::check_with_op(ret, "win_allocate_shared")?;
 
-        let local_ptr = NonNull::new(baseptr.cast::<T>())
-            .ok_or_else(|| Error::Internal("Win_allocate_shared returned null".into()))?;
+        mark_window_alive();
+
+        let local_ptr = if local_count == 0 {
+            // Zero-count: MPI may return a null base pointer for an empty
+            // segment (mirrors Win::allocate's zero-count arm).
+            NonNull::<T>::dangling()
+        } else {
+            NonNull::new(baseptr.cast::<T>())
+                .ok_or_else(|| Error::Internal("Win_allocate_shared returned null".into()))?
+        };
 
         Ok(SharedWindow {
             win_handle,
@@ -454,6 +590,17 @@ impl<T: MpiDatatype> SharedWindow<T> {
     ///
     /// The caller must ensure proper MPI synchronization (fence or lock)
     /// before reading data that may have been written by other processes.
+    ///
+    /// # Concurrent writes
+    ///
+    /// The slice aliases memory that other processes in the window can write
+    /// at any time, but a `&[T]` promises the compiler that its contents do
+    /// not change while it is borrowed. The compiler may therefore load a
+    /// value once and reuse it, so a loop that polls the slice for another
+    /// process's write can spin forever; this has been observed in optimised
+    /// builds. Polling through this slice is unsupported. Take a new slice
+    /// after each synchronising call (fence, lock or unlock) and read data
+    /// another process wrote only through that new slice.
     pub fn local_slice(&self) -> &[T] {
         // SAFETY: `local_ptr` was returned by MPI_Win_allocate_shared and is
         // guaranteed valid for `local_len` elements of type T for the lifetime
@@ -470,6 +617,16 @@ impl<T: MpiDatatype> SharedWindow<T> {
     ///
     /// The caller must ensure proper MPI synchronization (fence or lock)
     /// before writing data that other processes may read.
+    ///
+    /// # Concurrent writes
+    ///
+    /// The slice aliases memory that other processes in the window can read
+    /// and write at any time, but a `&mut [T]` promises the compiler
+    /// exclusive access while it is borrowed. The compiler may therefore keep
+    /// values in registers and skip loads or stores, so a loop that polls the
+    /// slice for another process's write can spin forever.
+    /// Polling through this slice is unsupported. Take a new slice after each
+    /// synchronising call (fence, lock or unlock).
     pub fn local_slice_mut(&mut self) -> &mut [T] {
         // SAFETY: `local_ptr` was returned by MPI_Win_allocate_shared and is
         // guaranteed valid for `local_len` elements of type T for the lifetime
@@ -497,6 +654,17 @@ impl<T: MpiDatatype> SharedWindow<T> {
     ///
     /// The caller must ensure proper MPI synchronization (fence or lock)
     /// before reading data that was written by the remote process.
+    ///
+    /// # Concurrent writes
+    ///
+    /// The slice aliases memory that other processes in the window can write
+    /// at any time, but a `&[T]` promises the compiler that its contents do
+    /// not change while it is borrowed. The compiler may therefore load a
+    /// value once and reuse it, so a loop that polls the slice for another
+    /// process's write can spin forever; this has been observed in optimised
+    /// builds. Polling through this slice is unsupported. Take a new slice
+    /// after each synchronising call (fence, lock or unlock) and read data
+    /// another process wrote only through that new slice.
     ///
     /// # Example
     ///
@@ -663,10 +831,11 @@ impl<T: MpiDatatype> SharedWindow<T> {
         Ok(LockAllGuard { window: self })
     }
 
-    /// Get the raw MPI window handle.
+    /// Get this window's raw handle.
     ///
-    /// This is provided for advanced use cases where direct access to the
-    /// underlying MPI window handle is needed (e.g., custom FFI calls).
+    /// The value is ferrompi's internal table index for this window. It is
+    /// not an MPI handle and cannot be passed to MPI; use it only to tell
+    /// objects apart, for example in logs.
     pub fn raw_handle(&self) -> i32 {
         self.win_handle
     }
@@ -683,6 +852,13 @@ impl<T: MpiDatatype> SharedWindow<T> {
 
 impl<T: MpiDatatype> Drop for SharedWindow<T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("SharedWindow") {
+            return;
+        }
+        // Release: pairs with `live_windows`'s Acquire load, so `Mpi::drop`
+        // cannot observe this window as gone before its teardown here has
+        // actually run.
+        LIVE_WINDOWS.fetch_sub(1, Ordering::Release);
         // SAFETY: win_handle is a valid MPI window handle that was allocated
         // by ferrompi_win_allocate_shared. It has not been freed yet because
         // Drop is only called once, and we don't expose a manual free method.
@@ -709,9 +885,9 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 /// The Rust language's stack-frame and move semantics make naïve
 /// `&origin` / `&result` arguments unsound: the function returns before
 /// the epoch closes, and the stack locations are reused. To guarantee
-/// stable addresses, this type owns heap-allocated `Box`es for every
-/// input/output buffer, and only releases or drops them when [`resolve`]
-/// consumes the struct.
+/// stable addresses, this type owns heap allocations for the origin (and
+/// compare) operands and the result destination; each is freed exactly
+/// once when the struct is dropped, whether directly or via [`resolve`].
 ///
 /// The type also carries an `Option<Box<T>>` for `compare_and_swap`'s
 /// extra `compare` argument; it is `None` for `fetch_and_op`.
@@ -746,11 +922,24 @@ pub struct PendingFetchResult<T> {
     /// Optional `compare` operand for `MPI_Compare_and_swap`.  `None` for
     /// `MPI_Fetch_and_op`.  Same lifetime invariant as `_origin`.
     _compare: Option<Box<T>>,
-    /// Result buffer — kept alive so MPI's pending RMA write reaches a
-    /// stable destination.  resolve() reads from this box once the epoch
+    /// Result destination — kept alive so MPI's pending RMA write reaches a
+    /// stable destination.  Owns its allocation via a raw pointer obtained
+    /// from `Box::into_raw` (never a cast from a shared borrow), freed
+    /// exactly once by `Drop`.  resolve() reads the value once the epoch
     /// has closed.
-    result: Box<std::mem::MaybeUninit<T>>,
+    result: NonNull<std::mem::MaybeUninit<T>>,
 }
+
+// SAFETY: `result` is a `NonNull` pointer to a heap allocation exclusively owned by
+// this struct (freed exactly once, by `Drop`), functionally equivalent to
+// `Box<MaybeUninit<T>>`'s ownership semantics. No other code holds a copy of this
+// pointer, so sending the struct across threads is sound whenever T: Send.
+unsafe impl<T: Send> Send for PendingFetchResult<T> {}
+// SAFETY: `result` is a `NonNull` pointer to a heap allocation exclusively owned by
+// this struct, reachable only through `self`-consuming methods (`resolve`, `Drop`); no
+// interior mutability is exposed through `&PendingFetchResult<T>`, so sharing a shared
+// reference across threads is sound whenever T: Sync.
+unsafe impl<T: Sync> Sync for PendingFetchResult<T> {}
 
 impl<T: Copy> PendingFetchResult<T> {
     /// Consume the pending result and return the fetched value.
@@ -771,34 +960,26 @@ impl<T: Copy> PendingFetchResult<T> {
     /// possibly uninitialised value (UB in Rust).
     #[inline]
     pub unsafe fn resolve(self) -> T {
-        // SAFETY: Caller guarantees the epoch has closed, at which point MPI
-        // has initialised the heap-allocated buffer with the pre-update
-        // remote value per MPI-3 §11.6.  All T: Copy types (enforced by the
-        // MpiDatatype + AtomicMpiDatatype bounds at the call site) are valid
-        // for any bit pattern, so assuming init is sound.  Dereferencing the
-        // Box moves the MaybeUninit<T> out of the heap allocation (allowed
-        // because MaybeUninit<T>: Copy when T: Copy), the Box itself is then
-        // freed when `self` is dropped.  The _origin and _compare boxes are
-        // dropped at the same time.
-        (*self.result).assume_init()
+        // SAFETY: Caller guarantees the epoch has closed, at which point MPI has
+        // initialised the allocation at `self.result` with the pre-update remote value
+        // per MPI-3 §11.6.  All T: Copy types (enforced by the MpiDatatype +
+        // AtomicMpiDatatype bounds at the call site) are valid for any bit pattern, so
+        // assuming init is sound.  `read()` copies the `MaybeUninit<T>` out of the
+        // allocation without freeing it; `self`'s `Drop` impl frees it exactly once,
+        // along with the `_origin` and `_compare` boxes, when this function returns.
+        unsafe { self.result.as_ptr().read().assume_init() }
     }
 }
 
-/// Tracks whether the local buffer is caller-supplied or MPI-managed.
-///
-/// This controls `Drop` semantics: in both cases `MPI_Win_free` is called
-/// (the MPI standard says the user buffer is left alone for `Win_create`,
-/// while MPI-allocated memory is freed for `Win_allocate`), so the C layer
-/// handles the distinction. The variant is preserved for clarity and future
-/// introspection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WinKind {
-    /// Buffer was supplied by the caller (`Win::create`). The user owns the
-    /// memory; `Drop` calls `MPI_Win_free` but does **not** free the buffer.
-    Created,
-    /// Buffer was allocated by MPI (`Win::allocate`). `Drop` calls
-    /// `MPI_Win_free` which also releases the MPI-managed buffer.
-    Allocated,
+impl<T> Drop for PendingFetchResult<T> {
+    fn drop(&mut self) {
+        // SAFETY: `result` was obtained from `Box::into_raw` in `fetch_and_op` or
+        // `compare_and_swap` and has not been freed since (the only other free site, the
+        // FFI error path in those constructors, returns before a `PendingFetchResult` is
+        // ever built). `Drop::drop` runs at most once per value, so reconstructing the
+        // `Box` here and letting it drop frees the allocation exactly once.
+        unsafe { drop(Box::from_raw(self.result.as_ptr())) };
+    }
 }
 
 /// A general-purpose distributed RMA window.
@@ -819,7 +1000,10 @@ pub enum WinKind {
 /// # RAII Lifecycle
 ///
 /// `MPI_Win_free` is called automatically when the `Win` is dropped. For
-/// `Win::allocate`, this also releases the MPI-managed buffer.
+/// `Win::allocate`, this also releases the MPI-managed buffer. If this
+/// window outlives the [`Mpi`](crate::Mpi) handle, `MPI_Finalize` is skipped
+/// instead: its memory stays valid until the process exits and is never
+/// freed.
 ///
 /// # Thread Safety
 ///
@@ -851,15 +1035,9 @@ pub struct Win<'a, T: MpiDatatype> {
     local_ptr: NonNull<T>,
     /// Number of `T` elements in the local buffer.
     local_len: usize,
-    /// Number of processes in the window's communicator.
-    comm_size: i32,
-    /// Whether the buffer is caller-supplied or MPI-managed.
-    ///
-    /// Preserved for clarity and future introspection (e.g., epoch helpers
-    /// in tickets 053–056 may expose this). The field is not read today
-    /// because Drop delegates buffer cleanup entirely to MPI_Win_free.
-    #[allow(dead_code)]
-    kind: WinKind,
+    /// Every rank's displacement unit and exposed byte length, packed by
+    /// [`window_word`] and indexed by rank in the window's communicator.
+    words: Box<[u64]>,
     /// Captures the `'a` lifetime so the borrow checker enforces that a
     /// caller-supplied buffer outlives the `Win`. For `Win::allocate` (which
     /// uses `'static`) this is a zero-sized phantom that imposes no constraint.
@@ -874,7 +1052,8 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// moved while the window is alive.
     ///
     /// `disp_unit` is set to `size_of::<T>()` and `size` to
-    /// `buf.len() * size_of::<T>()`.
+    /// `buf.len() * size_of::<T>()`. Creation first exchanges each rank's
+    /// displacement unit and exposed length with one allgather over `comm`.
     ///
     /// # Arguments
     ///
@@ -884,8 +1063,18 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The byte size overflows `i64` (`Error::InvalidBuffer`).
+    /// - Any rank's exposed byte length does not fit in 56 bits
+    ///   (`Error::InvalidBuffer` on every rank).
+    /// - The length exchange fails (`Error::Mpi` with
+    ///   `operation: Some("allgather")`); this can happen on some ranks only,
+    ///   and the other ranks can then block creating the window.
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_create")`).
+    ///
+    /// If this rank's window table is full, the process is aborted instead
+    /// (`MPI_Abort`, falling back to `SIGABRT` if `MPI_Abort` itself returns
+    /// on a non-conforming implementation): the new window already exposes
+    /// `buf` to every peer, so it can be neither returned nor freed on this
+    /// rank alone.
     ///
     /// # Example
     ///
@@ -897,13 +1086,9 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// let mut buf = vec![0f64; 64];
     /// let win = Win::create(&world, &mut buf).unwrap();
     /// ```
-    pub fn create(comm: &Communicator, buf: &'a mut [T]) -> crate::error::Result<Self> {
-        let byte_size = buf
-            .len()
-            .checked_mul(std::mem::size_of::<T>())
-            .ok_or(Error::InvalidBuffer)?;
-        let size = i64::try_from(byte_size).map_err(|_| Error::InvalidBuffer)?;
-        let disp_unit = std::mem::size_of::<T>() as i32;
+    pub fn create(comm: &Communicator, buf: &'a mut [T]) -> Result<Self> {
+        let words = exchange_window_words(comm, window_word::<T>(buf.len()))?;
+        let (size, disp_unit) = win_size_and_disp_unit::<T>(buf.len())?;
         let mut win_handle: i32 = 0;
 
         // SAFETY: `buf` is a valid, aligned mutable slice borrowed for `'a`.
@@ -917,15 +1102,12 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
                 size,
                 disp_unit,
                 -1, // MPI_INFO_NULL
-                comm.raw_handle(),
+                comm.handle,
                 &mut win_handle,
             )
         };
         Error::check_with_op(ret, "win_create")?;
 
-        // SAFETY: `buf` is a non-empty or zero-length caller slice. For
-        // non-zero length, `buf.as_mut_ptr()` is guaranteed non-null. For
-        // zero length we use `NonNull::dangling()` as a valid aligned sentinel.
         let local_ptr = if buf.is_empty() {
             NonNull::<T>::dangling()
         } else {
@@ -933,12 +1115,13 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
             unsafe { NonNull::new_unchecked(buf.as_mut_ptr()) }
         };
 
+        mark_window_alive();
+
         Ok(Win {
             win_handle,
             local_ptr,
             local_len: buf.len(),
-            comm_size: comm.size(),
-            kind: WinKind::Created,
+            words,
             _marker: std::marker::PhantomData,
         })
     }
@@ -953,7 +1136,10 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// `'static` because there is no caller buffer to track.
     ///
     /// `disp_unit` is set to `size_of::<T>()` and `size` to
-    /// `local_count * size_of::<T>()`.
+    /// `local_count * size_of::<T>()`. Creation first exchanges each rank's
+    /// displacement unit and exposed length with one allgather over `comm`.
+    ///
+    /// The local segment reads as zero when the call returns.
     ///
     /// # Arguments
     ///
@@ -964,9 +1150,25 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The byte size overflows `i64` (`Error::InvalidBuffer`).
-    /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_allocate")`).
-    /// - MPI returns a null pointer for a non-zero count (`Error::Internal`).
+    /// - Any rank's exposed byte length does not fit in 56 bits
+    ///   (`Error::InvalidBuffer` on every rank).
+    /// - The length exchange fails (`Error::Mpi` with
+    ///   `operation: Some("allgather")`); this can happen on some ranks only,
+    ///   and the other ranks can then block creating the window.
+    /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_allocate")`);
+    ///   this can happen on some ranks only, and the other ranks can then
+    ///   block in the barrier after the new segment is zeroed.
+    /// - The window table is full (`Error::ResourceExhausted`; the window is
+    ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`).
+    /// - An error occurs while zeroing the new segment (`Error::Mpi` with
+    ///   `operation: Some("win_allocate")`; the window is
+    ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`).
+    /// - MPI returns a null pointer for a non-zero count (`Error::Internal`;
+    ///   the window is then leaked: never freed, and counted as alive so `Mpi`
+    ///   skips `MPI_Finalize`).
+    ///
+    /// In the last three cases, a peer whose own call succeeded blocks in its
+    /// collective `Drop` (`MPI_Win_free`) waiting for this rank.
     ///
     /// # Example
     ///
@@ -977,14 +1179,11 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// let world = mpi.world();
     /// let win = Win::<f64>::allocate(&world, 32).unwrap();
     /// ```
-    pub fn allocate(comm: &Communicator, local_count: usize) -> crate::error::Result<Self> {
-        let byte_size = local_count
-            .checked_mul(std::mem::size_of::<T>())
-            .ok_or(Error::InvalidBuffer)?;
-        let size = i64::try_from(byte_size).map_err(|_| Error::InvalidBuffer)?;
-        let disp_unit = std::mem::size_of::<T>() as i32;
+    pub fn allocate(comm: &Communicator, local_count: usize) -> Result<Self> {
+        let words = exchange_window_words(comm, window_word::<T>(local_count))?;
+        let (size, disp_unit) = win_size_and_disp_unit::<T>(local_count)?;
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let mut win_handle: i32 = 0;
+        let mut win_handle: i32 = -1;
 
         // SAFETY: We pass valid out-parameter pointers to the C shim, which
         // calls MPI_Win_allocate. The C shim validates the comm handle. The
@@ -995,12 +1194,18 @@ impl<T: MpiDatatype> Win<'static, T> {
                 size,
                 disp_unit,
                 -1, // MPI_INFO_NULL
-                comm.raw_handle(),
+                comm.handle,
                 &mut baseptr,
                 &mut win_handle,
             )
         };
+        if ret != 0 && win_handle == FERROMPI_WIN_LEAKED {
+            // MPI created the window but could not zero or register it; it is never freed.
+            mark_window_alive();
+        }
         Error::check_with_op(ret, "win_allocate")?;
+
+        mark_window_alive();
 
         let local_ptr = if local_count == 0 {
             // Zero-count: use a dangling aligned pointer (same trick as
@@ -1016,8 +1221,7 @@ impl<T: MpiDatatype> Win<'static, T> {
             win_handle,
             local_ptr,
             local_len: local_count,
-            comm_size: comm.size(),
-            kind: WinKind::Allocated,
+            words,
             _marker: std::marker::PhantomData,
         })
     }
@@ -1060,11 +1264,11 @@ impl<T: MpiDatatype> Win<'_, T> {
         unsafe { std::slice::from_raw_parts_mut(self.local_ptr.as_ptr(), self.local_len) }
     }
 
-    /// Get the raw MPI window handle.
+    /// Get this window's raw handle.
     ///
-    /// Provided for advanced use cases where direct access to the underlying
-    /// MPI window handle is needed (e.g., custom FFI calls or epoch helpers
-    /// from tickets 053–056).
+    /// The value is ferrompi's internal table index for this window. It is
+    /// not an MPI handle and cannot be passed to MPI; use it only to tell
+    /// objects apart, for example in logs.
     pub fn raw_handle(&self) -> i32 {
         self.win_handle
     }
@@ -1074,7 +1278,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// Equals the size of the communicator used to create the window and
     /// determines the valid rank range for RMA operations.
     pub fn comm_size(&self) -> i32 {
-        self.comm_size
+        self.words.len() as i32
     }
 
     /// Fence synchronization (active-target epoch boundary).
@@ -1161,12 +1365,11 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// win.wait_exposure().unwrap();
     /// ```
     pub fn post(&self, group: &Group, assert: WinPscwAssert) -> Result<()> {
-        // SAFETY: `win_handle` is a valid MPI window handle. `group.raw_handle()`
+        // SAFETY: `win_handle` is a valid MPI window handle. `group.handle`
         // returns a valid group handle from the C-layer group table.
         // `assert.bits()` is either 0 or a combination of MPI_MODE_* constants
         // returned by the MPI implementation.
-        let ret =
-            unsafe { ffi::ferrompi_win_post(group.raw_handle(), assert.bits(), self.win_handle) };
+        let ret = unsafe { ffi::ferrompi_win_post(group.handle, assert.bits(), self.win_handle) };
         Error::check_with_op(ret, "win_post")
     }
 
@@ -1203,11 +1406,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// win.complete().unwrap();
     /// ```
     pub fn start(&self, group: &Group, assert: WinPscwAssert) -> Result<()> {
-        // SAFETY: `win_handle` is a valid MPI window handle. `group.raw_handle()`
+        // SAFETY: `win_handle` is a valid MPI window handle. `group.handle`
         // returns a valid group handle from the C-layer group table.
         // `assert.bits()` is either 0 or a combination of MPI_MODE_* constants.
-        let ret =
-            unsafe { ffi::ferrompi_win_start(group.raw_handle(), assert.bits(), self.win_handle) };
+        let ret = unsafe { ffi::ferrompi_win_start(group.handle, assert.bits(), self.win_handle) };
         Error::check_with_op(ret, "win_start")
     }
 
@@ -1248,9 +1450,6 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// against this rank's window are complete. Closes the exposure epoch
     /// opened by [`Win::post`].
     ///
-    /// Named `wait_exposure` rather than `wait` to avoid a name collision with
-    /// `Request::wait` when both are in scope via `use ferrompi::*`.
-    ///
     /// # Errors
     ///
     /// Returns `Error::Mpi { operation: Some("win_wait"), .. }` if MPI reports
@@ -1280,9 +1479,6 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// Wraps `MPI_Win_test`. Returns `true` if the exposure epoch started by
     /// [`Win::post`] has completed (i.e., all access-side ranks have called
     /// [`Win::complete`]), `false` otherwise. Does not block.
-    ///
-    /// Named `test_exposure` rather than `test` to avoid a name collision when
-    /// both `Win` and `Request` are in scope via `use ferrompi::*`.
     ///
     /// # Errors
     ///
@@ -1491,17 +1687,18 @@ impl<T: MpiDatatype> Win<'_, T> {
         Error::check_with_op(ret, "win_flush_local_all")
     }
 
-    /// Synchronize the local public window copy with the local private copy.
+    /// Synchronize the public and private copies of this window's local memory.
     ///
-    /// Issues a memory barrier that ensures consistency between the public and
-    /// private copies of the window memory on the local process. This is a
-    /// purely local operation — it does not require a surrounding lock epoch
-    /// and does not communicate with any remote process.
+    /// Wraps `MPI_Win_sync`, a local memory barrier: it does not communicate
+    /// and does not complete pending RMA operations. MPI allows it only inside
+    /// a passive-target epoch (MPI-4.0 section 12.5.4), that is between
+    /// [`Win::lock`] or [`Win::lock_all`] and the matching unlock; outside one,
+    /// MPICH returns an error.
     ///
     /// # Errors
     ///
     /// Returns `Error::Mpi { operation: Some("win_sync"), .. }` if the MPI
-    /// call fails.
+    /// call fails, including when no passive-target epoch is open.
     ///
     /// # Example
     ///
@@ -1512,18 +1709,41 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// let world = mpi.world();
     /// let win = Win::<f64>::allocate(&world, 8).unwrap();
     ///
-    /// // sync is valid outside any epoch
-    /// win.sync().unwrap();
+    /// {
+    ///     let _guard = win.lock_all().unwrap();
+    ///     win.sync().unwrap();
+    ///     // The epoch ends when `_guard` is dropped
+    /// }
     /// ```
     pub fn sync(&self) -> Result<()> {
-        // SAFETY: `win_handle` is a valid MPI window handle. `MPI_Win_sync`
-        // is a local operation and is valid at any point after window creation.
+        // SAFETY: `win_handle` is a valid MPI window handle. `MPI_Win_sync` is
+        // valid only inside a passive-target epoch, which the caller must open;
+        // outside one MPI returns an error rather than touching memory.
         let ret = unsafe { ffi::ferrompi_win_sync(self.win_handle) };
         Error::check_with_op(ret, "win_sync")
     }
 }
 
 impl<T: MpiDatatype> Win<'_, T> {
+    /// Forwards to [`check_rma_target`] with this window's exchanged words
+    /// and `size_of::<T>()`.
+    fn check_target(
+        &self,
+        target_rank: i32,
+        target_disp: i64,
+        target_count: i64,
+        buffer_lens: &[usize],
+    ) -> Result<()> {
+        check_rma_target(
+            &self.words,
+            std::mem::size_of::<T>(),
+            target_rank,
+            target_disp,
+            target_count,
+            buffer_lens,
+        )
+    }
+
     /// One-sided write: copy `origin` into the remote rank's window memory.
     ///
     /// Wraps `MPI_Put`. The operation is posted to the network immediately, but
@@ -1542,9 +1762,11 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
-    /// * [`Error::Mpi`] — if `MPI_Put` fails (e.g., `MPI_ERR_RANK` for an
-    ///   invalid `target_rank`).
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
+    /// * [`Error::Mpi`] — if `MPI_Put` fails.
     ///
     /// # Safety Contract
     ///
@@ -1570,17 +1792,17 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let win = Win::<f64>::allocate(&world, 4).unwrap();
+    /// let buf = [1.0f64, 2.0, 3.0, 4.0];
     ///
     /// // Open fence epoch on all ranks
     /// win.fence(WinFenceAssert::default()).unwrap();
     ///
     /// // Rank 0 puts four elements into rank 1's window at displacement 0
     /// if world.rank() == 0 {
-    ///     let buf = [1.0f64, 2.0, 3.0, 4.0];
     ///     win.put(&buf, 1, 0, buf.len() as i64).unwrap();
     /// }
     ///
-    /// // Close epoch — put completes here
+    /// // Close epoch — put completes here; `buf` must stay alive until now
     /// win.fence(WinFenceAssert::default()).unwrap();
     /// ```
     pub fn put(
@@ -1590,22 +1812,23 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<()> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
-        // SAFETY: `origin.as_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid and unmodified until the epoch
-        // closes (see the Safety Contract in the method docs).
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        let (p, n, dt) = buf(origin);
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is read by MPI until the epoch closes; the signature does not
+        // tie the buffer to the epoch, so keeping it alive and unmodified until then is
+        // the caller's documented obligation. `target_rank`, `target_disp`, and
+        // `target_count` were checked above against the target rank's exposed window, so
+        // MPI accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_put(
-                origin.as_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 self.win_handle,
             )
         };
@@ -1620,12 +1843,13 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// `request.wait()` returns, the `origin` slice can be safely overwritten
     /// or dropped. **Remote completion is not guaranteed by the request**: the
     /// remote rank does not observe the written data until the surrounding epoch
-    /// closes (fence / complete / unlock).
+    /// is flushed or closed (a lock guard's `flush`, or the unlock when the guard
+    /// drops).
     ///
     /// # Local vs. Remote completion
     ///
     /// - `request.wait()` → local buffer is free to reuse.
-    /// - Epoch close (fence / unlock / complete) → remote rank observes the
+    /// - Flush or unlock (guard drop) → remote rank observes the
     ///   write.
     ///
     /// Both are required for the full operation to be visible end-to-end.
@@ -1648,17 +1872,21 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
-    /// * [`Error::Mpi`] — if `MPI_Rput` fails (e.g., `MPI_ERR_RANK` for an
-    ///   invalid `target_rank`).
-    /// * [`Error::Mpi { class: MpiErrorClass::Other }`] — if the internal
-    ///   request table is exhausted.
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
+    /// * [`Error::Mpi`] — if `MPI_Rput` fails.
+    /// * [`Error::ResourceExhausted`] with resource
+    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
+    ///   internal request table is full.
     ///
     /// # Epoch Requirement
     ///
-    /// `rput` must be called inside an active access epoch (passive-target lock,
-    /// fence, or PSCW). Calling it outside an epoch is undefined per the MPI
-    /// standard.
+    /// `rput` must be called inside a passive-target epoch, that is between
+    /// [`Win::lock`] or [`Win::lock_all`] and the unlock when the guard
+    /// drops. MPI does not allow request-based RMA in fence or PSCW epochs;
+    /// calling it anywhere else is erroneous.
     ///
     /// # Example
     ///
@@ -1678,7 +1906,8 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///     req.wait().unwrap(); // local buffer safe to reuse after this
     ///     // Remote write completes when _guard drops (MPI_Win_unlock)
     /// }
-    /// // Rank 1 can read its local memory after a barrier here
+    /// // Rank 1 can read its local memory after a barrier and a lock (or
+    /// // `sync`) on its own window
     /// ```
     pub fn rput(
         &self,
@@ -1687,29 +1916,30 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<Request> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        let (p, n, dt) = buf(origin);
         let mut request_handle: i64 = 0;
-        // SAFETY: `origin.as_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid and unmodified until the returned
-        // Request is waited on (see the epoch requirement in the method docs).
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is read by MPI until the returned `Request` completes; the
+        // signature does not tie the buffer to the `Request`, so keeping it alive and
+        // unmodified until then is the caller's documented obligation. `target_rank`,
+        // `target_disp`, and `target_count` were checked above against the target rank's
+        // exposed window, so MPI accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_rput(
-                origin.as_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 self.win_handle,
                 &mut request_handle,
             )
         };
         Error::check_with_op(ret, "rput")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Rma))
     }
 
     /// One-sided read: copy data from a remote rank's window memory into
@@ -1731,9 +1961,11 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
-    /// * [`Error::Mpi`] — if `MPI_Get` fails (e.g., `MPI_ERR_RANK` for an
-    ///   invalid `target_rank`).
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
+    /// * [`Error::Mpi`] — if `MPI_Get` fails.
     ///
     /// # Safety Contract
     ///
@@ -1759,19 +1991,23 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let win = Win::<f64>::allocate(&world, 4).unwrap();
+    /// let mut buf = [0.0f64; 4];
     ///
     /// // Open fence epoch on all ranks
     /// win.fence(WinFenceAssert::default()).unwrap();
     ///
     /// // Rank 0 reads four elements from rank 1's window at displacement 0
     /// if world.rank() == 0 {
-    ///     let mut buf = [0.0f64; 4];
     ///     win.get(&mut buf, 1, 0, 4).unwrap();
     ///     // buf is NOT yet valid here — read after the closing fence
     /// }
     ///
     /// // Close epoch — get completes here, buf is now valid
     /// win.fence(WinFenceAssert::default()).unwrap();
+    ///
+    /// if world.rank() == 0 {
+    ///     println!("{:?}", buf);
+    /// }
     /// ```
     pub fn get(
         &self,
@@ -1780,22 +2016,23 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<()> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
-        // SAFETY: `origin.as_mut_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid and unused until the epoch
-        // closes (see the Safety Contract in the method docs).
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        let (p, n, dt) = buf_mut(origin);
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is written by MPI until the epoch closes; the signature does
+        // not tie the buffer to the epoch, so keeping it alive and untouched until then is
+        // the caller's documented obligation. `target_rank`, `target_disp`, and
+        // `target_count` were checked above against the target rank's exposed window, so
+        // MPI accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_get(
-                origin.as_mut_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 self.win_handle,
             )
         };
@@ -1830,22 +2067,29 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
-    /// * [`Error::Mpi`] — if `MPI_Rget` fails (e.g., `MPI_ERR_RANK` for an
-    ///   invalid `target_rank`).
-    /// * [`Error::Mpi { class: MpiErrorClass::Other }`] — if the internal
-    ///   request table is exhausted.
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
+    /// * [`Error::Mpi`] — if `MPI_Rget` fails.
+    /// * [`Error::ResourceExhausted`] with resource
+    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
+    ///   internal request table is full.
     ///
     /// # Epoch Requirement
     ///
-    /// `rget` must be called inside an active access epoch (passive-target lock,
-    /// fence, or PSCW). Calling it outside an epoch is undefined per the MPI
-    /// standard.
+    /// `rget` must be called inside a passive-target epoch, that is between
+    /// [`Win::lock`] or [`Win::lock_all`] and the unlock when the guard
+    /// drops. MPI does not allow request-based RMA in fence or PSCW epochs;
+    /// calling it anywhere else is erroneous.
     ///
     /// # Cancellation
     ///
-    /// Calling `request.cancel()` on an `Rget` request is undefined behavior
-    /// in MPI. The MPI standard discourages cancelling RMA requests.
+    /// Calling [`Request::cancel`] on the returned request returns
+    /// [`Error::NotSupported`] without calling into MPI: `MPI_Cancel` is
+    /// defined by the standard only for point-to-point requests, and both
+    /// MPICH and Open MPI reject it for RMA requests. The request is left
+    /// pending; follow up with [`Request::wait`] as usual.
     ///
     /// # Example
     ///
@@ -1875,29 +2119,30 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<Request> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        let (p, n, dt) = buf_mut(origin);
         let mut request_handle: i64 = 0;
-        // SAFETY: `origin.as_mut_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid until the returned Request is
-        // waited on (see the epoch requirement in the method docs).
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is written by MPI until the returned `Request` completes; the
+        // signature does not tie the buffer to the `Request`, so keeping it alive and
+        // untouched until then is the caller's documented obligation. `target_rank`,
+        // `target_disp`, and `target_count` were checked above against the target rank's
+        // exposed window, so MPI accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_rget(
-                origin.as_mut_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 self.win_handle,
                 &mut request_handle,
             )
         };
         Error::check_with_op(ret, "rget")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Rma))
     }
 
     /// One-sided reduce-accumulate: combine data from a local origin buffer
@@ -1925,7 +2170,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
     /// * [`Error::Mpi`] — if `MPI_Accumulate` fails for any other reason.
@@ -1952,6 +2200,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let mut win = Win::<f64>::allocate(&world, 4).unwrap();
+    /// let buf = [10.0f64, 20.0, 30.0, 40.0];
     ///
     /// // Rank 1 initialises its window
     /// if world.rank() == 1 {
@@ -1963,11 +2212,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// // Rank 0 adds [10, 20, 30, 40] to rank 1's window
     /// if world.rank() == 0 {
-    ///     let buf = [10.0f64, 20.0, 30.0, 40.0];
     ///     win.accumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum).unwrap();
     /// }
     ///
-    /// // Close epoch — accumulate completes here
+    /// // Close epoch — accumulate completes here; `buf` must stay alive until now
     /// win.fence(WinFenceAssert::default()).unwrap();
     /// // Rank 1's window is now [11.0, 22.0, 33.0, 44.0]
     /// ```
@@ -1979,24 +2227,24 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_count: i64,
         op: ReduceOp,
     ) -> Result<()> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
-        // SAFETY: `origin.as_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `op as i32` is the discriminant of a valid `ReduceOp` variant, which the
-        // C shim maps to the corresponding `MPI_Op` via `get_op()`.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid and unmodified until the epoch
-        // closes (see the Safety Contract in the method docs).
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        let (p, n, dt) = buf(origin);
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is read by MPI until the epoch closes; the signature does not
+        // tie the buffer to the epoch, so keeping it alive and unmodified until then is
+        // the caller's documented obligation. `target_rank`, `target_disp`, and
+        // `target_count` were checked above against the target rank's exposed window, so
+        // MPI accesses only memory the target exposed. `op as i32` is a valid `ReduceOp`
+        // discriminant that the shim maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_accumulate(
-                origin.as_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 op as i32,
                 self.win_handle,
             )
@@ -2012,8 +2260,8 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// Wraps `MPI_Raccumulate`. Unlike [`Win::accumulate`], local completion
     /// (i.e., the `origin` buffer being safe to reuse) is signaled by the
     /// returned [`Request`] rather than the epoch boundary. **Remote-side
-    /// completion** (visibility at the target) still requires the surrounding
-    /// epoch to close (fence, `complete`, or `unlock`). This is the same
+    /// completion** (visibility at the target) still requires a flush or the
+    /// unlock that closes the passive-target epoch. This is the same
     /// local-completion contract as [`Win::rput`].
     ///
     /// Any [`ReduceOp`] variant is accepted, including [`ReduceOp::Replace`]
@@ -2041,23 +2289,28 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` does not fit in `i64`.
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
-    /// * [`Error::Mpi { class: MpiErrorClass::Other }`] — if the internal
-    ///   request table is exhausted.
+    /// * [`Error::ResourceExhausted`] with resource
+    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
+    ///   internal request table is full.
     /// * [`Error::Mpi`] — if `MPI_Raccumulate` fails for any other reason.
     ///
     /// # Epoch Requirement
     ///
-    /// `raccumulate` must be called inside an active access epoch
-    /// (passive-target lock, fence, or PSCW). Calling it outside an epoch is
-    /// undefined per the MPI standard.
+    /// `raccumulate` must be called inside a passive-target epoch, that is
+    /// between [`Win::lock`] or [`Win::lock_all`] and the unlock when the
+    /// guard drops. MPI does not allow request-based RMA in fence or PSCW
+    /// epochs; calling it anywhere else is erroneous.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{LockType, Mpi, ReduceOp, Win};
+    /// use ferrompi::{LockType, Mpi, ReduceOp, Win, WinFenceAssert};
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
@@ -2067,16 +2320,26 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///     win.local_slice_mut().copy_from_slice(&[1, 2, 3, 4]);
     /// }
     ///
-    /// win.fence(ferrompi::WinFenceAssert::default()).unwrap();
+    /// // Make rank 1's store visible in its window; `no_succeed` says no fence
+    /// // epoch follows. The barrier orders the store before rank 0's lock.
+    /// win.fence(WinFenceAssert::no_succeed()).unwrap();
+    /// world.barrier().unwrap();
     ///
+    /// // Request-based RMA is valid only in a passive-target epoch
     /// if world.rank() == 0 {
     ///     let _guard = win.lock(LockType::Exclusive, 1).unwrap();
     ///     let buf = [10i32, 20, 30, 40];
     ///     let req = win.raccumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum).unwrap();
     ///     req.wait().unwrap(); // origin buffer safe to reuse after this
-    ///     // _guard drops here (MPI_Win_unlock) — remote visibility guaranteed
+    ///     // _guard drops here (MPI_Win_unlock): the update completes at rank 1
     /// }
-    /// // Rank 1's window is now [11, 22, 33, 44]
+    ///
+    /// world.barrier().unwrap();
+    /// if world.rank() == 1 {
+    ///     // Locking its own window makes the update visible to rank 1's loads
+    ///     let _guard = win.lock(LockType::Shared, 1).unwrap();
+    ///     assert_eq!(win.local_slice(), &[11, 22, 33, 44]);
+    /// }
     /// ```
     pub fn raccumulate(
         &self,
@@ -2086,32 +2349,32 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_count: i64,
         op: ReduceOp,
     ) -> Result<Request> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
+        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        let (p, n, dt) = buf(origin);
         let mut request_handle: i64 = 0;
-        // SAFETY: `origin.as_ptr()` is valid for `origin.len()` elements of type T.
-        // `T::TAG` matches T's memory layout per the `MpiDatatype` invariant.
-        // `op as i32` is the discriminant of a valid `ReduceOp` variant, which the
-        // C shim maps to the corresponding `MPI_Op` via `get_op()`.
-        // `win_handle` is a valid MPI window handle. The caller is responsible for
-        // ensuring this call is made inside an active access epoch, and that
-        // `origin`'s backing memory remains valid and unmodified until the returned
-        // Request is waited on (see the epoch requirement in the method docs).
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is read by MPI until the returned `Request` completes; the
+        // signature does not tie the buffer to the `Request`, so keeping it alive and
+        // unmodified until then is the caller's documented obligation. `target_rank`,
+        // `target_disp`, and `target_count` were checked above against the target rank's
+        // exposed window, so MPI accesses only memory the target exposed. `op as i32` is a
+        // valid `ReduceOp` discriminant that the shim maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_raccumulate(
-                origin.as_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
+                p,
+                n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 op as i32,
                 self.win_handle,
                 &mut request_handle,
             )
         };
         Error::check_with_op(ret, "raccumulate")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Rma))
     }
 
     /// Atomic read-modify-write: fetch the pre-update remote value into
@@ -2143,8 +2406,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `origin.len()` or `result.len()` does
-    ///   not fit in `i64`.
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, a
+    ///   buffer's length differs from `target_count`, or the access does not
+    ///   fit in the target rank's window.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
     /// * [`Error::Mpi`] — if `MPI_Get_accumulate` fails for any other reason.
@@ -2177,6 +2442,8 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let mut win = Win::<i32>::allocate(&world, 4).unwrap();
+    /// let origin = [1i32, 2, 3, 4];
+    /// let mut result = [0i32; 4];
     ///
     /// // Rank 1 initialises its window
     /// if world.rank() == 1 {
@@ -2188,13 +2455,16 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// // Rank 0 atomically fetches rank 1's values and adds [1, 2, 3, 4]
     /// if world.rank() == 0 {
-    ///     let origin = [1i32, 2, 3, 4];
-    ///     let mut result = [0i32; 4];
     ///     win.get_accumulate(&origin, &mut result, 1, 0, 4, ReduceOp::Sum).unwrap();
     /// }
     ///
-    /// // Close epoch — get_accumulate completes here
+    /// // Close epoch — get_accumulate completes here; `origin`/`result` must
+    /// // stay alive until now
     /// win.fence(WinFenceAssert::default()).unwrap();
+    ///
+    /// if world.rank() == 0 {
+    ///     println!("{:?}", result);
+    /// }
     /// // Rank 0's result == [10, 20, 30, 40] (pre-update)
     /// // Rank 1's window == [11, 22, 33, 44] (post-update)
     /// ```
@@ -2207,32 +2477,35 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_count: i64,
         op: ReduceOp,
     ) -> Result<()> {
-        let origin_count = i64::try_from(origin.len()).map_err(|_| Error::InvalidBuffer)?;
-        let result_count = i64::try_from(result.len()).map_err(|_| Error::InvalidBuffer)?;
-        // SAFETY: `origin.as_ptr()` is valid for `origin.len()` elements of type T
-        // (read-only during the epoch). `result.as_mut_ptr()` is valid for
-        // `result.len()` elements of type T (write destination, populated by MPI
-        // when the epoch closes). `T::TAG` correctly represents T's memory layout
-        // per the `MpiDatatype` invariant. `op as i32` is the discriminant of a
-        // valid `ReduceOp` variant, which the C shim maps to the corresponding
-        // `MPI_Op` via `get_op()`. `win_handle` is a valid MPI window handle.
-        // Non-aliasing of `origin` and `result` is guaranteed by Rust's
-        // `&[T]` / `&mut [T]` exclusivity rules. The caller is responsible for
-        // ensuring this call is inside an active access epoch and that `origin`
-        // remains valid and `result` is not read before the epoch closes (see the
-        // Safety Contract in the method docs).
+        self.check_target(
+            target_rank,
+            target_disp,
+            target_count,
+            &[origin.len(), result.len()],
+        )?;
+        let (o_ptr, o_n, dt) = buf(origin);
+        let (r_ptr, r_n, _) = buf_mut(result);
+        // SAFETY: the call must be inside an active access epoch, which the caller must
+        // ensure. `origin` is read by MPI and `result` is written by MPI until the epoch
+        // closes; the signature does not tie either buffer to the epoch, so keeping
+        // `origin` alive and unmodified, and `result` alive and unread, until then is the
+        // caller's documented obligation. `origin` (`&[T]`) and `result` (`&mut [T]`)
+        // cannot alias. `target_rank`, `target_disp`, and `target_count` were checked
+        // above against the target rank's exposed window, so MPI accesses only memory the
+        // target exposed. `op as i32` is a valid `ReduceOp` discriminant that the shim
+        // maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_get_accumulate(
-                origin.as_ptr().cast::<std::ffi::c_void>(),
-                origin_count,
-                T::TAG as i32,
-                result.as_mut_ptr().cast::<std::ffi::c_void>(),
-                result_count,
-                T::TAG as i32,
+                o_ptr,
+                o_n,
+                dt,
+                r_ptr,
+                r_n,
+                dt,
                 target_rank,
                 target_disp,
                 target_count,
-                T::TAG as i32,
+                dt,
                 op as i32,
                 self.win_handle,
             )
@@ -2267,6 +2540,9 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, or
+    ///   the access does not fit in the target rank's window.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
     /// * [`Error::Mpi`] — if `MPI_Fetch_and_op` fails for any other reason.
@@ -2322,6 +2598,7 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         op: ReduceOp,
     ) -> Result<PendingFetchResult<T>> {
+        self.check_target(target_rank, target_disp, 1, &[])?;
         use std::mem::MaybeUninit;
         // Box the origin and result so they have heap-stable addresses
         // that survive across the epoch.  MPI_Fetch_and_op only *initiates*
@@ -2333,19 +2610,27 @@ impl<T: MpiDatatype> Win<'_, T> {
         // other implementations.  See PendingFetchResult docs for the
         // lifetime contract.
         let origin_box: Box<T> = Box::new(origin);
-        let result_box: Box<MaybeUninit<T>> = Box::new(MaybeUninit::uninit());
-        // SAFETY: origin_box.as_ref() points to a heap allocation that
-        // lives for the lifetime of PendingFetchResult (we move it into
-        // the returned struct below).  result_box similarly.  Both
-        // addresses remain valid until the user consumes the
-        // PendingFetchResult via resolve() (or drops it).  `T::TAG`,
-        // `op as i32`, target_rank, target_disp, and win_handle invariants
-        // are unchanged from the previous implementation.
+        // SAFETY: `Box::into_raw` never returns a null pointer.
+        let result_ptr: NonNull<MaybeUninit<T>> =
+            unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(MaybeUninit::uninit()))) };
+        // SAFETY: `origin_box` points to a heap allocation moved into the returned
+        // `PendingFetchResult`; MPI reads through it until the epoch closes.
+        // `result_ptr` is a raw pointer that owns its allocation (obtained from
+        // `Box::into_raw` above, never a cast from a shared borrow); MPI writes through
+        // it until the epoch closes. The caller must keep the returned
+        // `PendingFetchResult` alive and call `resolve` only after the epoch closes —
+        // `resolve` is `unsafe` for that reason. `result_ptr`'s allocation is freed
+        // exactly once by `PendingFetchResult`'s `Drop`, on both the `resolve` and
+        // drop-without-resolve paths. `T::TAG` matches T's memory layout per the
+        // `MpiDatatype` invariant. `op as i32` is a valid `ReduceOp` discriminant that
+        // the shim maps to an `MPI_Op`. `target_rank` and `target_disp` were checked
+        // above (with `target_count` 1) against the target rank's exposed window, so MPI
+        // accesses only memory the target exposed. `win_handle` is a valid handle owned
+        // by `self`.
         let ret = unsafe {
             ffi::ferrompi_fetch_and_op(
                 (origin_box.as_ref() as *const T).cast::<std::ffi::c_void>(),
-                (result_box.as_ref() as *const MaybeUninit<T> as *mut MaybeUninit<T>)
-                    .cast::<std::ffi::c_void>(),
+                result_ptr.as_ptr().cast::<std::ffi::c_void>(),
                 T::TAG as i32,
                 target_rank,
                 target_disp,
@@ -2353,11 +2638,16 @@ impl<T: MpiDatatype> Win<'_, T> {
                 self.win_handle,
             )
         };
-        Error::check_with_op(ret, "fetch_and_op")?;
+        Error::check_with_op(ret, "fetch_and_op").inspect_err(|_| {
+            // SAFETY: `result_ptr` was obtained from `Box::into_raw` above and has not
+            // been freed; reconstructing the `Box` here and dropping it frees the
+            // allocation exactly once on this error path.
+            unsafe { drop(Box::from_raw(result_ptr.as_ptr())) };
+        })?;
         Ok(PendingFetchResult {
             _origin: origin_box,
             _compare: None,
-            result: result_box,
+            result: result_ptr,
         })
     }
 }
@@ -2424,8 +2714,11 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::Mpi`] — if `MPI_Compare_and_swap` fails (e.g., invalid rank
-    ///   or displacement, or the MPI version is < 3).
+    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, or
+    ///   the access does not fit in the target rank's window.
+    /// * [`Error::Mpi`] — if `MPI_Compare_and_swap` fails (e.g., the MPI
+    ///   version is < 3).
     ///
     /// # Safety Contract
     ///
@@ -2476,7 +2769,8 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
         compare: T,
         target_rank: i32,
         target_disp: i64,
-    ) -> crate::error::Result<PendingFetchResult<T>> {
+    ) -> Result<PendingFetchResult<T>> {
+        self.check_target(target_rank, target_disp, 1, &[])?;
         use std::mem::MaybeUninit;
         // Box origin, compare, and result for heap-stable addresses that
         // survive across the epoch.  MPI_Compare_and_swap is non-blocking
@@ -2485,42 +2779,61 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
         // storage would have been reused.  See PendingFetchResult docs.
         let origin_box: Box<T> = Box::new(origin);
         let compare_box: Box<T> = Box::new(compare);
-        let result_box: Box<MaybeUninit<T>> = Box::new(MaybeUninit::uninit());
-        // SAFETY: origin_box, compare_box, and result_box all point to
-        // heap allocations that live until PendingFetchResult is consumed
-        // or dropped (we move them into the returned struct below).
-        // `T::TAG`, target_rank, target_disp, and win_handle invariants
-        // are unchanged from the previous implementation.  `AtomicMpiDatatype`
-        // restricts T to integer/byte types per MPI 4.1 §12.5.4.
+        // SAFETY: `Box::into_raw` never returns a null pointer.
+        let result_ptr: NonNull<MaybeUninit<T>> =
+            unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(MaybeUninit::uninit()))) };
+        // SAFETY: `origin_box` and `compare_box` point to heap allocations moved into
+        // the returned `PendingFetchResult`; MPI reads through them until the epoch
+        // closes. `result_ptr` is a raw pointer that owns its allocation (obtained from
+        // `Box::into_raw` above, never a cast from a shared borrow); MPI writes through
+        // it until the epoch closes. The caller must keep the returned
+        // `PendingFetchResult` alive and call `resolve` only after the epoch closes —
+        // `resolve` is `unsafe` for that reason. `result_ptr`'s allocation is freed
+        // exactly once by `PendingFetchResult`'s `Drop`, on both the `resolve` and
+        // drop-without-resolve paths. `T::TAG` matches T's memory layout per the
+        // `MpiDatatype` invariant; `AtomicMpiDatatype` restricts T to the integer and
+        // byte types MPI supports for compare-and-swap (MPI 4.1 §12.5.4). `target_rank`
+        // and `target_disp` were checked above (with `target_count` 1) against the target
+        // rank's exposed window, so MPI accesses only memory the target exposed.
+        // `win_handle` is a valid handle owned by `self`.
         let ret = unsafe {
             ffi::ferrompi_compare_and_swap(
                 (origin_box.as_ref() as *const T).cast::<std::ffi::c_void>(),
                 (compare_box.as_ref() as *const T).cast::<std::ffi::c_void>(),
-                (result_box.as_ref() as *const MaybeUninit<T> as *mut MaybeUninit<T>)
-                    .cast::<std::ffi::c_void>(),
+                result_ptr.as_ptr().cast::<std::ffi::c_void>(),
                 T::TAG as i32,
                 target_rank,
                 target_disp,
                 self.win_handle,
             )
         };
-        Error::check_with_op(ret, "compare_and_swap")?;
+        Error::check_with_op(ret, "compare_and_swap").inspect_err(|_| {
+            // SAFETY: `result_ptr` was obtained from `Box::into_raw` above and has not
+            // been freed; reconstructing the `Box` here and dropping it frees the
+            // allocation exactly once on this error path.
+            unsafe { drop(Box::from_raw(result_ptr.as_ptr())) };
+        })?;
         Ok(PendingFetchResult {
             _origin: origin_box,
             _compare: Some(compare_box),
-            result: result_box,
+            result: result_ptr,
         })
     }
 }
 
 impl<T: MpiDatatype> Drop for Win<'_, T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("Win") {
+            return;
+        }
+        // Release: see `Drop for SharedWindow`'s identical comment.
+        LIVE_WINDOWS.fetch_sub(1, Ordering::Release);
         // SAFETY: `win_handle` is a valid MPI window handle allocated by
         // ferrompi_win_create or ferrompi_win_allocate. It has not been freed
         // yet because Drop is only called once. MPI_Win_free leaves the user
-        // buffer alone for Win::create (WinKind::Created) and frees the
-        // MPI-allocated buffer for Win::allocate (WinKind::Allocated) per the
-        // MPI standard — the C layer handles this distinction correctly.
+        // buffer alone for a caller-supplied buffer (Win::create) and frees
+        // the MPI-allocated buffer for Win::allocate per the MPI standard —
+        // the C layer handles this distinction correctly.
         unsafe { ffi::ferrompi_win_free(self.win_handle) };
     }
 }
@@ -2572,6 +2885,9 @@ impl<T: MpiDatatype> LockGuard<'_, T> {
 
 impl<T: MpiDatatype> Drop for LockGuard<'_, T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("LockGuard") {
+            return;
+        }
         // SAFETY: The window handle is valid (borrowed from SharedWindow)
         // and the rank was locked in the constructor. This unlock matches
         // the lock call that created this guard.
@@ -2639,6 +2955,9 @@ impl<T: MpiDatatype> LockAllGuard<'_, T> {
 
 impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("LockAllGuard") {
+            return;
+        }
         // SAFETY: The window handle is valid (borrowed from SharedWindow)
         // and all ranks were locked in the constructor. This unlock_all
         // matches the lock_all call that created this guard.
@@ -2700,6 +3019,9 @@ impl<T: MpiDatatype> WinLockGuard<'_, '_, T> {
 
 impl<T: MpiDatatype> Drop for WinLockGuard<'_, '_, T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("WinLockGuard") {
+            return;
+        }
         // SAFETY: `window.win_handle` is valid — it is borrowed from a live
         // `Win`. The rank was locked in `Win::lock`; this unlock matches that
         // lock call. Drop is only called once.
@@ -2780,6 +3102,9 @@ impl<T: MpiDatatype> WinLockAllGuard<'_, '_, T> {
 
 impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, '_, T> {
     fn drop(&mut self) {
+        if !rt::drop_guard("WinLockAllGuard") {
+            return;
+        }
         // SAFETY: `window.win_handle` is valid — it is borrowed from a live
         // `Win`. All ranks were locked in `Win::lock_all`; this unlock_all
         // matches that call. Drop is only called once.
@@ -2789,35 +3114,70 @@ impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, '_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        check_rma_target, window_word, Error, PendingFetchResult, WinFenceAssert, WinPscwAssert,
+        WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT,
+    };
+    use std::ptr::NonNull;
+
+    // -------------------------------------------------------------------------
+    // window_word unit tests
+    // -------------------------------------------------------------------------
 
     #[test]
-    fn lock_type_equality() {
-        assert_eq!(LockType::Exclusive, LockType::Exclusive);
-        assert_eq!(LockType::Shared, LockType::Shared);
-        assert_ne!(LockType::Exclusive, LockType::Shared);
+    fn window_word_packs_disp_unit_and_length() {
+        assert_eq!(window_word::<u64>(4), (8u64 << 56) | 32);
+        assert_eq!(window_word::<u8>(0), 1u64 << 56);
+
+        let max_len = WINDOW_WORD_LEN_MASK;
+        assert_eq!(window_word::<u8>(max_len as usize), (1u64 << 56) | max_len);
+
+        assert_eq!(window_word::<u8>(1usize << 56), WINDOW_WORD_REJECT);
+        assert_eq!(window_word::<u64>(usize::MAX / 8 + 1), WINDOW_WORD_REJECT);
     }
 
-    #[test]
-    fn lock_type_debug() {
-        assert_eq!(format!("{:?}", LockType::Exclusive), "Exclusive");
-        assert_eq!(format!("{:?}", LockType::Shared), "Shared");
-    }
+    // -------------------------------------------------------------------------
+    // check_rma_target unit tests
+    // -------------------------------------------------------------------------
 
     #[test]
-    #[allow(clippy::clone_on_copy)]
-    fn lock_type_clone_copy() {
-        let original = LockType::Exclusive;
-        let copied = original; // Copy
-        let cloned = original.clone(); // Clone
-        assert_eq!(original, copied);
-        assert_eq!(original, cloned);
+    fn check_rma_target_boundaries() {
+        let words = [window_word::<u64>(4), window_word::<u8>(3)];
 
-        let original = LockType::Shared;
-        let copied = original; // Copy
-        let cloned = original.clone(); // Clone
-        assert_eq!(original, copied);
-        assert_eq!(original, cloned);
+        // (elem_size, rank, disp, count, lens)
+        let ok_cases: &[(usize, i32, i64, i64, &[usize])] = &[
+            (8, 0, 0, 4, &[4]),
+            (8, 0, 3, 1, &[1]),
+            (8, 0, 4, 0, &[0]),
+            (1, 1, 0, 3, &[3, 3]),
+        ];
+        for &(elem_size, rank, disp, count, lens) in ok_cases {
+            assert!(
+                check_rma_target(&words, elem_size, rank, disp, count, lens).is_ok(),
+                "expected Ok for ({elem_size}, {rank}, {disp}, {count}, {lens:?})"
+            );
+        }
+
+        let err_cases: &[(usize, i32, i64, i64, &[usize])] = &[
+            (8, 0, 2, 4, &[4]),
+            (8, 0, 4, 1, &[]),
+            (8, 0, 0, 4, &[3]),
+            (1, 1, 0, 3, &[3, 2]),
+            (8, 0, 0, -1, &[]),
+            (8, 0, -1, 1, &[1]),
+            (8, 2, 0, 1, &[1]),
+            (8, -1, 0, 1, &[1]),
+            (8, 0, i64::MAX, 1, &[1]),
+        ];
+        for &(elem_size, rank, disp, count, lens) in err_cases {
+            assert!(
+                matches!(
+                    check_rma_target(&words, elem_size, rank, disp, count, lens),
+                    Err(Error::InvalidBuffer)
+                ),
+                "expected Err(InvalidBuffer) for ({elem_size}, {rank}, {disp}, {count}, {lens:?})"
+            );
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -2825,167 +3185,41 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn win_kind_equality() {
-        assert_eq!(WinKind::Created, WinKind::Created);
-        assert_eq!(WinKind::Allocated, WinKind::Allocated);
-        assert_ne!(WinKind::Created, WinKind::Allocated);
-    }
+    fn pending_fetch_result_resolve_and_drop_without_resolve() {
+        use std::mem::MaybeUninit;
 
-    #[test]
-    fn win_kind_debug() {
-        assert_eq!(format!("{:?}", WinKind::Created), "Created");
-        assert_eq!(format!("{:?}", WinKind::Allocated), "Allocated");
-    }
+        fn make(value: i32) -> PendingFetchResult<i32> {
+            // SAFETY: `Box::into_raw` never returns a null pointer.
+            let result_ptr =
+                unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(MaybeUninit::new(value)))) };
+            PendingFetchResult {
+                _origin: Box::new(0),
+                _compare: None,
+                result: result_ptr,
+            }
+        }
 
-    #[test]
-    #[allow(clippy::clone_on_copy)]
-    fn win_kind_clone_copy() {
-        let original = WinKind::Created;
-        let copied = original;
-        let cloned = original.clone();
-        assert_eq!(original, copied);
-        assert_eq!(original, cloned);
-    }
+        // Resolve path: reads the value, then Drop frees `result` (and `_origin`) exactly once.
+        let resolved = make(42);
+        // SAFETY: no MPI epoch is involved; `result` was initialised directly above.
+        let value = unsafe { resolved.resolve() };
+        assert_eq!(value, 42);
 
-    #[test]
-    fn win_struct_compiles() {
-        // Compile-time witness: Win<'a, T> can be named and referenced.
-        fn _check<'a, T: MpiDatatype>(_: &Win<'a, T>) {}
-    }
+        // Drop-without-resolve path: Drop frees `result` (and `_origin`) exactly once.
+        let unresolved = make(7);
+        drop(unresolved);
 
-    #[test]
-    fn win_put_signature_compiles() {
-        // Compile-time witness: Win::put has the correct signature.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &[T]) -> Result<()> {
-            w.put(buf, 0, 0, buf.len() as i64)
-        }
-    }
-
-    #[test]
-    fn win_rput_signature_compiles() {
-        // Compile-time witness: Win::rput has the correct signature with T = i32.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &[T]) -> Result<Request> {
-            w.rput(buf, 0, 0, buf.len() as i64)
-        }
-    }
-
-    #[test]
-    fn win_get_signature_compiles() {
-        // Compile-time witness: Win::get has the correct signature.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &mut [T]) -> Result<()> {
-            w.get(buf, 0, 0, buf.len() as i64)
-        }
-    }
-
-    #[test]
-    fn win_rget_signature_compiles() {
-        // Compile-time witness: Win::rget has the correct signature with T = i32.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &mut [T]) -> Result<Request> {
-            w.rget(buf, 0, 0, buf.len() as i64)
-        }
-    }
-
-    #[test]
-    fn win_accumulate_signature_compiles() {
-        // Compile-time witness: Win::accumulate has the correct signature.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &[T]) -> Result<()> {
-            w.accumulate(buf, 0, 0, buf.len() as i64, ReduceOp::Sum)
-        }
-    }
-
-    #[test]
-    fn win_raccumulate_signature_compiles() {
-        // Compile-time witness: Win::raccumulate has the correct signature with T = i32.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, buf: &[T]) -> Result<Request> {
-            w.raccumulate(buf, 0, 0, buf.len() as i64, ReduceOp::Sum)
-        }
-    }
-
-    #[test]
-    fn win_get_accumulate_signature_compiles() {
-        // Compile-time witness: Win::get_accumulate has the correct signature.
-        fn _check<'a, T: MpiDatatype>(w: &Win<'a, T>, o: &[T], r: &mut [T]) -> Result<()> {
-            w.get_accumulate(o, r, 0, 0, o.len() as i64, ReduceOp::Sum)
-        }
-    }
-
-    #[test]
-    fn win_fetch_and_op_signature_compiles() {
-        // Compile-time witness: Win::fetch_and_op returns Result<PendingFetchResult<T>>
-        // for representative predefined types (i32, u64, f64).
-        fn _check_i32(w: &Win<'_, i32>) -> Result<PendingFetchResult<i32>> {
-            w.fetch_and_op(1, 0, 0, ReduceOp::Sum)
-        }
-        fn _check_u64(w: &Win<'_, u64>) -> Result<PendingFetchResult<u64>> {
-            w.fetch_and_op(1u64, 0, 0, ReduceOp::Sum)
-        }
-        fn _check_f64(w: &Win<'_, f64>) -> Result<PendingFetchResult<f64>> {
-            w.fetch_and_op(1.0, 0, 0, ReduceOp::Sum)
-        }
-        let _ = _check_i32 as fn(&Win<'_, i32>) -> Result<PendingFetchResult<i32>>;
-        let _ = _check_u64 as fn(&Win<'_, u64>) -> Result<PendingFetchResult<u64>>;
-        let _ = _check_f64 as fn(&Win<'_, f64>) -> Result<PendingFetchResult<f64>>;
-    }
-
-    #[test]
-    fn win_compare_and_swap_signature_compiles() {
-        // Compile-time witness: Win::compare_and_swap returns
-        // Result<PendingFetchResult<T>> for the five AtomicMpiDatatype types.
-        // f64 must NOT compile (verified via the compile_fail doctest in
-        // datatype.rs).
-        fn _check_i32(w: &Win<'_, i32>) -> Result<PendingFetchResult<i32>> {
-            w.compare_and_swap(200, 100, 0, 0)
-        }
-        fn _check_i64(w: &Win<'_, i64>) -> Result<PendingFetchResult<i64>> {
-            w.compare_and_swap(200i64, 100i64, 0, 0)
-        }
-        fn _check_u32(w: &Win<'_, u32>) -> Result<PendingFetchResult<u32>> {
-            w.compare_and_swap(200u32, 100u32, 0, 0)
-        }
-        fn _check_u64(w: &Win<'_, u64>) -> Result<PendingFetchResult<u64>> {
-            w.compare_and_swap(200u64, 100u64, 0, 0)
-        }
-        fn _check_u8(w: &Win<'_, u8>) -> Result<PendingFetchResult<u8>> {
-            w.compare_and_swap(2u8, 1u8, 0, 0)
-        }
-        let _ = _check_i32 as fn(&Win<'_, i32>) -> Result<PendingFetchResult<i32>>;
-        let _ = _check_i64 as fn(&Win<'_, i64>) -> Result<PendingFetchResult<i64>>;
-        let _ = _check_u32 as fn(&Win<'_, u32>) -> Result<PendingFetchResult<u32>>;
-        let _ = _check_u64 as fn(&Win<'_, u64>) -> Result<PendingFetchResult<u64>>;
-        let _ = _check_u8 as fn(&Win<'_, u8>) -> Result<PendingFetchResult<u8>>;
-    }
-
-    #[test]
-    fn win_forget_does_not_drop() {
-        // Construct a Win with a bogus handle and forget it to confirm the
-        // type compiles and the field layout is correct without requiring an
-        // MPI runtime. std::mem::forget prevents Drop from running (which
-        // would call ferrompi_win_free with an invalid handle).
-        let win: Win<'static, i32> = Win {
-            win_handle: -1,
-            local_ptr: std::ptr::NonNull::dangling(),
-            local_len: 0,
-            comm_size: 1,
-            kind: WinKind::Created,
-            _marker: std::marker::PhantomData,
-        };
-        std::mem::forget(win);
+        // Compile-time witness: the manual Send/Sync impls restore the auto-trait
+        // behavior PendingFetchResult<T> had when `result` was a `Box<MaybeUninit<T>>`.
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+        assert_send::<PendingFetchResult<i32>>();
+        assert_sync::<PendingFetchResult<i32>>();
     }
 
     // -------------------------------------------------------------------------
     // WinFenceAssert unit tests
     // -------------------------------------------------------------------------
-
-    #[test]
-    fn win_fence_assert_default_is_none() {
-        let a = WinFenceAssert::default();
-        assert_eq!(a.bits(), 0);
-    }
-
-    #[test]
-    fn win_fence_assert_none_constructor_is_zero() {
-        assert_eq!(WinFenceAssert::none().bits(), 0);
-    }
 
     #[test]
     fn win_fence_assert_or_combines_bits() {
@@ -3002,36 +3236,9 @@ mod tests {
         assert_eq!(a.bits(), 5);
     }
 
-    #[test]
-    fn win_fence_assert_debug_is_implemented() {
-        let a = WinFenceAssert::none();
-        let s = format!("{a:?}");
-        assert!(!s.is_empty());
-    }
-
-    #[test]
-    fn win_fence_assert_copy_and_clone() {
-        let a = WinFenceAssert::from_bits_for_test(7);
-        let b = a; // Copy
-        let c = a; // Copy again (Clone is derived)
-        assert_eq!(b.bits(), 7);
-        assert_eq!(c.bits(), 7);
-    }
-
     // -------------------------------------------------------------------------
     // WinPscwAssert unit tests
     // -------------------------------------------------------------------------
-
-    #[test]
-    fn win_pscw_assert_default_is_none() {
-        let a = WinPscwAssert::default();
-        assert_eq!(a.bits(), 0);
-    }
-
-    #[test]
-    fn win_pscw_assert_none_constructor_is_zero() {
-        assert_eq!(WinPscwAssert::none().bits(), 0);
-    }
 
     #[test]
     fn win_pscw_assert_or_combines_bits() {
@@ -3046,69 +3253,5 @@ mod tests {
         let mut a = WinPscwAssert::from_bits_for_test(1);
         a |= WinPscwAssert::from_bits_for_test(4);
         assert_eq!(a.bits(), 5);
-    }
-
-    #[test]
-    fn win_pscw_assert_debug_is_implemented() {
-        let a = WinPscwAssert::none();
-        let s = format!("{a:?}");
-        assert!(!s.is_empty());
-    }
-
-    #[test]
-    fn win_pscw_assert_copy_and_clone() {
-        let a = WinPscwAssert::from_bits_for_test(7);
-        let b = a; // Copy
-        let c = a; // Copy again (Clone is derived)
-        assert_eq!(b.bits(), 7);
-        assert_eq!(c.bits(), 7);
-    }
-
-    // -------------------------------------------------------------------------
-    // WinLockGuard / WinLockAllGuard type-level compile tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn win_lock_guard_type_compiles() {
-        fn _check<'g, 'a, T: MpiDatatype>(_: &WinLockGuard<'g, 'a, T>) {}
-        fn _check_all<'g, 'a, T: MpiDatatype>(_: &WinLockAllGuard<'g, 'a, T>) {}
-    }
-
-    #[test]
-    fn win_lock_guard_forget_does_not_drop() {
-        // Construct a WinLockGuard with a bogus Win and std::mem::forget it to
-        // confirm the type compiles and the field layout is correct without
-        // requiring an MPI runtime. std::mem::forget prevents Drop from
-        // running (which would call ferrompi_win_unlock with an invalid handle).
-        let win: Win<'static, f64> = Win {
-            win_handle: -1,
-            local_ptr: std::ptr::NonNull::dangling(),
-            local_len: 0,
-            comm_size: 1,
-            kind: WinKind::Created,
-            _marker: std::marker::PhantomData,
-        };
-        let guard = WinLockGuard {
-            window: &win,
-            rank: 0,
-        };
-        std::mem::forget(guard);
-        std::mem::forget(win);
-    }
-
-    #[test]
-    fn win_lock_all_guard_forget_does_not_drop() {
-        // Same as above for WinLockAllGuard.
-        let win: Win<'static, f64> = Win {
-            win_handle: -1,
-            local_ptr: std::ptr::NonNull::dangling(),
-            local_len: 0,
-            comm_size: 1,
-            kind: WinKind::Created,
-            _marker: std::marker::PhantomData,
-        };
-        let guard = WinLockAllGuard { window: &win };
-        std::mem::forget(guard);
-        std::mem::forget(win);
     }
 }

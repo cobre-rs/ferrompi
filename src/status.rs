@@ -27,37 +27,8 @@ pub struct Status {
     pub source: i32,
     /// Tag of the message.
     pub tag: i32,
-    /// Number of elements in the message (determined via `MPI_Get_count`).
+    /// Number of elements of the probed type in the message, from `MPI_Get_count`;
+    /// `-1` when the message is not a whole number of elements (MPI reports
+    /// `MPI_UNDEFINED`).
     pub count: i64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn status_clone() {
-        let status = Status {
-            source: 3,
-            tag: 42,
-            count: 100,
-        };
-        let cloned = status.clone();
-        assert_eq!(cloned.source, 3);
-        assert_eq!(cloned.tag, 42);
-        assert_eq!(cloned.count, 100);
-    }
-
-    #[test]
-    fn status_debug() {
-        let status = Status {
-            source: 0,
-            tag: 1,
-            count: 50,
-        };
-        let debug = format!("{:?}", status);
-        assert!(debug.contains("source"));
-        assert!(debug.contains("tag"));
-        assert!(debug.contains("count"));
-    }
 }

@@ -1,0 +1,9 @@
+
+running 4 tests
+test tests::buffer_attach_double_attach_returns_invalid_op ... ok
+test tests::buffer_attach_invalid_buffer_variant_exists ... ok
+test tests::buffer_attach_signature_compiles ... ok
+test tests::buffer_detach_without_attach_returns_invalid_op ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 139 filtered out; finished in 0.00s
+

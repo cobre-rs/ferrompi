@@ -2,11 +2,30 @@
 //! and their nonblocking (i*) and persistent (*_init) variants.
 
 use crate::comm::Communicator;
-use crate::datatype::MpiDatatype;
+use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::persistent::PersistentRequest;
-use crate::request::Request;
+use crate::request::{Request, RequestKind};
+
+/// Checks one counts/displacements pair that MPI reads on this rank: each array
+/// holds exactly `size` entries, every count is non-negative, and every block
+/// with a positive count lies inside a `buf_len`-element buffer (computed in i64).
+fn check_v_args(counts: &[i32], displs: &[i32], size: i32, buf_len: usize) -> Result<()> {
+    if counts.len() != size as usize || displs.len() != size as usize {
+        return Err(Error::InvalidBuffer);
+    }
+    let buf_len = buf_len as i64;
+    for (&count, &displ) in counts.iter().zip(displs) {
+        if count < 0 {
+            return Err(Error::InvalidBuffer);
+        }
+        if count > 0 && (displ < 0 || i64::from(displ) + i64::from(count) > buf_len) {
+            return Err(Error::InvalidBuffer);
+        }
+    }
+    Ok(())
+}
 
 impl Communicator {
     // ========================================================================
@@ -30,7 +49,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `recvcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -59,22 +80,23 @@ impl Communicator {
         displs: &[i32],
         root: i32,
     ) -> Result<()> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(recvcounts, displs, self.size, recv.len())?;
         }
-        // SAFETY: send is a valid slice of T with send.len() elements; recv is a valid
-        // mutable slice of T. recvcounts and displs are valid integer slices of equal
-        // length (guaranteed by the guard above). T::TAG matches T's MPI datatype per
-        // the MpiDatatype trait contract (ADR-0003). self.handle is owned by self and
-        // was validated by Communicator::from_handle. All slices outlive the call.
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). At root, recvcounts and
+        // displs are checked above to have size() entries, non-negative counts, and each
+        // positive-count block inside recv; at non-root MPI does not read recvcounts or
+        // displs, so they are unchecked here.
         let ret = unsafe {
             ffi::ferrompi_gatherv(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                sp,
+                n,
+                rp,
                 recvcounts.as_ptr(),
                 displs.as_ptr(),
-                T::TAG as i32,
+                dt,
                 root,
                 self.handle,
             )
@@ -99,7 +121,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `sendcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `send`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -127,23 +151,23 @@ impl Communicator {
         recv: &mut [T],
         root: i32,
     ) -> Result<()> {
-        if sendcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(sendcounts, displs, self.size, send.len())?;
         }
-        // SAFETY: send is a valid read-only slice of T (MPI standard: sendcounts/displs
-        // are only significant at root, and non-root ranks pass null in the C shim; the
-        // Rust borrow checker ensures no aliasing between send and recv). recv is a valid
-        // mutable slice of T with recv.len() elements. sendcounts and displs are valid
-        // integer slices of equal length (guaranteed by the guard above). T::TAG matches
-        // T's MPI datatype per ADR-0003. self.handle is owned by self.
+        let (sp, _, _) = buf(send);
+        let (rp, n, dt) = buf_mut(recv);
+        // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
+        // &mut [T]). At root, sendcounts and displs are checked above to have size()
+        // entries, non-negative counts, and each positive-count block inside send; at
+        // non-root MPI does not read sendcounts or displs, so they are unchecked here.
         let ret = unsafe {
             ffi::ferrompi_scatterv(
-                send.as_ptr().cast::<std::ffi::c_void>(),
+                sp,
                 sendcounts.as_ptr(),
                 displs.as_ptr(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                T::TAG as i32,
+                rp,
+                n,
+                dt,
                 root,
                 self.handle,
             )
@@ -167,7 +191,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `recvcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -194,22 +220,20 @@ impl Communicator {
         recvcounts: &[i32],
         displs: &[i32],
     ) -> Result<()> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
-        }
-        // SAFETY: send and recv are disjoint slices enforced by Rust borrow semantics
-        // (&[T] and &mut [T]). recvcounts and displs have equal length (guard above),
-        // and the C shim reads exactly comm.size() elements from each — the guard
-        // ensures the arrays are long enough. T::TAG matches T's MPI datatype per
-        // ADR-0003. self.handle is owned by self and was validated by from_handle.
+        check_v_args(recvcounts, displs, self.size, recv.len())?;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
+        // checked above, on every rank, to have size() entries, non-negative counts, and
+        // each positive-count block inside recv.
         let ret = unsafe {
             ffi::ferrompi_allgatherv(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                sp,
+                n,
+                rp,
                 recvcounts.as_ptr(),
                 displs.as_ptr(),
-                T::TAG as i32,
+                dt,
                 self.handle,
             )
         };
@@ -234,8 +258,10 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `sendcounts.len() != sdispls.len()` or
-    ///   `recvcounts.len() != rdispls.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts`/`sdispls`
+    ///   or `recvcounts`/`rdispls` does not have `size()` entries, a count is negative, or a
+    ///   block with a positive count starts at a negative displacement or ends past the end
+    ///   of `send`/`recv` respectively.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -262,23 +288,22 @@ impl Communicator {
         recvcounts: &[i32],
         rdispls: &[i32],
     ) -> Result<()> {
-        if sendcounts.len() != sdispls.len() || recvcounts.len() != rdispls.len() {
-            return Err(Error::InvalidBuffer);
-        }
-        // SAFETY: send and recv are disjoint slices (Rust borrow rules). sendcounts and
-        // sdispls have equal length; recvcounts and rdispls have equal length (both
-        // guaranteed by the guard above). All four displacement/count arrays are valid
-        // read-only pointers for the duration of the call. T::TAG matches T's MPI
-        // datatype per ADR-0003. self.handle is owned by self.
+        check_v_args(sendcounts, sdispls, self.size, send.len())?;
+        check_v_args(recvcounts, rdispls, self.size, recv.len())?;
+        let (sp, _, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). sendcounts/sdispls and
+        // recvcounts/rdispls are each checked above, on every rank, to have size() entries,
+        // non-negative counts, and each positive-count block inside send/recv respectively.
         let ret = unsafe {
             ffi::ferrompi_alltoallv(
-                send.as_ptr().cast::<std::ffi::c_void>(),
+                sp,
                 sendcounts.as_ptr(),
                 sdispls.as_ptr(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                rp,
                 recvcounts.as_ptr(),
                 rdispls.as_ptr(),
-                T::TAG as i32,
+                dt,
                 self.handle,
             )
         };
@@ -304,7 +329,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `recvcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -333,30 +360,34 @@ impl Communicator {
         displs: &[i32],
         root: i32,
     ) -> Result<Request> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(recvcounts, displs, self.size, recv.len())?;
         }
         let mut request_handle: i64 = 0;
-        // SAFETY: send is a valid slice of T with send.len() elements; recv is a valid
-        // mutable slice of T. recvcounts and displs are valid integer slices of equal
-        // length (guaranteed by the guard above). Caller must keep send and recv alive
-        // until the returned Request is waited on (buffer-lifetime invariant). T::TAG
-        // matches T's MPI datatype per ADR-0003. self.handle is owned by self.
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). At root, recvcounts and
+        // displs are checked above to have size() entries, non-negative counts, and each
+        // positive-count block inside recv; at non-root MPI does not read recvcounts or
+        // displs, so they are unchecked here. The returned Request does not borrow send,
+        // recv, recvcounts or displs; keeping all four alive and untouched until the
+        // request completes is the caller's documented obligation, which this signature
+        // does not enforce.
         let ret = unsafe {
             ffi::ferrompi_igatherv(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                sp,
+                n,
+                rp,
                 recvcounts.as_ptr(),
                 displs.as_ptr(),
-                T::TAG as i32,
+                dt,
                 root,
                 self.handle,
                 &mut request_handle,
             )
         };
         Error::check_with_op(ret, "igatherv")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking scatter variable amounts of data from root.
@@ -374,7 +405,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `sendcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `send`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -403,31 +436,34 @@ impl Communicator {
         displs: &[i32],
         root: i32,
     ) -> Result<Request> {
-        if sendcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(sendcounts, displs, self.size, send.len())?;
         }
         let mut request_handle: i64 = 0;
-        // SAFETY: send is a valid read-only slice; recv is a valid mutable slice.
-        // sendcounts and displs are valid integer slices of equal length (guard above).
-        // On non-root ranks, MPI treats send/sendcounts/displs as insignificant — the
-        // Rust borrow prevents aliasing with recv. Caller must keep all slices alive
-        // until the returned Request is waited on. T::TAG per ADR-0003. self.handle
-        // is owned by self and was validated by Communicator::from_handle.
+        let (sp, _, _) = buf(send);
+        let (rp, n, dt) = buf_mut(recv);
+        // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
+        // &mut [T]). At root, sendcounts and displs are checked above to have size()
+        // entries, non-negative counts, and each positive-count block inside send; at
+        // non-root MPI does not read sendcounts or displs, so they are unchecked here. The
+        // returned Request does not borrow send, recv, sendcounts or displs; keeping all
+        // four alive and untouched until the request completes is the caller's documented
+        // obligation, which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_iscatterv(
-                send.as_ptr().cast::<std::ffi::c_void>(),
+                sp,
                 sendcounts.as_ptr(),
                 displs.as_ptr(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                T::TAG as i32,
+                rp,
+                n,
+                dt,
                 root,
                 self.handle,
                 &mut request_handle,
             )
         };
         Error::check_with_op(ret, "iscatterv")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-gather variable amounts of data.
@@ -444,7 +480,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `recvcounts.len() != displs.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -472,29 +510,30 @@ impl Communicator {
         recvcounts: &[i32],
         displs: &[i32],
     ) -> Result<Request> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_v_args(recvcounts, displs, self.size, recv.len())?;
         let mut request_handle: i64 = 0;
-        // SAFETY: send and recv are disjoint slices (Rust borrow rules). recvcounts and
-        // displs have equal length (guard above); the C shim reads exactly comm.size()
-        // elements from each. Caller must keep all slices alive until the returned
-        // Request is waited on (buffer-lifetime invariant). T::TAG per ADR-0003.
-        // self.handle is owned by self and was validated by Communicator::from_handle.
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
+        // checked above, on every rank, to have size() entries, non-negative counts, and
+        // each positive-count block inside recv. The returned Request does not borrow
+        // send, recv, recvcounts or displs; keeping all four alive and untouched until the
+        // request completes is the caller's documented obligation, which this signature
+        // does not enforce.
         let ret = unsafe {
             ffi::ferrompi_iallgatherv(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                sp,
+                n,
+                rp,
                 recvcounts.as_ptr(),
                 displs.as_ptr(),
-                T::TAG as i32,
+                dt,
                 self.handle,
                 &mut request_handle,
             )
         };
         Error::check_with_op(ret, "iallgatherv")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-to-all with variable counts.
@@ -513,8 +552,10 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `sendcounts.len() != sdispls.len()` or
-    ///   `recvcounts.len() != rdispls.len()`.
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts`/`sdispls`
+    ///   or `recvcounts`/`rdispls` does not have `size()` entries, a count is negative, or a
+    ///   block with a positive count starts at a negative displacement or ends past the end
+    ///   of `send`/`recv` respectively.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -542,41 +583,43 @@ impl Communicator {
         recvcounts: &[i32],
         rdispls: &[i32],
     ) -> Result<Request> {
-        if sendcounts.len() != sdispls.len() || recvcounts.len() != rdispls.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_v_args(sendcounts, sdispls, self.size, send.len())?;
+        check_v_args(recvcounts, rdispls, self.size, recv.len())?;
         let mut request_handle: i64 = 0;
-        // SAFETY: send and recv are disjoint slices (Rust borrow rules). sendcounts and
-        // sdispls have equal length; recvcounts and rdispls have equal length (both
-        // guaranteed by the guard above). All four arrays are valid read-only pointers
-        // for the duration of the in-flight operation. Caller must keep all slices alive
-        // until the returned Request is waited on. T::TAG per ADR-0003. self.handle is
-        // owned by self and was validated by Communicator::from_handle.
+        let (sp, _, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). sendcounts/sdispls and
+        // recvcounts/rdispls are each checked above, on every rank, to have size() entries,
+        // non-negative counts, and each positive-count block inside send/recv respectively.
+        // The returned Request does not borrow send, recv, or any of the four
+        // count/displacement arrays; keeping all of them alive and untouched until the
+        // request completes is the caller's documented obligation, which this signature
+        // does not enforce.
         let ret = unsafe {
             ffi::ferrompi_ialltoallv(
-                send.as_ptr().cast::<std::ffi::c_void>(),
+                sp,
                 sendcounts.as_ptr(),
                 sdispls.as_ptr(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                rp,
                 recvcounts.as_ptr(),
                 rdispls.as_ptr(),
-                T::TAG as i32,
+                dt,
                 self.handle,
                 &mut request_handle,
             )
         };
         Error::check_with_op(ret, "ialltoallv")?;
-        Ok(Request::new(request_handle))
+        Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
     // ========================================================================
-    // Persistent V-Collectives (MPI 4.0+)
+    // Persistent V-Collectives (MPI 4.0, or Open MPI 5)
     // ========================================================================
 
     /// Initialize a persistent gatherv operation (variable-count gather).
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -585,6 +628,13 @@ impl Communicator {
     /// * `recvcounts` - Number of elements to receive from each rank
     /// * `displs` - Displacement for each rank in the receive buffer
     /// * `root` - Rank of the root process
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
+    /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
     ///
@@ -610,23 +660,27 @@ impl Communicator {
         displs: &[i32],
         root: i32,
     ) -> Result<PersistentRequest> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(recvcounts, displs, self.size, recv.len())?;
         }
         let mut request_handle: i64 = 0;
-        // SAFETY: send and recv are valid slices of T; recvcounts and displs have equal
-        // length (guard above). Per ADR-0004 §"V-variant buffers", all three pointer
-        // arrays (data buffer, counts, displacements) must remain valid for the entire
-        // lifetime of the returned PersistentRequest, not just until wait(). T::TAG per
-        // ADR-0003. self.handle is owned by self and was validated by from_handle.
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). At root, recvcounts and
+        // displs are checked above to have size() entries, non-negative counts, and each
+        // positive-count block inside recv; at non-root MPI does not read recvcounts or
+        // displs, so they are unchecked here. The returned PersistentRequest does not
+        // borrow send, recv, recvcounts or displs; keeping all four alive and untouched
+        // until the request is freed is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_gatherv_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                sp,
+                n,
+                rp,
                 recvcounts.as_ptr(),
                 displs.as_ptr(),
-                T::TAG as i32,
+                dt,
                 root,
                 self.handle,
                 &mut request_handle,
@@ -639,7 +693,7 @@ impl Communicator {
     /// Initialize a persistent scatterv operation (variable-count scatter).
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -648,6 +702,13 @@ impl Communicator {
     /// * `displs` - Displacement for each rank in the send buffer
     /// * `recv` - Receive buffer
     /// * `root` - Rank of the root process
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `send`.
+    /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
     ///
@@ -673,24 +734,27 @@ impl Communicator {
         recv: &mut [T],
         root: i32,
     ) -> Result<PersistentRequest> {
-        if sendcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
+        if self.rank == root {
+            check_v_args(sendcounts, displs, self.size, send.len())?;
         }
         let mut request_handle: i64 = 0;
-        // SAFETY: send is a valid read-only slice; recv is a valid mutable slice.
-        // sendcounts and displs have equal length (guard above). Per ADR-0004 §"V-variant
-        // buffers", all three pointer arrays must remain valid for the full lifetime of
-        // the returned PersistentRequest. On non-root ranks, MPI ignores send/sendcounts/
-        // displs; the Rust borrow ensures no aliasing between send and recv. T::TAG per
-        // ADR-0003. self.handle is owned by self.
+        let (sp, _, _) = buf(send);
+        let (rp, n, dt) = buf_mut(recv);
+        // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
+        // &mut [T]). At root, sendcounts and displs are checked above to have size()
+        // entries, non-negative counts, and each positive-count block inside send; at
+        // non-root MPI does not read sendcounts or displs, so they are unchecked here. The
+        // returned PersistentRequest does not borrow send, recv, sendcounts or displs;
+        // keeping all four alive and untouched until the request is freed is the caller's
+        // documented obligation, which this signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_scatterv_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
+                sp,
                 sendcounts.as_ptr(),
                 displs.as_ptr(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
-                recv.len() as i64,
-                T::TAG as i32,
+                rp,
+                n,
+                dt,
                 root,
                 self.handle,
                 &mut request_handle,
@@ -703,7 +767,7 @@ impl Communicator {
     /// Initialize a persistent all-gatherv operation (variable-count all-gather).
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -711,6 +775,13 @@ impl Communicator {
     /// * `recv` - Receive buffer
     /// * `recvcounts` - Number of elements to receive from each rank
     /// * `displs` - Displacement for each rank in the receive buffer
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
+    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
+    ///   positive count starts at a negative displacement or ends past the end of `recv`.
+    /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
     ///
@@ -735,23 +806,24 @@ impl Communicator {
         recvcounts: &[i32],
         displs: &[i32],
     ) -> Result<PersistentRequest> {
-        if recvcounts.len() != displs.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_v_args(recvcounts, displs, self.size, recv.len())?;
         let mut request_handle: i64 = 0;
-        // SAFETY: send and recv are disjoint slices (Rust borrow rules). recvcounts and
-        // displs have equal length (guard above). Per ADR-0004 §"V-variant buffers", all
-        // three pointer arrays (data buffer, counts, displacements) must remain valid for
-        // the full lifetime of the returned PersistentRequest. T::TAG per ADR-0003.
-        // self.handle is owned by self and was validated by Communicator::from_handle.
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
+        // checked above, on every rank, to have size() entries, non-negative counts, and
+        // each positive-count block inside recv. The returned PersistentRequest does not
+        // borrow send, recv, recvcounts or displs; keeping all four alive and untouched
+        // until the request is freed is the caller's documented obligation, which this
+        // signature does not enforce.
         let ret = unsafe {
             ffi::ferrompi_allgatherv_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                send.len() as i64,
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                sp,
+                n,
+                rp,
                 recvcounts.as_ptr(),
                 displs.as_ptr(),
-                T::TAG as i32,
+                dt,
                 self.handle,
                 &mut request_handle,
             )
@@ -763,7 +835,7 @@ impl Communicator {
     /// Initialize a persistent all-to-allv operation (variable-count all-to-all).
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Requires MPI 4.0+.
+    /// Requires MPI 4.0, or Open MPI 5.
     ///
     /// # Arguments
     ///
@@ -773,6 +845,14 @@ impl Communicator {
     /// * `recv` - Receive buffer
     /// * `recvcounts` - Number of elements to receive from each rank
     /// * `rdispls` - Receive displacement for each rank
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts`/`sdispls`
+    ///   or `recvcounts`/`rdispls` does not have `size()` entries, a count is negative, or a
+    ///   block with a positive count starts at a negative displacement or ends past the end
+    ///   of `send`/`recv` respectively.
+    /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
     ///
@@ -804,24 +884,27 @@ impl Communicator {
         recvcounts: &[i32],
         rdispls: &[i32],
     ) -> Result<PersistentRequest> {
-        if sendcounts.len() != sdispls.len() || recvcounts.len() != rdispls.len() {
-            return Err(Error::InvalidBuffer);
-        }
+        check_v_args(sendcounts, sdispls, self.size, send.len())?;
+        check_v_args(recvcounts, rdispls, self.size, recv.len())?;
         let mut request_handle: i64 = 0;
-        // SAFETY: send and recv are disjoint slices (Rust borrow rules). sendcounts and
-        // sdispls have equal length; recvcounts and rdispls have equal length (both
-        // guaranteed by the guard above). Per ADR-0004 §"V-variant buffers", all six
-        // pointer arrays must remain valid for the full lifetime of the returned
-        // PersistentRequest. T::TAG per ADR-0003. self.handle is owned by self.
+        let (sp, _, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). sendcounts/sdispls and
+        // recvcounts/rdispls are each checked above, on every rank, to have size() entries,
+        // non-negative counts, and each positive-count block inside send/recv respectively.
+        // The returned PersistentRequest does not borrow send, recv, or any of the four
+        // count/displacement arrays; keeping all of them alive and untouched until the
+        // request is freed is the caller's documented obligation, which this signature
+        // does not enforce.
         let ret = unsafe {
             ffi::ferrompi_alltoallv_init(
-                send.as_ptr().cast::<std::ffi::c_void>(),
+                sp,
                 sendcounts.as_ptr(),
                 sdispls.as_ptr(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                rp,
                 recvcounts.as_ptr(),
                 rdispls.as_ptr(),
-                T::TAG as i32,
+                dt,
                 self.handle,
                 &mut request_handle,
             )
@@ -833,20 +916,51 @@ impl Communicator {
 
 #[cfg(test)]
 mod tests {
-    use crate::comm::Communicator;
+    use super::check_v_args;
+    use crate::comm::test_comm;
     use crate::error::Error;
 
-    fn dummy_comm() -> Communicator {
-        Communicator {
-            handle: 0,
-            rank: 0,
-            size: 1,
-        }
+    #[test]
+    fn check_v_args_boundaries() {
+        // exact fit
+        assert!(check_v_args(&[2, 2], &[0, 2], 2, 4).is_ok());
+        // one element past the end
+        assert!(matches!(
+            check_v_args(&[2, 2], &[0, 2], 2, 3),
+            Err(Error::InvalidBuffer)
+        ));
+        // counts.len() != size
+        assert!(matches!(
+            check_v_args(&[2, 2, 2], &[0, 2, 4], 2, 6),
+            Err(Error::InvalidBuffer)
+        ));
+        // displs.len() != size
+        assert!(matches!(
+            check_v_args(&[2, 2], &[0, 2, 4], 2, 6),
+            Err(Error::InvalidBuffer)
+        ));
+        // negative count
+        assert!(matches!(
+            check_v_args(&[-1, 2], &[0, 2], 2, 4),
+            Err(Error::InvalidBuffer)
+        ));
+        // negative displacement with count > 0
+        assert!(matches!(
+            check_v_args(&[2, 2], &[-1, 2], 2, 4),
+            Err(Error::InvalidBuffer)
+        ));
+        // negative displacement with count 0
+        assert!(check_v_args(&[0, 2], &[-1, 0], 2, 2).is_ok());
+        // i32 arithmetic would wrap: i32::MAX + 1 overflows i32 but not i64
+        assert!(matches!(
+            check_v_args(&[1], &[i32::MAX], 1, i32::MAX as usize),
+            Err(Error::InvalidBuffer)
+        ));
     }
 
     #[test]
     fn gatherv_init_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -857,7 +971,7 @@ mod tests {
 
     #[test]
     fn scatterv_init_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
@@ -868,7 +982,7 @@ mod tests {
 
     #[test]
     fn allgatherv_init_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -879,7 +993,7 @@ mod tests {
 
     #[test]
     fn alltoallv_init_mismatched_send_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20]; // 3 elements != 4
@@ -899,7 +1013,7 @@ mod tests {
 
     #[test]
     fn alltoallv_init_mismatched_recv_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20, 30];
@@ -921,7 +1035,7 @@ mod tests {
 
     #[test]
     fn gatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -932,7 +1046,7 @@ mod tests {
 
     #[test]
     fn scatterv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
@@ -943,7 +1057,7 @@ mod tests {
 
     #[test]
     fn allgatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -954,7 +1068,7 @@ mod tests {
 
     #[test]
     fn alltoallv_mismatched_send_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20]; // 3 elements != 4
@@ -974,7 +1088,7 @@ mod tests {
 
     #[test]
     fn alltoallv_mismatched_recv_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20, 30];
@@ -994,7 +1108,7 @@ mod tests {
 
     #[test]
     fn igatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -1005,7 +1119,7 @@ mod tests {
 
     #[test]
     fn iscatterv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
@@ -1016,7 +1130,7 @@ mod tests {
 
     #[test]
     fn iallgatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
@@ -1027,7 +1141,7 @@ mod tests {
 
     #[test]
     fn ialltoallv_mismatched_send_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20]; // 3 elements != 4
@@ -1047,7 +1161,7 @@ mod tests {
 
     #[test]
     fn ialltoallv_mismatched_recv_counts_displs_returns_invalid_buffer() {
-        let comm = dummy_comm();
+        let comm = test_comm(0, 1);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20, 30];

@@ -10,13 +10,14 @@ impl Communicator {
     pub fn processor_name(&self) -> Result<String> {
         let mut buf = [0u8; 256];
         let mut len: i32 = 0;
-        // SAFETY: buf is a 256-byte stack array, exclusively writable; the C shim writes at most
-        // MPI_MAX_PROCESSOR_NAME bytes and sets len to the actual length.
+        // SAFETY: buf is a 256-byte stack array, exclusively writable; MPI writes at most
+        // MPI_MAX_PROCESSOR_NAME bytes, which the C layer asserts at build time is at most 256.
         let ret = unsafe {
             ffi::ferrompi_get_processor_name(buf.as_mut_ptr().cast::<std::ffi::c_char>(), &mut len)
         };
         Error::check_with_op(ret, "get_processor_name")?;
         let len = (len.max(0) as usize).min(buf.len());
+        let len = buf[..len].iter().position(|&b| b == 0).unwrap_or(len);
         let s = std::str::from_utf8(&buf[..len])
             .map_err(|_| Error::Internal("Invalid UTF-8 in processor name".into()))?;
         Ok(s.to_string())
@@ -30,6 +31,12 @@ impl Communicator {
     /// feature) SLURM job information.
     ///
     /// [`TopologyInfo`]: crate::TopologyInfo
+    ///
+    /// # Errors
+    ///
+    /// If the processor-name or version query fails on any rank, every rank
+    /// returns `Err`: that rank its own error, every other rank
+    /// [`Error::Internal`] naming the lowest such rank.
     ///
     /// # Example
     ///
@@ -52,7 +59,7 @@ impl Communicator {
     /// Returns a [`Group`] containing all processes in this communicator.
     /// Use [`Group::include`] or [`Group::exclude`] on the returned group
     /// to derive sub-groups, which can then be used with
-    /// `MPI_Comm_create_group` (a future epic).
+    /// [`Communicator::create_from_group`](Self::create_from_group).
     ///
     /// # Errors
     ///
@@ -88,6 +95,17 @@ impl Communicator {
         Self::from_handle(new_handle)
     }
 
+    /// Convert a communicator-handle result into `Option<Self>`, treating a
+    /// negative handle as `MPI_COMM_NULL` (used by split, split_type, and
+    /// create_from_group).
+    fn from_optional_handle(new_handle: i32) -> Result<Option<Self>> {
+        if new_handle < 0 {
+            Ok(None)
+        } else {
+            Self::from_handle(new_handle).map(Some)
+        }
+    }
+
     /// Split this communicator into sub-communicators based on color and key.
     ///
     /// Processes with the same `color` are placed in the same new communicator.
@@ -112,11 +130,7 @@ impl Communicator {
         // SAFETY: self.handle is owned by this Communicator; remaining arguments are scalars.
         let ret = unsafe { ffi::ferrompi_comm_split(self.handle, color, key, &mut new_handle) };
         Error::check_with_op(ret, "comm_split")?;
-        if new_handle < 0 {
-            Ok(None)
-        } else {
-            Self::from_handle(new_handle).map(Some)
-        }
+        Self::from_optional_handle(new_handle)
     }
 
     /// Split this communicator by type.
@@ -145,11 +159,7 @@ impl Communicator {
             ffi::ferrompi_comm_split_type(self.handle, split_type as i32, key, &mut new_handle)
         };
         Error::check_with_op(ret, "comm_split_type")?;
-        if new_handle < 0 {
-            Ok(None)
-        } else {
-            Self::from_handle(new_handle).map(Some)
-        }
+        Self::from_optional_handle(new_handle)
     }
 
     /// Create a communicator containing only processes that share memory.
@@ -190,8 +200,9 @@ impl Communicator {
     /// # Errors
     ///
     /// Returns an error if `group` contains a rank not present in the parent
-    /// communicator (`MPI_ERR_GROUP`), or if the C-side communicator table is
-    /// full (`MPI_ERR_OTHER`).
+    /// communicator (`MPI_ERR_GROUP`), or
+    /// [`Error::ResourceExhausted`](crate::Error::ResourceExhausted) if the
+    /// communicator table is full.
     ///
     /// # Example
     ///
@@ -214,11 +225,7 @@ impl Communicator {
             ffi::ferrompi_comm_create_from_group_parent(self.handle, group.handle, &mut new_handle)
         };
         Error::check_with_op(ret, "comm_create_from_group_parent")?;
-        if new_handle < 0 {
-            Ok(None)
-        } else {
-            Self::from_handle(new_handle).map(Some)
-        }
+        Self::from_optional_handle(new_handle)
     }
 
     /// Abort MPI execution across all processes in this communicator.
@@ -247,47 +254,36 @@ impl Communicator {
     ///
     /// In the standard case `MPI_Abort` terminates the entire process
     /// group and this function never returns. If `MPI_Abort` itself
-    /// returns (non-standard but observed in some implementations during
-    /// internal failures), this function falls back to
-    /// [`std::process::abort`], which raises `SIGABRT` and terminates
-    /// the current process immediately. The original `errorcode` is lost
-    /// in that fallback path because `process::abort` does not accept an
-    /// exit code; the signal code (usually 134 = 128 + 6) is the best
-    /// evidence the caller has that the fallback triggered.
+    /// returns (the MPI standard asks it to end the processes, but that is
+    /// not guaranteed, and some implementations return), or if ferrompi
+    /// rejects the call before it reaches MPI (the lifecycle/thread-level
+    /// conditions of
+    /// [`Error::Finalized`](crate::Error::Finalized) and
+    /// [`Error::ThreadLevelViolation`](crate::Error::ThreadLevelViolation)),
+    /// this function falls back to [`std::process::abort`], which raises
+    /// `SIGABRT` and terminates the current process immediately. The
+    /// original `errorcode` is lost in that fallback path because
+    /// `process::abort` does not accept an exit code; the signal code
+    /// (usually 134 = 128 + 6) is the best evidence the caller has that
+    /// the fallback triggered.
     pub fn abort(&self, errorcode: i32) -> ! {
-        // SAFETY: ferrompi_abort delegates to MPI_Abort, which is
-        // defined to terminate all processes in the communicator and
-        // never return. This call is safe to make with any valid
-        // communicator handle; self.handle is always valid because
-        // Communicator is only constructed through safe methods that
-        // guarantee handle validity.
+        // SAFETY: ferrompi_abort passes self.handle, which is valid because
+        // Communicator is only constructed through safe methods that guarantee
+        // it, to MPI_Abort. MPI_Abort should terminate every process in the
+        // communicator but is not guaranteed to; if it returns, the
+        // std::process::abort below ends this process.
         unsafe { ffi::ferrompi_abort(self.handle, errorcode) };
 
         // Defense in depth: the MPI standard says MPI_Abort "should"
         // terminate all processes but does not strictly guarantee the
         // calling process aborts before return. If MPI_Abort ever
-        // returns (non-standard implementation behavior), we must still
-        // honor the `-> !` contract. std::process::abort() raises
-        // SIGABRT and is guaranteed to diverge without running
+        // returns (allowed by the standard, and observed in practice), or
+        // if the lifecycle guard rejected the call above before it reached
+        // MPI, we must still honor the `-> !` contract. std::process::abort()
+        // raises SIGABRT and is guaranteed to diverge without running
         // destructors — which is the right outcome, because any
-        // destructor that touches MPI state after a failed MPI_Abort
-        // has undefined behavior.
+        // destructor that touches MPI state after a failed or rejected
+        // MPI_Abort has undefined behavior.
         std::process::abort()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::comm::Communicator;
-    use crate::error::Result;
-    use crate::group::Group;
-
-    // Compile-time witness: verifies that create_from_group has the expected signature.
-    #[allow(dead_code)]
-    fn create_from_group_signature_compiles(
-        c: &Communicator,
-        g: &Group,
-    ) -> Result<Option<Communicator>> {
-        c.create_from_group(g)
     }
 }

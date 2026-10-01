@@ -5,6 +5,7 @@
 //! convenience methods `scan_scalar` and `exscan_scalar`.
 //!
 //! Run with: mpiexec -n 4 cargo run --example scan
+// mpi-test: np=2..
 
 use ferrompi::{Mpi, ReduceOp, Result};
 

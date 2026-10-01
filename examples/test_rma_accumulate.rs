@@ -9,8 +9,11 @@
 //!      `[100, 200, 300, 400]`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_accumulate
+// mpi-test: np=2
 
 use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -22,24 +25,6 @@ fn main() {
         size >= 2,
         "test_rma_accumulate requires exactly 2 processes, got {size}"
     );
-
-    // ========================================================================
-    // Probe: Win::accumulate requires MPI >= 3. Skip gracefully on older builds.
-    // ========================================================================
-    let version_str = Mpi::version().unwrap_or_default();
-    let major: u32 = version_str
-        .split_whitespace()
-        .nth(1)
-        .and_then(|v| v.split('.').next())
-        .and_then(|m| m.parse().ok())
-        .unwrap_or(0);
-
-    if major < 3 {
-        if rank == 0 {
-            println!("SKIP: Win::accumulate requires MPI >= 3 (got {version_str})");
-        }
-        return;
-    }
 
     let mut local_ok = true;
 
@@ -137,22 +122,5 @@ fn main() {
         println!("PASS: Win::accumulate Replace");
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — confirms no rank diverged silently
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    assert!(
-        global_ok != 0,
-        "test_rma_accumulate: one or more ranks reported failure"
-    );
-
-    world.barrier().expect("final barrier failed");
-    if rank == 0 {
-        println!("\n========================================");
-        println!("All Win::accumulate tests passed! (2 tests)");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_rma_accumulate");
 }

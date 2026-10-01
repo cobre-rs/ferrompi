@@ -1,6 +1,6 @@
 # ADR-0001: Hand-written C Wrapper Layer
 
-**Status:** Accepted — 2026-05-17
+**Status:** Accepted — 2026-05-17; amended 2026-09-24
 **Date:** 2026-05-17
 **Deciders:** Rogerio Alves
 
@@ -129,6 +129,8 @@ gymnastics that are harder to audit.
    before they cross the FFI boundary, producing a stable type at the Rust
    level regardless of the underlying MPI handle representation.
 
+   > **Amended 2026-09-24 — Source portability, not binary portability.** See [Amendments](#amendments).
+
 2. **Encapsulation of version-gated features.** MPI 4.0 introduced large-count
    `_c` variants that cannot be referenced in Rust source if the build
    targets MPI 3.x — any attempt to name `MPI_Send_c` in Rust FFI declarations
@@ -200,8 +202,7 @@ the FFI declarations.
 
 - _Code volume._ The C layer is 4629 LOC in `csrc/ferrompi.c` and 2171 LOC
   in `csrc/ferrompi.h`. Every new MPI function requires additions to both
-  files, to `src/ffi.rs`, and to the safe Rust wrapper, following the
-  six-layer convention documented in `epic-07-summary.md`.
+  files, to `src/ffi.rs`, and to the safe Rust wrapper.
 - _Manual maintenance._ When the MPI standard adds new functions or when
   ferrompi adds support for new MPI versions, the C shims must be written by
   hand. There is no automated mechanism to detect that a new MPI function
@@ -441,9 +442,21 @@ and requiring users to recompile ferrompi when switching implementations is an
 unacceptable operational friction. The handle-table approach pays a modest code
 cost to eliminate this friction entirely.
 
+> **Amended 2026-09-24 — Source portability, not binary portability.** See [Amendments](#amendments).
+
+---
+
+## Amendments
+
+### 2026-09-24 — Source portability, not binary portability
+
+Decision Driver 1 and the "Single-implementation builds" alternative above both claim that a single ferrompi build links against MPICH, Open MPI, and Cray MPICH without recompilation. That claim does not hold: `build.rs` compiles the C shim against the `mpi.h` header of one selected MPI implementation and links against that implementation's library, so switching MPI implementations means rebuilding ferrompi.
+
+What the handle tables give is source portability: one Rust API, and one integer handle type, compiles against every implementation's headers. Binary portability — one build that runs correctly against any conforming MPI implementation — is what the MPI 5.0 standard ABI adds. ADR-0006 (`0006-mpi5-abi-direction.md`) records that direction.
+
 ---
 
 ## Status
 
-Accepted — 2026-05-17. Implementation predates this ADR; ADR retrospectively
+Accepted — 2026-05-17; amended 2026-09-24. Implementation predates this ADR; ADR retrospectively
 documents the chosen architecture as of commit 83f6ef7431b3ab8d3fbe8bc8782c10fc9615de4d.

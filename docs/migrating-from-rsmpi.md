@@ -15,26 +15,25 @@ function-for-function mapping as a conversion reference.
 
 ## 1. Quick Comparison
 
-The table below extends the feature matrix in `README.md` with the dimensions that
-matter most during migration. See `docs/architecture.md` for the rationale behind
-each design choice.
+The table below lists the dimensions that matter most during migration. See
+`docs/architecture.md` for the rationale behind each design choice.
 
-| Dimension              | rsmpi 0.8                                    | ferrompi 0.5                                               |
-| ---------------------- | -------------------------------------------- | ---------------------------------------------------------- |
-| MPI standard           | 3.1                                          | 4.1                                                        |
-| Persistent collectives | No                                           | Yes (`_init` / `start` / `wait`)                           |
-| Large-count (>2³¹)     | No                                           | Yes                                                        |
-| Thread safety          | `!Send` — communicators cannot cross threads | `Send + Sync` — hybrid MPI+threads                         |
-| Generic API style      | Trait objects (`Buffer`, `BufferMut`)        | Sealed trait (`MpiDatatype`)                               |
-| Buffer wrapping        | `.buffer()` / `.buffer_mut()` required       | `&[T]` / `&mut [T]` directly                               |
-| Custom datatypes       | `Equivalence` derive macro                   | `CustomDatatype` builder + `BytePermutable`                |
-| Custom reductions      | `UserOperation` trait                        | `UserOp<T: MpiDatatype>` (16-slot registry)                |
-| Error handling         | Panics on MPI errors by default              | `Result<T, Error>` on every call                           |
-| RAII cleanup           | Manual or partial                            | Full — `Drop` frees groups, comms, windows, datatypes, ops |
-| Shared memory windows  | No                                           | Yes (`Win<T>` with `rma` feature)                          |
-| Intercommunicators     | Yes                                          | No                                                         |
-| Dynamic processes      | Yes (`spawn`, `accept`, `open_port`)         | No                                                         |
-| MPI I/O                | Yes (`MPI_File_*`)                           | No                                                         |
+| Dimension                   | rsmpi 0.8                                    | ferrompi 0.6                                                                                                     |
+| ---------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| MPI standard                 | 3.1                                            | MPI 3.1 library; MPI 4.0 operations when the library reports MPI 4.0 (persistent collectives also on Open MPI 5) |
+| Persistent collectives       | No                                             | Yes, with MPICH 4.x or Open MPI 5 (`_init` / `start` / `wait`)                                                   |
+| Large-count (>2³¹)           | No                                             | Yes, with an MPI 4.0 library (MPICH 4.x)                                                                         |
+| Thread safety                | `!Send` — communicators cannot cross threads | `Send + Sync` — hybrid MPI+threads                                                                               |
+| Generic API style            | Trait objects (`Buffer`, `BufferMut`)         | Sealed trait (`MpiDatatype`)                                                                                     |
+| Buffer wrapping              | `.buffer()` / `.buffer_mut()` required        | `&[T]` / `&mut [T]` directly                                                                                     |
+| Custom datatypes             | `Equivalence` derive macro                    | `CustomDatatype` builder + `BytePermutable`                                                                      |
+| Custom reductions            | `UserOperation` trait                         | `UserOp<T: MpiDatatype>` (16-slot registry)                                                                      |
+| Error handling                | Panics on MPI errors by default               | `Result<T, Error>` on every call                                                                                 |
+| RAII cleanup                  | Manual or partial                             | Full — `Drop` frees groups, comms, windows, datatypes, ops                                                       |
+| Shared memory / RMA windows   | No                                             | Yes — `SharedWindow<T>` and `Win<T>`, both behind the `rma` feature                                              |
+| Intercommunicators            | Yes                                            | No                                                                                                               |
+| Dynamic processes             | Yes (`spawn`, `accept`, `open_port`)          | No                                                                                                               |
+| MPI I/O                       | Yes (`MPI_File_*`)                            | No                                                                                                               |
 
 ferrompi is deliberately narrower than rsmpi. The trade-off is a smaller, more
 consistent API in exchange for dropping features that few HPC applications use.
@@ -61,7 +60,7 @@ Persistent collectives do not exist in rsmpi; the right column shows `_init` met
 | `comm.process_at_rank(r).broadcast_into(&mut buf)`                  | `comm.broadcast(&mut buf, r)?`                          | Root and non-root use the same call                    |
 | `comm.process_at_rank(r).immediate_broadcast_into(scope, &mut buf)` | `comm.ibroadcast(&mut buf, r)?`                         | Returns `Request`; no scope needed                     |
 | `(none — not available in rsmpi)`                                   | `comm.bcast_init(&mut buf, r)?`                         | Persistent; call `.start()` + `.wait()` each iteration |
-| `comm.process_at_rank(r).reduce_into(&send, op)`                    | `comm.reduce(&send, &mut recv, op, r)?`                 | Non-root `recv` may be empty slice                     |
+| `comm.process_at_rank(r).reduce_into(&send, op)`                    | `comm.reduce(&send, &mut recv, op, r)?`                 | `recv` must have `send.len()` elements on every rank, including non-root |
 | `comm.process_at_rank(r).reduce_into_root(&send, &mut recv, op)`    | `comm.reduce(&send, &mut recv, op, r)?`                 | Same call for root and non-root                        |
 | `comm.process_at_rank(r).immediate_reduce_into(&send, op)`          | `comm.ireduce(&send, &mut recv, op, r)?`                | Returns `Request`                                      |
 | `(none — not available in rsmpi)`                                   | `comm.reduce_init(&send, &mut recv, op, r)?`            | Persistent                                             |
@@ -102,20 +101,25 @@ In rsmpi, send and receive are called on `Process` handles obtained from
 `source`, and `tag` are plain `i32` parameters on `Communicator`. Use
 `MPI_ANY_SOURCE` (`-1`) and `MPI_ANY_TAG` (`-1`) as constants.
 
-| rsmpi expression                                                 | ferrompi expression                                       | Notes                                             |
-| ---------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------- |
-| `comm.process_at_rank(dest).send(&buf)`                          | `comm.send(&buf, dest, tag)?`                             | Tag is explicit in ferrompi                       |
-| `comm.process_at_rank(dest).send_with_tag(&buf, tag)`            | `comm.send(&buf, dest, tag)?`                             |                                                   |
-| `comm.process_at_rank(dest).synchronous_send(&buf)`              | `comm.ssend(&buf, dest, tag)?`                            | Synchronous mode                                  |
-| `comm.process_at_rank(dest).buffered_send(&buf)`                 | `comm.bsend(&buf, dest, tag)?`                            | Requires buffer attached via `Mpi::buffer_attach` |
-| `comm.process_at_rank(dest).ready_send(&buf)`                    | `comm.rsend(&buf, dest, tag)?`                            | Receiver must have posted recv first              |
-| `comm.any_process().receive_into(&mut buf)`                      | `comm.recv(&mut buf, -1, -1)?`                            | Returns `(source, tag, count)` tuple              |
-| `comm.process_at_rank(src).receive_into_with_tag(&mut buf, tag)` | `comm.recv(&mut buf, src, tag)?`                          |                                                   |
-| `comm.process_at_rank(dest).immediate_send(&buf)`                | `comm.isend(&buf, dest, tag)?`                            | Returns `Request`                                 |
-| `comm.process_at_rank(src).immediate_receive_into(&mut buf)`     | `comm.irecv(&mut buf, src, tag)?`                         | Returns `Request`                                 |
-| `comm.send_receive(sendbuf, dest, recvbuf, src)`                 | `comm.sendrecv(&send, dest, stag, &mut recv, src, rtag)?` |                                                   |
-| `comm.process_at_rank(src).probe()`                              | `comm.probe::<T>(src, tag)?`                              | Returns `Status`; blocks                          |
-| `comm.process_at_rank(src).immediate_probe()`                    | `comm.iprobe::<T>(src, tag)?`                             | Returns `Option<Status>`                          |
+ferrompi has no non-persistent synchronous, buffered, or ready send. The only
+forms of these three modes are the persistent `*_init` requests: initialise once,
+then call `.start()?` and `.wait()?` on the returned `PersistentRequest` for each
+message.
+
+| rsmpi expression                                                 | ferrompi expression                                        | Notes                                                                    |
+| ---------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| `comm.process_at_rank(dest).send(&buf)`                          | `comm.send(&buf, dest, tag)?`                                | Tag is explicit in ferrompi                                             |
+| `comm.process_at_rank(dest).send_with_tag(&buf, tag)`             | `comm.send(&buf, dest, tag)?`                                |                                                                           |
+| `comm.process_at_rank(dest).synchronous_send(&buf)`               | `comm.ssend_init(&buf, dest, tag)?`                           | Persistent only — call `.start()?` then `.wait()?` each iteration      |
+| `comm.process_at_rank(dest).buffered_send(&buf)`                  | `comm.bsend_init(&buf, dest, tag)?`                           | Persistent only; requires a buffer attached via `Mpi::buffer_attach`   |
+| `comm.process_at_rank(dest).ready_send(&buf)`                     | `comm.rsend_init(&buf, dest, tag)?`                           | Persistent only; the receiver must have posted its recv before `.start()?` |
+| `comm.any_process().receive_into(&mut buf)`                      | `comm.recv(&mut buf, -1, -1)?`                               | Returns `(source, tag, count)` tuple                                    |
+| `comm.process_at_rank(src).receive_into_with_tag(&mut buf, tag)` | `comm.recv(&mut buf, src, tag)?`                              |                                                                           |
+| `comm.process_at_rank(dest).immediate_send(&buf)`                | `comm.isend(&buf, dest, tag)?`                                | Returns `Request`                                                       |
+| `comm.process_at_rank(src).immediate_receive_into(&mut buf)`      | `comm.irecv(&mut buf, src, tag)?`                             | Returns `Request`                                                       |
+| `comm.send_receive(sendbuf, dest, recvbuf, src)`                  | `comm.sendrecv(&send, dest, stag, &mut recv, src, rtag)?`    |                                                                           |
+| `comm.process_at_rank(src).probe()`                               | `comm.probe::<T>(src, tag)?`                                  | Returns `Status`; blocks                                                |
+| `comm.process_at_rank(src).immediate_probe()`                     | `comm.iprobe::<T>(src, tag)?`                                 | Returns `Option<Status>`                                                |
 
 ### 2c. Groups and Communicators
 
@@ -125,7 +129,7 @@ exposes everything as inherent methods on `Group` and `Communicator`. All
 group-creating calls return owned `Group` values that free their handle on drop.
 
 | rsmpi expression                             | ferrompi expression                       | Notes                                        |
-| -------------------------------------------- | ----------------------------------------- | -------------------------------------------- |
+| --------------------------------------------- | -------------------------------------------- | ----------------------------------------------- |
 | `comm.rank()`                                | `comm.rank()`                             | ferrompi returns `i32` directly (not `Rank`) |
 | `comm.size()`                                | `comm.size()`                             | Returns `i32`                                |
 | `comm.group()`                               | `comm.group()?`                           | Returns `Result<Group>`                      |
@@ -142,7 +146,7 @@ group-creating calls return owned `Group` values that free their handle on drop.
 | `comm.split_by_color_with_key(color, key)`   | `comm.split(color, key)?`                 | Same call                                    |
 | `comm.split_shared(key)`                     | `comm.split_shared()?`                    | Shared-memory subcommunicator                |
 | `comm.split_by_subgroup_collective(&group)`  | `comm.create_from_group(&group)?`         | Returns `Option<Communicator>`               |
-| `Mpi::create_from_group(group, tag)`         | `mpi.create_from_group(&group, tag)?`     | Called on `Mpi` handle in ferrompi           |
+| `(none — MPI 4.0, not in rsmpi)`             | `mpi.create_from_group(&group, tag)?`     | Called on `Mpi` handle in ferrompi           |
 
 ---
 
@@ -193,7 +197,7 @@ fn main() {
 </td>
 <td>
 
-```rust
+```rust,no_run
 use ferrompi::{Mpi, ReduceOp};
 
 fn main() -> ferrompi::Result<()> {
@@ -230,8 +234,9 @@ object.
 ### 3b. Nonblocking Send and Receive with Wait
 
 rsmpi's `WaitGuard` wraps a `Request` and calls `MPI_Wait` on drop, making wait
-implicit. ferrompi's `Request::wait` is explicit and consumes the request by value,
-giving the compiler a clear lifetime for the in-flight buffer.
+implicit. ferrompi's `Request::wait` is explicit and consumes the `Request` by
+value, but nothing ties the request to its buffer: do not read, write, or drop the
+buffer passed to `isend`/`irecv` until `wait` (or a successful `test`) returns.
 
 <table>
 <tr>
@@ -305,16 +310,14 @@ fn main() -> ferrompi::Result<()> {
 </table>
 
 Key differences: ferrompi does not use lifetime scopes or guard wrappers for
-nonblocking operations — `Request::wait()` takes ownership and the buffer is safe
-to read afterwards. A `Request` dropped without calling `wait()` will **block in Drop**
-until the operation completes — the handle is not leaked, but the
-implicit wait may be surprising in latency-sensitive code, and can
-deadlock if the peer never matches the send/recv. For control flow
-that bypasses `wait()` (e.g., an early-return `?` on an error path,
-or a panic unwind), prefer explicit `wait()` or `test()` to keep
-failure modes observable. A future ferrompi version is expected to
-attempt `MPI_Cancel` from `Drop` to make this safer; until then,
-assume `Drop` blocks.
+nonblocking operations — `Request::wait()` takes ownership, but the compiler does
+not tie the buffer's lifetime to the request, so you must not read, write, or drop
+the buffer until `wait()` (or a successful `test()`) returns. A `Request` dropped
+without calling `wait()` will **block in Drop** until the operation completes — the
+handle is not leaked, but the implicit wait may be surprising in latency-sensitive
+code, and can deadlock if the peer never matches the send/recv. For control flow
+that bypasses `wait()` (e.g., an early-return `?` on an error path, or a panic
+unwind), prefer explicit `wait()` or `test()` to keep failure modes observable.
 
 ### 3c. Persistent Broadcast Loop
 
@@ -391,8 +394,11 @@ fn main() -> ferrompi::Result<()> {
 </table>
 
 Key differences: `bcast_init` calls `MPI_Bcast_init` once; each `start`/`wait` pair
-calls `MPI_Start`/`MPI_Wait` without reinitialising the request. On MPICH 4.2 and
-OpenMPI 5.0 this reduces per-iteration latency by 10–30% for small messages. The
+calls `MPI_Start`/`MPI_Wait` without reinitialising the request. On MPICH at 2
+ranks, a persistent allreduce was 20–58 % faster per call than `iallreduce` up to
+4 KiB, at most 8 % faster at 32 KiB, and no faster from 256 KiB (`benches/README.md`).
+Open MPI 4.1 lacks the MPI 4.0 `MPI_*_init` entry points, so ferrompi's persistent
+collectives return `Error::NotSupported` there; Open MPI 5 provides them. The
 `PersistentRequest` is freed automatically when it goes out of scope.
 
 ---
@@ -400,8 +406,8 @@ OpenMPI 5.0 this reduces per-iteration latency by 10–30% for small messages. T
 ## 4. Features Not Supported in ferrompi
 
 The following rsmpi features are absent from ferrompi. For each, a brief reason is
-given. Features marked "out of scope for v0.x" may be added in a future epic if user
-demand materialises and a corresponding ticket is opened on the issue tracker.
+given. Features marked "out of scope for v0.x" are not planned; open an issue if
+you need one.
 
 ### Dynamic Process Management
 
@@ -472,15 +478,19 @@ ferrompi uses the sealed `MpiDatatype` trait, which is implemented only for
 primitive types: `f32`, `f64`, `i32`, `i64`, `u8`, `u32`, and `u64`. Custom
 compound types have two routes:
 
-- **`CustomDatatype`**: Use the `DatatypeBuilder` API (epic 6) to describe the
-  layout of a struct and commit it to a `CustomDatatype`. Pass it to `send_custom`,
-  `recv_custom`, `isend_custom`, `irecv_custom`.
-- **`BytePermutable`**: For types that are safe to transmit as raw bytes with no
-  padding. Implement this sealed trait (gated by an `unsafe impl`) and use
-  `allreduce_bytes`.
+- **`CustomDatatype`**: build one with `CustomDatatype::contiguous`, `::vector`,
+  `::create_struct` (with `StructField` descriptors), or `::resized`, then pass it
+  to `send_custom`, `recv_custom`, `isend_custom`, `irecv_custom`. Those four
+  methods are generic over `T: PlainData`, an `unsafe trait` your own type opts
+  into (see its rustdoc for the required invariants: `Copy + 'static`, no padding
+  bytes, every bit pattern valid).
+- **`BytePermutable`**: sealed — you cannot add it for your own types. ferrompi
+  implements it for `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, and
+  `[T; N]` where `T: BytePermutable`; it bounds `allreduce_bytes`, which reduces
+  those types bitwise (`MPI_BYTE`) without a custom datatype.
 
 Neither path is as ergonomic as a derive macro. The limitation is intentional: the
-sealed trait guarantees that every type used in a generic MPI call has a known,
+sealed traits guarantee that every type used in a generic MPI call has a known,
 stable ABI without runtime inspection.
 
 ### No Buffer Wrappers
@@ -495,9 +505,17 @@ world.all_reduce_into(&send.buffer(), &mut recv.buffer_mut(), &op);
 
 ferrompi takes `&[T]` and `&mut [T]` directly. No wrapping is needed:
 
-```rust,ignore
+```rust,no_run
+# use ferrompi::{Mpi, ReduceOp};
+# fn main() -> ferrompi::Result<()> {
+# let mpi = Mpi::init()?;
+# let world = mpi.world();
+# let send = vec![1.0f64; 4];
+# let mut recv = vec![0.0f64; 4];
 // ferrompi — plain slice references
-world.allreduce(&send, &mut recv, op)?;
+world.allreduce(&send, &mut recv, ReduceOp::Sum)?;
+# Ok(())
+# }
 ```
 
 ### Thread Safety — `Send + Sync` vs `!Send`
@@ -506,32 +524,52 @@ rsmpi communicators are `!Send` and `!Sync`. They cannot be moved across thread
 boundaries, making hybrid MPI+threads programs awkward. ferrompi's `Communicator`
 is `Send + Sync`, enabling patterns such as:
 
-```rust,ignore
-use ferrompi::{Mpi, ReduceOp};
-use std::thread;
-
-let mpi = Mpi::init_thread(ferrompi::ThreadLevel::Multiple)?;
+```rust,no_run
+# use ferrompi::{Mpi, ReduceOp, ThreadLevel};
+# use std::thread;
+# fn main() -> ferrompi::Result<()> {
+let mpi = Mpi::init_thread(ThreadLevel::Multiple)?;
 let world = mpi.world();
 
-// Communicator can be cloned and sent to a thread
-let world2 = world.clone();
-thread::spawn(move || {
-    let _ = world2.allreduce_scalar(1.0f64, ReduceOp::Sum);
+// Communicator is Send + Sync: a scoped thread can borrow it directly,
+// no clone or wrapper needed.
+thread::scope(|s| {
+    s.spawn(|| {
+        let _ = world.allreduce_scalar(1.0f64, ReduceOp::Sum);
+    });
 });
+# Ok(())
+# }
 ```
 
 The thread-safety guarantee is conditional on the MPI runtime supporting the
 requested thread level. Use `Mpi::init_thread(ThreadLevel::Multiple)` for full
-concurrent access. See `README.md` and `docs/architecture.md` for the thread-level
-matrix.
+concurrent access. See the `ThreadLevel` rustdoc for which thread may call MPI at
+each level.
 
 ### Error Handling — `Result` vs Panic
 
 rsmpi panics on MPI errors by default. ferrompi returns `Result<T, ferrompi::Error>`
 on every fallible call. `ferrompi::Error::Mpi` carries four fields:
 
-```rust,ignore
-Error::Mpi { class, code, message, operation }
+```rust,no_run
+# use ferrompi::{Error, Mpi};
+# fn main() -> ferrompi::Result<()> {
+# let mpi = Mpi::init()?;
+# let world = mpi.world();
+# let send = [1.0f64];
+# let mut recv = [0.0f64];
+if let Err(err) = world.allreduce(&send, &mut recv, ferrompi::ReduceOp::Sum) {
+    // Error is #[non_exhaustive], so a match needs a wildcard arm.
+    match err {
+        Error::Mpi { class, code, message, operation } => {
+            eprintln!("{operation:?} failed: {class:?} (code {code}): {message}");
+        }
+        _ => eprintln!("{err}"),
+    }
+}
+# Ok(())
+# }
 ```
 
 where `class` is a `MpiErrorClass` enum, `code` is the raw MPI error integer,
@@ -545,18 +583,20 @@ handle errors explicitly — typically with `?` in `fn main() -> ferrompi::Resul
 rsmpi requires explicit calls to free some objects. ferrompi implements `Drop` on
 all handle-owning types:
 
-| Type                | What `Drop` calls                              |
-| ------------------- | ---------------------------------------------- |
-| `Communicator`      | `MPI_Comm_free`                                |
-| `Group`             | `MPI_Group_free`                               |
-| `Request`           | `MPI_Request_free` (if not consumed by `wait`) |
-| `PersistentRequest` | `MPI_Request_free`                             |
-| `Win<T>`            | `MPI_Win_free`                                 |
-| `CustomDatatype`    | `MPI_Type_free`                                |
-| `UserOp<T>`         | `MPI_Op_free`                                  |
+| Type                | What `Drop` does                                              |
+| -------------------- | ----------------------------------------------------------------- |
+| `Communicator`      | `MPI_Comm_free`, except for the world communicator                |
+| `Group`             | `MPI_Group_free`                                                   |
+| `Request`           | `MPI_Wait` if the send/recv has not completed                     |
+| `PersistentRequest` | `MPI_Wait` if started and not waited, then `MPI_Request_free`     |
+| `Win<T>`            | `MPI_Win_free`                                                     |
+| `SharedWindow<T>`   | `MPI_Win_free`                                                     |
+| `CustomDatatype`    | `MPI_Type_free`                                                    |
+| `UserOp<T>`         | `MPI_Op_free`                                                       |
+| `Info`              | `MPI_Info_free`                                                     |
 
-Migrated code should remove any manual teardown calls — they will double-free if
-left in place.
+After the `Mpi` handle is dropped, none of these `Drop` impls make an MPI call —
+see the `Mpi` rustdoc for the full lifecycle.
 
 ---
 
@@ -566,7 +606,7 @@ Use this checklist when porting a crate from rsmpi to ferrompi. The function
 mapping in [Section 2](#2-function-for-function-mapping) is the authoritative
 conversion reference.
 
-- [ ] Add `ferrompi = "0.2"` to `Cargo.toml`; remove `mpi` dependency.
+- [ ] Add `ferrompi = "0.6"` to `Cargo.toml`; remove `mpi` dependency.
 - [ ] Add `features = ["rma"]` if using shared memory windows; add `features =
 ["numa"]` for SLURM helpers.
 - [ ] Replace `use mpi::traits::*` with `use ferrompi::{Mpi, ReduceOp}` (and

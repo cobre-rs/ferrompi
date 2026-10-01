@@ -12,8 +12,11 @@
 //!      equals `999` (post-update).
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_fetch_and_op
+// mpi-test: np=2
 
 use ferrompi::{Mpi, PendingFetchResult, ReduceOp, Win, WinFenceAssert};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -25,25 +28,6 @@ fn main() {
         size >= 2,
         "test_rma_fetch_and_op requires at least 2 processes, got {size}"
     );
-
-    // ========================================================================
-    // Probe: Win::fetch_and_op requires MPI >= 3. Skip gracefully on older
-    // builds.
-    // ========================================================================
-    let version_str = Mpi::version().unwrap_or_default();
-    let major: u32 = version_str
-        .split_whitespace()
-        .nth(1)
-        .and_then(|v| v.split('.').next())
-        .and_then(|m| m.parse().ok())
-        .unwrap_or(0);
-
-    if major < 3 {
-        if rank == 0 {
-            println!("SKIP: Win::fetch_and_op requires MPI >= 3 (got {version_str})");
-        }
-        return;
-    }
 
     let mut local_ok = true;
 
@@ -80,9 +64,11 @@ fn main() {
         win.fence(WinFenceAssert::default())
             .expect("test 1 closing fence failed");
 
-        // SAFETY: epoch is closed; the result buffer is now populated.
         let mut old = 0i32;
         if let Some(p) = pending {
+            // SAFETY: the preceding fence closed the epoch, so MPI has
+            // populated the result buffer per PendingFetchResult::resolve's
+            // safety contract.
             old = unsafe { p.resolve() };
         }
 
@@ -138,9 +124,11 @@ fn main() {
         win.fence(WinFenceAssert::default())
             .expect("test 2 closing fence failed");
 
-        // SAFETY: epoch is closed; the result buffer is now populated.
         let mut old = 0i32;
         if let Some(p) = pending {
+            // SAFETY: the preceding fence closed the epoch, so MPI has
+            // populated the result buffer per PendingFetchResult::resolve's
+            // safety contract.
             old = unsafe { p.resolve() };
         }
 
@@ -163,22 +151,5 @@ fn main() {
         println!("PASS: Win::fetch_and_op Replace");
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — confirms no rank diverged silently
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    assert!(
-        global_ok != 0,
-        "test_rma_fetch_and_op: one or more ranks reported failure"
-    );
-
-    world.barrier().expect("final barrier failed");
-    if rank == 0 {
-        println!("\n========================================");
-        println!("All Win::fetch_and_op tests passed! (2 tests)");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_rma_fetch_and_op");
 }

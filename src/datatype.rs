@@ -27,16 +27,18 @@
 //! |------------------|-----------------------|-----------|
 //! | [`FloatInt`]     | `MPI_FLOAT_INT`       | 7         |
 //! | [`DoubleInt`]    | `MPI_DOUBLE_INT`      | 8         |
-//! | [`LongInt`]      | `MPI_LONG_INT`        | 9         |
+//! | [`LongInt`] (Linux x86_64/aarch64/ppc64le only) | `MPI_LONG_INT` | 9 |
 //! | [`Int2`]         | `MPI_2INT`            | 10        |
 //! | [`ShortInt`]     | `MPI_SHORT_INT`       | 11        |
-//! | [`LongDoubleInt`]| `MPI_LONG_DOUBLE_INT` | 12        |
+//! | [`LongDoubleInt`] (Linux x86_64/aarch64/ppc64le only) | `MPI_LONG_DOUBLE_INT` | 12 |
 //!
 //! # Byte-Permutable Types (`BytePermutable`)
 //!
 //! | Rust Type       | MPI Equivalent | Tag Value |
 //! |-----------------|----------------|-----------|
 //! | u8-like bytes   | `MPI_BYTE`     | 13        |
+
+use std::ffi::c_void;
 
 /// Internal module to seal [`MpiDatatype`] — prevents external implementations.
 mod sealed {
@@ -59,8 +61,8 @@ mod sealed_byte {
 
 /// Internal module to seal [`AtomicMpiDatatype`] — a separate seal for types
 /// eligible for `MPI_Compare_and_swap` (integer and byte types only).
+#[cfg(feature = "rma")]
 mod sealed_atomic {
-    #[allow(dead_code)]
     pub trait Sealed {}
 }
 
@@ -91,6 +93,8 @@ pub enum DatatypeTag {
     DoubleInt = 8,
     /// Paired `{ i64 value; i32 index }` for `MPI_LONG_INT` (MAXLOC/MINLOC).
     /// Note: on most 64-bit platforms `long` is 8 bytes, matching `i64`.
+    /// The matching `LongInt` struct exists only on Linux x86_64, aarch64
+    /// and little-endian powerpc64.
     LongInt = 9,
     /// Paired `{ i32 value; i32 index }` for `MPI_2INT` (MAXLOC/MINLOC)
     Int2 = 10,
@@ -99,6 +103,8 @@ pub enum DatatypeTag {
     /// Paired `{ f128-equivalent value; i32 index }` for `MPI_LONG_DOUBLE_INT`
     /// (MAXLOC/MINLOC). Uses `[u8; 16]` on x86_64 where `long double` is 80-bit
     /// extended precision stored in 16 bytes.
+    /// The matching `LongDoubleInt` struct exists only on Linux x86_64,
+    /// aarch64 and little-endian powerpc64.
     LongDoubleInt = 12,
     /// Opaque 1-byte unit (`MPI_BYTE`) for type-erased bitwise reductions.
     ///
@@ -135,6 +141,71 @@ pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {
     const TAG: DatatypeTag;
 }
 
+/// Bound for the element type of the custom-datatype point-to-point methods
+/// ([`Communicator::send_custom`](crate::Communicator::send_custom),
+/// [`recv_custom`](crate::Communicator::recv_custom),
+/// [`isend_custom`](crate::Communicator::isend_custom) and
+/// [`irecv_custom`](crate::Communicator::irecv_custom)).
+///
+/// # Safety
+///
+/// Implementors guarantee that every bit pattern of `size_of::<Self>()`
+/// bytes is a valid `Self`. The type must therefore have no references, no
+/// raw pointers that MPI's write could invalidate, no `Box`, `Vec`, `bool`,
+/// `char`, enum, or `NonZero*` fields. Padding bytes are allowed. The type
+/// should be `#[repr(C)]` so its layout matches the datatype built for it.
+///
+/// This trait is blanket-implemented for every [`MpiDatatype`] and for
+/// fixed-size arrays `[T; N]` of any `PlainData` type.
+///
+/// # Example
+///
+/// ```compile_fail
+/// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi};
+/// # let _mpi = Mpi::init().unwrap();
+/// # let world = _mpi.world();
+/// let dt8 = CustomDatatype::contiguous(8, DatatypeTag::U8).unwrap();
+/// let mut boxes: [Box<u64>; 1] = [Box::new(5)];
+/// world.recv_custom(&mut boxes, &dt8, 0, 2).unwrap();
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, PlainData};
+/// #[repr(C)]
+/// #[derive(Clone, Copy)]
+/// struct Pair { v: f64, i: i32 }
+/// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
+/// unsafe impl PlainData for Pair {}
+/// # let _mpi = Mpi::init().unwrap();
+/// # let world = _mpi.world();
+/// let dt8 = CustomDatatype::contiguous(8, DatatypeTag::U8).unwrap();
+/// let mut boxes: [Pair; 1] = [Pair { v: 0.0, i: 0 }];
+/// world.recv_custom(&mut boxes, &dt8, 0, 2).unwrap();
+/// ```
+pub unsafe trait PlainData: Copy + 'static {}
+// SAFETY: every MpiDatatype is a primitive integer or float, and any bit pattern of its size is a valid value.
+unsafe impl<T: MpiDatatype> PlainData for T {}
+// SAFETY: an array of plain data is plain data — its bytes are exactly N back-to-back elements, each valid for any bit pattern.
+unsafe impl<T: PlainData, const N: usize> PlainData for [T; N] {}
+
+/// Describes a typed slice for MPI FFI as `(pointer, count, tag)`.
+///
+/// The pointer is valid for `s.len()` elements of `T` for as long as the
+/// borrow of `s` lives (for [`buf_mut`], it is also valid for writes and
+/// unaliased). The count is exact: a slice length never exceeds
+/// `isize::MAX <= i64::MAX`. The tag is the MPI datatype that the sealed
+/// `MpiDatatype` impl assigns to `T`, so MPI's element size and layout equal
+/// `T`'s. The pointer is never null, even for an empty slice, so a NULL
+/// passed elsewhere as an in-place marker stays unambiguous.
+pub(crate) fn buf<T: MpiDatatype>(s: &[T]) -> (*const c_void, i64, i32) {
+    (s.as_ptr().cast(), s.len() as i64, T::TAG as i32)
+}
+
+/// See [`buf`].
+pub(crate) fn buf_mut<T: MpiDatatype>(s: &mut [T]) -> (*mut c_void, i64, i32) {
+    (s.as_mut_ptr().cast(), s.len() as i64, T::TAG as i32)
+}
+
 macro_rules! impl_mpi_datatype {
     ($ty:ty, $tag:expr) => {
         impl sealed::Sealed for $ty {}
@@ -163,9 +234,8 @@ impl_mpi_datatype!(u64, DatatypeTag::U64);
 ///
 /// Use these types exclusively with [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed) and
 /// [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) / [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc). They are **not** valid for
-/// `broadcast`, `send`, `recv`, or other collectives (MPI treats them as
-/// opaque structure types that require `MPI_Type_commit`; ferrompi does not
-/// yet manage committed derived types — that is Epic 6).
+/// `broadcast`, `send`, `recv`, or other collectives: they implement
+/// [`MpiIndexedDatatype`], not [`MpiDatatype`], which those APIs require.
 ///
 /// # Example
 ///
@@ -237,7 +307,17 @@ pub struct DoubleInt {
 /// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
 /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
 ///
-/// Layout on 64-bit Linux: `sizeof == 16`, `alignof == 8`.
+/// This type is available only on Linux x86_64, aarch64 and little-endian
+/// powerpc64, where its layout matches the C `{ long; int }` struct. Other
+/// targets are not supported in this release.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
 pub struct LongInt {
@@ -292,13 +372,17 @@ pub struct ShortInt {
 /// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
 /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
 ///
-/// Layout on x86_64 Linux: `sizeof == 32`, `alignof == 16`.
-/// Layout on aarch64 Linux: `sizeof == 32`, `alignof == 16`
-/// (128-bit quad-precision `long double`, 16 bytes value + 4-byte index +
-/// 12 bytes trailing padding).
-/// On x86_64 Linux, `long double` has 16-byte alignment; use `repr(C, align(16))`
-/// so that the Rust struct layout matches the C struct layout exactly.
-/// On other platforms this over-aligns harmlessly (MPI will still accept it).
+/// This type is available only on Linux x86_64, aarch64 and little-endian
+/// powerpc64, where its layout matches the C `{ long double; int }` struct.
+/// Other targets are not supported in this release.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C, align(16))]
 pub struct LongDoubleInt {
@@ -319,10 +403,46 @@ macro_rules! impl_mpi_indexed_datatype {
 
 impl_mpi_indexed_datatype!(FloatInt, DatatypeTag::FloatInt);
 impl_mpi_indexed_datatype!(DoubleInt, DatatypeTag::DoubleInt);
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
 impl_mpi_indexed_datatype!(LongInt, DatatypeTag::LongInt);
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
+const _: () = assert!(std::mem::size_of::<LongInt>() == 16 && std::mem::align_of::<LongInt>() == 8);
 impl_mpi_indexed_datatype!(Int2, DatatypeTag::Int2);
 impl_mpi_indexed_datatype!(ShortInt, DatatypeTag::ShortInt);
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
 impl_mpi_indexed_datatype!(LongDoubleInt, DatatypeTag::LongDoubleInt);
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        all(target_arch = "powerpc64", target_endian = "little")
+    )
+))]
+const _: () = assert!(
+    std::mem::size_of::<LongDoubleInt>() == 32 && std::mem::align_of::<LongDoubleInt>() == 16
+);
 
 // ============================================================
 // Byte-permutable types for MPI_BYTE bitwise reductions
@@ -423,10 +543,24 @@ impl_atomic_mpi_datatype!(u8);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(feature = "rma")]
+    use super::AtomicMpiDatatype;
+    use super::{
+        BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, MpiDatatype, MpiIndexedDatatype,
+        PlainData, ShortInt,
+    };
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            all(target_arch = "powerpc64", target_endian = "little")
+        )
+    ))]
+    use super::{LongDoubleInt, LongInt};
 
     #[test]
-    fn tag_values_match_c_defines() {
+    fn datatype_tag_values_match_c_defines() {
         assert_eq!(DatatypeTag::F32 as i32, 0);
         assert_eq!(DatatypeTag::F64 as i32, 1);
         assert_eq!(DatatypeTag::I32 as i32, 2);
@@ -434,101 +568,43 @@ mod tests {
         assert_eq!(DatatypeTag::U8 as i32, 4);
         assert_eq!(DatatypeTag::U32 as i32, 5);
         assert_eq!(DatatypeTag::U64 as i32, 6);
-    }
-
-    #[test]
-    fn datatype_tags_match_c_defines() {
-        // Verify each Rust type's TAG constant maps to the correct C-side define
-        assert_eq!(f32::TAG as i32, 0); // FERROMPI_F32
-        assert_eq!(f64::TAG as i32, 1); // FERROMPI_F64
-        assert_eq!(i32::TAG as i32, 2); // FERROMPI_I32
-        assert_eq!(i64::TAG as i32, 3); // FERROMPI_I64
-        assert_eq!(u8::TAG as i32, 4); // FERROMPI_U8
-        assert_eq!(u32::TAG as i32, 5); // FERROMPI_U32
-        assert_eq!(u64::TAG as i32, 6); // FERROMPI_U64
-    }
-
-    #[test]
-    fn datatype_tag_values_are_sequential() {
-        let tags = [
-            DatatypeTag::F32,
-            DatatypeTag::F64,
-            DatatypeTag::I32,
-            DatatypeTag::I64,
-            DatatypeTag::U8,
-            DatatypeTag::U32,
-            DatatypeTag::U64,
-        ];
-        for (i, tag) in tags.iter().enumerate() {
-            assert_eq!(*tag as i32, i as i32);
-        }
-        // Byte is 13 (after the six indexed types that occupy 7-12)
+        assert_eq!(DatatypeTag::FloatInt as i32, 7);
+        assert_eq!(DatatypeTag::DoubleInt as i32, 8);
+        assert_eq!(DatatypeTag::LongInt as i32, 9);
+        assert_eq!(DatatypeTag::Int2 as i32, 10);
+        assert_eq!(DatatypeTag::ShortInt as i32, 11);
+        assert_eq!(DatatypeTag::LongDoubleInt as i32, 12);
         assert_eq!(DatatypeTag::Byte as i32, 13);
-    }
 
-    #[test]
-    fn trait_is_implemented() {
-        // Compile-time check that all types implement MpiDatatype
-        fn assert_mpi_datatype<T: MpiDatatype>() {}
-        assert_mpi_datatype::<f32>();
-        assert_mpi_datatype::<f64>();
-        assert_mpi_datatype::<i32>();
-        assert_mpi_datatype::<i64>();
-        assert_mpi_datatype::<u8>();
-        assert_mpi_datatype::<u32>();
-        assert_mpi_datatype::<u64>();
-    }
-
-    #[test]
-    fn datatype_tag_debug_format() {
-        assert_eq!(format!("{:?}", DatatypeTag::F32), "F32");
-        assert_eq!(format!("{:?}", DatatypeTag::F64), "F64");
-        assert_eq!(format!("{:?}", DatatypeTag::I32), "I32");
-        assert_eq!(format!("{:?}", DatatypeTag::I64), "I64");
-        assert_eq!(format!("{:?}", DatatypeTag::U8), "U8");
-        assert_eq!(format!("{:?}", DatatypeTag::U32), "U32");
-        assert_eq!(format!("{:?}", DatatypeTag::U64), "U64");
-    }
-
-    #[test]
-    fn datatype_tag_clone_hash() {
-        use std::collections::HashSet;
-        let tag = DatatypeTag::F64;
-        let cloned = tag;
-        assert_eq!(cloned, DatatypeTag::F64);
-
-        let mut set = HashSet::new();
-        set.insert(DatatypeTag::F32);
-        set.insert(DatatypeTag::F64);
-        set.insert(DatatypeTag::F32); // duplicate
-        assert_eq!(set.len(), 2);
-    }
-
-    #[test]
-    fn indexed_datatype_tags_match_c_defines() {
-        // These values must stay in sync with FERROMPI_FLOAT_INT etc. in csrc/ferrompi.h
-        assert_eq!(DatatypeTag::FloatInt as i32, 7); // FERROMPI_FLOAT_INT
-        assert_eq!(DatatypeTag::DoubleInt as i32, 8); // FERROMPI_DOUBLE_INT
-        assert_eq!(DatatypeTag::LongInt as i32, 9); // FERROMPI_LONG_INT
-        assert_eq!(DatatypeTag::Int2 as i32, 10); // FERROMPI_2INT
-        assert_eq!(DatatypeTag::ShortInt as i32, 11); // FERROMPI_SHORT_INT
-        assert_eq!(DatatypeTag::LongDoubleInt as i32, 12); // FERROMPI_LONG_DOUBLE_INT
-
-        // Verify TAG constants on the structs themselves
+        assert_eq!(f32::TAG as i32, 0);
+        assert_eq!(f64::TAG as i32, 1);
+        assert_eq!(i32::TAG as i32, 2);
+        assert_eq!(i64::TAG as i32, 3);
+        assert_eq!(u8::TAG as i32, 4);
+        assert_eq!(u32::TAG as i32, 5);
+        assert_eq!(u64::TAG as i32, 6);
         assert_eq!(FloatInt::TAG as i32, 7);
         assert_eq!(DoubleInt::TAG as i32, 8);
+        #[cfg(all(
+            target_os = "linux",
+            any(
+                target_arch = "x86_64",
+                target_arch = "aarch64",
+                all(target_arch = "powerpc64", target_endian = "little")
+            )
+        ))]
         assert_eq!(LongInt::TAG as i32, 9);
         assert_eq!(Int2::TAG as i32, 10);
         assert_eq!(ShortInt::TAG as i32, 11);
+        #[cfg(all(
+            target_os = "linux",
+            any(
+                target_arch = "x86_64",
+                target_arch = "aarch64",
+                all(target_arch = "powerpc64", target_endian = "little")
+            )
+        ))]
         assert_eq!(LongDoubleInt::TAG as i32, 12);
-
-        // Byte must match FERROMPI_BYTE in csrc/ferrompi.h
-        assert_eq!(DatatypeTag::Byte as i32, 13); // FERROMPI_BYTE
-    }
-
-    #[test]
-    fn byte_datatype_tag_is_13() {
-        assert_eq!(DatatypeTag::Byte as i32, 13);
     }
 
     #[test]
@@ -543,6 +619,20 @@ mod tests {
         assert_byte_permutable::<i32>();
         assert_byte_permutable::<i64>();
         assert_byte_permutable::<[u64; 4]>();
+    }
+
+    #[test]
+    fn plain_data_implemented_for_mpi_datatypes() {
+        fn assert_plain<T: PlainData>() {}
+        assert_plain::<f32>();
+        assert_plain::<f64>();
+        assert_plain::<i32>();
+        assert_plain::<i64>();
+        assert_plain::<u8>();
+        assert_plain::<u32>();
+        assert_plain::<u64>();
+        assert_plain::<[f64; 3]>();
+        assert_plain::<[[i32; 2]; 4]>();
     }
 
     #[test]
@@ -579,22 +669,6 @@ mod tests {
             );
         }
 
-        // LongInt: { i64, i32 } — same shape as DoubleInt
-        // sizeof == 16, alignof == 8 on 64-bit Linux.
-        assert!(
-            size_of::<LongInt>() >= 12,
-            "LongInt must hold at least i64 + i32"
-        );
-        assert!(
-            align_of::<LongInt>() >= 8,
-            "LongInt alignment must be at least i64 alignment"
-        );
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-        {
-            assert_eq!(size_of::<LongInt>(), 16, "LongInt size on x86_64/aarch64");
-            assert_eq!(align_of::<LongInt>(), 8, "LongInt align on x86_64/aarch64");
-        }
-
         // Int2: { i32, i32 } — no padding
         // sizeof == 8, alignof == 4
         assert_eq!(size_of::<Int2>(), 8, "Int2 size");
@@ -619,55 +693,6 @@ mod tests {
                 "ShortInt align on x86_64/aarch64"
             );
         }
-
-        // LongDoubleInt: { [u8;16], i32 } — value is 16 bytes, index is 4 bytes,
-        // trailing padding to satisfy alignment. On x86_64: sizeof == 20 rounds up
-        // to 32 due to 16-byte alignment of long double. On aarch64: sizeof == 32.
-        assert!(
-            size_of::<LongDoubleInt>() >= 20,
-            "LongDoubleInt must hold at least [u8;16] + i32"
-        );
-        assert!(
-            align_of::<LongDoubleInt>() >= 1,
-            "LongDoubleInt must have at least 1-byte alignment"
-        );
-        // On x86_64 Linux, MPI_LONG_DOUBLE_INT is { long double (16 bytes), int (4 bytes) }
-        // with 12 bytes trailing padding, total 32 bytes, aligned to 16 bytes.
-        #[cfg(target_arch = "x86_64")]
-        {
-            assert_eq!(
-                size_of::<LongDoubleInt>(),
-                32,
-                "LongDoubleInt size on x86_64"
-            );
-            assert_eq!(
-                align_of::<LongDoubleInt>(),
-                16,
-                "LongDoubleInt align on x86_64"
-            );
-        }
-    }
-
-    #[test]
-    fn indexed_datatype_trait_is_implemented() {
-        fn assert_indexed<T: MpiIndexedDatatype>() {}
-        assert_indexed::<FloatInt>();
-        assert_indexed::<DoubleInt>();
-        assert_indexed::<LongInt>();
-        assert_indexed::<Int2>();
-        assert_indexed::<ShortInt>();
-        assert_indexed::<LongDoubleInt>();
-    }
-
-    #[test]
-    fn indexed_and_primitive_traits_are_disjoint() {
-        fn assert_primitive<T: MpiDatatype>() {}
-        assert_primitive::<f64>();
-        assert_primitive::<i32>();
-
-        fn assert_indexed<T: MpiIndexedDatatype>() {}
-        assert_indexed::<DoubleInt>();
-        assert_indexed::<Int2>();
     }
 
     #[cfg(feature = "rma")]

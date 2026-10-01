@@ -1,0 +1,10 @@
+[package]
+name = "ferrompi-audit-c-shim"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ferrompi = { path = "../../../..", features = ["rma"] }
+
+[workspace]

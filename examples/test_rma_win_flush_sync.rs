@@ -1,8 +1,7 @@
 //! Integration test for Win::flush_local / flush_local_all / sync helpers.
 //!
-//! Verifies that the three local-completion helpers introduced in ticket-056
-//! compile and run correctly without issuing any RMA data operations.
-//! Data-movement tests are deferred to tickets 034 / 057–062.
+//! Verifies that the three local-completion helpers compile and run
+//! correctly without issuing any RMA data operations.
 //!
 //! Test matrix (all on a 2-rank world):
 //!
@@ -12,14 +11,15 @@
 //! 2. **flush_local_all and sync inside a lock_all epoch** — all ranks call
 //!    `lock_all()`, invoke `win.flush_local_all()` and `win.sync()`, then drop
 //!    the guard (→ unlock_all).
-//!    Note: `MPI_Win_sync` is defined by the MPI standard as a local operation
-//!    valid at any point, but MPICH 4.2.x enforces it only within a
-//!    passive-target epoch. The test therefore calls `sync` inside `lock_all`
-//!    to be portable across all conformant implementations.
+//!    Note: the MPI standard allows `MPI_Win_sync` only within a passive-target
+//!    epoch, so the test calls `sync` inside `lock_all`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_flush_sync
+// mpi-test: np=2
 
 use ferrompi::{LockType, Mpi, ReduceOp, Win, WinFenceAssert};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -46,9 +46,14 @@ fn main() {
         }
     };
 
-    // Opening fence to satisfy MPI epoch rules before passive-target use.
-    if let Err(e) = win.fence(WinFenceAssert::none()) {
+    // `no_succeed` says no fence epoch follows; the barrier puts every rank's
+    // fence before any rank's lock.
+    if let Err(e) = win.fence(WinFenceAssert::no_succeed()) {
         eprintln!("rank {rank}: FAIL: initial fence failed: {e}");
+        local_ok = false;
+    }
+    if let Err(e) = world.barrier() {
+        eprintln!("rank {rank}: FAIL: barrier before lock failed: {e}");
         local_ok = false;
     }
 
@@ -64,9 +69,7 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: Win::lock(Shared, 0) failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 
@@ -89,19 +92,15 @@ fn main() {
     // All ranks call lock_all(), invoke flush_local_all() and sync(), then
     // drop the guard (→ unlock_all).
     //
-    // Note: MPI_Win_sync is a local memory barrier that the MPI standard
-    // defines as valid outside any epoch, but MPICH 4.2.x rejects it unless
-    // a passive-target epoch is active. The test therefore calls sync() inside
-    // the lock_all epoch to be portable across all conformant implementations.
+    // Note: the MPI standard allows MPI_Win_sync only within a passive-target
+    // epoch, so the test calls sync() inside the lock_all epoch.
     // ========================================================================
     {
         let guard = match win.lock_all() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("rank {rank}: FAIL: Win::lock_all failed: {e}");
-                local_ok = false;
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
-                return;
+                world.abort(1);
             }
         };
 
@@ -123,19 +122,5 @@ fn main() {
         println!("PASS: Win::flush_local_all and Win::sync inside lock_all epoch");
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — confirms no rank diverged silently.
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    assert!(
-        global_ok != 0,
-        "test_rma_win_flush_sync: one or more ranks reported failure"
-    );
-
-    if rank == 0 {
-        println!("\nPASS: Win::flush_local / flush_local_all / sync (2 tests)");
-    }
+    common::check(&world, local_ok, "test_rma_win_flush_sync");
 }

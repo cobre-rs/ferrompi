@@ -6,6 +6,7 @@
 //! f64 coverage in test_nonblocking.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_p2p_extra
+// mpi-test: np=2..
 
 use ferrompi::Mpi;
 
@@ -102,6 +103,14 @@ fn verify_data<T: TestValue>(recv_data: &[T], partner: i32, rank: i32, op_name: 
     }
 }
 
+/// Increment `test_counter` and, on rank 0, print a "PASS: {label}" line.
+fn record_pass(rank: i32, test_counter: &mut i32, label: &str) {
+    *test_counter += 1;
+    if rank == 0 {
+        println!("PASS: {label}");
+    }
+}
+
 /// Test 1: Blocking send/recv with even/odd pairing to avoid deadlock.
 ///
 /// Even ranks send first then receive; odd ranks receive first then send.
@@ -115,9 +124,13 @@ fn test_send_recv<T: ferrompi::MpiDatatype + TestValue>(
     let tag = tag_base;
     let buf_len = 4;
 
+    let partner = if rank % 2 == 0 { rank + 1 } else { rank - 1 };
+    if partner >= size {
+        return;
+    }
+
     if rank % 2 == 0 {
         // Even rank: send first, then receive
-        let partner = (rank + 1) % size;
         let send_data: Vec<T> = (0..buf_len)
             .map(|i| T::from_rank_indexed(rank, i))
             .collect();
@@ -151,7 +164,6 @@ fn test_send_recv<T: ferrompi::MpiDatatype + TestValue>(
         verify_data(&recv_data, partner, rank, "send/recv");
     } else {
         // Odd rank: receive first, then send
-        let partner = (rank + size - 1) % size;
         let mut recv_data = vec![T::from_rank(0); buf_len];
         let (src, actual_tag, count) = world
             .recv(&mut recv_data, partner, tag)
@@ -270,26 +282,29 @@ fn run_type_tests<T: ferrompi::MpiDatatype + TestValue>(
     // Test: blocking send/recv
     test_send_recv::<T>(world, rank, size, tag_offset + 10);
     world.barrier().expect("barrier after send/recv failed");
-    *test_counter += 1;
-    if rank == 0 {
-        println!("PASS: send/recv <{}>", T::type_name());
-    }
+    record_pass(
+        rank,
+        test_counter,
+        &format!("send/recv <{}>", T::type_name()),
+    );
 
     // Test: sendrecv
     test_sendrecv::<T>(world, rank, size, tag_offset + 20);
     world.barrier().expect("barrier after sendrecv failed");
-    *test_counter += 1;
-    if rank == 0 {
-        println!("PASS: sendrecv <{}>", T::type_name());
-    }
+    record_pass(
+        rank,
+        test_counter,
+        &format!("sendrecv <{}>", T::type_name()),
+    );
 
     // Test: isend/irecv
     test_isend_irecv::<T>(world, rank, size, tag_offset + 30);
     world.barrier().expect("barrier after isend/irecv failed");
-    *test_counter += 1;
-    if rank == 0 {
-        println!("PASS: isend/irecv <{}>", T::type_name());
-    }
+    record_pass(
+        rank,
+        test_counter,
+        &format!("isend/irecv <{}>", T::type_name()),
+    );
 }
 
 fn main() {
@@ -354,10 +369,7 @@ fn main() {
             );
         }
         world.barrier().expect("barrier after probe::<i32> failed");
-        test_count += 1;
-        if rank == 0 {
-            println!("PASS: probe::<i32>");
-        }
+        record_pass(rank, &mut test_count, "probe::<i32>");
     }
 
     // ========================================================================
@@ -394,10 +406,55 @@ fn main() {
             );
         }
         world.barrier().expect("barrier after iprobe::<i32> failed");
-        test_count += 1;
-        if rank == 0 {
-            println!("PASS: iprobe::<i32>");
+        record_pass(rank, &mut test_count, "iprobe::<i32>");
+    }
+
+    // ========================================================================
+    // Test: probe::<i32>/iprobe::<i32> of a message that is not a whole
+    // number of i32 elements (MPI_Get_count reports MPI_UNDEFINED)
+    // ========================================================================
+    // Rank 0 sends 3 bytes to rank 1; rank 1 probes it as i32 before
+    // receiving it as u8.
+    {
+        let tag = 2200;
+        if rank == 0 && size >= 2 {
+            let data = [1u8, 2, 3];
+            world
+                .send(&data, 1, tag)
+                .expect("partial element count test: send failed");
+        } else if rank == 1 {
+            let status = world
+                .probe::<i32>(0, tag)
+                .expect("probe::<i32> of partial message failed");
+            assert_eq!(
+                status.count, -1,
+                "probe::<i32> of 3 bytes must report count -1"
+            );
+
+            let status = world
+                .iprobe::<i32>(0, tag)
+                .expect("iprobe::<i32> of partial message failed")
+                .expect("iprobe::<i32>: message still queued but not found");
+            assert_eq!(
+                status.count, -1,
+                "iprobe::<i32> of 3 bytes must report count -1"
+            );
+
+            let mut buf = [0u8; 3];
+            let (_, _, count) = world
+                .recv(&mut buf, 0, tag)
+                .expect("recv of partial-count message failed");
+            assert_eq!(count, 3, "recv of 3-byte message count mismatch");
+            assert_eq!(buf, [1, 2, 3], "recv of 3-byte message payload mismatch");
         }
+        world
+            .barrier()
+            .expect("barrier after partial element count test failed");
+        record_pass(
+            rank,
+            &mut test_count,
+            "probe of a partial element count reports -1",
+        );
     }
 
     // ========================================================================

@@ -7,6 +7,9 @@ on:
     branches: [main, develop]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -14,8 +17,8 @@ env:
 jobs:
   test:
     name: Test (${{ matrix.mpi }}, ${{ matrix.features == '' && 'default' || matrix.features }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
 
     strategy:
       fail-fast: false
@@ -24,21 +27,23 @@ jobs:
         features: ["", "rma"]
         include:
           - mpi: mpich
-            pkg: mpich libmpich-dev
+            np_list: "2 3 4"
           - mpi: openmpi
             pkg: libopenmpi-dev openmpi-bin
+            np_list: "4"
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - name: Cache cargo registry
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -50,7 +55,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Cache cargo build
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: target
           key: ${{ runner.os }}-target-${{ matrix.mpi }}-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
@@ -59,45 +64,43 @@ jobs:
             ${{ runner.os }}-target-${{ matrix.mpi }}-${{ matrix.features }}-
             ${{ runner.os }}-target-${{ matrix.mpi }}-
 
-      - name: Install MPI
+      - name: Install MPI (Open MPI)
+        if: matrix.mpi == 'openmpi'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.pkg }} pkg-config libhwloc-dev
+          sudo apt-get install -y ${{ matrix.pkg }} pkg-config
           mpiexec --version
 
-      - name: Hotfix MPICH on Ubuntu Noble
+      - name: Setup MPICH
         if: matrix.mpi == 'mpich'
+        uses: ./.github/actions/setup-mpich
+
+      - name: MPICH hotfix fixture test
+        if: matrix.mpi == 'mpich'
+        run: bash .github/scripts/mpich-hotfix-test.sh
+
+      - name: Release-notes fixture test
+        if: matrix.mpi == 'mpich' && matrix.features == ''
+        run: bash .github/scripts/release-notes-test.sh
+
+      - name: Plan-structure leak gate
+        if: matrix.mpi == 'mpich' && matrix.features == ''
         run: |
-          # Workaround for broken MPICH 4.2.0 package in Ubuntu 24.04 LTS (Noble)
-          # See: https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338
-          # See: https://github.com/mpi4py/setup-mpi/issues/13
-          # Adapted from https://github.com/mpi4py/setup-mpi/blob/master/setup-mpi.sh
-          ARCH=$(dpkg --print-architecture)
-          REPO=https://archive.ubuntu.com/ubuntu
-          LIBUCX=libucx0_1.18.1+ds-2_${ARCH}.deb
-          LIBMPICH=libmpich12_4.2.1-5_${ARCH}.deb
-          curl -sSOf ${REPO}/pool/universe/u/ucx/${LIBUCX}
-          curl -sSOf ${REPO}/pool/universe/m/mpich/${LIBMPICH}
-          TMPDIR=$(mktemp -d)
-          dpkg-deb -x ${LIBUCX} ${TMPDIR}
-          dpkg-deb -x ${LIBMPICH} ${TMPDIR}
-          LIBDIR=/usr/lib/$(arch)-linux-gnu
-          sudo cp -a ${TMPDIR}${LIBDIR}/ucx ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0 ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12 ${LIBDIR}
-          sudo ldconfig
-          rm -rf ${TMPDIR} ${LIBUCX} ${LIBMPICH}
-          echo "MPICH hotfix applied successfully"
+          bash .github/scripts/check-no-plan-leaks-test.sh
+          bash .github/scripts/check-no-plan-leaks.sh
 
       - name: Configure OpenMPI environment
         if: matrix.mpi == 'openmpi'
         run: |
-          echo "OMPI_MCA_rmaps_base_oversubscribe=1" >> "$GITHUB_ENV"
-          echo "OMPI_ALLOW_RUN_AS_ROOT=1" >> "$GITHUB_ENV"
-          echo "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1" >> "$GITHUB_ENV"
-          echo "OMPI_MCA_btl=self,tcp" >> "$GITHUB_ENV"
+          {
+            echo "OMPI_MCA_rmaps_base_oversubscribe=1"
+            echo "OMPI_ALLOW_RUN_AS_ROOT=1"
+            echo "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1"
+            echo "OMPI_MCA_btl=self,tcp"
+            # The runner's docker0 + NAT rule gives Open MPI 4.1's TCP BTL a second,
+            # misrouted path to same-host peers; persistent sends then hang.
+            echo "OMPI_MCA_btl_tcp_if_include=lo"
+          } >> "$GITHUB_ENV"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -109,39 +112,208 @@ jobs:
         if: matrix.features != ''
         run: cargo clippy --all-targets --features ${{ matrix.features }} -- -D warnings
 
+      - name: Clippy (numa feature)
+        if: matrix.mpi == 'mpich' && matrix.features == 'rma'
+        run: cargo clippy --all-targets --features numa -- -D warnings
+
       - name: Unit tests
         run: cargo test --lib --features numa --verbose
 
       - name: Build examples
         run: cargo build --examples --features "${{ matrix.features }}"
 
+      - name: Runner self-test
+        run: bash tests/runner_selftest.sh
+
+      - name: Build-script probe test
+        if: matrix.mpi == 'mpich' && matrix.features == ''
+        run: bash tests/build_probe.sh
+
       - name: MPI integration tests
         run: |
           chmod +x tests/run_mpi_tests.sh
-          MPI_NP=4 ./tests/run_mpi_tests.sh "${{ matrix.features }}"
+          MPI_NP_LIST="${{ matrix.np_list }}" ./tests/run_mpi_tests.sh "${{ matrix.features }}"
 
-      - name: Build documentation
-        if: matrix.features == 'rma'
-        run: cargo doc --no-deps --features rma
+  test-openmpi5:
+    name: Test (openmpi5, rma)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    container:
+      image: debian:trixie@sha256:9cc080028c43b27d2074d63a5f9caf7166d731494965616c1a6d2827a004585c # trixie, resolved 2026-09-25
+      options: --shm-size=1g --cap-add=SYS_PTRACE
+
+    env:
+      OMPI_ALLOW_RUN_AS_ROOT: 1
+      OMPI_ALLOW_RUN_AS_ROOT_CONFIRM: 1
+
+    steps:
+      - name: Install OpenMPI and build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends openmpi-bin libopenmpi-dev pkg-config build-essential ca-certificates curl git jq
+
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-openmpi5-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-openmpi5-
+
+      - name: Check MPI version
+        run: mpiexec --version
+
+      - name: MPI integration tests (rma)
+        run: MPI_NP_LIST=4 ./tests/run_mpi_tests.sh rma
+
+      - name: Receive pending after a process failure aborts (ULFM)
+        shell: bash
+        run: |
+          cargo build --example ulfm_pending
+          # timeout caps a stuck run at well under the job timeout; a killed
+          # run still fails below unless the two greps already found the
+          # literal with no FAIL: in whatever output it produced first.
+          for mode in wait wait_all wait_any irecv_full; do
+            out=$(timeout 60 mpiexec --oversubscribe --with-ft ulfm -n 3 target/debug/examples/ulfm_pending "$mode" 2>&1 || true)
+            printf '%s\n' "$out"
+            grep -qF 'ferrompi: receive pending after a process failure' <<<"$out"
+            if grep -qF 'FAIL: ' <<<"$out"; then exit 1; fi
+          done
+
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.85
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-msrv-
+
+      - name: Setup MPICH
+        uses: ./.github/actions/setup-mpich
+
+      - name: Build lib, tests and examples
+        run: cargo build --locked --all-features --lib --tests --examples
+
+  abi-stubs:
+    name: MPI ABI stubs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout MPI Forum ABI stubs
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: mpi-forum/mpi-abi-stubs
+          ref: 3ab68bc2c456816ef3b8a5b755ea0155bbf6bae2
+          path: mpi-abi-stubs
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-abi-stubs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-abi-stubs-
+
+      - name: Build and install the ABI stubs
+        run: make -C mpi-abi-stubs install PREFIX="$RUNNER_TEMP/mpi-abi"
+
+      - name: Build examples against the ABI stubs
+        run: cargo build --locked --features rma --examples
         env:
-          RUSTDOCFLAGS: -D warnings
+          MPICC: ${{ runner.temp }}/mpi-abi/bin/mpicc_abi
+
+  large-count:
+    name: Large count (mpich)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-large-count-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-large-count-
+
+      - name: Setup MPICH
+        uses: ./.github/actions/setup-mpich
+
+      - name: Build the large-count example
+        run: cargo build --locked --release --features rma --example large_count
+
+      - name: Run the large-count example
+        run: mpiexec -n 1 target/release/examples/large_count
 
   coverage:
     name: Code Coverage
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           components: llvm-tools-preview
 
       - name: Cache cargo registry
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -151,45 +323,119 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-coverage-
 
-      - name: Install MPI
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mpich libmpich-dev pkg-config libhwloc-dev libpmix-dev libucx-dev
-
-      - name: Hotfix MPICH on Ubuntu Noble
-        run: |
-          # Workaround for broken MPICH 4.2.0 package in Ubuntu 24.04 LTS (Noble)
-          # See: https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338
-          ARCH=$(dpkg --print-architecture)
-          REPO=https://archive.ubuntu.com/ubuntu
-          LIBUCX=libucx0_1.18.1+ds-2_${ARCH}.deb
-          LIBMPICH=libmpich12_4.2.1-5_${ARCH}.deb
-          curl -sSOf ${REPO}/pool/universe/u/ucx/${LIBUCX}
-          curl -sSOf ${REPO}/pool/universe/m/mpich/${LIBMPICH}
-          TMPDIR=$(mktemp -d)
-          dpkg-deb -x ${LIBUCX} ${TMPDIR}
-          dpkg-deb -x ${LIBMPICH} ${TMPDIR}
-          LIBDIR=/usr/lib/$(arch)-linux-gnu
-          sudo cp -a ${TMPDIR}${LIBDIR}/ucx ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libuc[mpst]*.so.0 ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12.*.* ${LIBDIR}
-          sudo cp -a ${TMPDIR}${LIBDIR}/libmpi*.so.12 ${LIBDIR}
-          sudo ldconfig
-          rm -rf ${TMPDIR} ${LIBUCX} ${LIBMPICH}
-          echo "MPICH hotfix applied successfully"
+      - name: Setup MPICH
+        uses: ./.github/actions/setup-mpich
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0 # v2.87.22
+        with:
+          tool: cargo-llvm-cov
 
       - name: Run coverage (unit tests + MPI integration tests)
         run: |
-          chmod +x tests/run_mpi_coverage.sh
-          MPI_NP=4 ./tests/run_mpi_coverage.sh numa
+          # shellcheck source=/dev/null
+          source <(cargo llvm-cov show-env --export-prefix)
+          cargo llvm-cov clean --workspace
+          cargo test --lib --features numa
+          MPI_NP_LIST=4 ./tests/run_mpi_tests.sh numa
+          cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./lcov.info
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  doc:
+    name: Docs and package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-doc-
+
+      - name: Setup MPICH
+        uses: ./.github/actions/setup-mpich
+
+      - name: Doctests (default features)
+        run: cargo test --doc
+
+      - name: Doctests (all features)
+        run: cargo test --doc --all-features
+
+      - name: Documentation (default features)
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Package allow-list
+        run: |
+          cargo package --locked
+          cargo package --locked --list > "$RUNNER_TEMP/package-files"
+          if grep -E '^(examples|benches|audits|tests|\.github)/|^test\.sh$' "$RUNNER_TEMP/package-files"; then
+            exit 1
+          fi
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly
+
+      - name: docs.rs emulation (nightly, all features)
+        run: cargo +nightly doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+
+  valgrind:
+    name: Valgrind (mpich)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-valgrind-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-valgrind-
+
+      - name: Setup MPICH
+        uses: ./.github/actions/setup-mpich
+
+      - name: Install valgrind
+        run: sudo apt-get install -y valgrind
+
+      - name: Valgrind memcheck
+        run: |
+          chmod +x tests/run_mpi_tests.sh
+          ./tests/run_mpi_tests.sh --valgrind rma

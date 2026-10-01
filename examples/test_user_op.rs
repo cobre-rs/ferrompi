@@ -6,8 +6,11 @@
 //!   3. Drop-after-use: verifies no MPI corruption after the UserOp is dropped.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_user_op
+// mpi-test: np=4 valgrind
 
 use ferrompi::{Mpi, ReduceOp, UserOp};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -46,12 +49,9 @@ fn main() {
         let send = vec![rank as f64 + 1.5_f64];
         let mut recv = vec![0.0_f64];
 
-        match world.allreduce_with_op(&send, &mut recv, &op) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 1: allreduce_with_op failed: {e}");
-                local_ok = false;
-            }
+        if let Err(e) = world.allreduce_with_op(&send, &mut recv, &op) {
+            eprintln!("rank {rank}: FAIL Test 1: allreduce_with_op failed: {e}");
+            local_ok = false;
         }
 
         let expected = (size - 1) as f64 + 1.5_f64;
@@ -90,12 +90,9 @@ fn main() {
         let send = vec![contrib];
         let mut recv = vec![0i32];
 
-        match world.allreduce_with_op(&send, &mut recv, &op) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 2: allreduce_with_op failed: {e}");
-                local_ok = false;
-            }
+        if let Err(e) = world.allreduce_with_op(&send, &mut recv, &op) {
+            eprintln!("rank {rank}: FAIL Test 2: allreduce_with_op failed: {e}");
+            local_ok = false;
         }
 
         let effective_size = size.min(30);
@@ -191,12 +188,9 @@ fn main() {
         let send = vec![rank + 1];
         let mut recv = vec![0i32];
 
-        match world.allreduce_with_op(&send, &mut recv, &op) {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 4: allreduce_with_op failed: {e}");
-                local_ok = false;
-            }
+        if let Err(e) = world.allreduce_with_op(&send, &mut recv, &op) {
+            eprintln!("rank {rank}: FAIL Test 4: allreduce_with_op failed: {e}");
+            local_ok = false;
         }
 
         if recv[0] != 1 {
@@ -207,24 +201,5 @@ fn main() {
         }
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — gate process::exit so no rank exits early.
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    if global_ok == 0 {
-        if rank == 0 {
-            eprintln!("FAIL: at least one rank failed a UserOp assertion");
-        }
-        std::process::exit(1);
-    }
-
-    if rank == 0 {
-        println!();
-        println!("========================================");
-        println!("All UserOp tests passed!");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_user_op");
 }

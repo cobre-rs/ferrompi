@@ -1,466 +1,214 @@
 # MPI Implementation Compatibility
 
-> **Audience:** Users selecting an MPI implementation to deploy ferrompi, and
-> contributors interpreting test failures against a non-CI-tested runtime.
->
-> **Testing disclaimer:** Only two implementations are part of CI: MPICH
-> (using the Ubuntu Noble package, hotfixed to 4.2.1) and Open MPI (from
-> `libopenmpi-dev` on Ubuntu Noble, which ships Open MPI 4.x). All other
-> implementations — Open MPI 5.x, Intel MPI, and Cray MPI — are **not CI-tested**.
-> Their entries in the matrix below are based on known MPI standard version
-> support and user reports. Do not assume that an unmarked cell indicates a
-> problem; it indicates an absence of evidence. Where CI evidence exists, cells
-> are marked ✓ or ⚠. Where no evidence exists, cells are marked ?.
-
----
-
-## CI vs User-Reported Status
-
-ferrompi's CI pipeline (`.github/workflows/test.yml`) runs on Ubuntu Noble
-(`ubuntu-latest`) and installs MPI via `apt-get`. The matrix covers two
-implementations:
-
-| Implementation | CI status     | Version tested      | Install package              |
-| -------------- | ------------- | ------------------- | ---------------------------- |
-| MPICH          | CI-tested     | 4.2.1 (hotfixed)    | `mpich libmpich-dev`         |
-| Open MPI       | CI-tested     | 4.x (Noble default) | `libopenmpi-dev openmpi-bin` |
-| Open MPI 5.x   | user-reported | 5.0.0+              | —                            |
-| Intel MPI      | user-reported | 2021.x / 2024.x     | —                            |
-| Cray MPI / MPT | untested      | 8.x (MPICH-derived) | via `CRAY_MPICH_DIR`         |
-
-The CI workflow installs MPICH, applies a hotfix for the Ubuntu Noble
-`libmpich12` package (see the
-[upstream bug report](https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338)),
-and runs all integration tests under both the default feature set and the `rma`
-feature set. Open MPI is also installed from the Noble archive but requires
-environment overrides (`OMPI_MCA_rmaps_base_oversubscribe=1`,
-`OMPI_ALLOW_RUN_AS_ROOT=1`) to run correctly in the GitHub Actions sandbox.
-
-MPICH 3.x is **not tested in CI**. The Ubuntu Noble default provides MPICH
-4.2.x; there is no matrix entry for an older MPICH. User reports from MPICH 3.x
-deployments are the only signal. The same applies to Open MPI 5.x, Intel MPI,
-and Cray MPI.
-
-User-reported compatibility evidence is collected via GitHub Issues. When a
-report is verified (a reproducible test run with version output attached), the
-relevant cells in this document are updated and the issue is linked from the
-corresponding footnote. See [How to Report Compatibility](#how-to-report-compatibility)
-for what to include.
-
----
-
-## Implementation Matrix
-
-Column ordering is consistent across all sub-tables:
-**MPICH 3.x | MPICH 4.x | Open MPI 4 | Open MPI 5 | Cray MPI**
-
-Legend:
-
-- ✓ — works; confirmed by CI pass or a verified user report
-- ⚠ — works with a caveat; see the numbered footnote below the table
-- ✗ — does not work; feature is absent or known to fail
-- ? — untested; no CI evidence and no verified user report
-
-### Blocking Collectives
-
-These functions map to the `Communicator::barrier`, `broadcast`, `reduce`,
-`allreduce`, `gather`, `allgather`, `scatter`, `alltoall`, `scan`, `exscan`,
-and `reduce_scatter_block` methods in ferrompi's public API. All are MPI 1.0+
-features and have been available in every MPI implementation for decades. The
-MPICH 4.x ✓ cells reflect CI passes on MPICH 4.2.1.
-
-| Feature                | MPICH 3.x | MPICH 4.x | Open MPI 4 | Open MPI 5 | Cray MPI |
-| ---------------------- | :-------: | :-------: | :--------: | :--------: | :------: |
-| `barrier`              |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `broadcast`            |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `reduce`               |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `allreduce`            |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `gather`               |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `allgather`            |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `scatter`              |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `alltoall`             |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `scan`                 |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `exscan`               |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `reduce_scatter_block` |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-
-Open MPI 4 ✓ reflects CI passes on the Ubuntu Noble `libopenmpi-dev` package.
-
-### Nonblocking Collectives
-
-These are the `i*` variants (`ibarrier`, `ibcast`, `ireduce`, etc.). They are
-MPI 3.0+ features. MPICH 3.x supports MPI 3.1 and provides these; Open MPI 3+
-does as well. The ✓ entries for MPICH 3.x are based on MPI standard conformance
-(MPICH 3.x implements MPI 3.1); CI evidence exists only for MPICH 4.x and Open
-MPI 4.
-
-| Feature                 | MPICH 3.x | MPICH 4.x | Open MPI 4 | Open MPI 5 | Cray MPI |
-| ----------------------- | :-------: | :-------: | :--------: | :--------: | :------: |
-| `ibarrier`              |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `ibcast`                |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `ireduce`               |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `iallreduce`            |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `igather`               |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `iallgather`            |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `iscatter`              |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `ialltoall`             |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `iscan`                 |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `iexscan`               |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `ireduce_scatter_block` |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-
-### Persistent Collectives
-
-Persistent collectives (`*_init` / `start` / `wait` pattern) require **MPI
-4.0+**. MPICH 4.0 was the first MPICH release to support MPI 4.0. Open MPI
-4.x implements MPI 3.1 only; Open MPI 5.0 is the first Open MPI release to
-implement MPI 4.0. Consequently:
-
-- MPICH 3.x: ✗ — the `#if MPI_VERSION >= 4` stub in `csrc/ferrompi.c` returns
-  `MPI_ERR_UNSUPPORTED_OPERATION`; the Rust layer maps this to
-  `Error::NotSupported`.
-- Open MPI 4: ✗ — Open MPI 4.x implements MPI 3.1, not MPI 4.0. The MPI
-  version number of the _implementation_ (4.x) does not equal the MPI
-  _standard_ version (3.1). See note on version number confusion in
-  [Open MPI 4 notes](#open-mpi-4).
-
-| Feature                     | MPICH 3.x | MPICH 4.x | Open MPI 4 | Open MPI 5 | Cray MPI |
-| --------------------------- | :-------: | :-------: | :--------: | :--------: | :------: |
-| `barrier_init`              |     ✗     |     ✓     |     ✗      |     ?      |    ?     |
-| `bcast_init`                |     ✗     |     ✓     |     ✗      |     ?      |    ?     |
-| `reduce_init`               |     ✗     |     ✓     |     ✗      |     ?      |    ?     |
-| `allreduce_init`            |     ✗     |     ✓     |     ✗      |     ?      |    ?     |
-| `gather_init`               |     ✗     |     ✓     |     ✗      |     ?      |    ?     |
-| `allgather_init`            |     ✗     |     ✓     |     ✗      |     ?      |    ?     |
-| `scatter_init`              |     ✗     |  ⚠ [^1]   |     ✗      |     ?      |    ?     |
-| `alltoall_init`             |     ✗     |     ✓     |     ✗      |     ?      |    ?     |
-| `scan_init`                 |     ✗     |     ✓     |     ✗      |     ?      |    ?     |
-| `exscan_init`               |     ✗     |     ✓     |     ✗      |     ?      |    ?     |
-| `reduce_scatter_block_init` |     ✗     |     ✓     |     ✗      |     ?      |    ?     |
-
-[^1]:
-    `scatter_init` with `MPI_IN_PLACE` (`scatter_init_inplace`) triggers a
-    deterministic deadlock in MPICH 4.2.x when called on the root rank.
-    Reproduced on MPICH 4.2.0, 4.2.1 (Ubuntu Noble hotfix), and 4.2.3 (Fedora).
-    Fixed in MPICH 4.3+. The `test_scatter_init_inplace` integration test is
-    conditionally skipped on any MPICH version string containing `"4.2."`. The
-    non-inplace `scatter_init` (distinct buffer send and receive) is unaffected.
-
-### Persistent Point-to-Point
-
-Persistent P2P functions (`send_init`, `recv_init`, `bsend_init`, `rsend_init`,
-`ssend_init`) were introduced in MPI 1.1 but ferrompi gates them at
-`#if MPI_VERSION >= 3` per project policy. No runtime version probe is needed;
-the gate is compile-time only. All five are available on every MPI 3.x and 4.x
-implementation.
-
-| Feature      | MPICH 3.x | MPICH 4.x | Open MPI 4 | Open MPI 5 | Cray MPI |
-| ------------ | :-------: | :-------: | :--------: | :--------: | :------: |
-| `send_init`  |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `recv_init`  |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `bsend_init` |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `rsend_init` |     ✓     |  ✓ [^2]   |     ✓      |     ?      |    ?     |
-| `ssend_init` |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-
-[^2]:
-    `rsend_init` requires strict ordering: the receiving rank must post and
-    start its `recv_init`/`start` before a barrier, and only after that barrier
-    may the sending rank start the ready-send request. Omitting the barrier
-    produces undefined behavior on strict implementations (including MPICH 4.x).
-    The `test_rsend_init` integration test enforces this ordering explicitly.
-
-### RMA / Shared Memory Windows
-
-RMA operations require the `rma` feature flag (`cargo build --features rma`).
-`Win_allocate_shared` requires MPI 3.0+. All other RMA functions below are MPI
-2.0+ (`MPI_Put`, `MPI_Get`, `MPI_Accumulate`) or MPI 3.0+ (`MPI_Rput`,
-`MPI_Rget`, `MPI_Raccumulate`, `MPI_Get_accumulate`, `MPI_Fetch_and_op`,
-`MPI_Compare_and_swap`, `MPI_Win_flush*`, `MPI_Win_sync`, `MPI_Win_lock_all`).
-All are available on MPICH 3.x/4.x and Open MPI 4+.
-
-| Feature               | MPICH 3.x | MPICH 4.x | Open MPI 4 | Open MPI 5 | Cray MPI |
-| --------------------- | :-------: | :-------: | :--------: | :--------: | :------: |
-| `win_fence`           |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `win_lock`            |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `win_lock_all`        |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `win_unlock`          |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `win_unlock_all`      |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `win_flush`           |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `win_flush_all`       |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `win_flush_local`     |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `win_flush_local_all` |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `win_sync`            |     ✓     |  ⚠ [^3]   |     ✓      |     ?      |    ?     |
-| `put`                 |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `get`                 |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `accumulate`          |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `get_accumulate`      |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `fetch_and_op`        |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `compare_and_swap`    |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `rput`                |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `rget`                |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `raccumulate`         |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-
-[^3]:
-    `MPI_Win_sync` is documented by the MPI standard as valid at any point
-    within an epoch, but MPICH 4.2.x enforces a stricter interpretation and
-    requires that `MPI_Win_sync` be called only within a passive-target epoch
-    (inside a `lock`/`unlock` or `lock_all`/`unlock_all` pair). ferrompi
-    documents this in the `src/window.rs` rustdoc for `Win::sync`. For
-    portability across all MPICH 4.x releases, always call `sync` via a
-    `WinLockGuard` or `WinLockAllGuard` rather than as a bare inherent method.
-
-### Groups and Communicators
-
-| Feature                   | MPICH 3.x | MPICH 4.x | Open MPI 4 | Open MPI 5 | Cray MPI |
-| ------------------------- | :-------: | :-------: | :--------: | :--------: | :------: |
-| `Group::union`            |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `Group::intersection`     |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `Group::difference`       |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `Communicator::split`     |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `Communicator::duplicate` |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `create_from_group`       |  ✗ [^4]   |     ✓     |   ✗ [^4]   |     ?      |    ?     |
-
-[^4]:
-    `Mpi::create_from_group` calls `MPI_Comm_create_from_group`, which is
-    a MPI 4.0+ function. On implementations that provide only MPI 3.x
-    (`MPI_VERSION < 4`), the C shim at `csrc/ferrompi.c:651-668` returns
-    `MPI_ERR_UNSUPPORTED_OPERATION` via a compile-time `#if MPI_VERSION >= 4`
-    stub. The Rust layer maps this to `Error::NotSupported`. A runtime version
-    probe via `OnceLock<bool>` in `src/lib.rs` prevents the call from reaching
-    the C layer at all on older runtimes.
-
-### User-Defined Reduction Operations
-
-`UserOp` uses the `MPI_Op_create` trampoline mechanism, which is MPI 1.0+
-and available everywhere. The `_noncommutative` variant uses `commute=0` in
-`MPI_Op_create`; this is standard MPI and supported by all implementations.
-Only `allreduce_with_op` is currently exposed; the full `_with_op` sweep
-(reduce, scan, exscan) is deferred to a follow-up.
-
-| Feature                      | MPICH 3.x | MPICH 4.x | Open MPI 4 | Open MPI 5 | Cray MPI |
-| ---------------------------- | :-------: | :-------: | :--------: | :--------: | :------: |
-| `UserOp::new`                |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-| `UserOp::new_noncommutative` |     ✓     |     ✓     |     ✓      |     ?      |    ?     |
-
-### Large-Count `_c` Variants
-
-All collective `_c` variants (e.g., `MPI_Allreduce_c`, `MPI_Bcast_c`) require
-**MPI 4.0+**. The `#if MPI_VERSION >= 4` gate in `csrc/ferrompi.c` covers
-every nonblocking collective shim. Persistent shims deliberately omit the `_c`
-branch (standing epic-04 convention: persistent shims are MPI 4.0+ themselves,
-and large-count interaction with persistent initialisers is deferred to MPI 5.x
-clarification).
-
-| Feature                                   | MPICH 3.x | MPICH 4.x | Open MPI 4 | Open MPI 5 | Cray MPI |
-| ----------------------------------------- | :-------: | :-------: | :--------: | :--------: | :------: |
-| All collective `_c` variants (>2³¹ elems) |     ✗     |     ✓     |     ✗      |     ?      |    ?     |
-
----
-
-## Implementation-Specific Notes
-
-### MPICH 4.x
-
-MPICH 4.x is the primary CI-tested implementation. ferrompi is developed and
-tested against MPICH 4.2.1 (the Ubuntu Noble hotfix package).
-
-**Known issues on MPICH 4.2.x:**
-
-- **`scatter_init_inplace` deadlock.** `MPI_Scatter_init` with `MPI_IN_PLACE`
-  on the root rank produces a deterministic deadlock on all MPICH 4.2.x
-  releases (4.2.0, 4.2.1, 4.2.3). The fix is present in MPICH 4.3+. ferrompi's
-  `test_scatter_init_inplace` example detects the affected versions at runtime
-  and prints `SKIP: MPICH 4.2.x has a known MPI_Scatter_init+MPI_IN_PLACE
-deadlock`. The non-inplace `scatter_init` (separate send and receive buffers)
-  is unaffected.
-
-- **`MPI_Win_sync` passive-epoch requirement.** MPICH 4.2.x enforces that
-  `MPI_Win_sync` must be called within a passive-target epoch (inside a lock
-  pair), even though the MPI standard does not impose this restriction in all
-  contexts. Always call `Win::sync` via a lock guard. This is documented in the
-  `src/window.rs` rustdoc and captured in footnote [^3] above.
-
-- **Ubuntu Noble MPICH package.** The `mpich` and `libmpich12` packages in
-  Ubuntu 24.04 LTS (Noble) ship a broken MPICH 4.2.0. CI applies a hotfix that
-  replaces the shared library with MPICH 4.2.1 from the Ubuntu archive. See the
-  `Hotfix MPICH on Ubuntu Noble` step in `.github/workflows/test.yml` and the
-  [upstream Launchpad bug](https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338).
-
-**`MPI_UNDEFINED` value.** MPICH uses `MPI_UNDEFINED = -32766`; ferrompi
-normalises this to `-1` in the C shim layer (`csrc/ferrompi.c`) so callers
-always see `-1`. Do not hardcode either value in application code; use
-`Group::undefined()` (which calls `ferrompi_mpi_undefined()`) to obtain the
-sentinel.
-
-**`MPI_MODE_*` constants.** Window fence and PSCW assert constants
-(`MPI_MODE_NOSTORE`, `MPI_MODE_NOPUT`, etc.) are implementation-defined
-integers. ferrompi queries them at runtime via `OnceLock`-cached C shims and
-exposes them through the `WinFenceAssert` and `WinPscwAssert` bitflag types.
-Never hardcode mode constant values.
-
-### MPICH 3.x
-
-MPICH 3.x implements MPI 3.1. It is **not tested in CI**; support is based on
-known MPI standard conformance. The following MPI 4.0+ features are absent:
-
-- All persistent collectives (`barrier_init`, `bcast_init`, etc.)
-- `create_from_group` (`MPI_Comm_create_from_group`)
-- All large-count `_c` variants (`MPI_Allreduce_c`, etc.)
-
-The C shim layer in `csrc/ferrompi.c` provides `#if MPI_VERSION >= 4` stubs
-for every MPI 4.0+ entry point. These stubs return
-`MPI_ERR_UNSUPPORTED_OPERATION` unconditionally when compiled against
-MPICH 3.x headers. Rust code maps this to `Error::NotSupported` and integration
-tests use the `SKIP` pattern: check `Mpi::version()` at runtime, print
-`"SKIP: ..."`, and return `0`.
-
-All blocking collectives, nonblocking collectives, persistent P2P, and
-group/communicator operations (excluding `create_from_group`) are expected to
-work on MPICH 3.4.x.
-
-### Open MPI 4
-
-> **Important version number note.** "Open MPI 4" refers to the _implementation_
-> version (the release number on the Open MPI website). Open MPI 4.x implements
-> the MPI **3.1** standard, not MPI 4.0. Do not confuse the Open MPI release
-> version with the MPI standard version.
-
-Open MPI 4.x is CI-tested via the Ubuntu Noble `libopenmpi-dev` package. All
-blocking collectives, nonblocking collectives, persistent P2P, RMA operations,
-group operations, and user-defined ops are expected to work.
-
-**Absent features (MPI 3.1 only):**
-
-- Persistent collectives (require MPI 4.0+)
-- `create_from_group` (requires MPI 4.0+)
-- Large-count `_c` variants (require MPI 4.0+)
-
-**Known CI caveats.** Open MPI requires oversubscription and root-permission
-flags when running in GitHub Actions:
-`OMPI_MCA_rmaps_base_oversubscribe=1`, `OMPI_ALLOW_RUN_AS_ROOT=1`,
-`OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1`. These are set in `.github/workflows/test.yml`
-and are not required outside the CI sandbox.
-
-**`MPI_UNDEFINED` value.** Open MPI uses `-1` for `MPI_UNDEFINED`, matching
-ferrompi's normalised value. The normalisation in the C shim layer is still
-applied for defensive correctness.
-
-**`Request::cancel` portability.** `MPI_Cancel` on a send request is silently
-ignored by Open MPI (the cancel is accepted but the send completes normally).
-This is standard-conformant. The `cancel` method in ferrompi rustdoc documents
-this explicitly.
-
-### Open MPI 5
-
-Open MPI 5.0 is the first Open MPI release to implement MPI 4.0. It is
-**not CI-tested** in ferrompi; support is based on user reports.
-
-With Open MPI 5.x, the following features expected to be available (in addition
-to everything in Open MPI 4):
-
-- Persistent collectives (`bcast_init`, `allreduce_init`, etc.)
-- `create_from_group`
-- Large-count `_c` variants
-
-The `scatter_init_inplace` MPICH 4.2.x deadlock is absent on Open MPI 5.x (the
-`test_scatter_init_inplace` integration test documents this explicitly).
-
-If you run ferrompi on Open MPI 5.x, please report your experience via a GitHub
-Issue. See [How to Report Compatibility](#how-to-report-compatibility).
-
-### Intel MPI
-
-Intel MPI is **not CI-tested**. Intel MPI is based on MPICH and tracks MPICH
-releases closely. Intel MPI 2021.x is built on MPICH 3.4; Intel MPI 2024.x is
-built on MPICH 4.x.
-
-**Expected compatibility:**
-
-- Intel MPI 2021.x: equivalent to MPICH 3.4. MPI 4.0 features unavailable.
-- Intel MPI 2024.x: equivalent to MPICH 4.x. All MPI 4.0 features expected to
-  work. The MPICH 4.2.x `scatter_init_inplace` deadlock may also affect Intel
-  MPI 2024 releases that incorporate MPICH 4.2.x; check `mpiexec --version`
-  for the embedded MPICH version string.
-
-To build against Intel MPI, set `MPICC=/opt/intel/oneapi/mpi/latest/bin/mpicc`
-and either set `MPI_PKG_CONFIG` or ensure that Intel MPI's `pkg-config` path
-is on `PKG_CONFIG_PATH`.
-
-### Cray MPI / MPT
-
-Cray MPI (also referred to as Cray MPT or MPICH for Cray) is **untested**.
-It is a custom MPICH derivative maintained by HPE/Cray for Cray XC, XE, and EX
-systems. Compatibility with ferrompi is expected to be similar to the
-underlying MPICH release, but Cray-specific compiler and linker requirements
-create additional configuration complexity:
-
-- The `CRAY_MPICH_DIR` environment variable must be set to the Cray MPI
-  installation directory (e.g., `/opt/cray/pe/mpich/8.1.25`). ferrompi's
-  `build.rs` checks this variable before falling back to pkg-config.
-- Cray systems typically use the Cray compiler wrapper (`cc`) rather than
-  `mpicc`. Set `MPICC=$(which cc)` or the appropriate Cray wrapper.
-- pthread linkage may differ from upstream MPICH. The handle-table ADR
-  (`docs/adr/0002-handle-tables.md`, Decision Driver 5) notes Cray-specific
-  pthread linkage as a known concern.
-- The Cray ICC backend may emit warnings that ferrompi's CI does not test
-  (`-D warnings` is enforced in CI under GCC/Clang only).
-
-If you successfully build and test ferrompi on a Cray system, please report
-your experience including the `CRAY_MPICH_DIR` path and the embedded MPICH
-version number.
-
----
-
-## Required Environment Variables and Build Flags
-
-ferrompi's `build.rs` detects the MPI installation through a probe chain.
-The table below summarises the three environment variables that override the
-auto-detection, plus the feature flags that gate optional functionality.
-
-| Variable / Flag   | Type          | Effect                                              | When Required                                                    |
-| ----------------- | ------------- | --------------------------------------------------- | ---------------------------------------------------------------- |
-| `MPI_PKG_CONFIG`  | env var       | Sets the `pkg-config` service name to query         | When pkg-config returns the wrong MPI (e.g., multiple installed) |
-| `MPICC`           | env var       | Sets the MPI compiler wrapper path                  | When `mpicc` is not on `$PATH` or the wrong wrapper is found     |
-| `CRAY_MPICH_DIR`  | env var       | Points `build.rs` to the Cray MPI installation root | Required on all Cray PE systems                                  |
-| `--features rma`  | Cargo feature | Enables RMA and shared-memory window API            | Optional; adds `Win`, `WinLockGuard`, and all RMA methods        |
-| `--features numa` | Cargo feature | Enables NUMA-aware allocation (implies `rma`)       | Optional; requires `libhwloc-dev` at build time                  |
-
-**Which implementations need explicit overrides:**
-
-- **MPICH** (non-system install): set `MPICC=/path/to/mpicc` and
-  `MPI_PKG_CONFIG=mpich`.
-- **Open MPI**: if both MPICH and Open MPI are installed, set
-  `MPI_PKG_CONFIG=ompi` to select Open MPI.
-- **Intel MPI**: set `MPICC=/opt/intel/oneapi/mpi/latest/bin/mpicc`. The
-  `intel-mpi` pkg-config name is not universally available; using `MPICC` is
-  more reliable.
-- **Cray MPI**: set `CRAY_MPICH_DIR`. All other detection is skipped when this
-  variable is present.
-- **Ubuntu system MPICH**: auto-detected via `pkg-config mpich`. No override
-  needed if `mpich libmpich-dev` are the only MPI packages installed.
-
----
-
-## How to Report Compatibility
-
-Compatibility reports from non-CI implementations are the primary mechanism for
-improving this document. When filing a GitHub Issue, include the following
-checklist so the report can be verified and the matrix updated:
+This is ferrompi's reference for selecting an MPI implementation, building
+against it, and running under it. Each fact below is stated once; what an
+individual method does lives in that method's own rustdoc on docs.rs, not
+here.
+
+## Platforms and MPI libraries
+
+Linux is the supported platform and the only one CI tests (x86_64,
+`ubuntu-24.04` runners). macOS builds but is not CI-tested. `LongDoubleInt`
+and `LongInt` are available only on Linux, and only on x86_64, aarch64 and
+little-endian powerpc64. Windows is not supported.
+
+ferrompi needs an MPI 3.1 library. It enables the persistent collectives and
+`Mpi::create_from_group` when the library's `mpi.h` reports `MPI_VERSION >= 4`,
+or when the library is Open MPI 5 or later, which implements both while
+reporting MPI 3.1; elsewhere they return `Error::NotSupported`. It uses the
+`_c` large-count calls only when `mpi.h` reports `MPI_VERSION >= 4`; below
+that, Open MPI 5 included, a count above `i32::MAX` returns `Error::Mpi` with
+class `Count`. The variable-count collectives (`gatherv`, `scatterv`,
+`allgatherv`, `alltoallv` and their persistent forms) take their counts as
+`i32` arrays; a count above `i32::MAX` returns that same `Count` error on every
+MPI, including one with `MPI_VERSION >= 4`. `Communicator::allreduce_with_op`
+does too: a `UserOp` is a classic MPI user function with an `int` length, which
+MPICH narrows a larger count into without splitting.
+
+The table below is the outcome of ferrompi's three CI builds: MPICH 4.2.1
+(`ubuntu-24.04`, the Noble package hotfixed to that version, np 2/3/4,
+default and `rma`), Open MPI 4.1.6 (`ubuntu-24.04`, np 4, default and
+`rma`), and Open MPI 5.0.7 (a pinned `debian:trixie` container, np 4,
+`rma`). Every other MPI — MPICH 3.x, Intel MPI, Cray MPICH, or any other Open
+MPI version — is untested; expect it to behave like the MPICH row if it reports
+`MPI_VERSION` 4, like the Open MPI 5.0.7 row if it is Open MPI 5 or later, and
+like the Open MPI 4.1.6 row otherwise.
+
+| Feature family | MPICH 4.2.1 | Open MPI 4.1.6 | Open MPI 5.0.7 |
+| --- | --- | --- | --- |
+| Blocking and nonblocking collectives and point-to-point | tested | tested | tested |
+| Persistent point-to-point | tested | tested | tested |
+| Persistent collectives | tested | `NotSupported` | tested |
+| `create_from_group` | tested | `NotSupported` | tested |
+| Counts above `i32::MAX` | tested | `Err` (class `Count`) | `Err` (class `Count`) |
+| RMA windows (`rma`) | tested | tested | tested |
+
+MPICH 4.2.1 reports `MPI_VERSION` 4; Open MPI 4.1.6 and 5.0.7 both report MPI
+3.1 (`MPI_VERSION` 3). ferrompi recognizes Open MPI 5 or later from the
+header's `OMPI_MAJOR_VERSION`.
+
+## Known implementation issues
+
+One item each: the symptom, the affected library, and what to do.
+
+- MPICH 4.2.x: `scatter_init_inplace` (persistent `scatter` with
+  `MPI_IN_PLACE` at the root) deadlocks. Fixed in MPICH 4.3. Use
+  `scatter_init` with a separate send buffer on 4.2.x instead;
+  `examples/test_inplace.rs` detects the affected version string at
+  runtime and skips only this one case, not the other in-place persistent
+  collectives.
+- Ubuntu 24.04's `mpich` 4.2.0 package starts every rank as a singleton —
+  each sees a world of size 1 — once more than one process is launched. CI
+  installs MPICH 4.2.1 from a pinned Ubuntu snapshot instead
+  ([Launchpad bug 2072338](https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338)).
+  To avoid it, use an MPICH 4.2.1 or later package;
+  `.github/scripts/mpich-hotfix.sh` shows the exact packages CI installs.
+- `Win::sync` outside a passive-target epoch is erroneous; MPICH returns an
+  error for it. Call it between `Win::lock`/`Win::lock_all` and the guard's
+  drop — see the `Win::sync` method's own documentation on docs.rs for the
+  full rule. Other libraries may accept it silently, so a program tested
+  only there can fail on MPICH.
+- After a failed `wait_all`, which of the other requests are still pending
+  depends on the library and on timing. On MPICH, the requests that come
+  after the failed one in the slice stay pending. ferrompi's own rule — a
+  request is marked completed only once MPI actually completes it,
+  successfully or not — holds on every library; rely on that rather than an
+  implementation's particular pending behaviour. To finish the rest, call
+  `Request::wait_all` again on the same slice; completed entries are
+  skipped.
+- Open MPI 4.1.6 and 5.0.7: a nonblocking receive truncated by a send from a
+  rank to itself is not reported as an error; the receive returns success.
+  A blocking `recv` of the same message does report `Truncate`; use it for
+  self-messages where truncation must be detected.
+- Open MPI 4.1.6 and 5.0.7: a persistent request that fails inside `wait`,
+  `test` or `wait_all` is freed by MPI. ferrompi marks the owning
+  `PersistentRequest` inactive; a later `start` on it returns `Err` with
+  class `Request`. Create a new request to run the operation again.
+- Open MPI 4.1: `Win::create` over a self/TCP-only transport fails with
+  `MPI_ERR_WIN`, even at a single process; restricting the transport to one
+  interface does not help. In that configuration, `Win::allocate` works
+  when all ranks share one host (CI's setup); prefer it there.
+- Open MPI 4.1.6, for `Win::allocate` windows whose ranks all share one
+  host (these use Open MPI's shared-memory one-sided component, `osc/sm`):
+  once a window has been used for post-start-complete-wait (PSCW) epochs,
+  a further PSCW epoch opened with `WinPscwAssert::no_check()` can let
+  `wait_exposure` return before the matching put has landed. Open
+  `no_check()` PSCW epochs only on a freshly allocated window.
+- Open MPI 4.1's TCP transport, on a host where an extra interface sits
+  behind a NAT rule (for example Docker's `docker0` bridge and its
+  masquerade rule): sends between ranks on the same host can hang. This
+  was observed with consecutive persistent sends. Open MPI spreads
+  messages across one TCP path per interface, and messages on the
+  NAT-rewritten path are never delivered. Same-host ranks use TCP only
+  when shared memory is disabled, as CI does with `OMPI_MCA_btl=self,tcp`.
+  Restrict TCP to the interfaces that actually connect the ranks. CI's
+  ranks share one host, so it sets `OMPI_MCA_btl_tcp_if_include=lo`. A
+  multi-host job must name its cluster interface or subnet instead (for
+  example `eth0` or `10.0.0.0/16`), never `lo`.
+- If the MPI library refuses to install ferrompi's error handler on a
+  newly created window (reported for Open MPI 4.x), ferrompi prints a
+  warning to stderr, and RMA errors on that window then abort the process
+  instead of returning `Err`.
+- When `MPI_Finalize` is skipped because a window is still alive — see the
+  `Mpi` type's own documentation for the full rule — MPICH's `mpiexec`
+  exits 0. Open MPI 4.1.6 and 5.0.7 instead exit 1 and print an "exiting
+  improperly" notice. On every library, drop all windows before the `Mpi`
+  handle so `MPI_Finalize` runs; under Open MPI, a skipped finalize makes
+  the job exit non-zero, which batch schedulers and CI treat as a failure.
+- Fault-tolerant MPI (ULFM): ferrompi exposes no failure-acknowledgement
+  API. With the library's process-fault-tolerance mode enabled (Open MPI
+  5: `mpiexec --with-ft ulfm`), a receive from any source that a process
+  failure leaves pending (`MPI_ERR_PROC_FAILED_PENDING`) cannot complete
+  through ferrompi. The `wait` or `test` call that reports it (or `irecv`
+  itself when the request table is full, since it then waits for the
+  receive before returning `ResourceExhausted`) prints
+  `ferrompi: receive pending after a process failure` to stderr and aborts
+  the process instead of returning. Other failures return `Err` as usual.
+
+## Building
+
+`build.rs` detects the MPI installation through two tiers, tried in order.
+
+**Explicit tier.** The first non-empty variable among `MPI_PKG_CONFIG`,
+`MPICC` and `CRAY_MPICH_DIR` wins outright: if its probe fails, the build
+panics naming that variable (`MPI_PKG_CONFIG=<name>: ...`), with no
+fall-through to the next variable or to auto-detection.
+
+**Auto tier**, tried only when none of the three is set: pkg-config for
+`mpich`, then `ompi`, then `mpi`; then `mpicc` on `PATH`; then `/usr`,
+`/usr/local`, `/opt/mpich` and `/opt/openmpi`, each checked for
+`include/mpi.h` plus a matching library under `lib`, `lib64` or the Debian
+multiarch `lib` directory.
+
+A compiler wrapper — `mpicc`, or the path named by `MPICC` — is queried with
+`-show` first (MPICH, Intel MPI), then `--showme` (Open MPI). Only its
+`-I`, `-L`, `-l` and `-D` tokens are used; every other token is ignored.
+
+- **Open MPI**: auto-detected through pkg-config's `ompi` package, or
+  select it explicitly with `MPI_PKG_CONFIG=ompi` or `MPICC=<path>/mpicc`
+  (an Open MPI wrapper answers `--showme`).
+- **Cray**: the `cray-mpich` module sets `CRAY_MPICH_DIR`. As one of the
+  three explicit variables, it outranks auto-detection — it does not
+  outrank `MPI_PKG_CONFIG` or `MPICC`, which are checked first. `build.rs`
+  uses `$CRAY_MPICH_DIR/lib/pkgconfig/mpich.pc` when it exists, otherwise
+  `include/mpi.h` together with `libmpich` or `libmpi` under `lib` or
+  `lib64`. Never set `MPICC` to Cray's `cc`: it answers neither `-show` nor
+  `--showme`, so the build fails.
+- **MPI 5 standard ABI**: set `MPICC` to the implementation's ABI wrapper,
+  for example `MPICC=<prefix>/bin/mpicc_abi`. CI builds the examples this
+  way against the MPI Forum's reference ABI stubs. Such a build compiles
+  and links, but nothing runs it: runtime support is planned for 0.8.0. See
+  ADR-0006 (`ferrompi::doc::adr_0006_mpi5_abi_direction`) for the
+  direction. The draft ABI — `MPI_ABI_VERSION` defined with `MPI_VERSION`
+  below 5, as an `-DMPI_ABI` MPICH 4.3 build produces — is rejected at
+  compile time.
+
+Cargo reruns `build.rs`, and therefore recompiles the C shim, whenever
+`MPI_PKG_CONFIG`, `MPICC`, `CRAY_MPICH_DIR` or `PATH` changes — including a
+`module load` that only changes `PATH`.
+
+Two Cargo features gate optional functionality: `rma` enables RMA and
+shared-memory window operations; `numa` implies `rma` and adds the SLURM
+helpers (the `slurm` module and `SlurmInfo`), needing no extra system
+library.
+
+## Running
+
+`build.rs` embeds no rpath in the binary. If the MPI library is not on the
+loader's default search path, a binary built against it fails to start with
+an error such as `libmpi.so.12: cannot open shared object file`. Make the
+library discoverable at run time: set `LD_LIBRARY_PATH` (`DYLD_LIBRARY_PATH`
+on macOS), register its directory with `ldconfig`, or load the cluster's MPI
+module.
+
+Launch with the library's own `mpiexec` or `srun`, not another
+implementation's.
+
+Run-time costs of ferrompi's own checks:
+
+- `Win::create` and `Win::allocate` each perform one allgather of 8 bytes
+  per rank, for the RMA bounds check; `SharedWindow::allocate` does not;
+- `Win::allocate` and `SharedWindow::allocate` also zero their segment,
+  which adds a lock-all epoch, two barriers, and a `memset` that commits
+  every page at construction time. For example, a 64 MiB window at 4 ranks
+  took about 60 ms per create-and-free, against about 18 ms for the raw MPI
+  calls without ferrompi's zeroing, measured on MPICH 4.2.3 on one host;
+- every `Win` data-transfer call adds a local bounds check — no
+  communication — costing a few nanoseconds.
+
+### Reporting compatibility
+
+Compatibility reports from implementations outside the three CI builds
+above are the primary way this reference improves. When filing a report,
+include:
 
 ```text
-## Compatibility Report
-
 - ferrompi version: (output of `grep '^version' Cargo.toml`)
 - MPI implementation and version: (output of `mpiexec --version`)
-- OS and distribution: (e.g., Ubuntu 22.04, RHEL 9.3, macOS 14.4)
-- Compiler: (output of `$(MPICC) --version` or `mpicc --version`)
-- Cargo features tested: (e.g., `default`, `rma`, `numa`)
-- Test command: (e.g., `MPI_NP=4 ./tests/run_mpi_tests.sh rma`)
-- Test results: (pass/fail counts; paste the summary line)
-- Failing examples (if any): (names of failing `run_test` entries)
-- Any environment variable overrides used: (MPI_PKG_CONFIG, MPICC, etc.)
+- OS and distribution:
+- Compiler: (output of `mpicc --version`, or the wrapper named by MPICC)
+- Cargo features tested: (e.g., default, rma, numa)
+- Test command: (e.g., `MPI_NP_LIST=4 ./tests/run_mpi_tests.sh rma`)
+- Test results: the runner's summary line, plus any `FAIL <example> (np=N)`
+  lines
 ```
-
-Once a report is verified (reproducible by a maintainer or confirmed by a
-second independent report), the relevant cells in the matrix above are updated
-from ? to ✓ or ⚠, and the issue number is linked from the corresponding
-footnote. Reports that do not include the `mpiexec --version` output cannot be
-verified and will not be used to update the matrix.

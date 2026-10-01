@@ -6,6 +6,7 @@
 //! ranks synchronize via `barrier()`, then rank 0 calls `rsend_init` + `start()`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_rsend
+// mpi-test: np=2
 
 use ferrompi::Mpi;
 

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Pre-commit hook: ln -sf ../../.github/scripts/pre-commit .git/hooks/pre-commit
+set -euo pipefail
+cargo fmt --all -- --check
+bash .github/scripts/check-no-plan-leaks.sh

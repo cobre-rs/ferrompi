@@ -5,8 +5,11 @@
 //! operation name "bcast".
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_error_context
+// mpi-test: np=2
 
 use ferrompi::Mpi;
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -34,12 +37,8 @@ fn main() {
             }
         }
         Ok(_) => {
-            // Some MPI implementations tolerate invalid roots in single-rank
-            // jobs; skip rather than fail.
-            if world.rank() == 0 {
-                println!("SKIP: broadcast with root=999 returned Ok (MPI did not error)");
-                println!("      This can happen with lenient single-rank MPI implementations.");
-            }
+            eprintln!("FAIL: broadcast with root 999 returned Ok");
+            std::process::exit(1);
         }
     }
 }

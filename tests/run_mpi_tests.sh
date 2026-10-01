@@ -1,288 +1,650 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ==========================================================================
-# FerroMPI Integration Test Runner
+# FerroMPI MPI integration test runner.
 #
-# Builds all examples and runs each test example with mpiexec.
-# Reports pass/fail for each and returns nonzero if any test fails.
+# Discovers directive-bearing examples/*.rs files, builds them through
+# `cargo build --examples --message-format=json-render-diagnostics`, and
+# runs each one under mpiexec. Executable paths are resolved from the cargo
+# JSON artifact stream, so the runner works with a relocated
+# CARGO_TARGET_DIR.
 #
 # Usage:
-#   ./tests/run_mpi_tests.sh               # Run default tests
-#   ./tests/run_mpi_tests.sh rma           # Run with rma feature (includes shared_memory)
-#   ./tests/run_mpi_tests.sh numa          # Run with numa feature (implies rma)
-#   MPI_NP=8 ./tests/run_mpi_tests.sh      # Run with 8 processes
+#   tests/run_mpi_tests.sh [features]
+#   tests/run_mpi_tests.sh --valgrind [features]
+#
+# --valgrind selects only examples whose directive has the `valgrind` flag,
+# runs each once at its minimal np under `valgrind --error-exitcode=99`
+# with tests/valgrind/mpich.supp, and multiplies the per-run timeout by 10.
 #
 # Environment:
-#   MPI_NP      — Number of MPI processes (default: 4)
-#   MPIEXEC     — Path to mpiexec (default: mpiexec)
-#   BUILD_MODE  — "debug" or "release" (default: debug)
-#
-# Prerequisites:
-#   - MPICH 4.0+ or OpenMPI 5.0+ installed
-#   - Rust toolchain installed
+#   MPI_NP_LIST       Space-separated process counts (default: 4)
+#   MPIEXEC           Path to mpiexec (default: mpiexec)
+#   MPI_TEST_TIMEOUT  Per-run wall-clock cap in seconds (default: 90)
 # ==========================================================================
 set -euo pipefail
 
-# Configuration
-FEATURES="${1:-}"
-NP="${MPI_NP:-4}"
+MPI_NP_LIST="${MPI_NP_LIST:-4}"
 MPIEXEC="${MPIEXEC:-mpiexec}"
-BUILD_MODE="${BUILD_MODE:-debug}"
+MPI_TEST_TIMEOUT="${MPI_TEST_TIMEOUT:-90}"
 
-# Auto-detect OpenMPI and add --oversubscribe to avoid binding errors in CI
-MPIEXEC_ARGS=""
-if "$MPIEXEC" --version 2>&1 | grep -q "Open MPI"; then
-    MPIEXEC_ARGS="--oversubscribe"
-fi
+# The warning Mpi's Drop prints when it skips MPI_Finalize because a window is
+# still alive. Only expect=unfinalized examples may print it.
+FINALIZE_SKIPPED_MARKER="MPI_Finalize skipped"
 
-PASSED=0
-FAILED=0
-SKIPPED=0
-FAILED_TESTS=()
+# valgrind flags for --valgrind mode. classify reports exit 99 as
+# "FAIL valgrind errors", so --error-exitcode must stay 99.
+readonly -a VALGRIND_ARGS=(-q --error-exitcode=99 --track-origins=yes --leak-check=no)
 
-# Color codes (if terminal supports it)
-if [ -t 1 ]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[0;33m'
-    CYAN='\033[0;36m'
-    BOLD='\033[1m'
-    RESET='\033[0m'
-else
-    RED=''
-    GREEN=''
-    YELLOW=''
-    CYAN=''
-    BOLD=''
-    RESET=''
-fi
+FEATURES=""
+IMPL_ID=""
+FEATURE_CLOSURE=""
+TMPDIR_RUN=""
+VALGRIND_MODE=0
+VALGRIND_SUPP=""
+declare -a MPI_NP_LIST_ARR=()
+declare -a MPIEXEC_ARGS=()
 
-# ========================================================================
-# Helper functions
-# ========================================================================
+declare -A DIRECTIVE_NP=()
+declare -A DIRECTIVE_TIMEOUT=()
+declare -A DIRECTIVE_SKIPOK=()
+declare -A DIRECTIVE_EXPECT=()
+declare -A DIRECTIVE_STDERR=()
+declare -A DIRECTIVE_VALGRIND=()
+declare -a DIRECTIVE_ORDER=()
 
-print_header() {
-    echo ""
-    echo -e "${BOLD}╔════════════════════════════════════════════════════╗${RESET}"
-    echo -e "${BOLD}║       FerroMPI Integration Test Runner            ║${RESET}"
-    echo -e "${BOLD}╚════════════════════════════════════════════════════╝${RESET}"
-    echo ""
-    echo -e "  Processes:   ${CYAN}${NP}${RESET}"
-    echo -e "  Features:    ${CYAN}${FEATURES:-default}${RESET}"
-    echo -e "  Build mode:  ${CYAN}${BUILD_MODE}${RESET}"
-    echo -e "  mpiexec:     ${CYAN}${MPIEXEC}${RESET}"
-    echo -e "  mpiexec args:${CYAN}${MPIEXEC_ARGS:- (none)}${RESET}"
-    echo ""
+declare -A ARTIFACTS=()
+declare -A REQUIRED_FEATURES=()
+
+declare -a SKIP_REASONS=()
+declare -a FAILED_RUNS=()
+PASS_COUNT=0
+SKIP_COUNT=0
+SKIP_FEATURE_COUNT=0
+FAIL_COUNT=0
+RUNS_EXECUTED=0
+
+# ==========================================================================
+# Pure functions
+# ==========================================================================
+
+# die <message>
+# Prints "ERROR: <message>" on stderr and exits 2 (a usage or build
+# error, not a test failure).
+die() {
+  echo "ERROR: $*" >&2
+  exit 2
 }
 
-check_prerequisites() {
-    if ! command -v "$MPIEXEC" &> /dev/null; then
-        echo -e "${RED}ERROR: ${MPIEXEC} not found in PATH${RESET}"
-        echo "Please install MPICH or OpenMPI first:"
-        echo "  Ubuntu: sudo apt install mpich libmpich-dev"
-        echo "  macOS:  brew install mpich"
-        exit 1
-    fi
+# parse_directive <line>
+# Parses the content of a `// mpi-test: ` line into
+# np/timeout/skip-ok/expect/valgrind fields. Prints
+# "<np>|<timeout>|<skip-ok>|<expect>|<valgrind>" (empty string for an absent
+# field, "1" for the valgrind flag) and returns 0, or prints a reason on
+# stderr and returns 1.
+parse_directive() {
+  local line="$1"
+  local np="" tmo="" skip_ok="" expect="" valgrind=""
+  local -a kvs
+  read -ra kvs <<<"$line"
 
-    if ! command -v cargo &> /dev/null; then
-        echo -e "${RED}ERROR: cargo not found in PATH${RESET}"
-        echo "Please install the Rust toolchain first."
-        exit 1
-    fi
+  local kv
+  for kv in "${kvs[@]}"; do
+    case "$kv" in
+      np=*)
+        np="${kv#np=}"
+        if [[ ! "$np" =~ ^[0-9]+(\.\.)?$ ]]; then
+          echo "invalid np value: $kv" >&2
+          return 1
+        fi
+        ;;
+      timeout=*)
+        tmo="${kv#timeout=}"
+        if [[ ! "$tmo" =~ ^[0-9]+$ ]]; then
+          echo "invalid timeout value: $kv" >&2
+          return 1
+        fi
+        ;;
+      skip-ok=*)
+        skip_ok="${kv#skip-ok=}"
+        if [[ -z "$skip_ok" ]]; then
+          echo "invalid skip-ok value: $kv" >&2
+          return 1
+        fi
+        ;;
+      expect=*)
+        expect="${kv#expect=}"
+        case "$expect" in
+          abort | unfinalized) ;;
+          *)
+            echo "invalid expect value: $kv" >&2
+            return 1
+            ;;
+        esac
+        ;;
+      valgrind)
+        valgrind=1
+        ;;
+      *)
+        echo "unknown directive key: $kv" >&2
+        return 1
+        ;;
+    esac
+  done
+
+  if [[ -z "$np" ]]; then
+    echo "missing np key" >&2
+    return 1
+  fi
+
+  printf '%s|%s|%s|%s|%s\n' "$np" "$tmo" "$skip_ok" "$expect" "$valgrind"
 }
 
-build_examples() {
-    echo -e "${BOLD}Building examples...${RESET}"
-    local build_args=(--examples)
+# expand_np <spec> <np-list...>
+# np=N runs once at N. np=N.. runs at every np-list value >= N, or once at N
+# if none qualifies. Prints the resulting np values space-separated.
+expand_np() {
+  local spec="$1"
+  shift
+  local -a np_list=("$@")
 
-    if [ "$BUILD_MODE" = "release" ]; then
-        build_args+=(--release)
-    fi
+  if [[ "$spec" != *".." ]]; then
+    echo "$spec"
+    return 0
+  fi
 
-    if [ -n "$FEATURES" ]; then
-        build_args+=(--features "$FEATURES")
+  local base="${spec%..}"
+  local -a matched=()
+  local n
+  for n in "${np_list[@]}"; do
+    if ((n >= base)); then
+      matched+=("$n")
     fi
+  done
 
-    if ! cargo build "${build_args[@]}" 2>&1; then
-        echo -e "${RED}ERROR: Build failed${RESET}"
-        exit 1
-    fi
-    echo -e "${GREEN}Build successful!${RESET}"
-    echo ""
+  if ((${#matched[@]} == 0)); then
+    echo "$base"
+  else
+    echo "${matched[*]}"
+  fi
 }
 
-# Run a single test example
-# Arguments: $1 = test name, $2 = number of processes (optional, defaults to NP)
-run_test() {
-    local name="$1"
-    local procs="${2:-$NP}"
-    local binary="./target/${BUILD_MODE}/examples/${name}"
-    # Per-test wall-clock cap. Picked larger than any healthy mpiexec on the
-    # examples we run (most finish in <1s; the concurrency stress test in <30s),
-    # but small enough that an MPI deadlock fails the test cleanly instead of
-    # consuming the GitHub Actions 30-minute job budget.
-    local test_timeout="${MPI_TEST_TIMEOUT:-90}"
+# impl_id <mpiexec --version output>
+# HYDRA + a Version: X.Y.Z line becomes mpich-X.Y.Z; Open MPI/OpenRTE +
+# X.Y.Z becomes openmpi-X.Y.Z; anything else becomes unknown.
+impl_id() {
+  local output="$1"
 
-    if [ ! -f "$binary" ]; then
-        echo -e "  ${YELLOW}SKIP${RESET}  ${name} (binary not found)"
-        SKIPPED=$((SKIPPED + 1))
-        return 0
+  if [[ "$output" == *HYDRA* ]]; then
+    local v
+    v=$(printf '%s\n' "$output" | sed -n 's/^[[:space:]]*Version:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' | head -1)
+    if [[ -n "$v" ]]; then
+      echo "mpich-$v"
+      return 0
     fi
+  fi
 
-    echo -n -e "  Running ${BOLD}${name}${RESET} (n=${procs})... "
+  if [[ "$output" == *"Open MPI"* || "$output" == *"OpenRTE"* ]]; then
+    local v
+    v=$(printf '%s\n' "$output" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if [[ -n "$v" ]]; then
+      echo "openmpi-$v"
+      return 0
+    fi
+  fi
 
-    local output
-    local exit_code=0
-    # shellcheck disable=SC2086
-    output=$(timeout --kill-after=10 "$test_timeout" \
-        "$MPIEXEC" $MPIEXEC_ARGS -n "$procs" "$binary" 2>&1) || exit_code=$?
+  echo "unknown"
+}
 
-    if [ $exit_code -eq 0 ]; then
-        echo -e "${GREEN}PASS${RESET}"
-        PASSED=$((PASSED + 1))
-    elif [ $exit_code -eq 124 ] || [ $exit_code -eq 137 ]; then
-        echo -e "${RED}FAIL${RESET} (timeout after ${test_timeout}s)"
-        FAILED=$((FAILED + 1))
-        FAILED_TESTS+=("$name (timeout)")
-        echo "    --- last output ---"
-        echo "$output" | tail -20 | sed 's/^/    /'
-        echo "    --- end ---"
+# feature_closure <requested-csv> <features-json>
+# <features-json> is cargo metadata's `packages[0].features` object (feature
+# name -> implied feature list). Prints the transitive closure of
+# <requested-csv> as a sorted comma-separated list.
+feature_closure() {
+  local requested_csv="$1" features_json="$2"
+
+  local -A imp_of=()
+  local feat implied
+  while IFS='|' read -r feat implied; do
+    imp_of["$feat"]="$implied"
+  done < <(jq -r 'to_entries[] | "\(.key)|\(.value | join(","))"' <<<"$features_json")
+
+  local -A closure=()
+  local -a reqs
+  IFS=',' read -ra reqs <<<"$requested_csv"
+  local f
+  for f in "${reqs[@]}"; do
+    closure["$f"]=1
+  done
+
+  local changed=1
+  while ((changed)); do
+    changed=0
+    for f in "${!closure[@]}"; do
+      local -a implies
+      IFS=',' read -ra implies <<<"${imp_of[$f]:-}"
+      local imp
+      for imp in "${implies[@]}"; do
+        if [[ -z "${closure[$imp]+x}" ]] && [[ -n "${imp_of[$imp]+x}" ]]; then
+          closure["$imp"]=1
+          changed=1
+        fi
+      done
+    done
+  done
+
+  local -a sorted
+  mapfile -t sorted < <(printf '%s\n' "${!closure[@]}" | sort)
+  (
+    IFS=,
+    echo "${sorted[*]}"
+  )
+}
+
+# classify <exit> <output-file> <skip-ok> <expect> <stderr-literal> <impl-id>
+# Prints one outcome line: "PASS", "SKIP <reasons>" or "FAIL <detail>".
+classify() {
+  local exit_code="$1" outfile="$2" skip_ok="$3" expect="$4" literal="$5" impl="$6"
+
+  if [[ "$exit_code" == "124" || "$exit_code" == "137" ]]; then
+    echo "FAIL timeout"
+    return 0
+  fi
+
+  if [[ "$exit_code" == "99" ]]; then
+    echo "FAIL valgrind errors"
+    return 0
+  fi
+
+  if [[ "$expect" != "unfinalized" ]] && grep -qF -- "$FINALIZE_SKIPPED_MARKER" "$outfile"; then
+    echo "FAIL $FINALIZE_SKIPPED_MARKER without expect=unfinalized"
+    return 0
+  fi
+
+  if [[ "$expect" == "abort" ]] && ! { [[ "$exit_code" == "0" ]] && grep -q '^SKIP: ' "$outfile"; }; then
+    if [[ "$exit_code" == "0" ]]; then
+      echo "FAIL exited 0, abort expected"
+    elif ! grep -qF -- "$literal" "$outfile"; then
+      echo "FAIL abort marker missing"
+    elif grep -q '^FAIL: ' "$outfile"; then
+      echo "FAIL output contains a FAIL: line"
     else
-        echo -e "${RED}FAIL${RESET} (exit code: ${exit_code})"
-        FAILED=$((FAILED + 1))
-        FAILED_TESTS+=("$name")
-        # Print output for failed tests to aid debugging
-        echo "    --- output ---"
-        echo "$output" | sed 's/^/    /'
-        echo "    --- end ---"
+      echo "PASS"
     fi
+    return 0
+  fi
+
+  if [[ "$expect" == "unfinalized" ]]; then
+    if [[ "$exit_code" != "0" && "$exit_code" != "1" ]]; then
+      echo "FAIL exit $exit_code"
+      return 0
+    fi
+  elif [[ "$exit_code" != "0" ]]; then
+    echo "FAIL exit $exit_code"
+    return 0
+  fi
+
+  local skip_lines
+  skip_lines=$(grep '^SKIP: ' "$outfile" || true)
+
+  if [[ -n "$skip_lines" ]]; then
+    local registered=1 ok
+    local -a skip_oks
+    IFS=',' read -ra skip_oks <<<"$skip_ok"
+    for ok in "${skip_oks[@]}"; do
+      if [[ "$impl" == "$ok"* ]]; then
+        registered=0
+      fi
+    done
+
+    local reasons="" first_reason="" r
+    while IFS= read -r r; do
+      r="${r#SKIP: }"
+      if [[ -z "$first_reason" ]]; then
+        first_reason="$r"
+      fi
+      if [[ -z "$reasons" ]]; then
+        reasons="$r"
+      else
+        reasons="$reasons; $r"
+      fi
+    done <<<"$skip_lines"
+
+    if [[ "$registered" == 0 ]]; then
+      echo "SKIP $reasons"
+    else
+      echo "FAIL unregistered SKIP: $first_reason"
+    fi
+    return 0
+  fi
+
+  if [[ -n "$literal" ]] && ! grep -qF -- "$literal" "$outfile"; then
+    echo "FAIL stderr marker missing"
+    return 0
+  fi
+
+  echo "PASS"
 }
 
-# ========================================================================
+# artifact_outcome <required-features-csv> <closure-csv>
+# Decides the outcome for an example whose build artifact is missing.
+# Prints "SKIP(feature)" if any required feature falls outside the closure,
+# or "FAIL missing binary" otherwise.
+artifact_outcome() {
+  local required_csv="$1" closure_csv="$2"
+  local -a reqs
+  IFS=',' read -ra reqs <<<"$required_csv"
+  local req
+  for req in "${reqs[@]}"; do
+    if [[ ",$closure_csv," != *",$req,"* ]]; then
+      echo "SKIP(feature)"
+      return 0
+    fi
+  done
+  echo "FAIL missing binary"
+}
+
+# lib_debug_assertions <cargo-json-file>
+# Prints the debug_assertions flag cargo reports for the ferrompi library
+# artifact ("true"/"false"), or nothing when the stream has no such artifact.
+lib_debug_assertions() {
+  jq -r 'select(.reason=="compiler-artifact" and .target.name=="ferrompi" and (.target.kind|index("lib"))) | .profile.debug_assertions' "$1" | head -1
+}
+
+# ==========================================================================
+# Discovery, build and execution
+# ==========================================================================
+
+# discover <examples-dir>
+# Reads every top-level <examples-dir>/*.rs, validates its directive grammar
+# and populates the DIRECTIVE_* globals. Exits 2 on any grammar error, before
+# building anything.
+discover() {
+  local examples_dir="$1"
+  local f base line stderr_count directive_count
+  for f in $(printf '%s\n' "$examples_dir"/*.rs | sort); do
+    base=$(basename "$f" .rs)
+    line=$(sed -n 's#^// mpi-test: ##p' "$f" | head -1)
+    stderr_count=$(grep -c '^// mpi-test-stderr: ' "$f" || true)
+    directive_count=$(grep -c '^// mpi-test: ' "$f" || true)
+
+    if ((directive_count > 1)); then
+      die "$f: more than one // mpi-test: line"
+    fi
+
+    if [[ -z "$line" ]]; then
+      if ((stderr_count > 0)); then
+        die "$f: // mpi-test-stderr line without a // mpi-test: line"
+      fi
+      if [[ "$base" == test_* ]]; then
+        die "$f: missing // mpi-test: directive"
+      fi
+      continue
+    fi
+
+    local parsed
+    if ! parsed=$(parse_directive "$line"); then
+      die "$f: invalid // mpi-test: directive: $line"
+    fi
+    local np tmo skip_ok expect valgrind
+    IFS='|' read -r np tmo skip_ok expect valgrind <<<"$parsed"
+
+    if ((stderr_count > 1)); then
+      die "$f: more than one // mpi-test-stderr line"
+    fi
+
+    local stderr_literal=""
+    if ((stderr_count == 1)); then
+      stderr_literal=$(sed -n 's#^// mpi-test-stderr: ##p' "$f" | head -1)
+    fi
+
+    if [[ -n "$expect" && "$stderr_count" -eq 0 ]]; then
+      die "$f: expect=$expect requires a // mpi-test-stderr line"
+    fi
+
+    if [[ "$expect" == "unfinalized" && "$np" != "1" ]]; then
+      die "$f: expect=unfinalized requires np=1"
+    fi
+
+    DIRECTIVE_ORDER+=("$base")
+    DIRECTIVE_NP["$base"]="$np"
+    DIRECTIVE_TIMEOUT["$base"]="${tmo:-$MPI_TEST_TIMEOUT}"
+    DIRECTIVE_SKIPOK["$base"]="$skip_ok"
+    DIRECTIVE_EXPECT["$base"]="$expect"
+    DIRECTIVE_STDERR["$base"]="$stderr_literal"
+    DIRECTIVE_VALGRIND["$base"]="$valgrind"
+  done
+}
+
+# build <features>
+# Builds every example (dev profile only; refuses a build whose ferrompi
+# library has debug assertions off, since several examples check debug-only
+# diagnostics) and populates ARTIFACTS[name] with each built target's
+# absolute executable path, resolved from cargo's JSON artifact stream so a
+# relocated CARGO_TARGET_DIR still works. Exits 2 on a build failure.
+build() {
+  local features="$1"
+  local -a build_args=(build --examples --message-format=json-render-diagnostics)
+  if [[ -n "$features" ]]; then
+    build_args+=(--features "$features")
+  fi
+
+  local json_file="$TMPDIR_RUN/cargo-build.json"
+  if ! cargo "${build_args[@]}" >"$json_file"; then
+    die "cargo build --examples failed"
+  fi
+
+  if [[ "$(lib_debug_assertions "$json_file")" == "false" ]]; then
+    die "ferrompi was built without debug assertions; several examples check debug-only diagnostics"
+  fi
+
+  local name exe
+  while IFS='|' read -r name exe; do
+    ARTIFACTS["$name"]="$exe"
+  done < <(jq -r 'select(.reason=="compiler-artifact" and (.target.kind|index("example")) and .executable!=null) | "\(.target.name)|\(.executable)"' "$json_file")
+}
+
+# run_all
+# Runs every discovered example (expanding np) through mpiexec, prints one
+# report line per run, and tallies PASS/SKIP/SKIP(feature)/FAIL. In
+# VALGRIND_MODE, only valgrind-tagged examples run, each once at its minimal
+# np under the valgrind prefix, with the timeout multiplied by 10.
+run_all() {
+  local name
+  for name in "${DIRECTIVE_ORDER[@]}"; do
+    if ((VALGRIND_MODE)) && [[ -z "${DIRECTIVE_VALGRIND[$name]}" ]]; then
+      continue
+    fi
+
+    local np_spec="${DIRECTIVE_NP[$name]}"
+    local run_timeout="${DIRECTIVE_TIMEOUT[$name]}"
+    local skip_ok="${DIRECTIVE_SKIPOK[$name]}"
+    local expect="${DIRECTIVE_EXPECT[$name]}"
+    local literal="${DIRECTIVE_STDERR[$name]}"
+    local required="${REQUIRED_FEATURES[$name]:-}"
+    local exe="${ARTIFACTS[$name]:-}"
+
+    if ((VALGRIND_MODE)); then
+      run_timeout=$((run_timeout * 10))
+    fi
+
+    if [[ -z "$exe" ]]; then
+      local outcome
+      outcome=$(artifact_outcome "$required" "$FEATURE_CLOSURE")
+
+      if [[ "$outcome" == "SKIP(feature)" ]]; then
+        echo "SKIP(feature) $name (np=$np_spec) required-features=$required"
+        SKIP_FEATURE_COUNT=$((SKIP_FEATURE_COUNT + 1))
+      else
+        echo "FAIL $name (np=$np_spec) missing binary"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+        FAILED_RUNS+=("$name (np=$np_spec): missing binary")
+      fi
+      continue
+    fi
+
+    local -a nps
+    if ((VALGRIND_MODE)); then
+      nps=("${np_spec%..}")  # np=N and np=N.. both give N
+    else
+      read -ra nps <<<"$(expand_np "$np_spec" "${MPI_NP_LIST_ARR[@]}")"
+    fi
+
+    local np
+    for np in "${nps[@]}"; do
+      local outfile="$TMPDIR_RUN/${name}.np${np}.out"
+      local rc=0
+      local -a exec_cmd=("$MPIEXEC" "${MPIEXEC_ARGS[@]}" -n "$np")
+      if ((VALGRIND_MODE)); then
+        exec_cmd+=(valgrind "${VALGRIND_ARGS[@]}" "--suppressions=$VALGRIND_SUPP")
+      fi
+      exec_cmd+=("$exe")
+      timeout --kill-after=10 "$run_timeout" "${exec_cmd[@]}" >"$outfile" 2>&1 || rc=$?
+
+      local outcome
+      outcome=$(classify "$rc" "$outfile" "$skip_ok" "$expect" "$literal" "$IMPL_ID")
+      local status="${outcome%% *}"
+      local reason=""
+      if [[ "$status" != "$outcome" ]]; then
+        reason="${outcome#* }"
+      fi
+
+      if [[ -n "$reason" ]]; then
+        echo "$status $name (np=$np) $reason"
+      else
+        echo "$status $name (np=$np)"
+      fi
+
+      RUNS_EXECUTED=$((RUNS_EXECUTED + 1))
+      case "$status" in
+        PASS)
+          PASS_COUNT=$((PASS_COUNT + 1))
+          ;;
+        SKIP)
+          SKIP_COUNT=$((SKIP_COUNT + 1))
+          SKIP_REASONS+=("$name (np=$np): $reason")
+          ;;
+        FAIL)
+          FAIL_COUNT=$((FAIL_COUNT + 1))
+          FAILED_RUNS+=("$name (np=$np): $reason")
+          tail -n 40 "$outfile" | sed 's/^/    /'
+          ;;
+      esac
+    done
+  done
+}
+
+# ==========================================================================
 # Main
-# ========================================================================
+# ==========================================================================
 
-print_header
-check_prerequisites
-build_examples
+main() {
+  if [[ "${1:-}" == "--valgrind" ]]; then
+    VALGRIND_MODE=1
+    shift
+  fi
+  FEATURES="${1:-}"
 
-echo -e "${BOLD}════════════════════════════════════════${RESET}"
-echo -e "${BOLD}Running integration tests${RESET}"
-echo -e "${BOLD}════════════════════════════════════════${RESET}"
+  local -a missing=()
+  command -v "$MPIEXEC" >/dev/null 2>&1 || missing+=("$MPIEXEC")
+  command -v cargo >/dev/null 2>&1 || missing+=("cargo")
+  command -v jq >/dev/null 2>&1 || missing+=("jq")
+  if ((VALGRIND_MODE)); then
+    command -v valgrind >/dev/null 2>&1 || missing+=("valgrind")
+  fi
+  if ((${#missing[@]} > 0)); then
+    die "missing required tool(s): ${missing[*]}"
+  fi
 
-# Smoke test first (to verify MPI works)
-run_test hello_world
+  if ((VALGRIND_MODE)); then
+    VALGRIND_SUPP="$(git rev-parse --show-toplevel)/tests/valgrind/mpich.supp"
+  fi
 
-# Core test examples
-run_test test_lifecycle 2
-run_test test_collectives
-run_test test_blocking_extra
-run_test test_nonblocking
-run_test test_p2p_extra
-run_test test_nonblocking_collectives
-run_test test_waitany 4
-run_test test_cancel 2
-run_test test_persistent
-run_test test_info 2
-run_test test_comm_split 4
-run_test test_errhandler_returns
-run_test test_gather_inplace 4
-run_test test_allgather_inplace 4
-run_test test_scatter_inplace 4
-run_test test_alltoall_inplace 4
-run_test test_igather_inplace 4
-run_test test_iallgather_inplace 4
-run_test test_iscatter_inplace 4
-run_test test_ialltoall_inplace 4
-run_test test_gather_init_inplace 4
-run_test test_allgather_init_inplace 4
-run_test test_scatter_init_inplace 4
-run_test test_alltoall_init_inplace 4
-run_test test_allreduce_bytes 4
-run_test test_error_context 2
-run_test test_request_table_concurrency 2
-run_test test_comm_table_concurrency 1
-run_test test_group_basic 4
-run_test test_group_set_ops 4
-run_test test_group_ranges 4
-run_test test_comm_from_group 4
-run_test test_group_compare 4
-run_test test_group_translate 4
-run_test test_custom_dt_contiguous 2
-run_test test_custom_dt_vector 2
-run_test test_custom_dt_struct 2
-run_test test_custom_dt_resized 2
-run_test test_custom_dt_p2p 2
-run_test test_mpi_from_group 4
-run_test test_user_op 4
-run_test test_persistent_p2p 2
-run_test test_persistent_rsend 2
-run_test test_persistent_ssend 2
-run_test test_persistent_bsend 2
-run_test test_persistent_count_overflow 2
-run_test test_waitall_count_overflow 2
-run_test test_get_group_invalid_handle 2
-run_test test_create_from_group_null_handle 2
+  read -ra MPI_NP_LIST_ARR <<<"$MPI_NP_LIST"
 
-echo ""
-echo -e "${BOLD}────────────────────────────────────────${RESET}"
-echo -e "${BOLD}Running existing examples as smoke tests${RESET}"
-echo -e "${BOLD}────────────────────────────────────────${RESET}"
+  TMPDIR_RUN=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$TMPDIR_RUN'" EXIT
 
-# Existing examples that serve as additional smoke tests
-run_test ring
-run_test allreduce
-run_test nonblocking
-run_test comm_split
-run_test reduce_op_bitwise 2
-run_test reduce_op_maxloc 4
+  local version_output
+  version_output=$("$MPIEXEC" --version 2>&1 || true)
+  IMPL_ID=$(impl_id "$version_output")
 
-# persistent_bcast may fail on MPI < 4.0 — run but don't count failure as fatal
-echo ""
-echo -n -e "  Running ${BOLD}persistent_bcast${RESET} (n=${NP}, MPI 4.0+)... "
-# shellcheck disable=SC2086
-PERSIST_OUTPUT=$("$MPIEXEC" $MPIEXEC_ARGS -n "$NP" "./target/${BUILD_MODE}/examples/persistent_bcast" 2>&1) || true
-echo -e "${YELLOW}DONE${RESET} (MPI 4.0+ required; may show 'not available')"
+  if [[ "$IMPL_ID" == openmpi-* ]]; then
+    MPIEXEC_ARGS+=(--oversubscribe)
+  fi
 
-# hybrid_openmp — run as smoke test
-run_test hybrid_openmp 2
+  echo "ferrompi MPI test runner"
+  echo "  mpiexec:      $MPIEXEC ($IMPL_ID)"
+  echo "  mpiexec args: ${MPIEXEC_ARGS[*]:-(none)}"
+  echo "  np list:      ${MPI_NP_LIST_ARR[*]}"
+  echo "  features:     ${FEATURES:-default}"
+  echo "  timeout:      ${MPI_TEST_TIMEOUT}s"
+  if ((VALGRIND_MODE)); then
+    echo "  mode:         valgrind (suppressions=$VALGRIND_SUPP)"
+  fi
+  echo
 
-# RMA / shared memory tests (only if rma or numa feature is enabled)
-if [[ "$FEATURES" == *"rma"* ]] || [[ "$FEATURES" == *"numa"* ]]; then
-    echo ""
-    echo -e "${BOLD}────────────────────────────────────────${RESET}"
-    echo -e "${BOLD}Running RMA/shared memory tests${RESET}"
-    echo -e "${BOLD}────────────────────────────────────────${RESET}"
-    run_test test_rma_window
-    run_test test_rma_win_create 2
-    run_test test_rma_win_fence 2
-    run_test test_rma_win_pscw 2
-    run_test test_rma_win_lock 2
-    run_test test_rma_win_flush_sync 2
-    run_test test_rma_put 2
-    run_test test_rma_rput 2
-    run_test test_rma_rget 2
-    run_test test_rma_get 2
-    run_test test_rma_accumulate 2
-    run_test test_rma_raccumulate 2
-    run_test test_rma_get_accumulate 2
-    run_test test_rma_fetch_and_op 2
-    run_test test_rma_compare_and_swap 2
-    run_test shared_memory
+  discover examples
+  build "$FEATURES"
+
+  local metadata
+  metadata=$(cargo metadata --no-deps --format-version 1)
+  local features_json
+  features_json=$(jq -c '.packages[0].features' <<<"$metadata")
+
+  local name req_csv
+  while IFS='|' read -r name req_csv; do
+    REQUIRED_FEATURES["$name"]="$req_csv"
+  done < <(jq -r '.packages[0].targets[] | select(.kind==["example"]) | "\(.name)|\((."required-features" // []) | join(","))"' <<<"$metadata")
+
+  local default_csv
+  default_csv=$(jq -r '(.packages[0].features.default // []) | join(",")' <<<"$metadata")
+  local requested_csv="$default_csv"
+  if [[ -n "$FEATURES" ]]; then
+    local -a explicit
+    IFS=', ' read -ra explicit <<<"$FEATURES"
+    local f
+    for f in "${explicit[@]}"; do
+      [[ -n "$f" ]] && requested_csv="${requested_csv:+$requested_csv,}$f"
+    done
+  fi
+  FEATURE_CLOSURE=$(feature_closure "$requested_csv" "$features_json")
+
+  run_all
+
+  echo
+  echo "======================================================================"
+  echo "Summary"
+  echo "======================================================================"
+  echo "PASS: $PASS_COUNT"
+  echo "SKIP: $SKIP_COUNT"
+  echo "SKIP(feature): $SKIP_FEATURE_COUNT"
+  echo "FAIL: $FAIL_COUNT"
+
+  if ((${#SKIP_REASONS[@]} > 0)); then
+    echo
+    echo "SKIP reasons:"
+    local r
+    for r in "${SKIP_REASONS[@]}"; do
+      echo "  $r"
+    done
+  fi
+
+  if ((${#FAILED_RUNS[@]} > 0)); then
+    echo
+    echo "Failed runs:"
+    local r
+    for r in "${FAILED_RUNS[@]}"; do
+      echo "  $r"
+    done
+  fi
+
+  if ((FAIL_COUNT > 0 || RUNS_EXECUTED == 0)); then
+    exit 1
+  fi
+  exit 0
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-# ========================================================================
-# Summary
-# ========================================================================
-echo ""
-echo -e "${BOLD}╔════════════════════════════════════════════════════╗${RESET}"
-TOTAL=$((PASSED + FAILED + SKIPPED))
-if [ "$FAILED" -eq 0 ]; then
-    echo -e "${BOLD}║${RESET}  ${GREEN}Results: ${PASSED} passed, ${FAILED} failed, ${SKIPPED} skipped (${TOTAL} total)${RESET}"
-    echo -e "${BOLD}║${RESET}  ${GREEN}All tests passed!${RESET}"
-else
-    echo -e "${BOLD}║${RESET}  ${RED}Results: ${PASSED} passed, ${FAILED} failed, ${SKIPPED} skipped (${TOTAL} total)${RESET}"
-    echo -e "${BOLD}║${RESET}  ${RED}Failed tests: ${FAILED_TESTS[*]}${RESET}"
-fi
-echo -e "${BOLD}╚════════════════════════════════════════════════════╝${RESET}"
-
-exit "$FAILED"

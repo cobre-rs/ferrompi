@@ -6,6 +6,7 @@
 //! and verifies the result.
 //!
 //! Run with: mpiexec -n 4 cargo run --example gatherv
+// mpi-test: np=2..
 
 use ferrompi::{Mpi, Result};
 

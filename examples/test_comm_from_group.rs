@@ -13,8 +13,11 @@
 //! collective calls.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_comm_from_group
+// mpi-test: np=4
 
 use ferrompi::{Mpi, ReduceOp};
+
+mod common;
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -47,7 +50,7 @@ fn main() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("rank {rank}: FAIL: create_from_group returned error: {e}");
-            let _ = world.allreduce_scalar(0i32, ReduceOp::Min);
+            common::check(&world, false, "test_comm_from_group");
             std::process::exit(1);
         }
     };
@@ -60,11 +63,7 @@ fn main() {
             Some(c) => c,
             None => {
                 eprintln!("rank {rank}: FAIL Test 1a: expected Some(comm), got None");
-                local_ok = false;
-                // Participate in subsequent collective calls with fallback.
-                // We cannot join sub-comm collectives without a comm, so we
-                // skip them and let the sentinel allreduce catch the failure.
-                let _ = world.allreduce_scalar(local_ok as i32, ReduceOp::Min);
+                common::check(&world, false, "test_comm_from_group");
                 std::process::exit(1);
             }
         };
@@ -116,24 +115,5 @@ fn main() {
         }
     }
 
-    // ========================================================================
-    // Sentinel allreduce(Min) — gate process::exit so no rank exits early.
-    // ========================================================================
-    let global_ok = world
-        .allreduce_scalar(local_ok as i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
-
-    if global_ok == 0 {
-        if rank == 0 {
-            eprintln!("FAIL: at least one rank failed a create_from_group assertion");
-        }
-        std::process::exit(1);
-    }
-
-    if rank == 0 {
-        println!();
-        println!("========================================");
-        println!("All create_from_group tests passed!");
-        println!("========================================");
-    }
+    common::check(&world, local_ok, "test_comm_from_group");
 }
