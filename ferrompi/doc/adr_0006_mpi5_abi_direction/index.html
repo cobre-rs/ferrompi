@@ -1,0 +1,67 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="ADR-0006: MPI 5.0 Standard ABI Direction"><title>ferrompi::doc::adr_0006_mpi5_abi_direction - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-203241e4.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.101.0-nightly (21b707e3f 2026-09-30)" data-channel="nightly" data-search-js="search-b167f383.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module adr_0006_mpi5_abi_direction</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../ferrompi/index.html">ferrompi</a><span class="version">0.6.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module adr_<wbr>0006_<wbr>mpi5_<wbr>abi_<wbr>direction</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#adr-0006-mpi-50-standard-abi-direction" title="ADR-0006: MPI 5.0 Standard ABI Direction">ADR-0006: MPI 5.0 Standard ABI Direction</a><ul><li><a href="#context" title="Context">Context</a></li><li><a href="#decision" title="Decision">Decision</a></li><li><a href="#consequences" title="Consequences">Consequences</a></li><li><a href="#alternatives" title="Alternatives">Alternatives</a></li></ul></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In ferrompi::<wbr>doc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">ferrompi</a>::<wbr><a href="../index.html">doc</a></div><h1>Module <span>adr_<wbr>0006_<wbr>mpi5_<wbr>abi_<wbr>direction</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/ferrompi/doc.rs.html#40">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="adr-0006-mpi-50-standard-abi-direction"><a class="doc-anchor" href="#adr-0006-mpi-50-standard-abi-direction">§</a>ADR-0006: MPI 5.0 Standard ABI Direction</h2>
+<p><strong>Status:</strong> Accepted — 2026-09-24</p>
+<h3 id="context"><a class="doc-anchor" href="#context">§</a>Context</h3>
+<p>The MPI Forum ratified a standard binary ABI in MPI 5.0 (June 2025,
+<a href="https://www.mpi-forum.org/docs/mpi-5.0/mpi50-report.pdf">https://www.mpi-forum.org/docs/mpi-5.0/mpi50-report.pdf</a>). Conforming
+implementations keep the <code>mpi.h</code> header but build and export a separate
+library, <code>libmpi_abi</code>, which must be the application’s only direct MPI
+dependency. Handles become pointers to incomplete struct types, and
+predefined handles and constants take fixed values across every conforming
+implementation. A compiler defines <code>MPI_ABI_VERSION</code> when the ABI header is
+in effect.</p>
+<p>ferrompi’s C shim is compiled against one selected MPI implementation’s
+<code>mpi.h</code> and linked against that implementation’s library (ADR-0001, amended
+2026-09-24). The shim’s handle tables give one Rust API that compiles
+against every implementation’s headers — source portability — not a single
+binary that runs against any conforming MPI library. Binary portability is
+what a ratified-ABI build adds.</p>
+<p>MPICH 4.3’s <code>-DMPI_ABI</code> build defines <code>MPI_ABI_VERSION</code> but predates
+ratification: its error-handler and thread-level constants differ from the
+ratified ABI, so installing <code>MPI_ERRORS_RETURN</code> under that draft header
+installs an aborting handler instead. A build that trusts <code>MPI_ABI_VERSION</code>
+alone cannot tell the draft header from the ratified one.</p>
+<h3 id="decision"><a class="doc-anchor" href="#decision">§</a>Decision</h3>
+<ol>
+<li>Binary portability comes from compiling the unchanged C shim against a
+ratified MPI 5.0 ABI <code>mpi.h</code> and linking <code>libmpi_abi</code>. The build script
+already builds this way when the MPI compiler wrapper is an ABI wrapper
+(for example <code>MPICC=&lt;prefix&gt;/bin/mpicc_abi</code>), and it forwards that
+wrapper’s <code>-D</code> defines to the C compiler. ferrompi adds no ABI-specific
+<code>cfg</code>, Cargo feature, or Rust code path.</li>
+<li>The draft ABI is rejected at compile time: the shim’s build stops with a
+preprocessor error when <code>MPI_ABI_VERSION</code> is defined and <code>MPI_VERSION</code>
+is below 5.</li>
+<li>ferrompi supports the ratified-ABI build with run-time testing once it
+stores MPI handles by value instead of in the shim’s handle tables.</li>
+<li>A Rust-native ABI backend — ABI struct and constant declarations written
+directly in Rust, with no C shim — waits for a concrete requirement,
+such as interoperability with another MPI-using C library or dropping
+the C toolchain from the build.</li>
+</ol>
+<h3 id="consequences"><a class="doc-anchor" href="#consequences">§</a>Consequences</h3>
+<ul>
+<li>The ratified-ABI build compiles and links but is not tested at run time
+until 0.8.0. CI’s “MPI ABI stubs” job builds the crate and its examples
+against the MPI Forum’s reference ABI stubs through their <code>mpicc_abi</code>
+wrapper; the stubs abort inside every non-trivial call, so nothing runs.</li>
+<li>The <code>DatatypeTag</code> and <code>ReduceOp</code> discriminants are internal (ADR-0003,
+amended 2026-09-24), which leaves room to encode them as ABI handle
+values later.</li>
+<li>The public API exposes no MPI implementation handle: <code>raw_handle()</code>
+returns an index into ferrompi’s own tables. Interoperability with other
+MPI-using libraries waits for the by-value handle representation in
+Decision 3.</li>
+<li><code>docs/mpi-compatibility.md</code> is the reference for selecting an ABI build.</li>
+</ul>
+<h3 id="alternatives"><a class="doc-anchor" href="#alternatives">§</a>Alternatives</h3>
+<ul>
+<li>Rejected: a build-script ABI probe emitting a <code>cfg</code> — no ferrompi code
+path differs between a native header and an ABI header.</li>
+<li>Rejected: accepting the draft ABI — its constants would install an
+aborting error handler.</li>
+<li>Rejected: a Rust-native ABI backend now — thousands of lines of handle
+and constant declarations for no stated requirement.</li>
+<li>Rejected: an ABI-only release — not while every ABI implementation is an
+opt-in build.</li>
+</ul>
+</div></details></section></div></main></body></html>

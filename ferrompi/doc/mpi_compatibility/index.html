@@ -1,0 +1,193 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="MPI Implementation Compatibility"><title>ferrompi::doc::mpi_compatibility - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-203241e4.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.101.0-nightly (21b707e3f 2026-09-30)" data-channel="nightly" data-search-js="search-b167f383.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module mpi_compatibility</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../ferrompi/index.html">ferrompi</a><span class="version">0.6.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module mpi_<wbr>compatibility</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#mpi-implementation-compatibility" title="MPI Implementation Compatibility">MPI Implementation Compatibility</a><ul><li><a href="#platforms-and-mpi-libraries" title="Platforms and MPI libraries">Platforms and MPI libraries</a></li><li><a href="#known-implementation-issues" title="Known implementation issues">Known implementation issues</a></li><li><a href="#building" title="Building">Building</a></li><li><a href="#running" title="Running">Running</a></li></ul></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In ferrompi::<wbr>doc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">ferrompi</a>::<wbr><a href="../index.html">doc</a></div><h1>Module <span>mpi_<wbr>compatibility</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/ferrompi/doc.rs.html#22">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="mpi-implementation-compatibility"><a class="doc-anchor" href="#mpi-implementation-compatibility">§</a>MPI Implementation Compatibility</h2>
+<p>This is ferrompi’s reference for selecting an MPI implementation, building
+against it, and running under it. Each fact below is stated once; what an
+individual method does lives in that method’s own rustdoc on docs.rs, not
+here.</p>
+<h3 id="platforms-and-mpi-libraries"><a class="doc-anchor" href="#platforms-and-mpi-libraries">§</a>Platforms and MPI libraries</h3>
+<p>Linux is the supported platform and the only one CI tests (x86_64,
+<code>ubuntu-24.04</code> runners). macOS builds but is not CI-tested. <code>LongDoubleInt</code>
+and <code>LongInt</code> are available only on Linux, and only on x86_64, aarch64 and
+little-endian powerpc64. Windows is not supported.</p>
+<p>ferrompi needs an MPI 3.1 library. It enables the persistent collectives and
+<code>Mpi::create_from_group</code> when the library’s <code>mpi.h</code> reports <code>MPI_VERSION &gt;= 4</code>,
+or when the library is Open MPI 5 or later, which implements both while
+reporting MPI 3.1; elsewhere they return <code>Error::NotSupported</code>. It uses the
+<code>_c</code> large-count calls only when <code>mpi.h</code> reports <code>MPI_VERSION &gt;= 4</code>; below
+that, Open MPI 5 included, a count above <code>i32::MAX</code> returns <code>Error::Mpi</code> with
+class <code>Count</code>. The variable-count collectives (<code>gatherv</code>, <code>scatterv</code>,
+<code>allgatherv</code>, <code>alltoallv</code> and their persistent forms) take their counts as
+<code>i32</code> arrays; a count above <code>i32::MAX</code> returns that same <code>Count</code> error on every
+MPI, including one with <code>MPI_VERSION &gt;= 4</code>. <code>Communicator::allreduce_with_op</code>
+does too: a <code>UserOp</code> is a classic MPI user function with an <code>int</code> length, which
+MPICH narrows a larger count into without splitting.</p>
+<p>The table below is the outcome of ferrompi’s three CI builds: MPICH 4.2.1
+(<code>ubuntu-24.04</code>, the Noble package hotfixed to that version, np 2/3/4,
+default and <code>rma</code>), Open MPI 4.1.6 (<code>ubuntu-24.04</code>, np 4, default and
+<code>rma</code>), and Open MPI 5.0.7 (a pinned <code>debian:trixie</code> container, np 4,
+<code>rma</code>). Every other MPI — MPICH 3.x, Intel MPI, Cray MPICH, or any other Open
+MPI version — is untested; expect it to behave like the MPICH row if it reports
+<code>MPI_VERSION</code> 4, like the Open MPI 5.0.7 row if it is Open MPI 5 or later, and
+like the Open MPI 4.1.6 row otherwise.</p>
+<div class="table"><table><thead><tr><th>Feature family</th><th>MPICH 4.2.1</th><th>Open MPI 4.1.6</th><th>Open MPI 5.0.7</th></tr></thead><tbody>
+<tr><td>Blocking and nonblocking collectives and point-to-point</td><td>tested</td><td>tested</td><td>tested</td></tr>
+<tr><td>Persistent point-to-point</td><td>tested</td><td>tested</td><td>tested</td></tr>
+<tr><td>Persistent collectives</td><td>tested</td><td><code>NotSupported</code></td><td>tested</td></tr>
+<tr><td><code>create_from_group</code></td><td>tested</td><td><code>NotSupported</code></td><td>tested</td></tr>
+<tr><td>Counts above <code>i32::MAX</code></td><td>tested</td><td><code>Err</code> (class <code>Count</code>)</td><td><code>Err</code> (class <code>Count</code>)</td></tr>
+<tr><td>RMA windows (<code>rma</code>)</td><td>tested</td><td>tested</td><td>tested</td></tr>
+</tbody></table>
+</div>
+<p>MPICH 4.2.1 reports <code>MPI_VERSION</code> 4; Open MPI 4.1.6 and 5.0.7 both report MPI
+3.1 (<code>MPI_VERSION</code> 3). ferrompi recognizes Open MPI 5 or later from the
+header’s <code>OMPI_MAJOR_VERSION</code>.</p>
+<h3 id="known-implementation-issues"><a class="doc-anchor" href="#known-implementation-issues">§</a>Known implementation issues</h3>
+<p>One item each: the symptom, the affected library, and what to do.</p>
+<ul>
+<li>MPICH 4.2.x: <code>scatter_init_inplace</code> (persistent <code>scatter</code> with
+<code>MPI_IN_PLACE</code> at the root) deadlocks. Fixed in MPICH 4.3. Use
+<code>scatter_init</code> with a separate send buffer on 4.2.x instead;
+<code>examples/test_inplace.rs</code> detects the affected version string at
+runtime and skips only this one case, not the other in-place persistent
+collectives.</li>
+<li>Ubuntu 24.04’s <code>mpich</code> 4.2.0 package starts every rank as a singleton —
+each sees a world of size 1 — once more than one process is launched. CI
+installs MPICH 4.2.1 from a pinned Ubuntu snapshot instead
+(<a href="https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338">Launchpad bug 2072338</a>).
+To avoid it, use an MPICH 4.2.1 or later package;
+<code>.github/scripts/mpich-hotfix.sh</code> shows the exact packages CI installs.</li>
+<li><code>Win::sync</code> outside a passive-target epoch is erroneous; MPICH returns an
+error for it. Call it between <code>Win::lock</code>/<code>Win::lock_all</code> and the guard’s
+drop — see the <code>Win::sync</code> method’s own documentation on docs.rs for the
+full rule. Other libraries may accept it silently, so a program tested
+only there can fail on MPICH.</li>
+<li>After a failed <code>wait_all</code>, which of the other requests are still pending
+depends on the library and on timing. On MPICH, the requests that come
+after the failed one in the slice stay pending. ferrompi’s own rule — a
+request is marked completed only once MPI actually completes it,
+successfully or not — holds on every library; rely on that rather than an
+implementation’s particular pending behaviour. To finish the rest, call
+<code>Request::wait_all</code> again on the same slice; completed entries are
+skipped.</li>
+<li>Open MPI 4.1.6 and 5.0.7: a nonblocking receive truncated by a send from a
+rank to itself is not reported as an error; the receive returns success.
+A blocking <code>recv</code> of the same message does report <code>Truncate</code>; use it for
+self-messages where truncation must be detected.</li>
+<li>Open MPI 4.1.6 and 5.0.7: a persistent request that fails inside <code>wait</code>,
+<code>test</code> or <code>wait_all</code> is freed by MPI. ferrompi marks the owning
+<code>PersistentRequest</code> inactive; a later <code>start</code> on it returns <code>Err</code> with
+class <code>Request</code>. Create a new request to run the operation again.</li>
+<li>Open MPI 4.1: <code>Win::create</code> over a self/TCP-only transport fails with
+<code>MPI_ERR_WIN</code>, even at a single process; restricting the transport to one
+interface does not help. In that configuration, <code>Win::allocate</code> works
+when all ranks share one host (CI’s setup); prefer it there.</li>
+<li>Open MPI 4.1.6, for <code>Win::allocate</code> windows whose ranks all share one
+host (these use Open MPI’s shared-memory one-sided component, <code>osc/sm</code>):
+once a window has been used for post-start-complete-wait (PSCW) epochs,
+a further PSCW epoch opened with <code>WinPscwAssert::no_check()</code> can let
+<code>wait_exposure</code> return before the matching put has landed. Open
+<code>no_check()</code> PSCW epochs only on a freshly allocated window.</li>
+<li>Open MPI 4.1’s TCP transport, on a host where an extra interface sits
+behind a NAT rule (for example Docker’s <code>docker0</code> bridge and its
+masquerade rule): sends between ranks on the same host can hang. This
+was observed with consecutive persistent sends. Open MPI spreads
+messages across one TCP path per interface, and messages on the
+NAT-rewritten path are never delivered. Same-host ranks use TCP only
+when shared memory is disabled, as CI does with <code>OMPI_MCA_btl=self,tcp</code>.
+Restrict TCP to the interfaces that actually connect the ranks. CI’s
+ranks share one host, so it sets <code>OMPI_MCA_btl_tcp_if_include=lo</code>. A
+multi-host job must name its cluster interface or subnet instead (for
+example <code>eth0</code> or <code>10.0.0.0/16</code>), never <code>lo</code>.</li>
+<li>If the MPI library refuses to install ferrompi’s error handler on a
+newly created window (reported for Open MPI 4.x), ferrompi prints a
+warning to stderr, and RMA errors on that window then abort the process
+instead of returning <code>Err</code>.</li>
+<li>When <code>MPI_Finalize</code> is skipped because a window is still alive — see the
+<code>Mpi</code> type’s own documentation for the full rule — MPICH’s <code>mpiexec</code>
+exits 0. Open MPI 4.1.6 and 5.0.7 instead exit 1 and print an “exiting
+improperly” notice. On every library, drop all windows before the <code>Mpi</code>
+handle so <code>MPI_Finalize</code> runs; under Open MPI, a skipped finalize makes
+the job exit non-zero, which batch schedulers and CI treat as a failure.</li>
+<li>Fault-tolerant MPI (ULFM): ferrompi exposes no failure-acknowledgement
+API. With the library’s process-fault-tolerance mode enabled (Open MPI
+5: <code>mpiexec --with-ft ulfm</code>), a receive from any source that a process
+failure leaves pending (<code>MPI_ERR_PROC_FAILED_PENDING</code>) cannot complete
+through ferrompi. The <code>wait</code> or <code>test</code> call that reports it (or <code>irecv</code>
+itself when the request table is full, since it then waits for the
+receive before returning <code>ResourceExhausted</code>) prints
+<code>ferrompi: receive pending after a process failure</code> to stderr and aborts
+the process instead of returning. Other failures return <code>Err</code> as usual.</li>
+</ul>
+<h3 id="building"><a class="doc-anchor" href="#building">§</a>Building</h3>
+<p><code>build.rs</code> detects the MPI installation through two tiers, tried in order.</p>
+<p><strong>Explicit tier.</strong> The first non-empty variable among <code>MPI_PKG_CONFIG</code>,
+<code>MPICC</code> and <code>CRAY_MPICH_DIR</code> wins outright: if its probe fails, the build
+panics naming that variable (<code>MPI_PKG_CONFIG=&lt;name&gt;: ...</code>), with no
+fall-through to the next variable or to auto-detection.</p>
+<p><strong>Auto tier</strong>, tried only when none of the three is set: pkg-config for
+<code>mpich</code>, then <code>ompi</code>, then <code>mpi</code>; then <code>mpicc</code> on <code>PATH</code>; then <code>/usr</code>,
+<code>/usr/local</code>, <code>/opt/mpich</code> and <code>/opt/openmpi</code>, each checked for
+<code>include/mpi.h</code> plus a matching library under <code>lib</code>, <code>lib64</code> or the Debian
+multiarch <code>lib</code> directory.</p>
+<p>A compiler wrapper — <code>mpicc</code>, or the path named by <code>MPICC</code> — is queried with
+<code>-show</code> first (MPICH, Intel MPI), then <code>--showme</code> (Open MPI). Only its
+<code>-I</code>, <code>-L</code>, <code>-l</code> and <code>-D</code> tokens are used; every other token is ignored.</p>
+<ul>
+<li><strong>Open MPI</strong>: auto-detected through pkg-config’s <code>ompi</code> package, or
+select it explicitly with <code>MPI_PKG_CONFIG=ompi</code> or <code>MPICC=&lt;path&gt;/mpicc</code>
+(an Open MPI wrapper answers <code>--showme</code>).</li>
+<li><strong>Cray</strong>: the <code>cray-mpich</code> module sets <code>CRAY_MPICH_DIR</code>. As one of the
+three explicit variables, it outranks auto-detection — it does not
+outrank <code>MPI_PKG_CONFIG</code> or <code>MPICC</code>, which are checked first. <code>build.rs</code>
+uses <code>$CRAY_MPICH_DIR/lib/pkgconfig/mpich.pc</code> when it exists, otherwise
+<code>include/mpi.h</code> together with <code>libmpich</code> or <code>libmpi</code> under <code>lib</code> or
+<code>lib64</code>. Never set <code>MPICC</code> to Cray’s <code>cc</code>: it answers neither <code>-show</code> nor
+<code>--showme</code>, so the build fails.</li>
+<li><strong>MPI 5 standard ABI</strong>: set <code>MPICC</code> to the implementation’s ABI wrapper,
+for example <code>MPICC=&lt;prefix&gt;/bin/mpicc_abi</code>. CI builds the examples this
+way against the MPI Forum’s reference ABI stubs. Such a build compiles
+and links, but nothing runs it: runtime support is planned for 0.8.0. See
+ADR-0006 (<code>ferrompi::doc::adr_0006_mpi5_abi_direction</code>) for the
+direction. The draft ABI — <code>MPI_ABI_VERSION</code> defined with <code>MPI_VERSION</code>
+below 5, as an <code>-DMPI_ABI</code> MPICH 4.3 build produces — is rejected at
+compile time.</li>
+</ul>
+<p>Cargo reruns <code>build.rs</code>, and therefore recompiles the C shim, whenever
+<code>MPI_PKG_CONFIG</code>, <code>MPICC</code>, <code>CRAY_MPICH_DIR</code> or <code>PATH</code> changes — including a
+<code>module load</code> that only changes <code>PATH</code>.</p>
+<p>Two Cargo features gate optional functionality: <code>rma</code> enables RMA and
+shared-memory window operations; <code>numa</code> implies <code>rma</code> and adds the SLURM
+helpers (the <code>slurm</code> module and <code>SlurmInfo</code>), needing no extra system
+library.</p>
+<h3 id="running"><a class="doc-anchor" href="#running">§</a>Running</h3>
+<p><code>build.rs</code> embeds no rpath in the binary. If the MPI library is not on the
+loader’s default search path, a binary built against it fails to start with
+an error such as <code>libmpi.so.12: cannot open shared object file</code>. Make the
+library discoverable at run time: set <code>LD_LIBRARY_PATH</code> (<code>DYLD_LIBRARY_PATH</code>
+on macOS), register its directory with <code>ldconfig</code>, or load the cluster’s MPI
+module.</p>
+<p>Launch with the library’s own <code>mpiexec</code> or <code>srun</code>, not another
+implementation’s.</p>
+<p>Run-time costs of ferrompi’s own checks:</p>
+<ul>
+<li><code>Win::create</code> and <code>Win::allocate</code> each perform one allgather of 8 bytes
+per rank, for the RMA bounds check; <code>SharedWindow::allocate</code> does not;</li>
+<li><code>Win::allocate</code> and <code>SharedWindow::allocate</code> also zero their segment,
+which adds a lock-all epoch, two barriers, and a <code>memset</code> that commits
+every page at construction time. For example, a 64 MiB window at 4 ranks
+took about 60 ms per create-and-free, against about 18 ms for the raw MPI
+calls without ferrompi’s zeroing, measured on MPICH 4.2.3 on one host;</li>
+<li>every <code>Win</code> data-transfer call adds a local bounds check — no
+communication — costing a few nanoseconds.</li>
+</ul>
+<h4 id="reporting-compatibility"><a class="doc-anchor" href="#reporting-compatibility">§</a>Reporting compatibility</h4>
+<p>Compatibility reports from implementations outside the three CI builds
+above are the primary way this reference improves. When filing a report,
+include:</p>
+<div class="example-wrap"><pre class="language-text"><code>- ferrompi version: (output of `grep &#39;^version&#39; Cargo.toml`)
+- MPI implementation and version: (output of `mpiexec --version`)
+- OS and distribution:
+- Compiler: (output of `mpicc --version`, or the wrapper named by MPICC)
+- Cargo features tested: (e.g., default, rma, numa)
+- Test command: (e.g., `MPI_NP_LIST=4 ./tests/run_mpi_tests.sh rma`)
+- Test results: the runner&#39;s summary line, plus any `FAIL &lt;example&gt; (np=N)`
+  lines</code></pre></div></div></details></section></div></main></body></html>
