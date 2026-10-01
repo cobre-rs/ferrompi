@@ -8,8 +8,9 @@
 //! a sentinel `[u64; 2]` allreduce carrying a command code and argument. See
 //! `benches/README.md` for context and output details.
 
-use criterion::{black_box, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion};
 use ferrompi::{Communicator, PersistentRequest, ReduceOp};
+use std::hint::black_box;
 use std::time::Duration;
 
 mod common;

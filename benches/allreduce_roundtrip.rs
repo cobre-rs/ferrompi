@@ -5,8 +5,9 @@
 //! a `common::lead` allreduce issued before each data allreduce. See `benches/README.md`
 //! for context and output details.
 
-use criterion::{black_box, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput};
 use ferrompi::{Communicator, ReduceOp};
+use std::hint::black_box;
 use std::time::Duration;
 
 mod common;
