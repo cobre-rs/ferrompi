@@ -135,6 +135,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | SND-18 | Under fault-tolerant MPI, a wildcard receive started while the request table is full returns `ResourceExhausted` after its internal wait fails with MPI_ERR_PROC_FAILED_PENDING, while MPI still owns its buffer | major | repro | 0.5.x | fixed (105eb34) |
 | SND-19 | `allreduce_with_op` above `INT_MAX` elements on MPI 4.0 calls `MPI_Allreduce_c` with a classic user function; MPICH narrows the count to `int` without splitting (its assertion compiles out under NDEBUG), so the Rust callback can receive a negative or wrapped length and build slices past the buffers | major | reading | 0.5.x | fixed (b96d7eb) |
 | SND-20 | The processor-name (256 B), library-version (8192 B) and error-string (512 B) Rust buffers are not checked against `MPI_MAX_PROCESSOR_NAME`, `MPI_MAX_LIBRARY_VERSION_STRING` and `MPI_MAX_ERROR_STRING`; a library with a larger constant would write past them | minor | reading | 0.5.x | fixed (631fa89) |
+| SND-21 | `Request::wait_any`/`test_any` mark `done[idx]` and report the index `MPI_Waitany`/`MPI_Testany` returned without checking `0 <= idx < count`, and `wait_some`/`test_some` index `done` and `indices` by the returned `outcount` and indices the same way; the C shim relies on the library writing valid values (or `MPI_UNDEFINED`) even when the call fails, so a library that writes an out-of-range value makes it write past the Rust-owned buffers | minor | reading | 0.6 | open (non-breaking; C-side bounds guard) |
 
 ### Correctness — [02](findings/02-correctness.md)
 
@@ -206,7 +207,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 
 | ID | Title | Sev | Verified | Target | Status |
 |---|---|---|---|---|---|
-| PRF-01 | Request table: ~14 ns / 2 locked RMWs per request (+58%/+33% small nonblocking p2p) | major | measured | 0.7 (D-2); no 0.5.x stop-gap | open |
+| PRF-01 | Request table: ~14 ns / 2 locked RMWs per request (+58%/+33% small nonblocking p2p) | major | measured | 0.7 (D-2); no 0.5.x stop-gap | open; 0.5.x hardening raised it to ~23 ns per request (MPICH bisect: ~3.6 ns of it from the `RequestKind` field, 4947bc4) |
 | PRF-02 | Bitmap concentrates contention; ADR/comment claim the opposite | minor | measured | 0.5.x docs / 0.7 | fixed (01866f1, 605fd2d): shim comment, ADR-0002; table change open (0.7) |
 | PRF-03 | `ffi_overhead` bench cannot measure FFI overhead | minor | measured | 0.5.x | fixed (f74665a, 15d570c) |
 | PRF-04 | "Persistent 10–30% faster" refuted as stated; bench at 1 MiB only | minor | measured | 0.5.x | fixed (e73c3d0, 134bfed, eb63b5d, 76eded0, 15d570c) |
@@ -230,7 +231,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | BLT-14 | 15 in-place C shims differ only by `MPI_IN_PLACE`; dead `is_root` | 300 | 0.5.x† | fixed (38c789e) |
 | BLT-15 | `UserOp` double registry + dead per-callback lookup | 120 | 0.5.x† | fixed (2d53b18) |
 | BLT-16 | Benches measuring nothing; duplicated bench protocol | 210 | 0.5.x† | fixed (aa460f1) |
-| BLT-20 | Six copies of the slot-claim loop | 70 | superseded by ARC-01 | open |
+| BLT-20 | Six copies of the slot-claim loop | 70 | superseded by ARC-01 | open; also covers the ~38 request-registration tails (`FERROMPI_ERR_REQUESTS_FULL`) in `csrc/ferrompi.c`, which D-2 removes with the tables |
 | BLT-21 | Process artifacts, stale line refs, expired promises in comments | 45 | 0.5.x† | fixed (3d206a8) |
 | BLT-23 | `Group::undefined()` FFI call returning literal −1 | 35 | 0.5.x† | fixed (e874118) |
 | BLT-25 | Dead C branches (errhandler install) | 30 | 0.5.x† | fixed (7389231) |
@@ -239,6 +240,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | BLT-29 | `with_handles` implemented twice | 20 | 0.5.x† | fixed (2b1237e) |
 | BLT-32 | `ReduceOp` compile_fail doctest via 14 `cfg_attr` | 16 | 0.6 (with ARC-02) | open |
 | BLT-34 | `use super::*` in 11 test modules | — | 0.5.x† | fixed (99f3f9d) |
+| BLT-35 | Five tidy-ups left after 0.6.0: the always-taken first-error guard in `zero_own_segment`; `docs/architecture.md` and `docs/mpi-compatibility.md` each restate a paragraph given earlier in the file; single-use locals in `examples/pi_monte_carlo.rs`; a `src/lib.rs` test comment restating `stub_mpi()` | ~20 | 0.6 | open |
 
 ### Documentation — [07](findings/07-docs.md)
 
@@ -259,6 +261,7 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | DOC-13 | `benches/README.md` claims | minor | 0.5.x | fixed (15d570c) |
 | DOC-14 | Missing docs: lifecycle, error reporting, runtime lib path, Open MPI build | minor | 0.5.x | fixed (98236f8, 90c95c6) |
 | DOC-15 | Wrong C comments | nit | 0.5.x | fixed (01866f1) |
+| DOC-16 | No doc says an error from a collective can reach only some ranks; the private `exchange_window_words` comment claims every rank sees the same error, so after a rank-local `MPI_Allgather` failure `Win::create`/`Win::allocate` can leave the other ranks blocked in `MPI_Win_create`/`MPI_Win_allocate` (`Communicator` docs cover local validation failures only) | minor | 0.6 | open |
 
 ### Build / CI / tests — [08](findings/08-build-ci-tests.md)
 
@@ -287,3 +290,5 @@ Target: release the fix belongs to (`0.5.x†` = non-breaking bloat, in 0.5.x sc
 | INF-21 | Unit tests mutate a global static (latent) | nit | stress test | — | open |
 | INF-22 | Third-party GitHub Actions pinned by tag, not commit SHA | minor | reading | 0.5.x | fixed (1dfc61f) |
 | INF-23 | Publishing uses a long-lived crates.io token (no Trusted Publishing) | minor | reading | later | open |
+| INF-24 | `examples/test_rma_rget.rs` and `test_rma_raccumulate.rs` open a passive-target lock right after a default `fence` (no `MPI_MODE_NOSUCCEED`, no barrier), unlike the `Win::raccumulate` rustdoc pattern; works on MPICH and Open MPI | nit | reading | 0.6 | open |
+| INF-25 | The cargo-registry cache step is repeated in 8 `test.yml` jobs (per-job keys, so a shared composite action would need an input) | nit | reading | later | open |
