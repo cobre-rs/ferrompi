@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-01
+
 This release hardens soundness and MPI correctness: argument validation,
 request completion, error classes, RMA bounds, large counts and the
 finalize lifecycle. It also makes MPI selection at build time explicit.
@@ -145,6 +147,12 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   `numa` feature is documented as the SLURM job-topology helpers only,
   with no NUMA or hwloc code; the README is trimmed, with the API tables
   living on docs.rs.
+- **Dependencies refreshed:** `criterion` dev-dependency 0.5 → 0.7 (the
+  newest release that builds on Rust 1.85; the benches now use
+  `std::hint::black_box`), `cargo update` to the latest Rust 1.85
+  compatible versions (thiserror 2.0.21, cc 1.5.1, pkg-config 0.3.34,
+  rand 0.10.3, …), and CI actions bumped (checkout v7, cache v6,
+  labeler v7, dependency-review-action v5, codecov-action v7).
 
 ### Removed
 
@@ -647,7 +655,8 @@ dependency refreshes and documentation work.
 - Comprehensive documentation
 - Initial CI/CD setup with GitHub Actions
 
-[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/cobre-rs/ferrompi/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/cobre-rs/ferrompi/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/cobre-rs/ferrompi/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/cobre-rs/ferrompi/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/cobre-rs/ferrompi/compare/v0.3.0...v0.4.0
