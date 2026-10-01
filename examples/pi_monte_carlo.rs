@@ -62,10 +62,8 @@ fn main() -> Result<()> {
     }
 
     // Convert to f64 for reduction (MPI doesn't have u64 reduction)
-    let local_inside_f64 = local_inside as f64;
-
     // Reduce all counts to rank 0
-    let send = [local_inside_f64];
+    let send = [local_inside as f64];
     let mut recv = [0.0];
     world.reduce(&send, &mut recv, ReduceOp::Sum, 0)?;
     let global_inside_f64 = recv[0];
@@ -110,15 +108,13 @@ fn main() -> Result<()> {
     }
 
     // Broadcast the result to all processes for verification
-    let mut pi_estimate = if rank == 0 {
+    let mut pi_buf = [if rank == 0 {
         4.0 * global_inside_f64 / (samples_per_process * size as u64) as f64
     } else {
         0.0
-    };
-
-    let mut pi_buf = [pi_estimate];
+    }];
     world.broadcast(&mut pi_buf, 0)?;
-    pi_estimate = pi_buf[0];
+    let pi_estimate = pi_buf[0];
 
     // Each process verifies the result is reasonable
     assert!(

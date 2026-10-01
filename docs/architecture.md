@@ -304,9 +304,6 @@ The list below distinguishes what belongs in C from what belongs in Rust.
   epoch requirement is documented on the item rustdoc but not enforced at
   runtime.
 
-The rationale for this split — rather than writing pure Rust FFI without any C
-intermediary — is documented in `adr/0001-why-c-wrapper.md`.
-
 ## FFI / ABI Invariants
 
 The following invariants must be preserved by every new MPI entry point added

@@ -747,10 +747,6 @@ mod tests {
     /// touched, so no running MPI environment is needed.
     #[test]
     fn create_from_group_null_byte_in_tag() {
-        // Construct a minimal stub Mpi to call the method (no MPI calls made
-        // because the null-byte check fires before the FFI call).
-        // We bypass init by constructing the struct directly — this is valid
-        // inside the crate's own test module where the fields are accessible.
         let mpi = stub_mpi();
         // Group with handle 0 (MPI_GROUP_EMPTY sentinel) — never dereferenced
         // because the null-byte check fires first.

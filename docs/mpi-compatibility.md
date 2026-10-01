@@ -43,12 +43,9 @@ like the Open MPI 4.1.6 row otherwise.
 | Counts above `i32::MAX` | tested | `Err` (class `Count`) | `Err` (class `Count`) |
 | RMA windows (`rma`) | tested | tested | tested |
 
-MPICH 4.2.1 reports `MPI_VERSION` 4, which is why it takes the "tested" cell
-throughout. Open MPI 4.1.6 and 5.0.7 both report MPI 3.1 (`MPI_VERSION` 3).
-Open MPI 5.0.7 implements the persistent collectives and
-`MPI_Comm_create_from_group` anyway, so ferrompi enables them on Open MPI 5 or
-later from the header's `OMPI_MAJOR_VERSION`. It has no `_c` calls, so counts
-above `i32::MAX` return `Count` there, as on Open MPI 4.1.
+MPICH 4.2.1 reports `MPI_VERSION` 4; Open MPI 4.1.6 and 5.0.7 both report MPI
+3.1 (`MPI_VERSION` 3). ferrompi recognizes Open MPI 5 or later from the
+header's `OMPI_MAJOR_VERSION`.
 
 ## Known implementation issues
 

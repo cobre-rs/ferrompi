@@ -3788,11 +3788,8 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
  * MPI_Win_free here; it reports the leak through FERROMPI_WIN_LEAKED so the
  * Rust side counts the window as alive. */
 static int zero_own_segment(MPI_Win win, MPI_Comm comm, void* base, MPI_Aint size) {
-    int ret = MPI_SUCCESS;
-
-    int first = MPI_Win_lock_all(MPI_MODE_NOCHECK, win);
-    int locked = (first == MPI_SUCCESS);
-    if (ret == MPI_SUCCESS) ret = first;
+    int ret = MPI_Win_lock_all(MPI_MODE_NOCHECK, win);
+    int locked = (ret == MPI_SUCCESS);
 
     if (size > 0 && base != NULL) memset(base, 0, (size_t)size);
 
