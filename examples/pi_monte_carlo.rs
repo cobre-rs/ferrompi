@@ -43,7 +43,7 @@ fn main() -> Result<()> {
     world.barrier()?;
 
     // Start timing
-    let start_time = Mpi::wtime();
+    let start_time = mpi.wtime();
 
     // Each process gets a different random seed based on rank
     let mut rng = rand::rng();
@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     world.reduce(&send, &mut recv, ReduceOp::Sum, 0)?;
     let global_inside_f64 = recv[0];
 
-    let elapsed = Mpi::wtime() - start_time;
+    let elapsed = mpi.wtime() - start_time;
 
     // Also get global timing statistics
     world.reduce(&[elapsed], [0.0].as_mut_slice(), ReduceOp::Max, 0)?;

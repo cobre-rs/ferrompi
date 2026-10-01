@@ -16,10 +16,11 @@ pub const FERROMPI_LOCK_EXCLUSIVE: int32_t = 0;
 #[cfg(feature = "rma")]
 pub const FERROMPI_LOCK_SHARED: int32_t = 1;
 
-// Legal before init or after finalize (lifecycle queries), a non-status
-// return with no MPI call to guard (constants, wtime, op-table
-// bookkeeping), or called only from a `Drop` impl — never routed through
-// the `crate::rt` lifecycle guard.
+// Never routed through the `crate::rt` lifecycle guard: calls legal before
+// init or after finalize (init, lifecycle and version queries, error
+// lookup), calls that make no MPI call (op-table bookkeeping, error-class
+// mapping), `wtime`, which only a live `Mpi` reaches, and calls made only
+// from a `Drop` impl.
 extern "C" {
     pub fn ferrompi_init_thread(required: c_int, provided: *mut c_int) -> c_int;
     pub fn ferrompi_finalize(active_requests: *mut int32_t) -> c_int;

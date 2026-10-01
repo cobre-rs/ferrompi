@@ -57,6 +57,11 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   in more cases; see Fixed below for the specific checks.
 - **`WinKind` is removed.** No function returned or accepted it; code that
   only named the type can drop the reference.
+- **`Mpi::wtime` now takes `&self`**, so it runs only while MPI is
+  initialized; MPICH aborted the process when `MPI_Wtime` was called before
+  init or after finalize. Migration: `Mpi::wtime()` becomes `mpi.wtime()`;
+  code without the `Mpi` handle, such as worker threads, can use
+  `std::time::Instant`.
 
 ### Added
 
@@ -90,8 +95,7 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
 - **After `Mpi` is dropped, MPI-calling methods now return
   `Err(Finalized)` instead of calling MPI**, and their own drops become
   silent no-ops. `version`, `library_version`, `is_initialized` and
-  `is_finalized` still answer; `wtime` is not checked either and still
-  calls `MPI_Wtime`, which the standard does not define after finalize.
+  `is_finalized` still answer.
 - **`Mpi::init`/`init_thread` called after finalize now returns
   `Err(Finalized)`** (MPICH used to abort).
 - **In debug builds at `ThreadLevel::Serialized`, two overlapping MPI

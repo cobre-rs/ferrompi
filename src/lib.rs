@@ -265,11 +265,9 @@ pub enum ThreadLevel {
 /// user op returns `Err(`[`Error::Finalized`]`)` without calling MPI. The
 /// queries the MPI standard allows at any time ([`Mpi::version`],
 /// [`Mpi::library_version`], [`Mpi::is_initialized`],
-/// [`Mpi::is_finalized`]) still answer. [`Mpi::wtime`] is not checked
-/// either and still calls `MPI_Wtime`, which the standard does not define
-/// after finalize. A communicator, request, window or window lock guard,
-/// datatype, group, info object or user op that outlives this handle makes
-/// no MPI call when it is dropped.
+/// [`Mpi::is_finalized`]) still answer. A communicator, request, window or
+/// window lock guard, datatype, group, info object or user op that outlives
+/// this handle makes no MPI call when it is dropped.
 ///
 /// If any window (feature `rma`) is still alive when this handle is
 /// dropped — whatever constructed it — `MPI_Finalize` is skipped instead,
@@ -407,12 +405,16 @@ impl Mpi {
         Communicator::world()
     }
 
-    /// Get the current wall-clock time.
+    /// Get the current wall-clock time (`MPI_Wtime`), in seconds.
     ///
-    /// This is a high-resolution timer suitable for benchmarking.
-    pub fn wtime() -> f64 {
+    /// This is a high-resolution timer suitable for benchmarking. It takes
+    /// `&self` because MPI must be initialized and not yet finalized; code
+    /// without the handle can use [`std::time::Instant`].
+    pub fn wtime(&self) -> f64 {
         // SAFETY: ferrompi_wtime takes no pointer arguments and touches no
-        // Rust-owned memory; it is a pure read of MPI_Wtime().
+        // Rust-owned memory; `&self` proves MPI is initialized and not
+        // finalized, and `Mpi` is neither `Send` nor `Sync`, so this runs on
+        // the thread that initialized MPI.
         unsafe { ffi::ferrompi_wtime() }
     }
 

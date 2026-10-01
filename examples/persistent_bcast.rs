@@ -43,7 +43,7 @@ fn main() -> Result<()> {
 
         let mut persistent_bcast = world.bcast_init(&mut bcast_buffer, 0)?;
         let num_iterations = 100;
-        let start_time = Mpi::wtime();
+        let start_time = mpi.wtime();
 
         for iter in 0..num_iterations {
             // Root updates the buffer
@@ -77,7 +77,7 @@ fn main() -> Result<()> {
             }
         }
 
-        let elapsed = Mpi::wtime() - start_time;
+        let elapsed = mpi.wtime() - start_time;
         let throughput = num_iterations as f64 / elapsed;
 
         world.barrier()?;
@@ -106,7 +106,7 @@ fn main() -> Result<()> {
         let mut persistent_allreduce =
             world.allreduce_init(&allreduce_send, &mut allreduce_recv, ReduceOp::Sum)?;
         let num_iterations = 100;
-        let start_time = Mpi::wtime();
+        let start_time = mpi.wtime();
 
         for iter in 0..num_iterations {
             // Each rank contributes its rank value
@@ -128,7 +128,7 @@ fn main() -> Result<()> {
             }
         }
 
-        let elapsed = Mpi::wtime() - start_time;
+        let elapsed = mpi.wtime() - start_time;
         let throughput = num_iterations as f64 / elapsed;
 
         world.barrier()?;
@@ -171,7 +171,7 @@ fn main() -> Result<()> {
         let mut buffer = vec![0.0f64; buffer_size];
         world.barrier()?;
 
-        let start = Mpi::wtime();
+        let start = mpi.wtime();
         for iter in 0..compare_iterations {
             if rank == 0 {
                 for (i, x) in buffer.iter_mut().enumerate() {
@@ -180,7 +180,7 @@ fn main() -> Result<()> {
             }
             world.broadcast(&mut buffer, 0)?;
         }
-        let non_persistent_time = Mpi::wtime() - start;
+        let non_persistent_time = mpi.wtime() - start;
 
         if rank == 0 {
             println!(
@@ -200,7 +200,7 @@ fn main() -> Result<()> {
             let mut persistent = world.bcast_init(&mut buffer, 0)?;
             world.barrier()?;
 
-            let start = Mpi::wtime();
+            let start = mpi.wtime();
             for iter in 0..compare_iterations {
                 if rank == 0 {
                     for (i, x) in buffer.iter_mut().enumerate() {
@@ -210,7 +210,7 @@ fn main() -> Result<()> {
                 persistent.start()?;
                 persistent.wait()?;
             }
-            let persistent_time = Mpi::wtime() - start;
+            let persistent_time = mpi.wtime() - start;
 
             if rank == 0 {
                 println!(
