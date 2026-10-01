@@ -128,11 +128,11 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 
 | ID | Title | Sev | Verified | Target | Status |
 |---|---|---|---|---|---|
-| SND-01 | Nonblocking `Request` not tied to its buffer | critical | repro | 0.7.0 (D-1) | open |
-| SND-02 | `PersistentRequest` not tied to its buffer | critical | repro | 0.7.0 (D-1) | open |
-| SND-03 | RMA origin buffers not tied to the epoch; 4 rustdoc examples are UB | critical | reading | 0.7.0 (D-1) | open |
-| SND-04 | `PendingFetchResult` dropped before epoch close → write into freed heap | critical | repro | 0.7.0 (D-1) | open |
-| SND-05 | `mem::forget(Win::create)` leaves MPI aliasing a released buffer | critical | repro | 0.7.0 (D-1) | open |
+| SND-01 | Nonblocking `Request` not tied to its buffer | critical | repro | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
+| SND-02 | `PersistentRequest` not tied to its buffer | critical | repro | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
+| SND-03 | RMA origin buffers not tied to the epoch; 4 rustdoc examples are UB | critical | reading | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
+| SND-04 | `PendingFetchResult` dropped before epoch close → write into freed heap | critical | repro | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
+| SND-05 | `mem::forget(Win::create)` leaves MPI aliasing a released buffer | critical | repro | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
 | SND-06 | gather/allgather/scatter never validate buffer sizes (9 methods) | critical | repro | 0.5.x | fixed (3637ae5) |
 | SND-07 | V-collectives don't validate counts/displs vs size and buffer | critical | repro | 0.5.x | fixed (9c23425) |
 | SND-08 | `*_custom` p2p: unbounded `T`, unchecked extent | critical | repro | 0.5.x (D-7) | fixed (ceada55) |
@@ -140,15 +140,16 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | SND-10 | Window memory used after finalize | critical | repro | 0.5.x (D-8) | fixed (90d9544) |
 | SND-11 | `Communicator` Send+Sync regardless of thread level | critical | repro | 0.5.x (D-3, D-9) | fixed (49cb30c) |
 | SND-12 | Uninitialised window memory exposed as `&[T]` | major | repro | 0.5.x | fixed (4747cd1) |
-| SND-13 | `SharedWindow` slices over concurrently-written memory (observed miscompile) | critical | repro | 0.7.0 (D-5); 0.5.x doc warning | fixed (31e6514): doc warning; API fix open (0.7.0; design input: issue #28, per-region slice guards) |
+| SND-13 | `SharedWindow` slices over concurrently-written memory (observed miscompile) | critical | repro | 0.7.0 (D-5); 0.5.x doc warning | fixed (31e6514): doc warning; API fix planned (ferrompi-0.7.0; design input: issue #28, per-region slice guards) |
 | SND-14 | `UserOp` fat-pointer transmute relies on unspecified layout | minor | reading | 0.5.x† | fixed (2d53b18) |
 | SND-15 | `fetch_and_op`/`compare_and_swap` result pointer derived from a shared borrow | minor | reading | 0.5.x | fixed (9777b12) |
-| SND-16 | `Mpi` drop racing a concurrent guarded call at `Serialized`/`Multiple` reaches MPI after finalize | major | reading | 0.7.0 | open (0.7.0: thread-safety API redesign) |
+| SND-16 | `Mpi` drop racing a concurrent guarded call at `Serialized`/`Multiple` reaches MPI after finalize | major | reading | 0.7.0 | planned (ferrompi-0.7.0) |
 | SND-17 | Under fault-tolerant MPI, a receive failing with MPIX_ERR_PROC_FAILED_PENDING is treated as complete while MPI still owns its buffer | major | reading | 0.5.x | fixed (20db67d) |
 | SND-18 | Under fault-tolerant MPI, a wildcard receive started while the request table is full returns `ResourceExhausted` after its internal wait fails with MPI_ERR_PROC_FAILED_PENDING, while MPI still owns its buffer | major | repro | 0.5.x | fixed (105eb34) |
 | SND-19 | `allreduce_with_op` above `INT_MAX` elements on MPI 4.0 calls `MPI_Allreduce_c` with a classic user function; MPICH narrows the count to `int` without splitting (its assertion compiles out under NDEBUG), so the Rust callback can receive a negative or wrapped length and build slices past the buffers | major | reading | 0.5.x | fixed (b96d7eb) |
 | SND-20 | The processor-name (256 B), library-version (8192 B) and error-string (512 B) Rust buffers are not checked against `MPI_MAX_PROCESSOR_NAME`, `MPI_MAX_LIBRARY_VERSION_STRING` and `MPI_MAX_ERROR_STRING`; a library with a larger constant would write past them | minor | reading | 0.5.x | fixed (631fa89) |
 | SND-21 | `Request::wait_any`/`test_any` mark `done[idx]` and report the index `MPI_Waitany`/`MPI_Testany` returned without checking `0 <= idx < count`, and `wait_some`/`test_some` index `done` and `indices` by the returned `outcount` and indices the same way; the C shim relies on the library writing valid values (or `MPI_UNDEFINED`) even when the call fails, so a library that writes an out-of-range value makes it write past the Rust-owned buffers | minor | reading | 0.6.0 | fixed (58c20be) |
+| SND-22 | `Win::local_slice(&self) -> &[T]` and `local_slice_mut` hand out plain slices over window memory that a peer's passive-target `put`/`accumulate`, or a fence that lands remote writes, can change while the borrow lives (`Win::fence` also takes `&self`); the rustdoc asks only for proper MPI epoch synchronization. This is SND-13's aliasing class on every window, not only `SharedWindow` | critical | reading | 0.7.0 | planned (ferrompi-0.7.0) |
 
 ### Correctness — [02](findings/02-correctness.md)
 
@@ -162,11 +163,11 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | COR-06 | `MPI_ERRORS_RETURN` not on `MPI_COMM_SELF` | major | reading | 0.5.x | fixed (19daebb) |
 | COR-07 | Finalize/re-init lifecycle aborts; `UserOp` drop after finalize | major | repro | 0.5.x | fixed (e1c123c) |
 | COR-08 | Finalize sweep frees active requests / collectively frees windows | minor | reading | 0.5.x | fixed (8c8bf37, 459d6ea) |
-| COR-09 | `-1` = PROC_NULL (MPICH) vs ANY_SOURCE (Open MPI) | minor | repro | 0.7.0 | open |
+| COR-09 | `-1` = PROC_NULL (MPICH) vs ANY_SOURCE (Open MPI) | minor | repro | 0.7.0 | planned (ferrompi-0.7.0) |
 | COR-10 | `cancel()` allowed on collective/RMA requests | minor | repro | 0.5.x | fixed (4947bc4) |
-| COR-11 | `LongDoubleInt`/`LongInt` layout wrong on macOS arm64 / Windows | minor | reading | 0.5.x | fixed (3a01966): target gating; per-target layouts open (0.7.0) |
+| COR-11 | `LongDoubleInt`/`LongInt` layout wrong on macOS arm64 / Windows | minor | reading | 0.5.x | fixed (3a01966): target gating; per-target layouts wont-fix (D-32) |
 | COR-12 | Pre-MPI-4 stubs never yield `NotSupported`; 3 contradicting docs | minor | reading | 0.5.x | fixed (58f8fdc, 134bfed, 98236f8): stub mapping, ADR-0004, docs/mpi-compatibility.md |
-| COR-13 | `Win::sync` rustdoc wrong; example fails on MPICH | minor | repro | 0.5.x docs / 0.7.0 API | fixed (3f50248, 98236f8): rustdoc, docs/mpi-compatibility.md; sync on lock guards open (0.7.0) |
+| COR-13 | `Win::sync` rustdoc wrong; example fails on MPICH | minor | repro | 0.5.x docs / 0.7.0 API | fixed (3f50248, 98236f8): rustdoc, docs/mpi-compatibility.md; sync on lock guards planned (ferrompi-0.7.0) |
 | COR-14 | `MPI_UNDEFINED` from `MPI_Get_count` leaks; rc ignored | nit | reading | 0.5.x | fixed (e918274) |
 | COR-15 | `op_set_closure` no bounds check; `op_create_user` no `op_used` check | nit | reading | 0.5.x | fixed (2d53b18) |
 | COR-16 | `type_create_struct` maybe-uninitialised arrays at count 0 | nit | compiler | 0.5.x | fixed (34a748c) |
@@ -187,22 +188,22 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | ID | Title | Sev | Reversibility | Target | Status |
 |---|---|---|---|---|---|
 | ARC-01 | C handle tables are the root cause of ABA, per-request cost, caps, sweep | major | two-way (large) | 0.8.0 (D-2) | open |
-| ARC-02 | Non-additive `rma` feature; no `#[non_exhaustive]` anywhere | major | one-way | 0.7.0 | fixed (1bbac44): #[non_exhaustive] on Error; rest open (0.7.0) |
-| ARC-03 | Shim representation in public API (`raw_handle`, discriminant contract, pub `from_code`) | major | one-way | 0.7.0 | open |
-| ARC-04 | Handles not tied to `Mpi` lifetime | major | mixed | 0.5.x guards / 0.7.0 | fixed (90d9544): runtime guards; lifetime parameter open (0.7.0) |
+| ARC-02 | Non-additive `rma` feature; no `#[non_exhaustive]` anywhere | major | one-way | 0.7.0 | fixed (1bbac44): #[non_exhaustive] on Error; rest planned (ferrompi-0.7.0) |
+| ARC-03 | Shim representation in public API (`raw_handle`, discriminant contract, pub `from_code`) | major | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
+| ARC-04 | Handles not tied to `Mpi` lifetime | major | mixed | 0.5.x guards / 0.7.0 | fixed (90d9544): runtime guards; lifetime parameter superseded (D-34) |
 | ARC-05 | Thread-safety model inconsistent | major | mixed | 0.5.x (D-3) | fixed (49cb30c) |
-| ARC-06 | Buffer-safety model (umbrella SND-01…05) | critical | one-way | 0.7.0 (D-1) | open |
-| ARC-07 | Ops and datatypes not parameters | major | one-way | 0.7.0 | open |
-| ARC-08 | Error model misleads and loses context | major | one-way | 0.7.0 | open |
-| ARC-09 | `Status` always discarded | major | one-way | 0.7.0 | open |
+| ARC-06 | Buffer-safety model (umbrella SND-01…05) | critical | one-way | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
+| ARC-07 | Ops and datatypes not parameters | major | one-way | 0.7.0 | planned (ferrompi-0.7.0): op parameter; datatype parameter deferred (D-33) |
+| ARC-08 | Error model misleads and loses context | major | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
+| ARC-09 | `Status` always discarded | major | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
 | ARC-10 | Copy-pasted families drifted (root of SND-06) | major | two-way | 0.5.x (validators) | fixed (c402d59) |
-| ARC-11 | Capability gaps (in-place nonblocking, mprobe, HW_GUIDED…) | minor | additive | 0.7.0+ | open |
-| ARC-12 | `Info` public but unused | minor | one-way | 0.7.0 (D-4) | open |
-| ARC-13 | `SharedWindow` duplicates `Win`; `WinKind` dead | minor | one-way | 0.5.x WinKind / 0.7.0 (D-5) | fixed (b39adfb): WinKind removed; SharedWindow merge open (0.7.0; design input: issue #28) |
-| ARC-14 | `numa` feature has no NUMA code, implies `rma` | minor | one-way | 0.7.0 | open |
-| ARC-15 | Naming/coverage asymmetries | minor | one-way | 0.7.0 | open |
-| ARC-16 | Magic `-1` sentinels; no typed source/tag | minor | one-way | 0.7.0 | open |
-| ARC-17 | RMA redundant `target_count`, duplicate tags | minor | one-way | 0.7.0 | open |
+| ARC-11 | Capability gaps (in-place nonblocking, mprobe, HW_GUIDED…) | minor | additive | 0.7.0 | planned (ferrompi-0.7.0); HW_GUIDED wont-fix (D-31) |
+| ARC-12 | `Info` public but unused | minor | one-way | 0.7.0 (D-4) | planned (ferrompi-0.7.0) |
+| ARC-13 | `SharedWindow` duplicates `Win`; `WinKind` dead | minor | one-way | 0.5.x WinKind / 0.7.0 (D-5) | fixed (b39adfb): WinKind removed; SharedWindow merge planned (ferrompi-0.7.0; design input: issue #28) |
+| ARC-14 | `numa` feature has no NUMA code, implies `rma` | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
+| ARC-15 | Naming/coverage asymmetries | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
+| ARC-16 | Magic `-1` sentinels; no typed source/tag | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
+| ARC-17 | RMA redundant `target_count`, duplicate tags | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
 | ARC-18 | Open MPI 5 capabilities unused (persistent collectives, `create_from_group` gated on `MPI_VERSION >= 4`; OMPI 5 reports 3.1) | minor | two-way | 0.5.x | fixed (213cfd0, d555791, c58cd05) |
 
 ### MPI-5 ABI — [04](findings/04-mpi5-abi.md)
@@ -212,7 +213,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | ABI-01 | build.rs drops `-D` flags (`MPI_ABI` lost → silent ABI mismatch) | critical (latent) | reading | 0.5.x | fixed (8e5e108) |
 | ABI-02 | No ABI detection probe; MPICH 4.3 draft ABI accepted | major | reading | 0.5.x reject / 0.8.0 build | fixed (67fbcd4): draft ABI rejected; ABI build open (0.8.0) |
 | ABI-03 | Build-selection env vars not tracked (= INF-03) | major | repro | 0.5.x | fixed (8f9fbfd) |
-| ABI-04 | Public-API one-way doors (= ARC-02/03) | major | reading | 0.7.0 | open |
+| ABI-04 | Public-API one-way doors (= ARC-02/03) | major | reading | 0.7.0 | planned (ferrompi-0.7.0) |
 | ABI-05 | ADR-0001 misstates what the ABI adds; ADR-0006 needed | minor | reading | 0.5.x | fixed (03f01e8, fb99656) |
 | ABI-06 | No interop API (deliberately deferred) | info | — | after ABI backend | open |
 | ABI-07 | Optional CI compile+link job against Forum ABI stubs | info | built locally | 0.5.x or 0.7 | fixed (5d62df7) |
@@ -252,7 +253,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | BLT-26 | `const _` Send/Sync asserts beside `unsafe impl` | 27 | 0.5.x† | fixed (c074ed1) |
 | BLT-27 | Dead `ferrompi_init`; module-wide `allow(dead_code)` | 25 | 0.5.x† | fixed (3cde221) |
 | BLT-29 | `with_handles` implemented twice | 20 | 0.5.x† | fixed (2b1237e) |
-| BLT-32 | `ReduceOp` compile_fail doctest via 14 `cfg_attr` | 16 | 0.7.0 (with ARC-02) | open |
+| BLT-32 | `ReduceOp` compile_fail doctest via 14 `cfg_attr` | 16 | 0.7.0 (with ARC-02) | planned (ferrompi-0.7.0) |
 | BLT-34 | `use super::*` in 11 test modules | — | 0.5.x† | fixed (99f3f9d) |
 | BLT-35 | Five tidy-ups left after 0.6.0: the always-taken first-error guard in `zero_own_segment`; `docs/architecture.md` and `docs/mpi-compatibility.md` each restate a paragraph given earlier in the file; single-use locals in `examples/pi_monte_carlo.rs`; a `src/lib.rs` test comment restating `stub_mpi()` | ~20 | 0.6.0 | fixed (96bef9b) |
 
@@ -263,7 +264,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | DOC-01 | `docs/architecture.md` false statements | major | 0.5.x | fixed (713cb4f) |
 | DOC-02 | ADR-0001 driver 1 false (= ABI-05) | minor | 0.5.x | fixed (03f01e8) |
 | DOC-03 | ADR-0002 claims that do not hold | minor | 0.5.x | fixed (605fd2d) |
-| DOC-04 | ADR-0004 lifetime rejection mis-argued; nonexistent variant | minor | 0.5.x note / 0.7.0 new ADR | fixed (134bfed): note; new ADR open (0.7.0) |
+| DOC-04 | ADR-0004 lifetime rejection mis-argued; nonexistent variant | minor | 0.5.x note / 0.7.0 new ADR | fixed (134bfed): note; new ADR planned (ferrompi-0.7.0) |
 | DOC-05 | ADR-0005 Decision 7 describes the rejected design; plan sections | major | 0.5.x | fixed (134bfed) |
 | DOC-06 | Migration guide: nonexistent APIs, false safety claim | major | 0.5.x | fixed (eb63b5d) |
 | DOC-07 | `docs/mpi-compatibility.md` inaccuracies | minor | 0.5.x | fixed (98236f8) |
@@ -301,10 +302,10 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | INF-18 | Package ships repo internals (incl. `audits/`) | minor | `cargo package` | 0.5.x | fixed (07c5241, bbd98f6) |
 | INF-19 | ADR-0002 mandated TSan step missing | minor | reading | 0.5.x / moot after ARC-01 | fixed (605fd2d) |
 | INF-20 | CI covers MPICH 4.2 + Open MPI 4.x only (no Open MPI 5) | minor | reading | 0.5.x | fixed (3f8ec50) |
-| INF-21 | Unit tests mutate a global static (latent) | nit | stress test | — | open |
+| INF-21 | Unit tests mutate a global static (latent) | nit | stress test | 0.7.0 | planned (ferrompi-0.7.0) |
 | INF-22 | Third-party GitHub Actions pinned by tag, not commit SHA | minor | reading | 0.5.x | fixed (1dfc61f) |
-| INF-23 | Publishing uses a long-lived crates.io token (no Trusted Publishing) | minor | reading | later | open |
+| INF-23 | Publishing uses a long-lived crates.io token (no Trusted Publishing) | minor | reading | 0.7.0 | planned (ferrompi-0.7.0) |
 | INF-24 | `examples/test_rma_rget.rs`, `test_rma_raccumulate.rs`, `test_rma_win_lock.rs` and `test_rma_win_flush_sync.rs` open a passive-target lock right after a `Win::fence` with no assert (no `MPI_MODE_NOSUCCEED`, no barrier), unlike the `Win::raccumulate` rustdoc pattern; works on MPICH and Open MPI | nit | reading | 0.6.0 | fixed (cfb67b4) |
-| INF-25 | The cargo-registry cache step is repeated in 8 `test.yml` jobs (per-job keys, so a shared composite action would need an input) | nit | reading | later | open |
-| INF-26 | `examples/test_rma_window.rs` and `examples/shared_memory.rs` take a passive-target lock after a `SharedWindow::fence()` and before the next one, with no `MPI_MODE_NOSUCCEED` and no barrier between the fence and the lock (in `shared_memory.rs` a read of a peer's segment comes between them), unlike the `Win::raccumulate` rustdoc pattern; `SharedWindow::fence` takes no assert argument, so the pattern cannot be expressed until `SharedWindow` merges into `Win`; works on MPICH and Open MPI | nit | reading | 0.7.0 | open (with ARC-13) |
+| INF-25 | The cargo-registry cache step is repeated in 8 `test.yml` jobs (per-job keys, so a shared composite action would need an input) | nit | reading | 0.7.0 | planned (ferrompi-0.7.0) |
+| INF-26 | `examples/test_rma_window.rs` and `examples/shared_memory.rs` take a passive-target lock after a `SharedWindow::fence()` and before the next one, with no `MPI_MODE_NOSUCCEED` and no barrier between the fence and the lock (in `shared_memory.rs` a read of a peer's segment comes between them), unlike the `Win::raccumulate` rustdoc pattern; `SharedWindow::fence` takes no assert argument, so the pattern cannot be expressed until `SharedWindow` merges into `Win`; works on MPICH and Open MPI | nit | reading | 0.7.0 | planned (ferrompi-0.7.0) |
 | INF-27 | `examples/pi_monte_carlo.rs` reduces the maximum elapsed time into a temporary, then reads `recv[0]`, which still holds the global inside count, so "Max time" prints a sample count (e.g. `Max time: 78541885.0000s`) | nit | repro | 0.6.0 | fixed (2ee62a7) |
