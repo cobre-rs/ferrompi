@@ -115,12 +115,24 @@ and reports each arm's median ns/call plus their delta. The first case,
 `A/A direct iallreduce+wait`, runs the direct call on both arms to give the noise floor
 the other cases' deltas are judged against.
 
-**Six cases:** `A/A direct iallreduce+wait` (noise floor), `isend+irecv+wait`,
-`8x(isend+irecv)+waitall`, `iallreduce+wait`, `persistent start+wait`, and
-`8x persistent start_all+wait_all`.
+**Eleven cases,** in run order: `A/A direct iallreduce+wait` (noise floor), then the
+blocking collectives `allreduce f64 sum`, `allreduce u64 bor`, `allgatherv u8 x64`,
+`broadcast f64` and `barrier`, then `isend+irecv+wait`, `8x(isend+irecv)+waitall`,
+`iallreduce+wait`, `persistent start+wait`, and `8x persistent start_all+wait_all`.
 
-**Output.** A header line, `# <library line>; 21 interleaved rounds per arm; median ns
-per call`, then one line per case:
+**Thread level.** The environment variable `FERROMPI_BENCH_LEVEL` selects the level MPI
+is initialized with: `funneled` (the default when unset) or `multiple`. Any other value
+panics with `FERROMPI_BENCH_LEVEL must be funneled or multiple, got <value>`. If the
+library grants a different level than requested, the bench prints
+`ffi_overhead: <level> not provided; skipped` and exits 0. All eleven cases run at either
+level.
+
+```
+FERROMPI_BENCH_LEVEL=multiple mpiexec -n 1 target/release/deps/ffi_overhead-<hash>
+```
+
+**Output.** A header line, `# <library line>; level <Level>; 21 interleaved rounds per
+arm; median ns per call`, then one line per case:
 `<case> direct X ns   ferrompi Y ns   delta ±Z ns`.
 
 **MPICH-only direct arm.** The direct arm declares MPICH's integer handle values and

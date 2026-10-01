@@ -5,6 +5,10 @@
 //! `A/A direct iallreduce+wait`, runs the direct arm on both sides; its delta is
 //! the noise floor the other cases' deltas are judged against.
 //!
+//! `FERROMPI_BENCH_LEVEL` selects the thread level MPI is initialized with:
+//! `funneled` (the default) or `multiple`. The binary prints one line and exits 0
+//! when the library does not provide the requested level.
+//!
 //! The direct arm links MPICH's integer handle values and calls only MPI-1/MPI-3
 //! symbols, so it links on every MPI implementation. At run time it runs only when
 //! `Mpi::library_version()` reports MPICH; on any other library it prints one line
@@ -16,7 +20,7 @@
 
 #![allow(non_snake_case)]
 
-use ferrompi::{Mpi, PersistentRequest, ReduceOp, Request};
+use ferrompi::{Mpi, PersistentRequest, ReduceOp, Request, ThreadLevel};
 use std::ffi::{c_int, c_void};
 use std::hint::black_box;
 use std::time::Instant;
@@ -28,6 +32,9 @@ type MpiRequest = c_int;
 const MPI_COMM_WORLD: c_int = 0x4400_0000;
 const MPI_DOUBLE: c_int = 0x4c00_080b;
 const MPI_SUM: c_int = 0x5800_0003;
+const MPI_UINT8_T: c_int = 0x4c00_013b;
+const MPI_UINT64_T: c_int = 0x4c00_083e;
+const MPI_BOR: c_int = 0x5800_0008;
 
 /// Interleaved rounds per case.
 const ROUNDS: usize = 21;
@@ -80,6 +87,32 @@ extern "C" {
         comm: c_int,
         request: *mut MpiRequest,
     ) -> c_int;
+    fn MPI_Allreduce(
+        sendbuf: *const c_void,
+        recvbuf: *mut c_void,
+        count: c_int,
+        datatype: c_int,
+        op: c_int,
+        comm: c_int,
+    ) -> c_int;
+    fn MPI_Allgatherv(
+        sendbuf: *const c_void,
+        sendcount: c_int,
+        sendtype: c_int,
+        recvbuf: *mut c_void,
+        recvcounts: *const c_int,
+        displs: *const c_int,
+        recvtype: c_int,
+        comm: c_int,
+    ) -> c_int;
+    fn MPI_Bcast(
+        buffer: *mut c_void,
+        count: c_int,
+        datatype: c_int,
+        root: c_int,
+        comm: c_int,
+    ) -> c_int;
+    fn MPI_Barrier(comm: c_int) -> c_int;
     fn MPI_Start(request: *mut MpiRequest) -> c_int;
     fn MPI_Startall(count: c_int, requests: *mut MpiRequest) -> c_int;
     fn MPI_Wait(request: *mut MpiRequest, status: *mut c_void) -> c_int;
@@ -156,7 +189,19 @@ fn compare(name: &str, iters: usize, mut direct: impl FnMut(), mut ferrompi: imp
 }
 
 fn main() {
-    let mpi = Mpi::init().unwrap();
+    let requested =
+        std::env::var_os("FERROMPI_BENCH_LEVEL").map(|v| v.to_string_lossy().into_owned());
+    let level = match requested.as_deref() {
+        None | Some("funneled") => ThreadLevel::Funneled,
+        Some("multiple") => ThreadLevel::Multiple,
+        Some(other) => panic!("FERROMPI_BENCH_LEVEL must be funneled or multiple, got {other}"),
+    };
+
+    let mpi = Mpi::init_thread(level).unwrap();
+    if mpi.thread_level() != level {
+        println!("ffi_overhead: {level:?} not provided; skipped");
+        return;
+    }
     let world = mpi.world();
 
     assert_eq!(world.size(), 1, "ffi_overhead runs at one rank");
@@ -167,7 +212,7 @@ fn main() {
         println!("ffi_overhead: the direct arm needs MPICH's handle values; skipped on {line}");
         return;
     }
-    println!("# {line}; {ROUNDS} interleaved rounds per arm; median ns per call");
+    println!("# {line}; level {level:?}; {ROUNDS} interleaved rounds per arm; median ns per call");
 
     // A/A direct iallreduce+wait: both arms run the direct code, on separate
     // buffers, to establish the noise floor the other cases are judged against.
@@ -181,6 +226,146 @@ fn main() {
             || direct_iallreduce(&send_b, &mut recv_b),
         );
     }
+
+    // allreduce f64 sum: blocking MPI_Allreduce against world.allreduce.
+    {
+        let (send_d, mut recv_d) = ([1.0f64], [0.0f64]);
+        let (send_f, mut recv_f) = ([1.0f64], [0.0f64]);
+        compare(
+            "allreduce f64 sum",
+            20_000,
+            || {
+                // SAFETY: send_d/recv_d are live, distinct one-element f64 buffers;
+                // the blocking MPI_Allreduce is done with them when it returns.
+                unsafe {
+                    MPI_Allreduce(
+                        black_box(send_d.as_ptr()).cast(),
+                        black_box(recv_d.as_mut_ptr()).cast(),
+                        1,
+                        MPI_DOUBLE,
+                        MPI_SUM,
+                        MPI_COMM_WORLD,
+                    );
+                }
+            },
+            || {
+                world
+                    .allreduce(black_box(&send_f), black_box(&mut recv_f), ReduceOp::Sum)
+                    .unwrap();
+            },
+        );
+    }
+
+    // allreduce u64 bor: blocking MPI_Allreduce with MPI_BOR on u64.
+    {
+        let (send_d, mut recv_d) = ([1u64], [0u64]);
+        let (send_f, mut recv_f) = ([1u64], [0u64]);
+        compare(
+            "allreduce u64 bor",
+            20_000,
+            || {
+                // SAFETY: send_d/recv_d are live, distinct one-element u64 buffers;
+                // the blocking MPI_Allreduce is done with them when it returns.
+                unsafe {
+                    MPI_Allreduce(
+                        black_box(send_d.as_ptr()).cast(),
+                        black_box(recv_d.as_mut_ptr()).cast(),
+                        1,
+                        MPI_UINT64_T,
+                        MPI_BOR,
+                        MPI_COMM_WORLD,
+                    );
+                }
+            },
+            || {
+                world
+                    .allreduce(
+                        black_box(&send_f),
+                        black_box(&mut recv_f),
+                        ReduceOp::BitwiseOr,
+                    )
+                    .unwrap();
+            },
+        );
+    }
+
+    // allgatherv u8 x64: one rank contributes 64 bytes; counts/displs are
+    // read-only and shared by both arms.
+    {
+        let send_d = [7u8; 64];
+        let mut recv_d = [0u8; 64];
+        let send_f = [7u8; 64];
+        let mut recv_f = [0u8; 64];
+        let (counts, displs) = ([64 as c_int], [0 as c_int]);
+        compare(
+            "allgatherv u8 x64",
+            20_000,
+            || {
+                // SAFETY: send_d/recv_d are live, distinct 64-byte buffers; counts and
+                // displs hold one entry for the one rank and outlive the call; the
+                // blocking MPI_Allgatherv is done with all four when it returns.
+                unsafe {
+                    MPI_Allgatherv(
+                        black_box(send_d.as_ptr()).cast(),
+                        64,
+                        MPI_UINT8_T,
+                        black_box(recv_d.as_mut_ptr()).cast(),
+                        counts.as_ptr(),
+                        displs.as_ptr(),
+                        MPI_UINT8_T,
+                        MPI_COMM_WORLD,
+                    );
+                }
+            },
+            || {
+                world
+                    .allgatherv(black_box(&send_f), black_box(&mut recv_f), &counts, &displs)
+                    .unwrap();
+            },
+        );
+    }
+
+    // broadcast f64: root 0 is the only rank.
+    {
+        let mut data_d = [1.0f64];
+        let mut data_f = [1.0f64];
+        compare(
+            "broadcast f64",
+            20_000,
+            || {
+                // SAFETY: data_d is a live one-element f64 buffer; the blocking
+                // MPI_Bcast is done with it when it returns.
+                unsafe {
+                    MPI_Bcast(
+                        black_box(data_d.as_mut_ptr()).cast(),
+                        1,
+                        MPI_DOUBLE,
+                        0,
+                        MPI_COMM_WORLD,
+                    );
+                }
+            },
+            || {
+                world.broadcast(black_box(&mut data_f), 0).unwrap();
+            },
+        );
+    }
+
+    // barrier: no buffers.
+    compare(
+        "barrier",
+        20_000,
+        || {
+            // SAFETY: MPI_Barrier borrows no buffers; MPI_COMM_WORLD is valid while
+            // `mpi` is alive.
+            unsafe {
+                MPI_Barrier(MPI_COMM_WORLD);
+            }
+        },
+        || {
+            world.barrier().unwrap();
+        },
+    );
 
     // isend+irecv+wait: one self message each way.
     {
