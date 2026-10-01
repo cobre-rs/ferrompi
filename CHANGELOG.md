@@ -249,6 +249,11 @@ finalize lifecycle. It also makes MPI selection at build time explicit.
   end in a NUL character on Open MPI**, whose `MPI_Get_library_version`
   counts the terminator in the length it reports; processor names and MPI
   error messages also end at the first NUL.
+- **`Request::wait_any`, `test_any`, `wait_some` and `test_some` no longer
+  write past their buffers when the MPI library reports a completed index
+  or count outside the request slice (or read past the scratch arrays)**;
+  they return `Error::Mpi` instead, with class `Intern` unless MPI itself
+  returned an error.
 
 ## [0.5.0] - 2026-06-18
 

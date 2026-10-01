@@ -3510,6 +3510,18 @@ int ferrompi_cancel(int64_t request_handle) {
     return MPI_Cancel(req);
 }
 
+/* MPI-4.1 §3.7.5: outcount is MPI_UNDEFINED or in [0, count], and each
+ * of the first outcount indices is in [0, count). The *some shims index
+ * the caller's done and indices buffers with these values. */
+static int some_result_in_range(int64_t count, int out, const int* indices) {
+    if (out == MPI_UNDEFINED) return 1;
+    if (out < 0 || out > count) return 0;
+    for (int i = 0; i < out; i++) {
+        if (indices[i] < 0 || indices[i] >= count) return 0;
+    }
+    return 1;
+}
+
 int ferrompi_waitany(int64_t count, const int64_t* request_handles,
                      int32_t* index, uint8_t* done) {
     *index = -1;
@@ -3533,6 +3545,11 @@ int ferrompi_waitany(int64_t count, const int64_t* request_handles,
     int idx = MPI_UNDEFINED;
     int ret = MPI_Waitany((int)count, reqs, &idx, MPI_STATUS_IGNORE);
     abort_if_pending_after_failure(ret);
+    // An index outside the list is treated as no completion reported.
+    if (idx != MPI_UNDEFINED && (idx < 0 || idx >= count)) {
+        idx = MPI_UNDEFINED;
+        if (ret == MPI_SUCCESS) ret = MPI_ERR_INTERN;
+    }
     if (idx != MPI_UNDEFINED) {
         done[idx] = 1;
     }
@@ -3585,6 +3602,10 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
     int out = MPI_UNDEFINED;
     int ret = MPI_Waitsome((int)count, reqs, &out, tmp_indices, sts);
     abort_if_pending_after_failure(ret);
+    if (!some_result_in_range(count, out, tmp_indices)) {
+        out = MPI_UNDEFINED;
+        if (ret == MPI_SUCCESS) ret = MPI_ERR_INTERN;
+    }
     if (ret == MPI_ERR_IN_STATUS) {
         for (int i = 0; i < out; i++) {
             abort_if_pending_after_failure(sts[i].MPI_ERROR);
@@ -3643,6 +3664,10 @@ int ferrompi_testany(int64_t count, const int64_t* request_handles,
     int f = 0;
     int ret = MPI_Testany((int)count, reqs, &idx, &f, MPI_STATUS_IGNORE);
     abort_if_pending_after_failure(ret);
+    if (idx != MPI_UNDEFINED && (idx < 0 || idx >= count)) {
+        idx = MPI_UNDEFINED;
+        if (ret == MPI_SUCCESS) ret = MPI_ERR_INTERN;
+    }
     if (f && idx != MPI_UNDEFINED) {
         done[idx] = 1;
     }
@@ -3696,6 +3721,10 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
     int out = MPI_UNDEFINED;
     int ret = MPI_Testsome((int)count, reqs, &out, tmp_indices, sts);
     abort_if_pending_after_failure(ret);
+    if (!some_result_in_range(count, out, tmp_indices)) {
+        out = MPI_UNDEFINED;
+        if (ret == MPI_SUCCESS) ret = MPI_ERR_INTERN;
+    }
     if (ret == MPI_ERR_IN_STATUS) {
         for (int i = 0; i < out; i++) {
             abort_if_pending_after_failure(sts[i].MPI_ERROR);
