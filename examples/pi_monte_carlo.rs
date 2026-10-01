@@ -71,7 +71,7 @@ fn main() -> Result<()> {
     let elapsed = mpi.wtime() - start_time;
 
     // Also get global timing statistics
-    world.reduce(&[elapsed], [0.0].as_mut_slice(), ReduceOp::Max, 0)?;
+    world.reduce(&[elapsed], &mut recv, ReduceOp::Max, 0)?;
     let max_time = recv[0];
     world.reduce(&[elapsed], &mut recv, ReduceOp::Min, 0)?;
     let min_time = recv[0];
