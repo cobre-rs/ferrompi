@@ -119,21 +119,27 @@ fn main() {
         let send_buf = vec![rank as f64 * 7.0; 5];
         let mut recv_buf = vec![0.0f64; 5];
 
-        let (source, actual_tag, count) = world
+        let status = world
             .sendrecv(&send_buf, next, tag, &mut recv_buf, prev, tag)
             .expect("sendrecv failed");
 
         assert_eq!(
-            source, prev,
-            "rank {rank}: sendrecv source = {source}, expected {prev}"
+            status.source,
+            Source::Rank(prev),
+            "rank {rank}: sendrecv source = {:?}, expected {prev}",
+            status.source
         );
         assert_eq!(
-            actual_tag, tag,
-            "rank {rank}: sendrecv tag = {actual_tag}, expected {tag}"
+            status.tag,
+            Tag::Value(tag),
+            "rank {rank}: sendrecv tag = {:?}, expected {tag}",
+            status.tag
         );
         assert_eq!(
-            count, 5,
-            "rank {rank}: sendrecv count = {count}, expected 5"
+            status.count,
+            Some(5),
+            "rank {rank}: sendrecv count = {:?}, expected 5",
+            status.count
         );
 
         let expected_val = prev as f64 * 7.0;
@@ -163,12 +169,14 @@ fn main() {
                     world.send(&send_data, partner, tag).expect("send failed");
 
                     let mut recv_data = vec![0.0f64; 3];
-                    let (src, _, _) = world
+                    let status = world
                         .recv(&mut recv_data, partner, tag)
                         .expect("recv failed");
                     assert_eq!(
-                        src, partner,
-                        "rank {rank}: recv source = {src}, expected {partner}"
+                        status.source,
+                        Source::Rank(partner),
+                        "rank {rank}: recv source = {:?}, expected {partner}",
+                        status.source
                     );
                     let expected = (partner * 11) as f64;
                     for &v in &recv_data {
@@ -179,12 +187,14 @@ fn main() {
                     }
                 } else {
                     let mut recv_data = vec![0.0f64; 3];
-                    let (src, _, _) = world
+                    let status = world
                         .recv(&mut recv_data, partner, tag)
                         .expect("recv failed");
                     assert_eq!(
-                        src, partner,
-                        "rank {rank}: recv source = {src}, expected {partner}"
+                        status.source,
+                        Source::Rank(partner),
+                        "rank {rank}: recv source = {:?}, expected {partner}",
+                        status.source
                     );
                     let expected = (partner * 11) as f64;
                     for &v in &recv_data {
@@ -332,12 +342,20 @@ fn main() {
         ];
         let mut recv_buf = vec![0.0f64; 3];
 
-        let (source, _tag, count) = world
+        let status = world
             .sendrecv(&send_buf, next, 800, &mut recv_buf, prev, 800)
             .expect("sendrecv different tags failed");
 
-        assert_eq!(source, prev, "rank {rank}: sendrecv source mismatch");
-        assert_eq!(count, 3, "rank {rank}: sendrecv count mismatch");
+        assert_eq!(
+            status.source,
+            Source::Rank(prev),
+            "rank {rank}: sendrecv source mismatch"
+        );
+        assert_eq!(
+            status.count,
+            Some(3),
+            "rank {rank}: sendrecv count mismatch"
+        );
 
         let expected = vec![
             (prev * 3) as f64,

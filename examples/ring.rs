@@ -36,16 +36,16 @@ fn main() -> Result<()> {
     // This avoids deadlock
     if rank % 2 == 0 {
         world.send(&send_data, next, 0)?;
-        let (source, tag, count) = world.recv(&mut recv_data, prev, 0)?;
+        let status = world.recv(&mut recv_data, prev, 0)?;
         println!(
-            "Rank {}: received {:?} from rank {} (tag={}, count={})",
-            rank, recv_data, source, tag, count
+            "Rank {}: received {:?} from {:?} (tag={:?}, count={:?})",
+            rank, recv_data, status.source, status.tag, status.count
         );
     } else {
-        let (source, tag, count) = world.recv(&mut recv_data, prev, 0)?;
+        let status = world.recv(&mut recv_data, prev, 0)?;
         println!(
-            "Rank {}: received {:?} from rank {} (tag={}, count={})",
-            rank, recv_data, source, tag, count
+            "Rank {}: received {:?} from {:?} (tag={:?}, count={:?})",
+            rank, recv_data, status.source, status.tag, status.count
         );
         world.send(&send_data, next, 0)?;
     }

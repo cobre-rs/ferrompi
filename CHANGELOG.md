@@ -65,6 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receive reports `Source::ProcNull`, `Tag::Any`, `Some(0)` on every MPI.
   Migration: compare against `Source::Rank(r)`/`Tag::Value(t)`; replace
   `count < 0` checks with `count.is_none()`.
+- **`recv` and `sendrecv` return `Status`** instead of a `(source, tag,
+  count)` tuple. Migration: `let st = world.recv(...)?;` then `st.source`,
+  `st.tag`, `st.count`.
 
 ### Changed
 

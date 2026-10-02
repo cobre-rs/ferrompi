@@ -1,19 +1,24 @@
 //! Typed point-to-point endpoints: a send, receive, probe or persistent request
-//! with `Source::ProcNull` completes at once with no data on every MPI; a
-//! negative rank or tag, or `Source::Any` as a destination, is rejected before
-//! any MPI call; a wildcard receive delivers the message of a ring (a send to
-//! self at np 1).
+//! with `Source::ProcNull` completes at once with no data on every MPI, and a
+//! receive, probe or `sendrecv` from it reports `Source::ProcNull`, `Tag::Any`
+//! and a count of 0; a negative rank or tag, or `Source::Any` as a destination,
+//! is rejected before any MPI call; a wildcard receive delivers the message of
+//! a ring (a send to self at np 1).
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_proc_null
 // mpi-test: np=1.. valgrind
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, Source, StructField, Tag};
+use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, Source, Status, StructField, Tag};
 
 mod common;
 
 const UNTOUCHED: [i32; 4] = [-7; 4];
 const RING_TAG: i32 = 5;
 const SENDRECV_TAG: i32 = 6;
+
+fn is_proc_null_status(st: &Status) -> bool {
+    st.source == Source::ProcNull && st.tag == Tag::Any && st.count == Some(0) && st.error.is_none()
+}
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -31,6 +36,11 @@ fn main() {
         r.is_ok() && buf == UNTOUCHED,
         "recv from ProcNull completes and leaves the buffer untouched",
     );
+    common::check(
+        &world,
+        r.as_ref().is_ok_and(is_proc_null_status),
+        "recv from ProcNull reports the ProcNull status",
+    );
 
     let r = world
         .irecv(&mut buf, Source::ProcNull, Tag::Any)
@@ -43,12 +53,17 @@ fn main() {
 
     let r = world.probe::<i32>(Source::ProcNull, Tag::Any);
     common::check(&world, r.is_ok(), "probe from ProcNull completes");
+    common::check(
+        &world,
+        r.as_ref().is_ok_and(is_proc_null_status),
+        "probe from ProcNull reports the ProcNull status",
+    );
 
     let r = world.iprobe::<i32>(Source::ProcNull, Tag::Any);
     common::check(
         &world,
-        matches!(r, Ok(Some(_))),
-        "iprobe from ProcNull reports a match",
+        matches!(&r, Ok(Some(st)) if is_proc_null_status(st)),
+        "iprobe from ProcNull reports a match with the ProcNull status",
     );
 
     let mut ring = [0i32; 4];
@@ -66,6 +81,11 @@ fn main() {
         &world,
         r.is_ok() && buf == UNTOUCHED && delivered.is_ok() && ring == [prev; 4],
         "sendrecv from ProcNull leaves the receive buffer untouched and still sends",
+    );
+    common::check(
+        &world,
+        r.as_ref().is_ok_and(is_proc_null_status),
+        "sendrecv from ProcNull reports the ProcNull receive status",
     );
 
     let mut persistent = world
@@ -154,7 +174,12 @@ fn main() {
     common::check(
         &world,
         waited.is_ok()
-            && matches!(r, Ok((source, RING_TAG, 4)) if source == prev)
+            && matches!(
+                r,
+                Ok(st) if st.source == Source::Rank(prev)
+                    && st.tag == Tag::Value(RING_TAG)
+                    && st.count == Some(4)
+            )
             && ring == [prev; 4],
         "sendrecv to ProcNull still receives the ring message",
     );
@@ -193,7 +218,12 @@ fn main() {
     common::check(
         &world,
         waited.is_ok()
-            && matches!(received, Ok((source, RING_TAG, 4)) if source == prev)
+            && matches!(
+                received,
+                Ok(st) if st.source == Source::Rank(prev)
+                    && st.tag == Tag::Value(RING_TAG)
+                    && st.count == Some(4)
+            )
             && buf == [prev; 4],
         "wildcard recv delivers the ring message",
     );

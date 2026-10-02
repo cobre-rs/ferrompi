@@ -106,7 +106,11 @@ impl Tag {
 
 /// Information about a probed or received MPI message.
 ///
-/// Returned by [`Communicator::probe`](crate::Communicator::probe) and
+/// Returned by [`Communicator::recv`](crate::Communicator::recv),
+/// [`Communicator::sendrecv`](crate::Communicator::sendrecv) and
+/// [`Communicator::recv_custom`](crate::Communicator::recv_custom) to describe
+/// the message just received, and by
+/// [`Communicator::probe`](crate::Communicator::probe) and
 /// [`Communicator::iprobe`](crate::Communicator::iprobe) to describe an
 /// incoming message without consuming it.
 ///

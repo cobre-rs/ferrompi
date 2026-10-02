@@ -139,25 +139,26 @@ fn test_send_recv<T: ferrompi::MpiDatatype + TestValue>(
             .expect("send failed in send/recv test");
 
         let mut recv_data = vec![T::from_rank(0); buf_len];
-        let (src, actual_tag, count) = world
+        let status = world
             .recv(&mut recv_data, partner, tag)
             .expect("recv failed in send/recv test");
 
         assert_eq!(
-            src,
-            partner,
-            "{}: send/recv source mismatch: got {src}, expected {partner}",
-            T::type_name()
+            status.source,
+            Source::Rank(partner),
+            "{}: send/recv source mismatch: got {:?}, expected {partner}",
+            T::type_name(),
+            status.source
         );
         assert_eq!(
-            actual_tag,
-            tag,
+            status.tag,
+            Tag::Value(tag),
             "{}: send/recv tag mismatch",
             T::type_name()
         );
         assert_eq!(
-            count,
-            buf_len as i64,
+            status.count,
+            Some(buf_len),
             "{}: send/recv count mismatch",
             T::type_name()
         );
@@ -165,25 +166,26 @@ fn test_send_recv<T: ferrompi::MpiDatatype + TestValue>(
     } else {
         // Odd rank: receive first, then send
         let mut recv_data = vec![T::from_rank(0); buf_len];
-        let (src, actual_tag, count) = world
+        let status = world
             .recv(&mut recv_data, partner, tag)
             .expect("recv failed in send/recv test");
 
         assert_eq!(
-            src,
-            partner,
-            "{}: send/recv source mismatch: got {src}, expected {partner}",
-            T::type_name()
+            status.source,
+            Source::Rank(partner),
+            "{}: send/recv source mismatch: got {:?}, expected {partner}",
+            T::type_name(),
+            status.source
         );
         assert_eq!(
-            actual_tag,
-            tag,
+            status.tag,
+            Tag::Value(tag),
             "{}: send/recv tag mismatch",
             T::type_name()
         );
         assert_eq!(
-            count,
-            buf_len as i64,
+            status.count,
+            Some(buf_len),
             "{}: send/recv count mismatch",
             T::type_name()
         );
@@ -217,20 +219,26 @@ fn test_sendrecv<T: ferrompi::MpiDatatype + TestValue>(
         .collect();
     let mut recv_buf = vec![T::from_rank(0); buf_len];
 
-    let (source, actual_tag, count) = world
+    let status = world
         .sendrecv(&send_buf, next, tag, &mut recv_buf, prev, tag)
         .expect("sendrecv failed");
 
     assert_eq!(
-        source,
-        prev,
-        "{}: sendrecv source mismatch: got {source}, expected {prev}",
+        status.source,
+        Source::Rank(prev),
+        "{}: sendrecv source mismatch: got {:?}, expected {prev}",
+        T::type_name(),
+        status.source
+    );
+    assert_eq!(
+        status.tag,
+        Tag::Value(tag),
+        "{}: sendrecv tag mismatch",
         T::type_name()
     );
-    assert_eq!(actual_tag, tag, "{}: sendrecv tag mismatch", T::type_name());
     assert_eq!(
-        count,
-        buf_len as i64,
+        status.count,
+        Some(buf_len),
         "{}: sendrecv count mismatch",
         T::type_name()
     );
@@ -449,10 +457,14 @@ fn main() {
             );
 
             let mut buf = [0u8; 3];
-            let (_, _, count) = world
+            let status = world
                 .recv(&mut buf, 0, tag)
                 .expect("recv of partial-count message failed");
-            assert_eq!(count, 3, "recv of 3-byte message count mismatch");
+            assert_eq!(
+                status.count,
+                Some(3),
+                "recv of 3-byte message count mismatch"
+            );
             assert_eq!(buf, [1, 2, 3], "recv of 3-byte message payload mismatch");
         }
         world

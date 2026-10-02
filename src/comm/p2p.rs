@@ -50,24 +50,30 @@ impl Communicator {
     /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
     /// at once with no data.
     ///
-    /// Returns `(source, tag, count)`; `count` is `-1` when the message is not
-    /// a whole number of `T`.
+    /// Returns the receive's [`Status`]: `status.source` is the matched source,
+    /// `status.tag` the matched tag and `status.count` the number of `T` elements
+    /// received, `None` when the message is not a whole number of `T`. A receive
+    /// from `Source::ProcNull` returns `Source::ProcNull`, `Tag::Any` and
+    /// `Some(0)` on every MPI.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::Mpi;
+    /// # use ferrompi::{Mpi, Source, Tag};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// let mut buf = vec![0.0f64; 10];
-    /// let (source, tag, count) = world.recv(&mut buf, 0, 0).unwrap();
+    /// let status = world.recv(&mut buf, 0, 0).unwrap();
+    /// assert_eq!(status.source, Source::Rank(0));
+    /// assert_eq!(status.tag, Tag::Value(0));
+    /// assert_eq!(status.count, Some(10));
     /// ```
     pub fn recv<T: MpiDatatype>(
         &self,
         data: &mut [T],
         source: impl Into<Source>,
         tag: impl Into<Tag>,
-    ) -> Result<(i32, i32, i64)> {
+    ) -> Result<Status> {
         let source = source.into().source_code("source")?;
         let tag = tag.into().tag_code("tag")?;
         let mut status = ffi::FerrompiStatus::default();
@@ -76,7 +82,7 @@ impl Communicator {
         // SAFETY: this blocking call returns only after MPI is done with the buffer.
         let ret = unsafe { ffi::ferrompi_recv(p, n, dt, source, tag, self.handle, &mut status) };
         Error::check_with_op(ret, "recv")?;
-        Ok((status.source, status.tag, status.count))
+        Ok(Status::from_ffi(status))
     }
 
     /// Nonblocking send.
@@ -176,8 +182,12 @@ impl Communicator {
     /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
     /// at once with no data.
     ///
-    /// Returns `(source, tag, count)`; `count` is `-1` when the message is not
-    /// a whole number of `T`.
+    /// Returns the [`Status`] of the receive half only; the send leaves no trace
+    /// in it. `status.source` is the matched source, `status.tag` the matched tag
+    /// and `status.count` the number of `T` elements received, `None` when the
+    /// message is not a whole number of `T`. With `Source::ProcNull` as the
+    /// source the receive half returns `Source::ProcNull`, `Tag::Any` and
+    /// `Some(0)` on every MPI, and the send still happens.
     ///
     /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
     /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
@@ -195,14 +205,17 @@ impl Communicator {
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::Mpi;
+    /// # use ferrompi::{Mpi, Source, Tag};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// let send = vec![world.rank() as f64; 5];
     /// let mut recv = vec![0.0f64; 5];
     /// let next = (world.rank() + 1) % world.size();
     /// let prev = (world.rank() - 1 + world.size()) % world.size();
-    /// let (src, tag, count) = world.sendrecv(&send, next, 0, &mut recv, prev, 0).unwrap();
+    /// let status = world.sendrecv(&send, next, 0, &mut recv, prev, 0).unwrap();
+    /// assert_eq!(status.source, Source::Rank(prev));
+    /// assert_eq!(status.tag, Tag::Value(0));
+    /// assert_eq!(status.count, Some(5));
     /// ```
     pub fn sendrecv<T: MpiDatatype>(
         &self,
@@ -212,7 +225,7 @@ impl Communicator {
         recv: &mut [T],
         source: impl Into<Source>,
         recvtag: impl Into<Tag>,
-    ) -> Result<(i32, i32, i64)> {
+    ) -> Result<Status> {
         let dest = dest.into().dest_code()?;
         let source = source.into().source_code("source")?;
         let recvtag = recvtag.into().tag_code("recvtag")?;
@@ -239,7 +252,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "sendrecv")?;
-        Ok((status.source, status.tag, status.count))
+        Ok(Status::from_ffi(status))
     }
 
     /// Blocking probe for an incoming message.
