@@ -255,7 +255,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | BLT-26 | `const _` Send/Sync asserts beside `unsafe impl` | 27 | 0.5.x† | fixed (c074ed1) |
 | BLT-27 | Dead `ferrompi_init`; module-wide `allow(dead_code)` | 25 | 0.5.x† | fixed (3cde221) |
 | BLT-29 | `with_handles` implemented twice | 20 | 0.5.x† | fixed (2b1237e) |
-| BLT-32 | `ReduceOp` compile_fail doctest via 14 `cfg_attr` | 16 | 0.7.0 (with ARC-02) | planned (ferrompi-0.7.0) |
+| BLT-32 | `ReduceOp` compile_fail doctest via 14 `cfg_attr` | 16 | 0.7.0 (with ARC-02) | fixed (d01558f) |
 | BLT-34 | `use super::*` in 11 test modules | — | 0.5.x† | fixed (99f3f9d) |
 | BLT-35 | Five tidy-ups left after 0.6.0: the always-taken first-error guard in `zero_own_segment`; `docs/architecture.md` and `docs/mpi-compatibility.md` each restate a paragraph given earlier in the file; single-use locals in `examples/pi_monte_carlo.rs`; a `src/lib.rs` test comment restating `stub_mpi()` | ~20 | 0.6.0 | fixed (96bef9b) |
 
