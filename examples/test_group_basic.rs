@@ -8,7 +8,7 @@
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_group_basic
 // mpi-test: np=4
 
-use ferrompi::{Group, Mpi, ReduceOp};
+use ferrompi::{Mpi, ReduceOp};
 
 mod common;
 
@@ -64,7 +64,7 @@ fn main() {
     {
         let world_group = world.group().expect("world.group() failed in Test 2");
         match world_group.rank() {
-            Ok(r) if r == rank => {
+            Ok(Some(r)) if r == rank => {
                 if rank == 0 {
                     println!(
                         "PASS: Test 2 — world_group.rank() matches world.rank() for all ranks"
@@ -72,7 +72,7 @@ fn main() {
                 }
             }
             Ok(r) => {
-                eprintln!("rank {rank}: FAIL Test 2: world_group.rank() = {r}, expected {rank}");
+                eprintln!("rank {rank}: FAIL Test 2: world_group.rank() = {r:?}, expected {rank}");
                 local_ok = false;
             }
             Err(e) => {
@@ -150,10 +150,9 @@ fn main() {
     // Test 5: rank in included sub-group
     //   rank 0 of WORLD -> rank 0 of sub-group {0, 2}
     //   rank 2 of WORLD -> rank 1 of sub-group {0, 2}
-    //   ranks 1, 3 of WORLD -> MPI_UNDEFINED (implementation-defined sentinel)
+    //   ranks 1, 3 of WORLD -> None (not a member)
     // ========================================================================
     {
-        let mpi_undefined = Group::undefined();
         let world_group = world.group().expect("world.group() failed in Test 5");
         let sub = match world_group.include(&[0, 2]) {
             Ok(g) => g,
@@ -165,23 +164,23 @@ fn main() {
         };
 
         let expected_sub_rank = match rank {
-            0 => 0,
-            2 => 1,
-            _ => mpi_undefined,
+            0 => Some(0),
+            2 => Some(1),
+            _ => None,
         };
 
         match sub.rank() {
             Ok(r) if r == expected_sub_rank => {
                 if rank == 0 {
-                    println!("PASS: Test 5 — sub-group rank correct for rank 0 (sub-rank = {r})");
+                    println!("PASS: Test 5 — sub-group rank correct for rank 0 (sub-rank = {r:?})");
                 }
                 if rank == 2 {
-                    println!("PASS: Test 5 — sub-group rank correct for rank 2 (sub-rank = {r})");
+                    println!("PASS: Test 5 — sub-group rank correct for rank 2 (sub-rank = {r:?})");
                 }
             }
             Ok(r) => {
                 eprintln!(
-                    "rank {rank}: FAIL Test 5: sub-group rank = {r}, expected {expected_sub_rank}"
+                    "rank {rank}: FAIL Test 5: sub-group rank = {r:?}, expected {expected_sub_rank:?}"
                 );
                 local_ok = false;
             }

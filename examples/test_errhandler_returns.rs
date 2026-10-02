@@ -97,7 +97,7 @@ fn main() {
     // ========================================================================
     {
         let split_comm = world
-            .split(0, rank)
+            .split(Some(0), rank)
             .expect("comm_split failed")
             .expect("expected Some communicator, got None");
 

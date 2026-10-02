@@ -7,7 +7,7 @@
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_comm_split
 // mpi-test: np=4
 
-use ferrompi::{Communicator, Mpi, ReduceOp, SplitType};
+use ferrompi::{Mpi, ReduceOp, SplitType};
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -26,7 +26,7 @@ fn main() {
     {
         let color = rank % 2;
         let sub = world
-            .split(color, rank)
+            .split(Some(color), rank)
             .expect("split failed")
             .expect("split returned None for valid color");
 
@@ -70,7 +70,7 @@ fn main() {
     {
         let color = rank % 2;
         let sub = world
-            .split(color, rank)
+            .split(Some(color), rank)
             .expect("split failed")
             .expect("split returned None");
 
@@ -103,7 +103,7 @@ fn main() {
     {
         let color = rank % 3;
         let sub = world
-            .split(color, rank)
+            .split(Some(color), rank)
             .expect("split mod 3 failed")
             .expect("split returned None");
 
@@ -138,31 +138,29 @@ fn main() {
     world.barrier().expect("barrier 3 failed");
 
     // ========================================================================
-    // Test 4: Split with UNDEFINED color (opt-out)
+    // Test 4: Split with a None color (opt-out)
     // ========================================================================
     {
         // Rank 0 opts out of the split
         let color = if rank == 0 {
-            Communicator::UNDEFINED
+            None
         } else {
-            0 // all other ranks in the same group
+            Some(0) // all other ranks in the same group
         };
-        let result = world
-            .split(color, rank)
-            .expect("split with UNDEFINED failed");
+        let result = world.split(color, rank).expect("opt-out split failed");
 
         if rank == 0 {
             assert!(
                 result.is_none(),
-                "rank 0: split with UNDEFINED should return None"
+                "rank 0: split with None color should return None"
             );
-            println!("PASS: split with UNDEFINED color");
+            println!("PASS: split with None color");
         } else {
-            let sub = result.expect("non-UNDEFINED ranks should get a communicator");
+            let sub = result.expect("ranks with a Some color should get a communicator");
             assert_eq!(
                 sub.size(),
                 size - 1,
-                "rank {rank}: UNDEFINED split sub_size = {}, expected {}",
+                "rank {rank}: opt-out split sub_size = {}, expected {}",
                 sub.size(),
                 size - 1
             );
@@ -177,7 +175,7 @@ fn main() {
     {
         let color = rank % 2;
         let sub = world
-            .split(color, rank)
+            .split(Some(color), rank)
             .expect("split failed")
             .expect("split returned None");
 

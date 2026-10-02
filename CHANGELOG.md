@@ -53,6 +53,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose reason names the replacement; a `-1` still compiles, so search for it
   rather than relying on compile errors. A 0.6 `-1` destination, which meant
   `MPI_PROC_NULL` on MPICH, becomes `Source::ProcNull`.
+- **`Communicator::split` takes `color: Option<i32>`** (`None` opts out) and
+  **`Group::rank` returns `Result<Option<i32>>`** (`None` for a non-member);
+  `Communicator::UNDEFINED` and `Group::undefined()` are removed. A negative
+  `Some` color returns `Error::InvalidArgument` before any MPI call. Migration:
+  `split(Some(color), key)`, `split(None, key)` for `UNDEFINED`; match
+  `Some(rank)`.
 
 ### Changed
 

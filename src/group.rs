@@ -25,7 +25,6 @@
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::rt;
-use crate::Communicator;
 
 /// Outcome of [`Group::compare`].
 ///
@@ -105,11 +104,10 @@ pub struct RankRange {
 /// [`include`](Self::include) or [`exclude`](Self::exclude) to derive
 /// sub-groups.
 ///
-/// # MPI_UNDEFINED
+/// # Non-members
 ///
-/// [`rank`](Self::rank) returns `-1` when the calling process is not a
-/// member of the group (`MPI_UNDEFINED` in the MPI standard). Consumers
-/// must handle this sentinel explicitly.
+/// [`rank`](Self::rank) returns `None` when the calling process is not a
+/// member of the group.
 pub struct Group {
     pub(crate) handle: i32,
 }
@@ -151,8 +149,7 @@ impl Group {
 
     /// Get the rank of the calling process in this group.
     ///
-    /// Returns `MPI_UNDEFINED` (`-1`) when the calling process is not a member
-    /// of the group. Consumers must handle this sentinel explicitly.
+    /// Returns `None` when the calling process is not a member of the group.
     ///
     /// # Errors
     ///
@@ -166,43 +163,19 @@ impl Group {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let g = world.group().unwrap();
-    /// assert_eq!(g.rank().unwrap(), world.rank());
+    /// assert_eq!(g.rank().unwrap(), Some(world.rank()));
     /// ```
-    pub fn rank(&self) -> Result<i32> {
+    pub fn rank(&self) -> Result<Option<i32>> {
         let mut rank: i32 = 0;
         // SAFETY: self.handle is owned by this Group and was allocated by the C-side group table.
         let ret = unsafe { ffi::ferrompi_group_rank(self.handle, &mut rank) };
         Error::check_with_op(ret, "group_rank")?;
-        Ok(rank)
+        Ok(if rank == -1 { None } else { Some(rank) })
     }
 
     /// Get the raw group handle for internal use.
     pub fn raw_handle(&self) -> i32 {
         self.handle
-    }
-
-    /// Return the normalised `MPI_UNDEFINED` sentinel value (`-1`).
-    ///
-    /// [`rank`](Self::rank) returns `-1` when the calling process is not a
-    /// member of the group.
-    ///
-    /// This function does not require an active MPI session.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{Group, Mpi};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let sub = world.group().unwrap().include(&[0, 2]).unwrap();
-    /// let r = sub.rank().unwrap();
-    /// if r == Group::undefined() {
-    ///     println!("not a member of this sub-group");
-    /// }
-    /// ```
-    pub const fn undefined() -> i32 {
-        Communicator::UNDEFINED
     }
 
     /// Create a new group containing only the specified ranks from this group.

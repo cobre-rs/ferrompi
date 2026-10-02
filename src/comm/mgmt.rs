@@ -108,10 +108,19 @@ impl Communicator {
 
     /// Split this communicator into sub-communicators based on color and key.
     ///
-    /// Processes with the same `color` are placed in the same new communicator.
-    /// The `key` controls the rank ordering within the new communicator.
+    /// This is a **collective operation**: every rank must call it. Processes
+    /// with the same `color` are placed in the same new communicator. The
+    /// `key` controls the rank ordering within the new communicator.
     ///
-    /// Returns `None` if this process used [`Communicator::UNDEFINED`] as color.
+    /// Pass `None` as `color` to opt out: the call returns `None` and the
+    /// process joins no new communicator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] if `color` is a negative `Some`.
+    /// The check is local and precedes the MPI call, as described under
+    /// "Argument validation" on [`Communicator`]: peers that already entered
+    /// the collective are not told and may block.
     ///
     /// # Example
     ///
@@ -120,12 +129,23 @@ impl Communicator {
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let color = world.rank() % 2; // Even/odd split
+    /// let color = Some(world.rank() % 2); // Even/odd split
     /// if let Some(sub) = world.split(color, world.rank()).unwrap() {
     ///     println!("Rank {} in sub-communicator of size {}", sub.rank(), sub.size());
     /// }
     /// ```
-    pub fn split(&self, color: i32, key: i32) -> Result<Option<Communicator>> {
+    pub fn split(&self, color: Option<i32>, key: i32) -> Result<Option<Communicator>> {
+        let color = match color {
+            // The shim maps -1 to MPI_UNDEFINED.
+            None => -1,
+            Some(c) if c >= 0 => c,
+            Some(_) => {
+                return Err(Error::InvalidArgument {
+                    arg: "color",
+                    reason: "negative color",
+                })
+            }
+        };
         let mut new_handle: i32 = 0;
         // SAFETY: self.handle is owned by this Communicator; remaining arguments are scalars.
         let ret = unsafe { ffi::ferrompi_comm_split(self.handle, color, key, &mut new_handle) };
@@ -285,5 +305,25 @@ impl Communicator {
         // destructor that touches MPI state after a failed or rejected
         // MPI_Abort has undefined behavior.
         std::process::abort()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::comm::test_comm;
+    use crate::error::Error;
+
+    #[test]
+    fn split_negative_color_returns_invalid_argument() {
+        let comm = test_comm(0, 1);
+        for color in [-1, -2, i32::MIN] {
+            assert!(
+                matches!(
+                    comm.split(Some(color), 0),
+                    Err(Error::InvalidArgument { arg: "color", .. })
+                ),
+                "color {color}"
+            );
+        }
     }
 }

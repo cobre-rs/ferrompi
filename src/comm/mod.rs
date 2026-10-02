@@ -179,12 +179,6 @@ unsafe impl Sync for Communicator {}
 const WORLD_HANDLE: i32 = 0;
 
 impl Communicator {
-    /// Constant for opting out of a communicator split.
-    ///
-    /// Processes passing this as the `color` to [`split()`](Self::split) will not be
-    /// included in any resulting communicator.
-    pub const UNDEFINED: i32 = -1;
-
     /// Get a handle to `MPI_COMM_WORLD`.
     pub(crate) fn world() -> Self {
         Self::from_handle(WORLD_HANDLE).expect("COMM_WORLD must be valid post-init")
