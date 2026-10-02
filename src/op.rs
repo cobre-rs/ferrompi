@@ -934,36 +934,14 @@ mod tests {
                 ReduceOp::LogicalXor => 9,
             }
         }
-        for op in [
-            ReduceOp::Sum,
-            ReduceOp::Max,
-            ReduceOp::Min,
-            ReduceOp::Prod,
-            ReduceOp::BitwiseOr,
-            ReduceOp::BitwiseAnd,
-            ReduceOp::BitwiseXor,
-            ReduceOp::LogicalOr,
-            ReduceOp::LogicalAnd,
-            ReduceOp::LogicalXor,
-        ] {
+        for op in FLOAT_OK.into_iter().chain(FLOAT_BAD) {
             assert_eq!(op as i32, expected(op));
         }
     }
 
     #[test]
     fn collective_op_codes_match_the_shim_switch() {
-        for op in [
-            ReduceOp::Sum,
-            ReduceOp::Max,
-            ReduceOp::Min,
-            ReduceOp::Prod,
-            ReduceOp::BitwiseOr,
-            ReduceOp::BitwiseAnd,
-            ReduceOp::BitwiseXor,
-            ReduceOp::LogicalOr,
-            ReduceOp::LogicalAnd,
-            ReduceOp::LogicalXor,
-        ] {
+        for op in FLOAT_OK.into_iter().chain(FLOAT_BAD) {
             assert_eq!(
                 CollectiveOp::<i32>::from(op)
                     .code(DatatypeTag::I32)

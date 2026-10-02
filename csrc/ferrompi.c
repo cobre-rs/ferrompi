@@ -4701,12 +4701,9 @@ int ferrompi_op_free(int32_t handle) {
      * predefined op), the op is still live and may be invoked.  Dropping the
      * Rust closure now would leave the trampoline with dangling closure-data
      * pointers (UB on next invocation).  Return the error without releasing
-     * closure or slot.
-     * Freeing an op that pending operations still reference is legal
-     * (MPI-4.1 section 2.5.1): they complete and the op is deallocated
-     * afterwards, so a referenced op is not a failure to retry.  The callers
-     * are the last drop of the op's registration, which only logs the error,
-     * and the finalize sweep; neither retries. */
+     * closure or slot.  Freeing a still-referenced op is legal (MPI-4.1
+     * section 2.5.1), so this is no retryable state; the callers, the last
+     * OpRegistration drop (which logs) and the finalize sweep, never retry. */
     if (ret != MPI_SUCCESS) {
         return ret;
     }
@@ -4730,4 +4727,3 @@ int ferrompi_op_free_slot_only(int32_t handle) {
     free_op_slot(handle);
     return MPI_SUCCESS;
 }
-
