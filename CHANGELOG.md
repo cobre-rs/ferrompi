@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reject a pair base type with `Error::InvalidArgument`** instead of
   `Error::InvalidOp`. Migration: match `Error::InvalidArgument`; `arg` is
   `basetype` for `contiguous` and `vector`, `fields` for `create_struct`.
+- **The `*_custom` methods
+  reject a datatype that does not fit `T` with `Error::InvalidArgument {
+  arg: "datatype", .. }`** instead of `Error::InvalidBuffer`. Migration:
+  match `Error::InvalidArgument`; `reason` tells a wrong extent from data
+  outside one element.
 
 ### Fixed
 

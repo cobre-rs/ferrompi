@@ -621,7 +621,7 @@ impl Communicator {
     /// This is the custom-datatype counterpart of [`send`](Self::send). The element
     /// type `T` must satisfy the [`PlainData`](crate::PlainData) bound. `datatype`'s
     /// extent must equal `size_of::<T>()` and its data must lie within one `T`,
-    /// otherwise the call returns [`Error::InvalidBuffer`] without calling MPI.
+    /// otherwise the call returns [`Error::InvalidArgument`] without calling MPI.
     ///
     /// # Arguments
     ///
@@ -632,7 +632,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    /// - [`Error::InvalidArgument`] if `datatype`'s extent does not equal
     ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
     ///   locally before any MPI call. If a peer already posted the matching
     ///   receive, that peer operation is not cancelled.
@@ -684,7 +684,7 @@ impl Communicator {
     /// This is the custom-datatype counterpart of [`recv`](Self::recv). The element
     /// type `T` must satisfy the [`PlainData`](crate::PlainData) bound. `datatype`'s
     /// extent must equal `size_of::<T>()` and its data must lie within one `T`,
-    /// otherwise the call returns [`Error::InvalidBuffer`] without calling MPI.
+    /// otherwise the call returns [`Error::InvalidArgument`] without calling MPI.
     ///
     /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
     ///
@@ -700,7 +700,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    /// - [`Error::InvalidArgument`] if `datatype`'s extent does not equal
     ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
     ///   locally before any MPI call. If a peer already posted the matching
     ///   send, that peer operation is not cancelled.
@@ -769,7 +769,7 @@ impl Communicator {
     ///
     /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound.
     /// `datatype`'s extent must equal `size_of::<T>()` and its data must lie
-    /// within one `T`, otherwise the call returns [`Error::InvalidBuffer`]
+    /// within one `T`, otherwise the call returns [`Error::InvalidArgument`]
     /// without calling MPI.
     ///
     /// # Arguments
@@ -781,7 +781,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    /// - [`Error::InvalidArgument`] if `datatype`'s extent does not equal
     ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
     ///   locally before any MPI call. If a peer already posted the matching
     ///   receive, that peer operation is not cancelled.
@@ -842,7 +842,7 @@ impl Communicator {
     ///
     /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound.
     /// `datatype`'s extent must equal `size_of::<T>()` and its data must lie
-    /// within one `T`, otherwise the call returns [`Error::InvalidBuffer`]
+    /// within one `T`, otherwise the call returns [`Error::InvalidArgument`]
     /// without calling MPI.
     ///
     /// # Arguments
@@ -854,7 +854,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    /// - [`Error::InvalidArgument`] if `datatype`'s extent does not equal
     ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
     ///   locally before any MPI call. If a peer already posted the matching
     ///   send, that peer operation is not cancelled.

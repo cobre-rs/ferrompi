@@ -399,20 +399,22 @@ impl CustomDatatype {
     /// Check that this datatype's extent equals `size_of::<T>()` and that its
     /// true bounds lie within one `T`.
     ///
-    /// Returns [`Error::InvalidBuffer`] otherwise.
+    /// Returns [`Error::InvalidArgument`] naming `datatype` otherwise.
     pub(crate) fn check_layout<T>(&self) -> Result<()> {
         let size = std::mem::size_of::<T>() as i64;
-        if self.extent != size || self.true_lb < 0 {
-            return Err(Error::InvalidBuffer);
+        if self.extent != size {
+            return Err(Error::InvalidArgument {
+                arg: "datatype",
+                reason: "extent differs from the element size",
+            });
         }
-        let end = self
-            .true_lb
-            .checked_add(self.true_extent)
-            .ok_or(Error::InvalidBuffer)?;
-        if end > size {
-            return Err(Error::InvalidBuffer);
+        match self.true_lb.checked_add(self.true_extent) {
+            Some(end) if self.true_lb >= 0 && end <= size => Ok(()),
+            _ => Err(Error::InvalidArgument {
+                arg: "datatype",
+                reason: "data lies outside one element",
+            }),
         }
-        Ok(())
     }
 }
 
@@ -516,10 +518,33 @@ mod tests {
 
         assert!(dt(16, 0, 12).check_layout::<Sample>().is_ok());
         assert!(dt(16, 0, 16).check_layout::<Sample>().is_ok());
-        assert!(dt(12, 0, 12).check_layout::<Sample>().is_err());
-        assert!(dt(32, 0, 12).check_layout::<Sample>().is_err());
-        assert!(dt(16, -1, 12).check_layout::<Sample>().is_err());
-        assert!(dt(16, 8, 12).check_layout::<Sample>().is_err());
-        assert!(dt(16, i64::MAX, 1).check_layout::<Sample>().is_err());
+
+        for (extent, true_lb, true_extent) in [(12, 0, 12), (32, 0, 12)] {
+            let result = dt(extent, true_lb, true_extent).check_layout::<Sample>();
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::InvalidArgument {
+                        arg: "datatype",
+                        reason: "extent differs from the element size"
+                    })
+                ),
+                "extent {extent}: got {result:?}"
+            );
+        }
+
+        for (true_lb, true_extent) in [(-1, 12), (8, 12), (i64::MAX, 1)] {
+            let result = dt(16, true_lb, true_extent).check_layout::<Sample>();
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::InvalidArgument {
+                        arg: "datatype",
+                        reason: "data lies outside one element"
+                    })
+                ),
+                "true_lb {true_lb}, true_extent {true_extent}: got {result:?}"
+            );
+        }
     }
 }

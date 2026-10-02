@@ -222,7 +222,7 @@ fn main() {
     // nonblocking half before its matching blocking half so the pre-fix run
     // (where these calls reach real MPI) cannot deadlock: isend before recv
     // on tag 3, irecv before send on tag 5. Post-fix, all four calls return
-    // Err(InvalidBuffer) before any request is created.
+    // Err(InvalidArgument) before any request is created.
     // ========================================================================
     {
         let dt = CustomDatatype::contiguous(32, DatatypeTag::U8)
@@ -234,7 +234,9 @@ fn main() {
         };
 
         let req1 = match world.isend_custom(&src[..1], &dt, rank, 3) {
-            Err(Error::InvalidBuffer) => None,
+            Err(Error::InvalidArgument {
+                arg: "datatype", ..
+            }) => None,
             Ok(req) => Some(req),
             Err(e) => {
                 eprintln!("rank {rank}: FAIL Test 4 — isend_custom unexpected Err: {e}");
@@ -244,14 +246,19 @@ fn main() {
         };
         if !matches!(
             world.recv_custom(&mut frame.recv, &dt, rank, 3),
-            Err(Error::InvalidBuffer)
+            Err(Error::InvalidArgument {
+                arg: "datatype",
+                ..
+            })
         ) {
-            eprintln!("rank {rank}: FAIL Test 4 — recv_custom did not return Err(InvalidBuffer)");
+            eprintln!("rank {rank}: FAIL Test 4 — recv_custom did not return Err(InvalidArgument)");
             local_ok = false;
         }
 
         let req2 = match world.irecv_custom(&mut frame.recv, &dt, rank, 5) {
-            Err(Error::InvalidBuffer) => None,
+            Err(Error::InvalidArgument {
+                arg: "datatype", ..
+            }) => None,
             Ok(req) => Some(req),
             Err(e) => {
                 eprintln!("rank {rank}: FAIL Test 4 — irecv_custom unexpected Err: {e}");
@@ -261,9 +268,12 @@ fn main() {
         };
         if !matches!(
             world.send_custom(&src[..1], &dt, rank, 5),
-            Err(Error::InvalidBuffer)
+            Err(Error::InvalidArgument {
+                arg: "datatype",
+                ..
+            })
         ) {
-            eprintln!("rank {rank}: FAIL Test 4 — send_custom did not return Err(InvalidBuffer)");
+            eprintln!("rank {rank}: FAIL Test 4 — send_custom did not return Err(InvalidArgument)");
             local_ok = false;
         }
 
@@ -296,7 +306,9 @@ fn main() {
         };
 
         let req = match world.isend_custom(&src[..1], &dt, rank, 4) {
-            Err(Error::InvalidBuffer) => None,
+            Err(Error::InvalidArgument {
+                arg: "datatype", ..
+            }) => None,
             Ok(req) => Some(req),
             Err(e) => {
                 eprintln!("rank {rank}: FAIL Test 5 — isend_custom unexpected Err: {e}");
@@ -306,9 +318,12 @@ fn main() {
         };
         if !matches!(
             world.recv_custom(&mut frame.recv, &dt, rank, 4),
-            Err(Error::InvalidBuffer)
+            Err(Error::InvalidArgument {
+                arg: "datatype",
+                ..
+            })
         ) {
-            eprintln!("rank {rank}: FAIL Test 5 — recv_custom did not return Err(InvalidBuffer)");
+            eprintln!("rank {rank}: FAIL Test 5 — recv_custom did not return Err(InvalidArgument)");
             local_ok = false;
         }
 
