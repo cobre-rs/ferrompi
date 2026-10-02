@@ -301,9 +301,11 @@ impl Communicator {
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]). op.handle is a valid MPI_Op registered by UserOp::new and
-        // kept alive for the lifetime of `op`.
-        let ret = unsafe { ffi::ferrompi_allreduce_user_op(sp, rp, n, dt, op.handle, self.handle) };
+        // (&[T] vs &mut [T]). op.registration.slot is a valid MPI_Op registered by
+        // UserOp::new; the registration is kept alive by the borrow of `op`.
+        let ret = unsafe {
+            ffi::ferrompi_allreduce_user_op(sp, rp, n, dt, op.registration.slot, self.handle)
+        };
         Error::check_with_op(ret, "allreduce_user_op")
     }
 

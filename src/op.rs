@@ -17,6 +17,7 @@
 use std::marker::PhantomData;
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Arc;
 
 use crate::datatype::{MpiDatatype, MpiIndexedDatatype};
 use crate::error::{Error, Result};
@@ -338,11 +339,17 @@ pub unsafe extern "C" fn ferrompi_op_drop_closure(slot: i32) {
 /// [`std::process::abort`] before the panic can reach the C frame.  Treat a
 /// panic inside a reduction closure as a fatal programming error.
 ///
+/// # Lifetime
+///
+/// MPI never invokes the closure after it is dropped, because the op is freed
+/// only when the last reference to its registration goes away.
+///
 /// # Slot-table limit
 ///
-/// At most 16 `UserOp` instances may be live concurrently per process.
-/// Attempting to create a seventeenth returns [`Error::ResourceExhausted`] with
-/// resource [`ResourceKind::Operation`](crate::ResourceKind::Operation).
+/// At most 16 `UserOp` instances may be live concurrently per process, and a
+/// slot is held until the `UserOp` is dropped. Attempting to create a
+/// seventeenth returns [`Error::ResourceExhausted`] with resource
+/// [`ResourceKind::Operation`](crate::ResourceKind::Operation).
 ///
 /// If a `UserOp` outlives the `Mpi` handle, finalizing MPI frees its op and
 /// drops its closure, and dropping the `UserOp` afterwards does nothing.
@@ -366,8 +373,14 @@ pub unsafe extern "C" fn ferrompi_op_drop_closure(slot: i32) {
 /// world.allreduce_with_op(&send, &mut recv, &op).unwrap();
 /// ```
 pub struct UserOp<T: MpiDatatype> {
-    pub(crate) handle: i32,
+    pub(crate) registration: Arc<OpRegistration>,
     _marker: PhantomData<T>,
+}
+
+/// One live `MPI_Op` slot and its closure; freed when the last holder drops.
+#[derive(Debug)]
+pub(crate) struct OpRegistration {
+    pub(crate) slot: i32,
 }
 
 impl<T: MpiDatatype> UserOp<T> {
@@ -456,7 +469,7 @@ impl<T: MpiDatatype> UserOp<T> {
         debug_assert_eq!(handle, slot);
 
         Ok(UserOp {
-            handle,
+            registration: Arc::new(OpRegistration { slot }),
             _marker: PhantomData,
         })
     }
@@ -490,7 +503,7 @@ where
     )
 }
 
-impl<T: MpiDatatype> Drop for UserOp<T> {
+impl Drop for OpRegistration {
     fn drop(&mut self) {
         if !rt::drop_guard("UserOp") {
             return;
@@ -502,16 +515,16 @@ impl<T: MpiDatatype> Drop for UserOp<T> {
         //      drops the Box).
         //   3. ferrompi_op_free → free_op_slot (reclaims the C-side slot).
         //
-        // The handle is valid for the lifetime of this UserOp; it is freed
+        // The slot is valid for the lifetime of this registration; it is freed
         // exactly once here.
         let ret = unsafe {
-            // SAFETY: self.handle was allocated by UserOp::new_impl and has
+            // SAFETY: self.slot was allocated by UserOp::new_impl and has
             // not been freed.  Drop is called exactly once.
-            ffi::ferrompi_op_free(self.handle)
+            ffi::ferrompi_op_free(self.slot)
         };
         // Log but do not panic in Drop.
         if ret != 0 {
-            eprintln!("ferrompi: UserOp::drop — ferrompi_op_free returned error code {ret}");
+            eprintln!("ferrompi: freeing a user op: ferrompi_op_free returned error code {ret}");
         }
     }
 }
@@ -529,7 +542,7 @@ mod tests {
     use crate::DoubleInt;
 
     use super::{ferrompi_op_drop_closure, rust_user_op_invoke, typed_adapter, MAX_OPS, REGISTRY};
-    use super::{CollectiveOp, ReduceOp};
+    use super::{CollectiveOp, ReduceOp, UserOp};
 
     /// The trampoline must hand the closure typed, full-length buffers built
     /// from MPI's raw pointers. Uses slot `MAX_OPS - 1`, which no other test
@@ -617,6 +630,15 @@ mod tests {
         // MPI call is made.
         let ret = unsafe { ffi::ferrompi_op_free(5) };
         assert_eq!(ret, 0, "must skip MPI_Op_free on an unused slot");
+    }
+
+    /// `Arc<OpRegistration>` keeps the auto traits only while the registration
+    /// itself is `Send + Sync`.
+    #[test]
+    fn user_op_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<UserOp<f64>>();
+        assert_send_sync::<UserOp<u8>>();
     }
 
     #[test]
