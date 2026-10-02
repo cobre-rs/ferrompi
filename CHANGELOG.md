@@ -43,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   these replace `InvalidOp`, `InvalidBuffer` and `Internal`. Migration: match
   the new variants; `arg` names the argument.
+- **Point-to-point sources, destinations and tags are typed:** receives and
+  probes take `impl Into<Source>` (`Source::Any`, `Source::ProcNull`,
+  `Source::Rank(r)`) and `impl Into<Tag>` (`Tag::Any`, `Tag::Value(t)`); sends
+  take `dest: impl Into<Source>`. `PROC_NULL` behaves the same on every MPI.
+  Migration: replace `-1` sources and tags with `Source::Any`/`Tag::Any`; an
+  `i32` rank or tag still converts. A negative rank or tag, or `Source::Any` as
+  a destination, now returns `Error::InvalidArgument` before any MPI call,
+  whose reason names the replacement; a `-1` still compiles, so search for it
+  rather than relying on compile errors. A 0.6 `-1` destination, which meant
+  `MPI_PROC_NULL` on MPICH, becomes `Source::ProcNull`.
 
 ### Changed
 

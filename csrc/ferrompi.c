@@ -1087,18 +1087,25 @@ static int tag_to_mpi(int32_t t) {
     return (t == FERROMPI_ANY_TAG) ? MPI_ANY_TAG : t;
 }
 
+// Translates the private destination code FERROMPI_PROC_NULL to the linked
+// MPI's MPI_PROC_NULL; any other value is a rank and passes through.
+static int dest_to_mpi(int32_t d) {
+    return (d == FERROMPI_PROC_NULL) ? MPI_PROC_NULL : d;
+}
+
 static int send_typed(const void* buf, int64_t count, MPI_Datatype dt,
                        int32_t dest, int32_t tag, int32_t comm_handle) {
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Comm comm = get_comm(comm_handle);
+    int mpi_dest = dest_to_mpi(dest);
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        return MPI_Send_c(buf, (MPI_Count)count, dt, dest, tag, comm);
+        return MPI_Send_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm);
 #else
         return MPI_ERR_COUNT;
 #endif
     }
-    return MPI_Send(buf, (int)count, dt, dest, tag, comm);
+    return MPI_Send(buf, (int)count, dt, mpi_dest, tag, comm);
 }
 
 static int recv_typed(void* buf, int64_t count, MPI_Datatype dt,
@@ -1138,16 +1145,17 @@ static int isend_typed(const void* buf, int64_t count, MPI_Datatype dt,
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Request req;
+    int mpi_dest = dest_to_mpi(dest);
     int ret;
 
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Isend_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
+        ret = MPI_Isend_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Isend(buf, (int)count, dt, dest, tag, comm, &req);
+        ret = MPI_Isend(buf, (int)count, dt, mpi_dest, tag, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {
@@ -1265,20 +1273,21 @@ int ferrompi_sendrecv(
     if (send_dt == MPI_DATATYPE_NULL || recv_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Status status;
 
+    int mpi_dest = dest_to_mpi(dest);
     int mpi_source = source_to_mpi(source);
     int mpi_recvtag = tag_to_mpi(recvtag);
 
     int ret;
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Sendrecv_c(sendbuf, (MPI_Count)sendcount, send_dt, dest, sendtag,
+        ret = MPI_Sendrecv_c(sendbuf, (MPI_Count)sendcount, send_dt, mpi_dest, sendtag,
                              recvbuf, (MPI_Count)recvcount, recv_dt, mpi_source, mpi_recvtag,
                              comm, &status);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Sendrecv(sendbuf, (int)sendcount, send_dt, dest, sendtag,
+        ret = MPI_Sendrecv(sendbuf, (int)sendcount, send_dt, mpi_dest, sendtag,
                            recvbuf, (int)recvcount, recv_dt, mpi_source, mpi_recvtag,
                            comm, &status);
     }
@@ -2174,16 +2183,17 @@ int ferrompi_send_init(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
+    int mpi_dest = dest_to_mpi(dest);
     int ret;
 
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Send_init_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
+        ret = MPI_Send_init_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Send_init(buf, (int)count, dt, dest, tag, comm, &req);
+        ret = MPI_Send_init(buf, (int)count, dt, mpi_dest, tag, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {
@@ -2249,16 +2259,17 @@ int ferrompi_rsend_init(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
+    int mpi_dest = dest_to_mpi(dest);
     int ret;
 
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Rsend_init_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
+        ret = MPI_Rsend_init_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Rsend_init(buf, (int)count, dt, dest, tag, comm, &req);
+        ret = MPI_Rsend_init(buf, (int)count, dt, mpi_dest, tag, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {
@@ -2285,16 +2296,17 @@ int ferrompi_ssend_init(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
+    int mpi_dest = dest_to_mpi(dest);
     int ret;
 
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Ssend_init_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
+        ret = MPI_Ssend_init_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Ssend_init(buf, (int)count, dt, dest, tag, comm, &req);
+        ret = MPI_Ssend_init(buf, (int)count, dt, mpi_dest, tag, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {
@@ -2339,16 +2351,17 @@ int ferrompi_bsend_init(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
+    int mpi_dest = dest_to_mpi(dest);
     int ret;
 
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Bsend_init_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
+        ret = MPI_Bsend_init_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Bsend_init(buf, (int)count, dt, dest, tag, comm, &req);
+        ret = MPI_Bsend_init(buf, (int)count, dt, mpi_dest, tag, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {

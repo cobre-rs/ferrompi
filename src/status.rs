@@ -15,19 +15,23 @@ pub(crate) const ANY_SOURCE_CODE: i32 = -1;
 pub(crate) const PROC_NULL_CODE: i32 = -2;
 pub(crate) const ANY_TAG_CODE: i32 = -1;
 
-/// Which rank a receive or probe matches messages from.
+/// Which rank a receive or probe matches messages from, or a send's destination.
 ///
-/// An `i32` converts to [`Source::Rank`], so `world.recv(&mut buf, 0, 7)` still
-/// compiles.
+/// An `i32` converts to [`Source::Rank`], so `world.recv(&mut buf, 0, 7)` and
+/// `world.send(&buf, 1, 7)` still compile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Source {
-    /// Match a message from any rank (`MPI_ANY_SOURCE`).
+    /// Match a message from any rank (`MPI_ANY_SOURCE`). As a destination it is
+    /// rejected with [`Error::InvalidArgument`] before any MPI call: MPI has no
+    /// "any destination".
     Any,
-    /// Match no rank (`MPI_PROC_NULL`): the call completes at once with no data.
+    /// Match no rank (`MPI_PROC_NULL`): a receive or probe completes at once with
+    /// no data. As a destination, a send sends nothing and completes at once.
     ProcNull,
-    /// Match messages from this rank. A negative rank is rejected with
-    /// [`Error::InvalidArgument`] before any MPI call; use [`Source::Any`] or
-    /// [`Source::ProcNull`] for the wildcards.
+    /// Match messages from this rank, or send to it. A negative rank is rejected
+    /// with [`Error::InvalidArgument`] before any MPI call; use [`Source::Any`]
+    /// or [`Source::ProcNull`] for the wildcards of a receive, and
+    /// [`Source::ProcNull`] for a destination.
     Rank(i32),
 }
 
@@ -46,6 +50,21 @@ impl Source {
             Source::Rank(_) => Err(Error::InvalidArgument {
                 arg,
                 reason: "negative rank: use Source::Any or Source::ProcNull",
+            }),
+        }
+    }
+
+    pub(crate) fn dest_code(self) -> Result<i32> {
+        match self {
+            Source::Any => Err(Error::InvalidArgument {
+                arg: "dest",
+                reason: "a destination cannot be Any",
+            }),
+            Source::ProcNull => Ok(PROC_NULL_CODE),
+            Source::Rank(r) if r >= 0 => Ok(r),
+            Source::Rank(_) => Err(Error::InvalidArgument {
+                arg: "dest",
+                reason: "negative rank: use Source::ProcNull",
             }),
         }
     }
@@ -147,6 +166,43 @@ mod tests {
                 Error::InvalidArgument {
                     arg: "source",
                     reason: "negative rank: use Source::Any or Source::ProcNull",
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn dest_code_any() {
+        let err = Source::Any.dest_code().unwrap_err();
+        assert!(matches!(
+            err,
+            Error::InvalidArgument {
+                arg: "dest",
+                reason: "a destination cannot be Any",
+            }
+        ));
+    }
+
+    #[test]
+    fn dest_code_proc_null() {
+        assert_eq!(Source::ProcNull.dest_code().unwrap(), PROC_NULL_CODE);
+    }
+
+    #[test]
+    fn dest_code_non_negative_rank() {
+        assert_eq!(Source::Rank(0).dest_code().unwrap(), 0);
+        assert_eq!(Source::Rank(7).dest_code().unwrap(), 7);
+    }
+
+    #[test]
+    fn dest_code_negative_rank() {
+        for r in [-1, -2, i32::MIN] {
+            let err = Source::Rank(r).dest_code().unwrap_err();
+            assert!(matches!(
+                err,
+                Error::InvalidArgument {
+                    arg: "dest",
+                    reason: "negative rank: use Source::ProcNull",
                 }
             ));
         }

@@ -13,10 +13,14 @@ use crate::status::{Source, Status, Tag};
 impl Communicator {
     /// Send a slice of values to another process.
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
     /// * `data` - Buffer to send
-    /// * `dest` - Destination rank
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag` - Message tag
     ///
     /// # Example
@@ -28,7 +32,13 @@ impl Communicator {
     /// let data = vec![1.0f64, 2.0, 3.0];
     /// world.send(&data, 1, 0).unwrap();
     /// ```
-    pub fn send<T: MpiDatatype>(&self, data: &[T], dest: i32, tag: i32) -> Result<()> {
+    pub fn send<T: MpiDatatype>(
+        &self,
+        data: &[T],
+        dest: impl Into<Source>,
+        tag: i32,
+    ) -> Result<()> {
+        let dest = dest.into().dest_code()?;
         let (p, n, dt) = buf(data);
         // SAFETY: this blocking call returns only after MPI is done with the buffer.
         let ret = unsafe { ffi::ferrompi_send(p, n, dt, dest, tag, self.handle) };
@@ -89,10 +99,14 @@ impl Communicator {
     /// handle. The send buffer **must not be modified** until the request is
     /// completed via [`Request::wait()`] or [`Request::test()`].
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
     /// * `data` - Buffer to send (must remain valid until the request completes)
-    /// * `dest` - Destination rank
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag` - Message tag
     ///
     /// # Example
@@ -106,7 +120,13 @@ impl Communicator {
     /// // ... do other work ...
     /// req.wait().unwrap();
     /// ```
-    pub fn isend<T: MpiDatatype>(&self, data: &[T], dest: i32, tag: i32) -> Result<Request> {
+    pub fn isend<T: MpiDatatype>(
+        &self,
+        data: &[T],
+        dest: impl Into<Source>,
+        tag: i32,
+    ) -> Result<Request> {
+        let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf(data);
         // SAFETY: the returned Request does not borrow data; keeping it alive and unmodified
@@ -173,10 +193,14 @@ impl Communicator {
     /// Returns `(actual_source, actual_tag, actual_count)`; `actual_count` is
     /// `-1` when the message is not a whole number of `T`.
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
     /// * `send` - Buffer to send
-    /// * `dest` - Destination rank
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `sendtag` - Send message tag
     /// * `recv` - Receive buffer
     /// * `source` - Source rank, [`Source::Any`] or [`Source::ProcNull`]
@@ -197,12 +221,13 @@ impl Communicator {
     pub fn sendrecv<T: MpiDatatype>(
         &self,
         send: &[T],
-        dest: i32,
+        dest: impl Into<Source>,
         sendtag: i32,
         recv: &mut [T],
         source: impl Into<Source>,
         recvtag: impl Into<Tag>,
     ) -> Result<(i32, i32, i64)> {
+        let dest = dest.into().dest_code()?;
         let source = source.into().source_code("source")?;
         let recvtag = recvtag.into().tag_code("recvtag")?;
         let mut actual_source: i32 = 0;
@@ -377,10 +402,14 @@ impl Communicator {
     ///
     /// Available in all MPI versions (MPI 1.1+).
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
     /// * `data` - Send buffer (must remain valid for lifetime of handle)
-    /// * `dest` - Destination rank
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
     /// # Example
@@ -399,9 +428,10 @@ impl Communicator {
     pub fn send_init<T: MpiDatatype>(
         &self,
         data: &[T],
-        dest: i32,
+        dest: impl Into<Source>,
         tag: i32,
     ) -> Result<PersistentRequest> {
+        let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf(data);
         // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
@@ -434,10 +464,14 @@ impl Communicator {
     /// `MPI_BSEND_OVERHEAD` is implementation-specific (typically a few hundred
     /// bytes); use a generous margin in practice.
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
     /// * `data` - Send buffer (must remain valid for lifetime of handle)
-    /// * `dest` - Destination rank
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
     /// # Example
@@ -461,9 +495,10 @@ impl Communicator {
     pub fn bsend_init<T: MpiDatatype>(
         &self,
         data: &[T],
-        dest: i32,
+        dest: impl Into<Source>,
         tag: i32,
     ) -> Result<PersistentRequest> {
+        let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf(data);
         // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
@@ -504,10 +539,14 @@ impl Communicator {
     /// The caller must not modify `data` while the request is active
     /// (between `start()` and `wait()`).
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
     /// * `data` - Send buffer (must remain valid for lifetime of handle)
-    /// * `dest` - Destination rank
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
     /// # Example
@@ -527,9 +566,10 @@ impl Communicator {
     pub fn rsend_init<T: MpiDatatype>(
         &self,
         data: &[T],
-        dest: i32,
+        dest: impl Into<Source>,
         tag: i32,
     ) -> Result<PersistentRequest> {
+        let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf(data);
         // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
@@ -561,10 +601,14 @@ impl Communicator {
     ///
     /// Available in all MPI versions (MPI 1.1+).
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
     /// * `data` - Send buffer (must remain valid for lifetime of handle)
-    /// * `dest` - Destination rank
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
     /// # Example
@@ -583,9 +627,10 @@ impl Communicator {
     pub fn ssend_init<T: MpiDatatype>(
         &self,
         data: &[T],
-        dest: i32,
+        dest: impl Into<Source>,
         tag: i32,
     ) -> Result<PersistentRequest> {
+        let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf(data);
         // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
@@ -654,11 +699,15 @@ impl Communicator {
     /// extent must equal `size_of::<T>()` and its data must lie within one `T`,
     /// otherwise the call returns [`Error::InvalidArgument`] without calling MPI.
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
     /// * `buf`      - Buffer to send; MPI count is `buf.len()`
     /// * `datatype` - Committed custom datatype describing each element
-    /// * `dest`     - Destination rank
+    /// * `dest`     - Destination rank or [`Source::ProcNull`]
     /// * `tag`      - Message tag
     ///
     /// # Errors
@@ -690,9 +739,10 @@ impl Communicator {
         &self,
         buf: &[T],
         datatype: &CustomDatatype,
-        dest: i32,
+        dest: impl Into<Source>,
         tag: i32,
     ) -> Result<()> {
+        let dest = dest.into().dest_code()?;
         datatype.check_layout::<T>()?;
         // SAFETY: buf.as_ptr() is valid for buf.len() elements; datatype.handle is an owned,
         // committed CustomDatatype; the buffer outlives this blocking call; check_layout above
@@ -806,11 +856,15 @@ impl Communicator {
     /// within one `T`, otherwise the call returns [`Error::InvalidArgument`]
     /// without calling MPI.
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
     /// * `buf`      - Buffer to send (must remain valid until the request completes)
     /// * `datatype` - Committed custom datatype describing each element
-    /// * `dest`     - Destination rank
+    /// * `dest`     - Destination rank or [`Source::ProcNull`]
     /// * `tag`      - Message tag
     ///
     /// # Errors
@@ -843,9 +897,10 @@ impl Communicator {
         &self,
         buf: &[T],
         datatype: &CustomDatatype,
-        dest: i32,
+        dest: impl Into<Source>,
         tag: i32,
     ) -> Result<Request> {
+        let dest = dest.into().dest_code()?;
         datatype.check_layout::<T>()?;
         let mut request_handle: i64 = 0;
         // SAFETY: buf.as_ptr() is valid for buf.len() elements; datatype.handle is an owned,
