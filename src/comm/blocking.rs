@@ -312,7 +312,7 @@ impl Communicator {
     /// This method finds the global maximum (or minimum) value across all ranks
     /// together with the rank index where it occurred. Only [`ReduceOp::MaxLoc`]
     /// and [`ReduceOp::MinLoc`] are accepted; passing any other op returns
-    /// [`Error::InvalidOp`].
+    /// [`Error::InvalidArgument`].
     ///
     /// The type parameter `T` must implement [`MpiIndexedDatatype`], which is
     /// only satisfied by the six MPI predefined paired types: [`FloatInt`],
@@ -329,7 +329,7 @@ impl Communicator {
     /// # Errors
     ///
     /// - [`Error::BufferSize`] if `send.len() != recv.len()`
-    /// - [`Error::InvalidOp`] if `op` is not `MaxLoc` or `MinLoc`
+    /// - [`Error::InvalidArgument`] if `op` is not `MaxLoc` or `MinLoc`
     /// - An MPI error if the library rejects the combination
     ///
     /// # Example
@@ -361,7 +361,10 @@ impl Communicator {
         op: ReduceOp,
     ) -> Result<()> {
         if !matches!(op, ReduceOp::MaxLoc | ReduceOp::MinLoc) {
-            return Err(Error::InvalidOp);
+            return Err(Error::InvalidArgument {
+                arg: "op",
+                reason: "only MaxLoc and MinLoc apply to pair types",
+            });
         }
         check_same_len("recv", send.len(), recv.len())?;
         // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T
@@ -404,7 +407,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidOp`] if `op` is not one of the three bitwise ops
+    /// - [`Error::InvalidArgument`] if `op` is not one of the three bitwise ops
     /// - [`Error::BufferSize`] if `send.len() != recv.len()`
     /// - [`Error::Mpi`] if the MPI layer rejects the call
     ///
@@ -436,7 +439,10 @@ impl Communicator {
             op,
             ReduceOp::BitwiseOr | ReduceOp::BitwiseAnd | ReduceOp::BitwiseXor
         ) {
-            return Err(Error::InvalidOp);
+            return Err(Error::InvalidArgument {
+                arg: "op",
+                reason: "only the bitwise ops apply to byte reductions",
+            });
         }
         check_same_len("recv", send.len(), recv.len())?;
         let byte_count = std::mem::size_of_val(send);
@@ -1129,7 +1135,7 @@ mod tests {
     }
 
     #[test]
-    fn allreduce_indexed_invalid_op_returns_invalid_op() {
+    fn allreduce_indexed_invalid_op_returns_invalid_argument() {
         let comm = test_comm(0, 1);
         let send = vec![
             DoubleInt {
@@ -1159,19 +1165,31 @@ mod tests {
         ] {
             let result = comm.allreduce_indexed(&send, &mut recv, op);
             assert!(
-                matches!(result, Err(Error::InvalidOp)),
-                "Expected InvalidOp for op {op:?} on indexed type"
+                matches!(
+                    result,
+                    Err(Error::InvalidArgument {
+                        arg: "op",
+                        reason: "only MaxLoc and MinLoc apply to pair types"
+                    })
+                ),
+                "Expected InvalidArgument for op {op:?} on indexed type"
             );
         }
     }
 
     #[test]
-    fn allreduce_bytes_invalid_op_returns_invalid_op() {
+    fn allreduce_bytes_invalid_op_returns_invalid_argument() {
         let comm = test_comm(0, 1);
         let send = [1u32; 4];
         let mut recv = [0u32; 4];
         let result = comm.allreduce_bytes(&send, &mut recv, ReduceOp::Sum);
-        assert!(matches!(result, Err(Error::InvalidOp)));
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument {
+                arg: "op",
+                reason: "only the bitwise ops apply to byte reductions"
+            })
+        ));
     }
 
     #[test]

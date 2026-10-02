@@ -494,8 +494,8 @@ impl Mpi {
     ///
     /// # Errors
     ///
-    /// - Returns `Err(Error::Internal(_))` if `stringtag` contains a null byte
-    ///   (the FFI call is never invoked in this case).
+    /// - Returns `Err(`[`Error::InvalidArgument`]`)` if `stringtag` contains a
+    ///   NUL byte (the FFI call is never invoked in this case).
     /// - Returns `Err(Error::NotSupported(_))` when ferrompi was built
     ///   against an MPI older than 4.0 other than Open MPI 5.
     /// - Returns `Err(Error::Mpi { .. })` if the underlying MPI call fails.
@@ -513,8 +513,10 @@ impl Mpi {
     /// assert_eq!(comm.size(), world.size());
     /// ```
     pub fn create_from_group(&self, group: &group::Group, stringtag: &str) -> Result<Communicator> {
-        let c_tag = CString::new(stringtag)
-            .map_err(|_| Error::Internal("stringtag contains null byte".into()))?;
+        let c_tag = CString::new(stringtag).map_err(|_| Error::InvalidArgument {
+            arg: "stringtag",
+            reason: "contains a NUL byte",
+        })?;
         let mut new_handle: i32 = -1;
         // SAFETY: c_tag.as_ptr() is a valid, null-terminated C string that
         // lives for the duration of this call. group.handle is a valid group
@@ -533,7 +535,7 @@ impl Mpi {
     /// MPI until [`buffer_detach`](Self::buffer_detach) is called. Only one
     /// buffer may be attached per process at a time; attempting to attach a
     /// second buffer without first detaching returns
-    /// `Err(`[`Error::InvalidOp`]`)`.
+    /// `Err(`[`Error::InvalidState`]`)`.
     ///
     /// The `buffer` is stored in a process-wide static so its allocation
     /// remains valid for the lifetime of the attachment. You must not access
@@ -553,14 +555,14 @@ impl Mpi {
     /// hundred extra bytes per buffered send. For safety, use a generous margin.
     ///
     /// Buffers larger than `i32::MAX` bytes are rejected with
-    /// `Err(`[`Error::InvalidBuffer`]`)` before the FFI call; the
+    /// `Err(`[`Error::InvalidArgument`]`)` before the FFI call; the
     /// underlying `MPI_Buffer_attach` takes an `int` count and cannot
     /// address larger buffers.
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `buffer.len() > i32::MAX as usize`.
-    /// - [`Error::InvalidOp`] if a buffer is already attached.
+    /// - [`Error::InvalidArgument`] if `buffer.len() > i32::MAX as usize`.
+    /// - [`Error::InvalidState`] if a buffer is already attached.
     /// - [`Error::Mpi`] if `MPI_Buffer_attach` fails.
     ///
     /// # Example
@@ -577,10 +579,15 @@ impl Mpi {
             .lock()
             .map_err(|_| Error::Internal("ATTACHED_BUFFER mutex poisoned".into()))?;
         if guard.is_some() {
-            return Err(Error::InvalidOp);
+            return Err(Error::InvalidState {
+                reason: "a buffer is already attached",
+            });
         }
         if buffer.len() > i32::MAX as usize {
-            return Err(Error::InvalidBuffer);
+            return Err(Error::InvalidArgument {
+                arg: "buffer",
+                reason: "longer than i32::MAX bytes",
+            });
         }
         let ptr = buffer.as_ptr() as *mut std::ffi::c_void;
         let size = buffer.len() as i64;
@@ -612,7 +619,7 @@ impl Mpi {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidOp`] if no buffer is currently attached.
+    /// - [`Error::InvalidState`] if no buffer is currently attached.
     /// - [`Error::Mpi`] if `MPI_Buffer_detach` fails.
     ///
     /// # Example
@@ -629,7 +636,9 @@ impl Mpi {
             .lock()
             .map_err(|_| Error::Internal("ATTACHED_BUFFER mutex poisoned".into()))?;
         if guard.is_none() {
-            return Err(Error::InvalidOp);
+            return Err(Error::InvalidState {
+                reason: "no buffer is attached",
+            });
         }
         let mut out_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut out_size: i64 = 0;
@@ -717,24 +726,34 @@ mod tests {
 
     /// Both guard paths of the attached-buffer static in one test, so no other
     /// test can interleave with the shared state: detach with nothing attached
-    /// and attach while a buffer is attached both return `Err(InvalidOp)`
+    /// and attach while a buffer is attached both return `Err(InvalidState)`
     /// without reaching MPI (the static is seeded directly).
     #[test]
-    fn buffer_attach_detach_guards_return_invalid_op() {
+    fn buffer_attach_detach_guards_return_invalid_state() {
         let mpi = stub_mpi();
 
         *ATTACHED_BUFFER.lock().unwrap() = None;
         let result = mpi.buffer_detach();
         assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "expected Err(InvalidOp) on detach without attach, got: {result:?}"
+            matches!(
+                result,
+                Err(Error::InvalidState {
+                    reason: "no buffer is attached"
+                })
+            ),
+            "expected Err(InvalidState) on detach without attach, got: {result:?}"
         );
 
         *ATTACHED_BUFFER.lock().unwrap() = Some(vec![0u8; 4].into_boxed_slice());
         let result = mpi.buffer_attach(vec![0u8; 8].into_boxed_slice());
         assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "expected Err(InvalidOp) on double attach, got: {result:?}"
+            matches!(
+                result,
+                Err(Error::InvalidState {
+                    reason: "a buffer is already attached"
+                })
+            ),
+            "expected Err(InvalidState) on double attach, got: {result:?}"
         );
 
         ATTACHED_BUFFER.lock().unwrap().take();
@@ -754,15 +773,15 @@ mod tests {
         // because the null-byte check fires first.
         let g = group::Group { handle: 0 };
         let result = mpi.create_from_group(&g, "bad\0tag");
-        match result {
-            Err(Error::Internal(msg)) => {
-                assert!(
-                    msg.contains("null byte"),
-                    "expected 'null byte' in error message, got: {msg}"
-                );
-            }
-            Ok(_) => panic!("expected Err(Error::Internal(_)), got Ok(_)"),
-            Err(e) => panic!("expected Err(Error::Internal(_)), got Err({e})"),
-        }
+        assert!(
+            matches!(
+                result,
+                Err(Error::InvalidArgument {
+                    arg: "stringtag",
+                    reason: "contains a NUL byte"
+                })
+            ),
+            "expected Err(InvalidArgument) for a NUL byte in the tag"
+        );
     }
 }

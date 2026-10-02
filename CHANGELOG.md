@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `target_count`, `origin`, `result`, `count`) instead of
   `Error::InvalidBuffer`. Migration: match the new variants; `arg` names the
   argument.
+- **Misuse errors name the state or argument:**
+  - `buffer_attach`/`buffer_detach` and `PersistentRequest::start`/`start_all`
+    return `Error::InvalidState`;
+  - an oversized attach buffer, a NUL in `create_from_group`'s tag, and a
+    wrong op for `allreduce_indexed`/`allreduce_bytes` return
+    `Error::InvalidArgument`;
+
+  these replace `InvalidOp`, `InvalidBuffer` and `Internal`. Migration: match
+  the new variants; `arg` names the argument.
 
 ### Changed
 

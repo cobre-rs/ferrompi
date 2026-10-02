@@ -165,11 +165,11 @@ fn main() -> Result<()> {
         }];
         let result = world.allreduce_indexed(&send, &mut recv, ReduceOp::Sum);
         assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "Rank {rank}: expected Err(InvalidOp) for Sum op on indexed type"
+            matches!(result, Err(Error::InvalidArgument { arg: "op", .. })),
+            "Rank {rank}: expected Err(InvalidArgument) for Sum op on indexed type"
         );
         if rank == 0 {
-            println!("InvalidOp guard for non-loc op PASS");
+            println!("InvalidArgument guard for non-loc op PASS");
         }
     }
 

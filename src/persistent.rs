@@ -85,11 +85,14 @@ impl PersistentRequest {
     ///
     /// # Errors
     ///
-    /// Returns an error if the operation is already active or if the start fails.
+    /// Returns [`Error::InvalidState`] if the operation is already active, or
+    /// an error if the start fails.
     #[inline]
     pub fn start(&mut self) -> Result<()> {
         if self.active {
-            return Err(Error::Internal("Request is already active".into()));
+            return Err(Error::InvalidState {
+                reason: "request is already active",
+            });
         }
         // SAFETY: self.handle is a valid persistent MPI request handle
         // registered in the C-side request table by the *_init constructor
@@ -164,19 +167,19 @@ impl PersistentRequest {
     ///
     /// # Errors
     ///
-    /// Returns `Err(Internal)` without calling MPI if any request is already
-    /// active. If MPI reports an error, it may have started some of the
-    /// requests; every request is then marked active, so `wait`, `wait_all`
-    /// or `Drop` completes whichever did start.
+    /// Returns `Err(`[`Error::InvalidState`]`)` without calling MPI if any
+    /// request is already active. If MPI reports an error, it may have started
+    /// some of the requests; every request is then marked active, so `wait`,
+    /// `wait_all` or `Drop` completes whichever did start.
     pub fn start_all(requests: &mut [PersistentRequest]) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
         }
 
         if requests.iter().any(|req| req.active) {
-            return Err(Error::Internal(
-                "One or more requests already active".into(),
-            ));
+            return Err(Error::InvalidState {
+                reason: "a request is already active",
+            });
         }
 
         // SAFETY: with_handles provides a valid, contiguous [i64] of the
@@ -278,11 +281,14 @@ mod tests {
             active: true,
         };
         let result = req.start();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
         assert!(
-            matches!(&err, Error::Internal(msg) if msg.contains("already active")),
-            "expected Error::Internal containing 'already active', got: {err}"
+            matches!(
+                result,
+                Err(Error::InvalidState {
+                    reason: "request is already active"
+                })
+            ),
+            "expected Err(InvalidState), got: {result:?}"
         );
         forget(req);
     }
@@ -311,11 +317,14 @@ mod tests {
             active: true,
         };
         let result = PersistentRequest::start_all(std::slice::from_mut(&mut req));
-        assert!(result.is_err());
-        let err = result.unwrap_err();
         assert!(
-            matches!(&err, Error::Internal(msg) if msg.contains("already active")),
-            "expected Error::Internal containing 'already active', got: {err}"
+            matches!(
+                result,
+                Err(Error::InvalidState {
+                    reason: "a request is already active"
+                })
+            ),
+            "expected Err(InvalidState), got: {result:?}"
         );
         forget(req);
     }
