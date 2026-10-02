@@ -145,7 +145,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | SND-13 | `SharedWindow` slices over concurrently-written memory (observed miscompile) | critical | repro | 0.7.0 (D-5); 0.5.x doc warning | fixed (31e6514): doc warning; API fix planned (ferrompi-0.7.0; design input: issue #28, per-region slice guards) |
 | SND-14 | `UserOp` fat-pointer transmute relies on unspecified layout | minor | reading | 0.5.x† | fixed (2d53b18) |
 | SND-15 | `fetch_and_op`/`compare_and_swap` result pointer derived from a shared borrow | minor | reading | 0.5.x | fixed (9777b12) |
-| SND-16 | `Mpi` drop racing a concurrent guarded call at `Serialized`/`Multiple` reaches MPI after finalize | major | reading | 0.7.0 | planned (ferrompi-0.7.0) |
+| SND-16 | `Mpi` drop racing a concurrent guarded call at `Serialized`/`Multiple` reaches MPI after finalize | major | reading | 0.7.0 | fixed (dc2be52) |
 | SND-17 | Under fault-tolerant MPI, a receive failing with MPIX_ERR_PROC_FAILED_PENDING is treated as complete while MPI still owns its buffer | major | reading | 0.5.x | fixed (20db67d) |
 | SND-18 | Under fault-tolerant MPI, a wildcard receive started while the request table is full returns `ResourceExhausted` after its internal wait fails with MPI_ERR_PROC_FAILED_PENDING, while MPI still owns its buffer | major | repro | 0.5.x | fixed (105eb34) |
 | SND-19 | `allreduce_with_op` above `INT_MAX` elements on MPI 4.0 calls `MPI_Allreduce_c` with a classic user function; MPICH narrows the count to `int` without splitting (its assertion compiles out under NDEBUG), so the Rust callback can receive a negative or wrapped length and build slices past the buffers | major | reading | 0.5.x | fixed (b96d7eb) |
