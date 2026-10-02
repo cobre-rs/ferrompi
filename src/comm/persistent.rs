@@ -806,7 +806,7 @@ mod tests {
     use crate::ReduceOp;
 
     #[test]
-    fn allreduce_init_mismatched_buffers_returns_invalid_buffer() {
+    fn allreduce_init_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
@@ -822,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn reduce_init_mismatched_buffers_returns_invalid_buffer() {
+    fn reduce_init_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
@@ -838,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_init_mismatched_buffers_returns_invalid_buffer() {
+    fn scan_init_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
@@ -854,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn exscan_init_mismatched_buffers_returns_invalid_buffer() {
+    fn exscan_init_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
@@ -870,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn alltoall_init_mismatched_buffers_returns_invalid_buffer() {
+    fn alltoall_init_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5]; // different length → fires before self.size()
@@ -894,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn allgather_init_inplace_mismatched_len_returns_invalid_buffer() {
+    fn allgather_init_inplace_mismatched_len_returns_invalid_argument() {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
         let result = comm.allgather_init_inplace(&mut data);
@@ -908,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn alltoall_init_inplace_mismatched_len_returns_invalid_buffer() {
+    fn alltoall_init_inplace_mismatched_len_returns_invalid_argument() {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
         let result = comm.alltoall_init_inplace(&mut data);

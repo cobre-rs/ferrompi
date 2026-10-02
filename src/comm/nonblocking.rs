@@ -714,7 +714,7 @@ mod tests {
     use crate::ReduceOp;
 
     #[test]
-    fn iallreduce_mismatched_buffers_returns_invalid_buffer() {
+    fn iallreduce_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
@@ -730,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn ireduce_mismatched_buffers_returns_invalid_buffer() {
+    fn ireduce_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
@@ -746,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn iscan_mismatched_buffers_returns_invalid_buffer() {
+    fn iscan_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
@@ -762,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn iexscan_mismatched_buffers_returns_invalid_buffer() {
+    fn iexscan_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
@@ -786,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn iallgather_inplace_mismatched_len_returns_invalid_buffer() {
+    fn iallgather_inplace_mismatched_len_returns_invalid_argument() {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
         let result = comm.iallgather_inplace(&mut data);
@@ -800,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn ialltoall_inplace_mismatched_len_returns_invalid_buffer() {
+    fn ialltoall_inplace_mismatched_len_returns_invalid_argument() {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
         let result = comm.ialltoall_inplace(&mut data);

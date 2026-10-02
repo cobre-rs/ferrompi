@@ -1189,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn gatherv_init_mismatched_counts_displs_returns_invalid_buffer() {
+    fn gatherv_init_mismatched_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
@@ -1207,7 +1207,7 @@ mod tests {
     }
 
     #[test]
-    fn scatterv_init_mismatched_counts_displs_returns_invalid_buffer() {
+    fn scatterv_init_mismatched_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
@@ -1225,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn allgatherv_init_mismatched_counts_displs_returns_invalid_buffer() {
+    fn allgatherv_init_mismatched_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
@@ -1243,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn alltoallv_init_mismatched_send_counts_displs_returns_invalid_buffer() {
+    fn alltoallv_init_mismatched_send_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
@@ -1270,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn alltoallv_init_mismatched_recv_counts_displs_returns_invalid_buffer() {
+    fn alltoallv_init_mismatched_recv_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
@@ -1299,7 +1299,7 @@ mod tests {
     // ── blocking / nonblocking v-collective length-mismatch guards ────────
 
     #[test]
-    fn gatherv_mismatched_counts_displs_returns_invalid_buffer() {
+    fn gatherv_mismatched_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
@@ -1317,7 +1317,7 @@ mod tests {
     }
 
     #[test]
-    fn scatterv_mismatched_counts_displs_returns_invalid_buffer() {
+    fn scatterv_mismatched_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
@@ -1335,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn allgatherv_mismatched_counts_displs_returns_invalid_buffer() {
+    fn allgatherv_mismatched_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
@@ -1353,7 +1353,7 @@ mod tests {
     }
 
     #[test]
-    fn alltoallv_mismatched_send_counts_displs_returns_invalid_buffer() {
+    fn alltoallv_mismatched_send_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
@@ -1380,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn alltoallv_mismatched_recv_counts_displs_returns_invalid_buffer() {
+    fn alltoallv_mismatched_recv_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
@@ -1407,7 +1407,7 @@ mod tests {
     }
 
     #[test]
-    fn igatherv_mismatched_counts_displs_returns_invalid_buffer() {
+    fn igatherv_mismatched_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
@@ -1425,7 +1425,7 @@ mod tests {
     }
 
     #[test]
-    fn iscatterv_mismatched_counts_displs_returns_invalid_buffer() {
+    fn iscatterv_mismatched_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
@@ -1443,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn iallgatherv_mismatched_counts_displs_returns_invalid_buffer() {
+    fn iallgatherv_mismatched_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
@@ -1461,7 +1461,7 @@ mod tests {
     }
 
     #[test]
-    fn ialltoallv_mismatched_send_counts_displs_returns_invalid_buffer() {
+    fn ialltoallv_mismatched_send_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
@@ -1488,7 +1488,7 @@ mod tests {
     }
 
     #[test]
-    fn ialltoallv_mismatched_recv_counts_displs_returns_invalid_buffer() {
+    fn ialltoallv_mismatched_recv_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];

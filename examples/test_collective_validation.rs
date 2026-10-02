@@ -20,16 +20,27 @@ use ferrompi::{Error, Mpi, PersistentRequest, Request, Result};
 
 mod common;
 
-fn check_unit(
-    result: Result<()>,
-    rank: i32,
-    method: &str,
-    variant: &str,
-    expected: fn(&Error) -> bool,
-    local_ok: &mut bool,
-) {
-    if !matches!(&result, Err(e) if expected(e)) {
-        eprintln!("rank {rank}: {method}: expected Err({variant}), got {result:?}");
+struct Expect {
+    variant: &'static str,
+    matches: fn(&Error) -> bool,
+}
+
+const BUFFER_SIZE: Expect = Expect {
+    variant: "BufferSize",
+    matches: |e| matches!(e, Error::BufferSize { .. }),
+};
+
+const INVALID_ARGUMENT: Expect = Expect {
+    variant: "InvalidArgument",
+    matches: |e| matches!(e, Error::InvalidArgument { .. }),
+};
+
+fn check_unit(result: Result<()>, rank: i32, method: &str, expected: &Expect, local_ok: &mut bool) {
+    if !matches!(&result, Err(e) if (expected.matches)(e)) {
+        eprintln!(
+            "rank {rank}: {method}: expected Err({}), got {result:?}",
+            expected.variant
+        );
         *local_ok = false;
     }
 }
@@ -38,19 +49,24 @@ fn check_request(
     result: Result<Request>,
     rank: i32,
     method: &str,
-    variant: &str,
-    expected: fn(&Error) -> bool,
+    expected: &Expect,
     local_ok: &mut bool,
 ) {
     match result {
-        Err(e) if expected(&e) => {}
+        Err(e) if (expected.matches)(&e) => {}
         Err(e) => {
-            eprintln!("rank {rank}: {method}: expected Err({variant}), got Err({e:?})");
+            eprintln!(
+                "rank {rank}: {method}: expected Err({}), got Err({e:?})",
+                expected.variant
+            );
             *local_ok = false;
         }
         Ok(req) => {
             req.wait().expect("wait on unexpectedly-accepted request");
-            eprintln!("rank {rank}: {method}: expected Err({variant}), got Ok(Request)");
+            eprintln!(
+                "rank {rank}: {method}: expected Err({}), got Ok(Request)",
+                expected.variant
+            );
             *local_ok = false;
         }
     }
@@ -60,19 +76,24 @@ fn check_persistent(
     result: Result<PersistentRequest>,
     rank: i32,
     method: &str,
-    variant: &str,
-    expected: fn(&Error) -> bool,
+    expected: &Expect,
     local_ok: &mut bool,
 ) {
     match result {
-        Err(e) if expected(&e) => {}
+        Err(e) if (expected.matches)(&e) => {}
         Err(e) => {
-            eprintln!("rank {rank}: {method}: expected Err({variant}), got Err({e:?})");
+            eprintln!(
+                "rank {rank}: {method}: expected Err({}), got Err({e:?})",
+                expected.variant
+            );
             *local_ok = false;
         }
         Ok(req) => {
             drop(req);
-            eprintln!("rank {rank}: {method}: expected Err({variant}), got Ok(PersistentRequest)");
+            eprintln!(
+                "rank {rank}: {method}: expected Err({}), got Ok(PersistentRequest)",
+                expected.variant
+            );
             *local_ok = false;
         }
     }
@@ -92,36 +113,15 @@ fn main() {
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.gather(&send, &mut backing[..2 * size - 1], 0);
-        check_unit(
-            result,
-            rank,
-            "gather",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_unit(result, rank, "gather", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.igather(&send, &mut backing[..2 * size - 1], 0);
-        check_request(
-            result,
-            rank,
-            "igather",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_request(result, rank, "igather", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.gather_init(&send, &mut backing[..2 * size - 1], 0);
-        check_persistent(
-            result,
-            rank,
-            "gather_init",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_persistent(result, rank, "gather_init", &BUFFER_SIZE, &mut local_ok);
     }
 
     // allgather / iallgather / allgather_init: every rank, recv one element short.
@@ -130,36 +130,15 @@ fn main() {
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.allgather(&send, &mut backing[..2 * size - 1]);
-        check_unit(
-            result,
-            rank,
-            "allgather",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_unit(result, rank, "allgather", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.iallgather(&send, &mut backing[..2 * size - 1]);
-        check_request(
-            result,
-            rank,
-            "iallgather",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_request(result, rank, "iallgather", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.allgather_init(&send, &mut backing[..2 * size - 1]);
-        check_persistent(
-            result,
-            rank,
-            "allgather_init",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_persistent(result, rank, "allgather_init", &BUFFER_SIZE, &mut local_ok);
     }
 
     // scatter / iscatter / scatter_init: root only, send one element short.
@@ -168,36 +147,15 @@ fn main() {
 
         let send_backing = vec![1i32; 2 * size];
         let result = world.scatter(&send_backing[..2 * size - 1], &mut recv, 0);
-        check_unit(
-            result,
-            rank,
-            "scatter",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_unit(result, rank, "scatter", &BUFFER_SIZE, &mut local_ok);
 
         let send_backing = vec![1i32; 2 * size];
         let result = world.iscatter(&send_backing[..2 * size - 1], &mut recv, 0);
-        check_request(
-            result,
-            rank,
-            "iscatter",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_request(result, rank, "iscatter", &BUFFER_SIZE, &mut local_ok);
 
         let send_backing = vec![1i32; 2 * size];
         let result = world.scatter_init(&send_backing[..2 * size - 1], &mut recv, 0);
-        check_persistent(
-            result,
-            rank,
-            "scatter_init",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_persistent(result, rank, "scatter_init", &BUFFER_SIZE, &mut local_ok);
     }
 
     // gatherv / igatherv / gatherv_init: root only, recv one element short of what
@@ -209,37 +167,16 @@ fn main() {
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.gatherv(&send, &mut backing[..2 * size - 1], &recvcounts, &displs, 0);
-        check_unit(
-            result,
-            rank,
-            "gatherv",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_unit(result, rank, "gatherv", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.igatherv(&send, &mut backing[..2 * size - 1], &recvcounts, &displs, 0);
-        check_request(
-            result,
-            rank,
-            "igatherv",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_request(result, rank, "igatherv", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
         let result =
             world.gatherv_init(&send, &mut backing[..2 * size - 1], &recvcounts, &displs, 0);
-        check_persistent(
-            result,
-            rank,
-            "gatherv_init",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_persistent(result, rank, "gatherv_init", &BUFFER_SIZE, &mut local_ok);
     }
 
     // scatterv / iscatterv / scatterv_init: root only, sendcounts/displs one entry
@@ -257,14 +194,7 @@ fn main() {
             &mut recv,
             0,
         );
-        check_unit(
-            result,
-            rank,
-            "scatterv",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_unit(result, rank, "scatterv", &BUFFER_SIZE, &mut local_ok);
 
         let result = world.iscatterv(
             &send,
@@ -273,14 +203,7 @@ fn main() {
             &displs_full[..size - 1],
             0,
         );
-        check_request(
-            result,
-            rank,
-            "iscatterv",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_request(result, rank, "iscatterv", &BUFFER_SIZE, &mut local_ok);
 
         let result = world.scatterv_init(
             &send,
@@ -289,14 +212,7 @@ fn main() {
             &mut recv,
             0,
         );
-        check_persistent(
-            result,
-            rank,
-            "scatterv_init",
-            "BufferSize",
-            |e| matches!(e, Error::BufferSize { .. }),
-            &mut local_ok,
-        );
+        check_persistent(result, rank, "scatterv_init", &BUFFER_SIZE, &mut local_ok);
     }
 
     // allgatherv / iallgatherv / allgatherv_init: every rank, displs[0] negative
@@ -309,14 +225,7 @@ fn main() {
 
         let mut backing = vec![0i32; size + 1];
         let result = world.allgatherv(&send, &mut backing[1..], &recvcounts, &displs);
-        check_unit(
-            result,
-            rank,
-            "allgatherv",
-            "InvalidArgument",
-            |e| matches!(e, Error::InvalidArgument { .. }),
-            &mut local_ok,
-        );
+        check_unit(result, rank, "allgatherv", &INVALID_ARGUMENT, &mut local_ok);
 
         let mut backing = vec![0i32; size + 1];
         let result = world.iallgatherv(&send, &mut backing[1..], &recvcounts, &displs);
@@ -324,8 +233,7 @@ fn main() {
             result,
             rank,
             "iallgatherv",
-            "InvalidArgument",
-            |e| matches!(e, Error::InvalidArgument { .. }),
+            &INVALID_ARGUMENT,
             &mut local_ok,
         );
 
@@ -335,8 +243,7 @@ fn main() {
             result,
             rank,
             "allgatherv_init",
-            "InvalidArgument",
-            |e| matches!(e, Error::InvalidArgument { .. }),
+            &INVALID_ARGUMENT,
             &mut local_ok,
         );
     }
@@ -359,14 +266,7 @@ fn main() {
             &recvcounts,
             &rdispls,
         );
-        check_unit(
-            result,
-            rank,
-            "alltoallv",
-            "InvalidArgument",
-            |e| matches!(e, Error::InvalidArgument { .. }),
-            &mut local_ok,
-        );
+        check_unit(result, rank, "alltoallv", &INVALID_ARGUMENT, &mut local_ok);
 
         let result = world.ialltoallv(
             &send,
@@ -376,14 +276,7 @@ fn main() {
             &recvcounts,
             &rdispls,
         );
-        check_request(
-            result,
-            rank,
-            "ialltoallv",
-            "InvalidArgument",
-            |e| matches!(e, Error::InvalidArgument { .. }),
-            &mut local_ok,
-        );
+        check_request(result, rank, "ialltoallv", &INVALID_ARGUMENT, &mut local_ok);
 
         let result = world.alltoallv_init(
             &send,
@@ -397,8 +290,7 @@ fn main() {
             result,
             rank,
             "alltoallv_init",
-            "InvalidArgument",
-            |e| matches!(e, Error::InvalidArgument { .. }),
+            &INVALID_ARGUMENT,
             &mut local_ok,
         );
     }
