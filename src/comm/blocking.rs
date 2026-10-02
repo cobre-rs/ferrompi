@@ -6,7 +6,7 @@ use crate::comm::{
 use crate::datatype::{buf, buf_mut, BytePermutable, DatatypeTag, MpiDatatype, MpiIndexedDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::op::UserOp;
+use crate::op::{CollectiveOp, UserOp};
 use crate::ReduceOp;
 
 impl Communicator {
@@ -310,9 +310,9 @@ impl Communicator {
     /// All-reduce paired value+index types using `MPI_MAXLOC` or `MPI_MINLOC`.
     ///
     /// This method finds the global maximum (or minimum) value across all ranks
-    /// together with the rank index where it occurred. Only [`ReduceOp::MaxLoc`]
-    /// and [`ReduceOp::MinLoc`] are accepted; passing any other op returns
-    /// [`Error::InvalidArgument`].
+    /// together with the rank index where it occurred. Only
+    /// [`CollectiveOp::MAX_LOC`] and [`CollectiveOp::MIN_LOC`] are accepted; any
+    /// other op on a pair type does not compile.
     ///
     /// The type parameter `T` must implement [`MpiIndexedDatatype`], which is
     /// only satisfied by the six MPI predefined paired types: [`FloatInt`],
@@ -324,18 +324,17 @@ impl Communicator {
     ///
     /// * `send` - Slice of paired values contributed by this process
     /// * `recv` - Output buffer; must be the same length as `send`
-    /// * `op` - Must be [`ReduceOp::MaxLoc`] or [`ReduceOp::MinLoc`]
+    /// * `op` - [`CollectiveOp::MAX_LOC`] or [`CollectiveOp::MIN_LOC`]
     ///
     /// # Errors
     ///
     /// - [`Error::BufferSize`] if `send.len() != recv.len()`
-    /// - [`Error::InvalidArgument`] if `op` is not `MaxLoc` or `MinLoc`
-    /// - An MPI error if the library rejects the combination
+    /// - An MPI error if the call fails
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{Mpi, ReduceOp, DoubleInt};
+    /// use ferrompi::{CollectiveOp, DoubleInt, Mpi};
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
@@ -344,8 +343,22 @@ impl Communicator {
     /// // Each rank contributes its rank as value and index.
     /// let send = [DoubleInt { value: rank as f64, index: rank }];
     /// let mut recv = [DoubleInt { value: 0.0, index: 0 }];
-    /// world.allreduce_indexed(&send, &mut recv, ReduceOp::MaxLoc).unwrap();
+    /// world.allreduce_indexed(&send, &mut recv, CollectiveOp::MAX_LOC).unwrap();
     /// // Every rank now holds { value: (size-1) as f64, index: size-1 }
+    /// ```
+    ///
+    /// `Sum` is not defined on a pair type:
+    ///
+    /// ```compile_fail,E0277
+    /// use ferrompi::{DoubleInt, Mpi, ReduceOp};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let rank = world.rank();
+    ///
+    /// let send = [DoubleInt { value: rank as f64, index: rank }];
+    /// let mut recv = [DoubleInt { value: 0.0, index: 0 }];
+    /// world.allreduce_indexed(&send, &mut recv, ReduceOp::Sum).unwrap();
     /// ```
     ///
     /// [`FloatInt`]: crate::FloatInt
@@ -354,23 +367,18 @@ impl Communicator {
     /// [`Int2`]: crate::Int2
     /// [`ShortInt`]: crate::ShortInt
     /// [`LongDoubleInt`]: crate::LongDoubleInt
-    pub fn allreduce_indexed<T: MpiIndexedDatatype>(
+    pub fn allreduce_indexed<'a, T: MpiIndexedDatatype>(
         &self,
         send: &[T],
         recv: &mut [T],
-        op: ReduceOp,
+        op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        if !matches!(op, ReduceOp::MaxLoc | ReduceOp::MinLoc) {
-            return Err(Error::InvalidArgument {
-                arg: "op",
-                reason: "only MaxLoc and MinLoc apply to pair types",
-            });
-        }
+        let op = op.into();
         check_same_len("recv", send.len(), recv.len())?;
         // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T
         // (T: MpiIndexedDatatype — one of the six predefined MPI paired types). They cannot
-        // alias (Rust borrow rules). send.len() == recv.len() verified above. op has been
-        // validated to be MaxLoc or MinLoc, which are the only valid ops for indexed types.
+        // alias (Rust borrow rules). send.len() == recv.len() verified above. op is MAX_LOC
+        // or MIN_LOC, the only ops CollectiveOp offers for a pair type.
         // T::TAG matches T's MPI paired datatype. Slices outlive this call.
         let ret = unsafe {
             ffi::ferrompi_allreduce(
@@ -378,7 +386,7 @@ impl Communicator {
                 recv.as_mut_ptr().cast::<std::ffi::c_void>(),
                 send.len() as i64,
                 T::TAG as i32,
-                op as i32,
+                op.code(),
                 self.handle,
             )
         };
@@ -984,6 +992,7 @@ mod tests {
     use crate::comm::test_comm;
     use crate::datatype::DoubleInt;
     use crate::error::Error;
+    use crate::CollectiveOp;
     use crate::ReduceOp;
 
     #[test]
@@ -1067,7 +1076,7 @@ mod tests {
             };
             5
         ];
-        let result = comm.allreduce_indexed(&send, &mut recv, ReduceOp::MaxLoc);
+        let result = comm.allreduce_indexed(&send, &mut recv, CollectiveOp::MAX_LOC);
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1132,49 +1141,6 @@ mod tests {
                 reason: "length is not a multiple of the communicator size"
             })
         ));
-    }
-
-    #[test]
-    fn allreduce_indexed_invalid_op_returns_invalid_argument() {
-        let comm = test_comm(0, 1);
-        let send = vec![
-            DoubleInt {
-                value: 1.0,
-                index: 0,
-            };
-            4
-        ];
-        let mut recv = vec![
-            DoubleInt {
-                value: 0.0,
-                index: 0,
-            };
-            4
-        ];
-        for op in [
-            ReduceOp::Sum,
-            ReduceOp::Max,
-            ReduceOp::Min,
-            ReduceOp::Prod,
-            ReduceOp::BitwiseOr,
-            ReduceOp::BitwiseAnd,
-            ReduceOp::BitwiseXor,
-            ReduceOp::LogicalOr,
-            ReduceOp::LogicalAnd,
-            ReduceOp::LogicalXor,
-        ] {
-            let result = comm.allreduce_indexed(&send, &mut recv, op);
-            assert!(
-                matches!(
-                    result,
-                    Err(Error::InvalidArgument {
-                        arg: "op",
-                        reason: "only MaxLoc and MinLoc apply to pair types"
-                    })
-                ),
-                "Expected InvalidArgument for op {op:?} on indexed type"
-            );
-        }
     }
 
     #[test]

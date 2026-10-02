@@ -190,7 +190,7 @@ pub use datatype_builder::{CustomDatatype, StructField};
 pub use error::{Error, MpiErrorClass, ResourceKind, Result};
 pub use group::{Group, GroupComparison, RankRange};
 pub use info::Info;
-pub use op::{ReduceOp, UserOp};
+pub use op::{CollectiveOp, ReduceOp, UserOp};
 pub use persistent::PersistentRequest;
 pub use request::Request;
 pub use status::{Source, Status, Tag};

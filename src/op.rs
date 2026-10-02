@@ -18,7 +18,7 @@ use std::marker::PhantomData;
 use std::os::raw::c_void;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::datatype::MpiDatatype;
+use crate::datatype::{MpiDatatype, MpiIndexedDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::rt;
@@ -28,6 +28,9 @@ use crate::rt;
 // ============================================================================
 
 /// Reduction operations
+///
+/// `MPI_MAXLOC` and `MPI_MINLOC` are [`CollectiveOp::MAX_LOC`] and
+/// [`CollectiveOp::MIN_LOC`], for the pair types only.
 ///
 /// The `Replace` and `NoOp` variants are only available with the `rma` feature.
 ///
@@ -78,16 +81,6 @@ pub enum ReduceOp {
     /// Logical XOR (`MPI_LXOR`). Interprets nonzero as `true`. Valid for
     /// integer types.
     LogicalXor = 9,
-    /// Maximum value with location (`MPI_MAXLOC`). Returns the maximum value
-    /// and the rank (index) where it occurred. Only valid with
-    /// [`MpiIndexedDatatype`](crate::MpiIndexedDatatype) via
-    /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
-    MaxLoc = 10,
-    /// Minimum value with location (`MPI_MINLOC`). Returns the minimum value
-    /// and the rank (index) where it occurred. Only valid with
-    /// [`MpiIndexedDatatype`](crate::MpiIndexedDatatype) via
-    /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
-    MinLoc = 11,
     /// Replace the target buffer with the source value (`MPI_REPLACE`).
     ///
     /// Only valid for `MPI_Accumulate`-family operations. Passing to
@@ -106,6 +99,96 @@ pub enum ReduceOp {
     /// This variant is only present when the `rma` feature is enabled.
     #[cfg(feature = "rma")]
     NoOp = 13,
+}
+
+/// A predefined MPI operation, before the shim maps its code to an `MPI_Op`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Builtin {
+    Reduce(ReduceOp),
+    PairMax,
+    PairMin,
+}
+
+impl Builtin {
+    /// Code that `get_op` in csrc/ferrompi.c maps to an `MPI_Op`; keep in sync.
+    pub(crate) const fn code(self) -> i32 {
+        match self {
+            Self::Reduce(op) => op as i32,
+            Self::PairMax => 10,
+            Self::PairMin => 11,
+        }
+    }
+}
+
+// Covariant in 'a; T appears only as a `fn` return, so it adds no auto-trait or drop bound.
+type OpMarker<'a, T> = PhantomData<(&'a (), fn() -> T)>;
+
+/// The operation of a reducing collective on elements of type `T`.
+///
+/// For a primitive `T` ([`MpiDatatype`]) it is built from a [`ReduceOp`]. For
+/// a pair `T` ([`MpiIndexedDatatype`]) the only operations are
+/// [`MAX_LOC`](Self::MAX_LOC) and [`MIN_LOC`](Self::MIN_LOC), so `MAX_LOC` or
+/// `MIN_LOC` on a primitive type, or any other predefined op on a pair type,
+/// does not compile.
+///
+/// ```
+/// use ferrompi::{CollectiveOp, DoubleInt, ReduceOp};
+///
+/// let _ = CollectiveOp::<DoubleInt>::MAX_LOC;
+/// let _: CollectiveOp<'_, f64> = ReduceOp::Sum.into();
+/// ```
+///
+/// `MAX_LOC` is not defined on a primitive type:
+///
+/// ```compile_fail,E0599
+/// let _ = ferrompi::CollectiveOp::<f64>::MAX_LOC;
+/// ```
+pub struct CollectiveOp<'a, T> {
+    op: Builtin,
+    _marker: OpMarker<'a, T>,
+}
+
+impl<T> Clone for CollectiveOp<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for CollectiveOp<'_, T> {}
+
+impl<T> std::fmt::Debug for CollectiveOp<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("CollectiveOp").field(&self.op).finish()
+    }
+}
+
+impl<T: MpiDatatype> From<ReduceOp> for CollectiveOp<'_, T> {
+    fn from(op: ReduceOp) -> Self {
+        Self {
+            op: Builtin::Reduce(op),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T: MpiIndexedDatatype> CollectiveOp<'static, T> {
+    /// `MPI_MAXLOC`: the maximum value and the index that came with it.
+    pub const MAX_LOC: Self = Self {
+        op: Builtin::PairMax,
+        _marker: PhantomData,
+    };
+
+    /// `MPI_MINLOC`: the minimum value and the index that came with it.
+    pub const MIN_LOC: Self = Self {
+        op: Builtin::PairMin,
+        _marker: PhantomData,
+    };
+}
+
+impl<T> CollectiveOp<'_, T> {
+    pub(crate) fn code(&self) -> i32 {
+        self.op.code()
+    }
 }
 
 // ============================================================================
@@ -443,9 +526,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::ffi;
+    use crate::DoubleInt;
 
-    use super::ReduceOp;
     use super::{ferrompi_op_drop_closure, rust_user_op_invoke, typed_adapter, MAX_OPS, REGISTRY};
+    use super::{CollectiveOp, ReduceOp};
 
     /// The trampoline must hand the closure typed, full-length buffers built
     /// from MPI's raw pointers. Uses slot `MAX_OPS - 1`, which no other test
@@ -548,8 +632,6 @@ mod tests {
             (ReduceOp::LogicalOr, 7),
             (ReduceOp::LogicalAnd, 8),
             (ReduceOp::LogicalXor, 9),
-            (ReduceOp::MaxLoc, 10),
-            (ReduceOp::MinLoc, 11),
         ];
         for (op, expected) in ops {
             assert_eq!(op as i32, expected);
@@ -559,5 +641,25 @@ mod tests {
             assert_eq!(ReduceOp::Replace as i32, 12);
             assert_eq!(ReduceOp::NoOp as i32, 13);
         }
+    }
+
+    #[test]
+    fn collective_op_codes_match_the_shim_switch() {
+        for op in [
+            ReduceOp::Sum,
+            ReduceOp::Max,
+            ReduceOp::Min,
+            ReduceOp::Prod,
+            ReduceOp::BitwiseOr,
+            ReduceOp::BitwiseAnd,
+            ReduceOp::BitwiseXor,
+            ReduceOp::LogicalOr,
+            ReduceOp::LogicalAnd,
+            ReduceOp::LogicalXor,
+        ] {
+            assert_eq!(CollectiveOp::<f64>::from(op).code(), op as i32);
+        }
+        assert_eq!(CollectiveOp::<DoubleInt>::MAX_LOC.code(), 10);
+        assert_eq!(CollectiveOp::<DoubleInt>::MIN_LOC.code(), 11);
     }
 }

@@ -1,16 +1,16 @@
 //! MAXLOC and MINLOC reduction example.
 //!
-//! Demonstrates `allreduce_indexed` with `ReduceOp::MaxLoc` and
-//! `ReduceOp::MinLoc` using the `DoubleInt` paired value+index type.
+//! Demonstrates `allreduce_indexed` with `CollectiveOp::MAX_LOC` and
+//! `CollectiveOp::MIN_LOC` using the `DoubleInt` paired value+index type.
 //!
 //! Each rank contributes `DoubleInt { value: rank as f64, index: rank }`.
-//! After `MaxLoc`: every rank holds `{ value: (size-1) as f64, index: size-1 }`.
-//! After `MinLoc`: every rank holds `{ value: 0.0, index: 0 }`.
+//! After `MAX_LOC`: every rank holds `{ value: (size-1) as f64, index: size-1 }`.
+//! After `MIN_LOC`: every rank holds `{ value: 0.0, index: 0 }`.
 //!
 //! Run with: mpiexec -n 4 cargo run --example reduce_op_maxloc
 // mpi-test: np=4
 
-use ferrompi::{DoubleInt, Error, Mpi, ReduceOp, Result};
+use ferrompi::{CollectiveOp, DoubleInt, Mpi, Result};
 
 fn main() -> Result<()> {
     let mpi = Mpi::init()?;
@@ -22,7 +22,7 @@ fn main() -> Result<()> {
     println!("Rank {rank}/{size}: starting MAXLOC/MINLOC tests");
 
     // ============================================================
-    // Test 1: MaxLoc — find the maximum value and its origin rank
+    // Test 1: MAX_LOC — find the maximum value and its origin rank
     // ============================================================
     {
         let send = [DoubleInt {
@@ -34,31 +34,31 @@ fn main() -> Result<()> {
             index: 0,
         }];
 
-        world.allreduce_indexed(&send, &mut recv, ReduceOp::MaxLoc)?;
+        world.allreduce_indexed(&send, &mut recv, CollectiveOp::MAX_LOC)?;
 
         let expected_value = (size - 1) as f64;
         let expected_index = size - 1;
         assert_eq!(
             recv[0].value, expected_value,
-            "Rank {rank}: MaxLoc value mismatch: got {}, expected {expected_value}",
+            "Rank {rank}: MAX_LOC value mismatch: got {}, expected {expected_value}",
             recv[0].value
         );
         assert_eq!(
             recv[0].index, expected_index,
-            "Rank {rank}: MaxLoc index mismatch: got {}, expected {expected_index}",
+            "Rank {rank}: MAX_LOC index mismatch: got {}, expected {expected_index}",
             recv[0].index
         );
 
         if rank == 0 {
             println!(
-                "MaxLoc PASS: value={}, index={}",
+                "MAX_LOC PASS: value={}, index={}",
                 recv[0].value, recv[0].index
             );
         }
     }
 
     // ============================================================
-    // Test 2: MinLoc — find the minimum value and its origin rank
+    // Test 2: MIN_LOC — find the minimum value and its origin rank
     // ============================================================
     {
         let send = [DoubleInt {
@@ -70,38 +70,38 @@ fn main() -> Result<()> {
             index: 0,
         }];
 
-        world.allreduce_indexed(&send, &mut recv, ReduceOp::MinLoc)?;
+        world.allreduce_indexed(&send, &mut recv, CollectiveOp::MIN_LOC)?;
 
         let expected_value = 0.0_f64;
         let expected_index = 0_i32;
         assert_eq!(
             recv[0].value, expected_value,
-            "Rank {rank}: MinLoc value mismatch: got {}, expected {expected_value}",
+            "Rank {rank}: MIN_LOC value mismatch: got {}, expected {expected_value}",
             recv[0].value
         );
         assert_eq!(
             recv[0].index, expected_index,
-            "Rank {rank}: MinLoc index mismatch: got {}, expected {expected_index}",
+            "Rank {rank}: MIN_LOC index mismatch: got {}, expected {expected_index}",
             recv[0].index
         );
 
         if rank == 0 {
             println!(
-                "MinLoc PASS: value={}, index={}",
+                "MIN_LOC PASS: value={}, index={}",
                 recv[0].value, recv[0].index
             );
         }
     }
 
     // ============================================================
-    // Test 3: MaxLoc with multiple elements
+    // Test 3: MAX_LOC with multiple elements
     // ============================================================
     {
         // Each rank contributes two elements with different values:
         //   element 0: value = rank as f64, index = rank
         //   element 1: value = (size - 1 - rank) as f64, index = rank
-        // After MaxLoc on element 0: value = (size-1), index = size-1
-        // After MaxLoc on element 1: value = (size-1), index = 0
+        // After MAX_LOC on element 0: value = (size-1), index = size-1
+        // After MAX_LOC on element 1: value = (size-1), index = 0
         let send = [
             DoubleInt {
                 value: rank as f64,
@@ -123,52 +123,30 @@ fn main() -> Result<()> {
             },
         ];
 
-        world.allreduce_indexed(&send, &mut recv, ReduceOp::MaxLoc)?;
+        world.allreduce_indexed(&send, &mut recv, CollectiveOp::MAX_LOC)?;
 
         assert_eq!(
             recv[0].value,
             (size - 1) as f64,
-            "Rank {rank}: MaxLoc[0] value mismatch"
+            "Rank {rank}: MAX_LOC[0] value mismatch"
         );
         assert_eq!(
             recv[0].index,
             size - 1,
-            "Rank {rank}: MaxLoc[0] index mismatch"
+            "Rank {rank}: MAX_LOC[0] index mismatch"
         );
         assert_eq!(
             recv[1].value,
             (size - 1) as f64,
-            "Rank {rank}: MaxLoc[1] value mismatch"
+            "Rank {rank}: MAX_LOC[1] value mismatch"
         );
-        assert_eq!(recv[1].index, 0, "Rank {rank}: MaxLoc[1] index mismatch");
+        assert_eq!(recv[1].index, 0, "Rank {rank}: MAX_LOC[1] index mismatch");
 
         if rank == 0 {
             println!(
-                "MaxLoc (multi-element) PASS: [{}, {}] [{}, {}]",
+                "MAX_LOC (multi-element) PASS: [{}, {}] [{}, {}]",
                 recv[0].value, recv[0].index, recv[1].value, recv[1].index
             );
-        }
-    }
-
-    // ============================================================
-    // Test 4: Invalid op returns Err — guard is enforced
-    // ============================================================
-    {
-        let send = [DoubleInt {
-            value: 1.0,
-            index: rank,
-        }];
-        let mut recv = [DoubleInt {
-            value: 0.0,
-            index: 0,
-        }];
-        let result = world.allreduce_indexed(&send, &mut recv, ReduceOp::Sum);
-        assert!(
-            matches!(result, Err(Error::InvalidArgument { arg: "op", .. })),
-            "Rank {rank}: expected Err(InvalidArgument) for Sum op on indexed type"
-        );
-        if rank == 0 {
-            println!("InvalidArgument guard for non-loc op PASS");
         }
     }
 

@@ -38,8 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `buffer_attach`/`buffer_detach` and `PersistentRequest::start`/`start_all`
     return `Error::InvalidState`;
   - an oversized attach buffer, a NUL in `create_from_group`'s tag, and a
-    wrong op for `allreduce_indexed`/`allreduce_bytes` return
-    `Error::InvalidArgument`;
+    wrong op for `allreduce_bytes` return `Error::InvalidArgument`;
 
   these replace `InvalidOp`, `InvalidBuffer` and `Internal`. Migration: match
   the new variants; `arg` names the argument.
@@ -68,6 +67,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`recv` and `sendrecv` return `Status`** instead of a `(source, tag,
   count)` tuple. Migration: `let st = world.recv(...)?;` then `st.source`,
   `st.tag`, `st.count`.
+- **`ReduceOp::MaxLoc` and `ReduceOp::MinLoc` are replaced by
+  `CollectiveOp::MAX_LOC` and `CollectiveOp::MIN_LOC`**, which exist only for
+  the pair types; `allreduce_indexed` takes `impl Into<CollectiveOp<T>>`, so
+  any other op on a pair type, or `MAX_LOC` on a primitive type, is a compile
+  error instead of an `Error::InvalidArgument` or an MPI error. Migration:
+  `world.allreduce_indexed(&send, &mut recv, CollectiveOp::MAX_LOC)`.
+
+### Added
+
+- `CollectiveOp<'a, T>`, the op type of the reducing collectives.
 
 ### Changed
 
