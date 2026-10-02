@@ -1965,7 +1965,7 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_rank: i32,
         target_disp: i64,
         target_count: i64,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         self.check_target(
             target_rank,
             target_disp,
@@ -2182,7 +2182,7 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_rank: i32,
         target_disp: i64,
         target_count: i64,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         self.check_target(
             target_rank,
             target_disp,
@@ -2423,7 +2423,7 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
         op: impl Into<AccumulateOp>,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         let op = op.into().code(T::TAG)?;
         self.check_target(
             target_rank,

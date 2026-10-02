@@ -163,6 +163,7 @@ mod op;
 mod persistent;
 mod request;
 mod rt;
+mod scope;
 #[cfg(feature = "numa")]
 pub mod slurm;
 mod status;
@@ -193,6 +194,7 @@ pub use info::Info;
 pub use op::{AccumulateOp, CollectiveOp, FetchOp, ReduceOp, UserOp};
 pub use persistent::PersistentRequest;
 pub use request::Request;
+pub use scope::{scope, Scope};
 pub use status::{Source, Status, Tag};
 #[cfg(feature = "numa")]
 pub use topology::SlurmInfo;
@@ -708,10 +710,16 @@ impl Drop for Mpi {
 }
 
 /// Why `Mpi::drop` must not call `MPI_Finalize`, or `None` when it may. This
-/// is the one place the skip is decided. Its input today is a live window
-/// (feature `rma`); a nonblocking scope open on the init thread and a
-/// movable handle holding an extent token join it as those types arrive.
+/// is the one place the skip is decided. Its inputs today are a nonblocking
+/// scope open on the dropping thread and a live window (feature `rma`); a
+/// movable handle holding an extent token joins them as those types arrive.
 fn finalize_skip_reason() -> Option<String> {
+    if rt::scopes_on_this_thread() > 0 {
+        return Some(
+            "a nonblocking scope is still open on this thread; its requests complete when the scope ends"
+                .into(),
+        );
+    }
     #[cfg(feature = "rma")]
     {
         let live = window::live_windows();
@@ -786,6 +794,19 @@ mod tests {
         );
 
         ATTACHED_BUFFER.lock().unwrap().take();
+    }
+
+    // ── finalize_skip_reason unit tests ───────────────────────────────────
+
+    #[test]
+    fn finalize_skip_reason_names_an_open_scope() {
+        let reason =
+            crate::scope(|_| Ok(super::finalize_skip_reason())).expect("an empty scope returns Ok");
+        assert_eq!(
+            reason.as_deref(),
+            Some("a nonblocking scope is still open on this thread; its requests complete when the scope ends")
+        );
+        assert_eq!(crate::rt::scopes_on_this_thread(), 0);
     }
 
     // ── Mpi::create_from_group unit tests ─────────────────────────────────

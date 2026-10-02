@@ -7,6 +7,7 @@ use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::request::{Request, RequestKind};
+use crate::scope::Scope;
 use crate::ReduceOp;
 
 impl Communicator {
@@ -33,7 +34,7 @@ impl Communicator {
     /// // ... do other work ...
     /// req.wait().unwrap();
     /// ```
-    pub fn ibroadcast<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<Request> {
+    pub fn ibroadcast<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<Request<'_>> {
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf_mut(data);
         // SAFETY: the returned Request does not borrow `data`; keeping it alive and
@@ -64,7 +65,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         op: ReduceOp,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -115,7 +116,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
         root: i32,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -173,7 +174,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         root: i32,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         if self.rank == root {
             check_rank_slots("recv", recv.len(), send.len(), self.size)?;
         }
@@ -213,7 +214,7 @@ impl Communicator {
     /// let req = world.iallgather(&send, &mut recv).unwrap();
     /// req.wait().unwrap();
     /// ```
-    pub fn iallgather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<Request> {
+    pub fn iallgather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<Request<'_>> {
         check_rank_slots("recv", recv.len(), send.len(), self.size)?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -256,7 +257,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         root: i32,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         if self.rank == root {
             check_rank_slots("send", send.len(), recv.len(), self.size)?;
         }
@@ -278,7 +279,8 @@ impl Communicator {
     /// Nonblocking barrier.
     ///
     /// Initiates a barrier synchronization and returns immediately with a
-    /// [`Request`] handle. The barrier is complete when the request is waited on.
+    /// [`Request`] handle that belongs to the scope `s`. The barrier is complete
+    /// when the request is waited on, or when the scope ends.
     ///
     /// # Example
     ///
@@ -286,18 +288,22 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let req = world.ibarrier().unwrap();
-    /// // ... do other work ...
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.ibarrier(s)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn ibarrier(&self) -> Result<Request> {
+    pub fn ibarrier<'s>(&self, s: &'s Scope<'s, '_>) -> Result<Request<'s>> {
         let mut request_handle: i64 = 0;
         // SAFETY: this call takes only the communicator handle and a request out-pointer;
-        // there is no data buffer, so the returned Request has no buffer-lifetime
-        // obligation.
+        // no buffer is involved, so the request has no buffer-lifetime obligation, and
+        // the scope completes it.
         let ret = unsafe { ffi::ferrompi_ibarrier(self.handle, &mut request_handle) };
         Error::check_with_op(ret, "ibarrier")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking inclusive prefix reduction (scan).
@@ -326,7 +332,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         op: ReduceOp,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -372,7 +378,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         op: ReduceOp,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -411,7 +417,7 @@ impl Communicator {
     /// let req = world.ialltoall(&send, &mut recv).unwrap();
     /// req.wait().unwrap();
     /// ```
-    pub fn ialltoall<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<Request> {
+    pub fn ialltoall<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<Request<'_>> {
         check_same_len("recv", send.len(), recv.len())?;
         let count = rank_block("send", send.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
@@ -459,7 +465,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         op: ReduceOp,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         check_same_len(
             "recv",
             rank_block("send", send.len(), self.size)?,
@@ -520,7 +526,11 @@ impl Communicator {
     /// let req = world.igather_inplace(&mut data, 0).unwrap();
     /// req.wait().unwrap();
     /// ```
-    pub fn igather_inplace<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<Request> {
+    pub fn igather_inplace<T: MpiDatatype>(
+        &self,
+        data: &mut [T],
+        root: i32,
+    ) -> Result<Request<'_>> {
         let mut request_handle: i64 = 0;
         let ret = if self.rank() == root {
             let recvcount = rank_block("data", data.len(), self.size)? as i64;
@@ -583,7 +593,7 @@ impl Communicator {
     /// let req = world.iallgather_inplace(&mut data).unwrap();
     /// req.wait().unwrap();
     /// ```
-    pub fn iallgather_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<Request> {
+    pub fn iallgather_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<Request<'_>> {
         let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
@@ -638,7 +648,11 @@ impl Communicator {
     ///     req.wait().unwrap();
     /// }
     /// ```
-    pub fn iscatter_inplace<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<Request> {
+    pub fn iscatter_inplace<T: MpiDatatype>(
+        &self,
+        data: &mut [T],
+        root: i32,
+    ) -> Result<Request<'_>> {
         let (sendbuf, sendcount, recvbuf, recvcount, dt) =
             scatter_inplace_args(data, self.rank() == root, self.size)?;
         let mut request_handle: i64 = 0;
@@ -694,7 +708,7 @@ impl Communicator {
     /// let req = world.ialltoall_inplace(&mut data).unwrap();
     /// req.wait().unwrap();
     /// ```
-    pub fn ialltoall_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<Request> {
+    pub fn ialltoall_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<Request<'_>> {
         let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);

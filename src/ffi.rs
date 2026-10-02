@@ -33,10 +33,11 @@ pub const FERROMPI_LOCK_EXCLUSIVE: int32_t = 0;
 pub const FERROMPI_LOCK_SHARED: int32_t = 1;
 
 // Never routed through the `crate::rt` lifecycle guard: calls legal before
-// init or after finalize (init, lifecycle and version queries, error
-// lookup), calls that make no MPI call (op-table bookkeeping, error-class
-// mapping), `wtime`, which only a live `Mpi` reaches, and calls made only
-// from a `Drop` impl.
+// init or after finalize (init, lifecycle and version queries), calls that
+// make no MPI call (op-table bookkeeping, error-class mapping), `wtime`, which
+// only a live `Mpi` reaches, and calls made only from a `Drop` impl. The error
+// lookup is guarded by hand after this block: MPI 3.1 libraries need not allow
+// it during or after `MPI_Finalize`.
 extern "C" {
     pub fn ferrompi_init_thread(required: c_int, provided: *mut c_int) -> c_int;
     pub fn ferrompi_finalize(active_requests: *mut int32_t) -> c_int;
@@ -45,12 +46,6 @@ extern "C" {
     pub fn ferrompi_comm_free(comm: int32_t) -> c_int;
     pub fn ferrompi_group_free(group_handle: int32_t) -> c_int;
     pub fn ferrompi_info_free(info_handle: int32_t) -> c_int;
-    pub fn ferrompi_error_info(
-        code: c_int,
-        error_class: *mut int32_t,
-        message: *mut c_char,
-        msg_len: *mut int32_t,
-    ) -> c_int;
     pub fn ferrompi_request_free(request: int64_t) -> c_int;
     pub fn ferrompi_get_library_version(buf: *mut c_char, len: *mut int32_t) -> c_int;
     pub fn ferrompi_get_version(version: *mut c_char, len: *mut int32_t) -> c_int;
@@ -85,6 +80,45 @@ extern "C" {
     pub fn ferrompi_win_unlock(rank: int32_t, win: int32_t) -> c_int;
     pub fn ferrompi_win_unlock_all(win: int32_t) -> c_int;
     pub fn ferrompi_win_pscw_mode_values(out: *mut int32_t);
+}
+
+extern "C" {
+    #[link_name = "ferrompi_error_info"]
+    fn error_info(
+        code: c_int,
+        error_class: *mut int32_t,
+        message: *mut c_char,
+        msg_len: *mut int32_t,
+    ) -> c_int;
+}
+
+/// Looks up the class and text of an MPI error code, under an in-flight token
+/// so that it cannot overlap `MPI_Finalize`. Takes the completion entry: it is
+/// admitted while finalizing, and refused once finalized or on a thread the
+/// thread level does not allow, with the refusal code as the result. Unlike the
+/// other wrappers it skips the debug overlap check: MPI-4.1 §11.6 and Table 11.1
+/// make `MPI_Error_class` and `MPI_Error_string` always thread-safe, the public
+/// `Error::from_code` needs no serialization from its callers, and a refusal
+/// would only lose the message.
+///
+/// # Safety
+///
+/// The pointers must be valid for the writes of `ferrompi_error_info` in
+/// `csrc/ferrompi.c`: `message` for `MPI_MAX_ERROR_STRING` bytes, the other two
+/// for one `int32_t`.
+pub unsafe fn ferrompi_error_info(
+    code: c_int,
+    error_class: *mut int32_t,
+    message: *mut c_char,
+    msg_len: *mut int32_t,
+) -> c_int {
+    let _call = match crate::rt::enter_completion() {
+        Ok(token) => token,
+        Err(refused) => return refused,
+    };
+    // SAFETY: the caller upholds the C function's contract, and the token keeps
+    // `MPI_Finalize` from starting until this call returns.
+    unsafe { error_info(code, error_class, message, msg_len) }
 }
 
 /// Wraps every other extern declaration in [`crate::rt::enter`]'s lifecycle

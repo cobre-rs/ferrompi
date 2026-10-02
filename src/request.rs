@@ -1,10 +1,9 @@
 //! Request handles for nonblocking MPI operations.
 
-#[cfg(debug_assertions)]
-use crate::error::FERROMPI_ERR_THREAD_LEVEL;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL};
 use crate::ffi;
 use crate::rt;
+use crate::scope::Registry;
 #[cfg(debug_assertions)]
 use std::io::Write;
 
@@ -58,7 +57,7 @@ pub(crate) fn with_handles<E, R>(
 
 /// The handle a batch call passes for `r`: `-1` (the C layer's null
 /// handle) once `r` has completed.
-fn handle_or_skip(r: &Request) -> i64 {
+fn handle_or_skip(r: &Request<'_>) -> i64 {
     if r.completed {
         -1
     } else {
@@ -67,8 +66,9 @@ fn handle_or_skip(r: &Request) -> i64 {
 }
 
 /// Records that MPI completed `r`.
-fn mark_completed(r: &mut Request) {
+fn mark_completed(r: &mut Request<'_>) {
     r.completed = true;
+    r.release();
 }
 
 /// Run `f` with a zeroed `i32` index scratch buffer of length `len`,
@@ -130,8 +130,9 @@ pub(crate) enum RequestKind {
 /// `test()` returning `true`) or dropped.** MPI holds raw pointers to these
 /// buffers; violating this invariant is undefined behavior.
 ///
-/// This cannot currently be enforced by the Rust type system because `Request`
-/// does not carry a lifetime parameter tying it to the buffers.
+/// For a request that is not created through a [`scope`](crate::scope) this
+/// cannot currently be enforced by the Rust type system, because such a request
+/// does not borrow its buffers.
 ///
 /// # Drop Behavior
 ///
@@ -148,6 +149,12 @@ pub(crate) enum RequestKind {
 /// `break`, or a panic unwind — prefer calling `wait()` or `test()` explicitly
 /// so that failure modes remain observable.** See also the migration guide note
 /// in [`doc::migrating_from_rsmpi`](crate::doc::migrating_from_rsmpi).
+///
+/// A request created through a [`scope`](crate::scope) is completed by the
+/// scope, which waits for it before returning or unwinding, so dropping it
+/// early is harmless; it belongs to the thread that created it. The other
+/// constructors still return requests that are not tied to a scope, and those
+/// keep the behavior described above.
 ///
 /// # Example
 ///
@@ -171,19 +178,55 @@ pub(crate) enum RequestKind {
 /// // Now recv contains the result
 /// println!("Sum: {:?}", recv);
 /// ```
-pub struct Request {
+pub struct Request<'s> {
     handle: i64,
     completed: bool,
     kind: RequestKind,
+    owner: Owner<'s>,
 }
 
-impl Request {
-    /// Create a new request from a raw handle.
+/// Who completes a request that was not waited for: the scope whose registry
+/// holds its slot, or the request itself when it is dropped.
+#[derive(Clone, Copy)]
+enum Owner<'s> {
+    Scoped(&'s Registry, u32),
+    Unscoped,
+}
+
+impl Request<'static> {
+    /// Create a request that no scope owns, from a raw handle.
     pub(crate) fn new(handle: i64, kind: RequestKind) -> Self {
         Request {
             handle,
             completed: false,
             kind,
+            owner: Owner::Unscoped,
+        }
+    }
+}
+
+impl<'s> Request<'s> {
+    /// Create a request owned by the scope whose registry holds `slot`.
+    pub(crate) fn scoped(
+        handle: i64,
+        kind: RequestKind,
+        registry: &'s Registry,
+        slot: u32,
+    ) -> Self {
+        Request {
+            handle,
+            completed: false,
+            kind,
+            owner: Owner::Scoped(registry, slot),
+        }
+    }
+}
+
+impl Request<'_> {
+    /// Frees this request's registry slot, once MPI completed the request.
+    fn release(&self) {
+        if let Owner::Scoped(registry, slot) = self.owner {
+            registry.release(slot);
         }
     }
 
@@ -208,10 +251,10 @@ impl Request {
     ///
     /// On a thread the active thread level does not allow, the wait is
     /// rejected and this call drops the still-in-flight `self` before
-    /// returning, which aborts the process (see the `Drop` impl below), except
-    /// while `Mpi` is dropping or after it skipped `MPI_Finalize`: the wait then
-    /// returns `Err(`[`Error::ThreadLevelViolation`]`)` and the request is
-    /// leaked.
+    /// returning, which aborts the process for a request that no scope owns (see
+    /// the `Drop` impl below), except while `Mpi` is dropping or after it
+    /// skipped `MPI_Finalize`: the wait then returns
+    /// `Err(`[`Error::ThreadLevelViolation`]`)` and the request is leaked.
     ///
     /// In a debug build at `Serialized`, a wait that overlaps another
     /// thread's MPI call can neither run nor hand the request back, so it
@@ -242,6 +285,11 @@ impl Request {
         }
         // MPI consumed the request whatever it returned; Drop must not wait on it again.
         self.completed = true;
+        // A refused call leaves the request pending, so its slot stays live
+        // for the scope end.
+        if ret != FERROMPI_ERR_FINALIZED && ret != FERROMPI_ERR_THREAD_LEVEL {
+            self.release();
+        }
         Error::check_with_op(ret, "wait")
     }
 
@@ -273,6 +321,7 @@ impl Request {
         // not re-wait on that now-freed handle.
         if flag != 0 {
             self.completed = true;
+            self.release();
         }
         Error::check_with_op(ret, "test")?;
         Ok(flag != 0)
@@ -294,7 +343,7 @@ impl Request {
     /// class and code. When the MPI library reports which request failed
     /// (MPICH and Open MPI do), the message also ends with `(request N)`,
     /// `N` being its index in `requests`.
-    pub fn wait_any(requests: &mut [Request]) -> Result<Option<usize>> {
+    pub fn wait_any(requests: &mut [Request<'_>]) -> Result<Option<usize>> {
         if requests.is_empty() {
             return Ok(None);
         }
@@ -335,7 +384,7 @@ impl Request {
     /// On a failed request, the returned error carries that request's own
     /// class and code, and its message ends with `(request N)`, `N` being
     /// its index in `requests`.
-    pub fn wait_some(requests: &mut [Request]) -> Result<Vec<usize>> {
+    pub fn wait_some(requests: &mut [Request<'_>]) -> Result<Vec<usize>> {
         if requests.is_empty() {
             return Ok(vec![]);
         }
@@ -396,7 +445,7 @@ impl Request {
     /// class and code. When the MPI library reports which request failed
     /// (MPICH and Open MPI do), the message also ends with `(request N)`,
     /// `N` being its index in `requests`.
-    pub fn test_any(requests: &mut [Request]) -> Result<Option<usize>> {
+    pub fn test_any(requests: &mut [Request<'_>]) -> Result<Option<usize>> {
         if requests.is_empty() {
             return Ok(None);
         }
@@ -442,7 +491,7 @@ impl Request {
     /// On a failed request, the returned error carries that request's own
     /// class and code, and its message ends with `(request N)`, `N` being
     /// its index in `requests`.
-    pub fn test_some(requests: &mut [Request]) -> Result<Vec<usize>> {
+    pub fn test_some(requests: &mut [Request<'_>]) -> Result<Vec<usize>> {
         if requests.is_empty() {
             return Ok(vec![]);
         }
@@ -577,7 +626,7 @@ impl Request {
     /// On a failed request, the returned error carries that request's own
     /// class and code, and its message ends with `(request N)`, `N` being
     /// its index in `requests`.
-    pub fn wait_all(requests: &mut [Request]) -> Result<()> {
+    pub fn wait_all(requests: &mut [Request<'_>]) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
         }
@@ -604,12 +653,13 @@ impl Request {
     }
 }
 
-impl Drop for Request {
+impl Drop for Request<'_> {
     /// Block until the in-flight operation completes, then release the handle.
     ///
     /// Calls `MPI_Wait` on the underlying request handle when `self.completed`
-    /// is `false`. **This call blocks** until the peer posts the matching
-    /// operation; if the peer never does, this deadlocks.
+    /// is `false` and no scope owns the request. **This call blocks** until the
+    /// peer posts the matching operation; if the peer never does, this
+    /// deadlocks. A scoped request does nothing here: its scope completes it.
     ///
     /// Maintainers: the `self.completed = true` assignment in `Request::wait`
     /// is the only guard that prevents a double-wait here. Any refactoring of
@@ -619,7 +669,7 @@ impl Drop for Request {
     /// After `Mpi` is dropped this does nothing; below `Serialized` on a
     /// non-init thread it aborts the process.
     fn drop(&mut self) {
-        if !self.completed {
+        if !self.completed && matches!(self.owner, Owner::Unscoped) {
             let Some(_call) = rt::drop_guard("Request") else {
                 return;
             };
@@ -638,17 +688,22 @@ impl Drop for Request {
 
 #[cfg(test)]
 mod tests {
-    use super::{with_handles, Request, RequestKind, HANDLE_STACK_CAP};
+    use super::{with_handles, Owner, Request, RequestKind, HANDLE_STACK_CAP};
     use crate::error::Error;
     use std::mem::forget;
 
+    fn test_request(completed: bool, kind: RequestKind) -> Request<'static> {
+        Request {
+            handle: 0,
+            completed,
+            kind,
+            owner: Owner::Unscoped,
+        }
+    }
+
     #[test]
     fn test_when_already_completed_returns_true() {
-        let mut req = Request {
-            handle: 0,
-            completed: true,
-            kind: RequestKind::PointToPoint,
-        };
+        let mut req = test_request(true, RequestKind::PointToPoint);
         let result = req.test();
         assert!(matches!(result, Ok(true)));
         forget(req);
@@ -659,11 +714,7 @@ mod tests {
         // wait() takes self by value (consuming).
         // With completed: true, it returns Ok(()) before any FFI call.
         // Drop then runs, but !self.completed is false, so Drop is a no-op.
-        let req = Request {
-            handle: 0,
-            completed: true,
-            kind: RequestKind::PointToPoint,
-        };
+        let req = test_request(true, RequestKind::PointToPoint);
         let result = req.wait();
         assert!(result.is_ok());
         // No forget() needed — wait() consumed the value, and Drop was a no-op
@@ -745,11 +796,7 @@ mod tests {
 
     #[test]
     fn get_status_on_completed_request_returns_true_without_ffi() {
-        let req = Request {
-            handle: 0,
-            completed: true,
-            kind: RequestKind::PointToPoint,
-        };
+        let req = test_request(true, RequestKind::PointToPoint);
         let result = req.get_status();
         assert!(matches!(result, Ok(true)));
         forget(req);
@@ -757,22 +804,14 @@ mod tests {
 
     #[test]
     fn cancel_on_completed_request_returns_ok_without_ffi() {
-        let mut req = Request {
-            handle: 0,
-            completed: true,
-            kind: RequestKind::PointToPoint,
-        };
+        let mut req = test_request(true, RequestKind::PointToPoint);
         let result = req.cancel();
         assert!(matches!(result, Ok(())));
         forget(req);
     }
 
     fn assert_cancel_not_supported(kind: RequestKind) {
-        let mut req = Request {
-            handle: 0,
-            completed: false,
-            kind,
-        };
+        let mut req = test_request(false, kind);
         let result = req.cancel();
         assert!(matches!(result, Err(Error::NotSupported(_))));
         forget(req);

@@ -117,7 +117,7 @@ impl Communicator {
         data: &[T],
         dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf(data);
@@ -160,7 +160,7 @@ impl Communicator {
         data: &mut [T],
         source: impl Into<Source>,
         tag: impl Into<Tag>,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         let source = source.into().source_code("source")?;
         let tag = tag.into().tag_code("tag")?;
         let mut request_handle: i64 = 0;
@@ -861,7 +861,7 @@ impl Communicator {
         datatype: &CustomDatatype,
         dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         let dest = dest.into().dest_code()?;
         datatype.check_layout::<T>()?;
         let mut request_handle: i64 = 0;
@@ -936,7 +936,7 @@ impl Communicator {
         datatype: &CustomDatatype,
         source: impl Into<Source>,
         tag: impl Into<Tag>,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         let source = source.into().source_code("source")?;
         let tag = tag.into().tag_code("tag")?;
         datatype.check_layout::<T>()?;

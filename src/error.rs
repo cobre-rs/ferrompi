@@ -384,7 +384,10 @@ impl Error {
     /// Create a structured error from an MPI error code.
     ///
     /// Calls `ferrompi_error_info` to obtain the error class and human-readable
-    /// message from the MPI runtime.
+    /// message from the MPI runtime. That lookup is refused once `MPI_Finalize`
+    /// is running or has returned, and on a thread the thread level does not
+    /// allow to call MPI; the error then has class [`MpiErrorClass::Raw`] and the
+    /// message `MPI error code {code}`.
     ///
     /// # Returns
     ///
@@ -451,7 +454,7 @@ impl Error {
                 operation: None,
             }
         } else {
-            // ferrompi_error_info itself failed — provide a fallback
+            // ferrompi_error_info failed or was refused — provide a fallback
             Error::Mpi {
                 class: MpiErrorClass::Raw(code),
                 code,

@@ -17,16 +17,25 @@
 //! yet to call either.
 //!
 //! Finalizing is two steps. [`begin_finalize`] stores `Finalizing`, which
-//! refuses new calls, and at `Serialized`/`Multiple` waits ([`drain_shards`])
-//! until every counted call has returned; [`end_finalize`] then stores
-//! `Finalized`, just before `MPI_Finalize` runs, and waits again for the
-//! completion calls admitted in between. A skipped `MPI_Finalize` leaves the
-//! state `Finalizing` for the rest of the process.
+//! refuses new calls, waits for the nonblocking scopes open on other threads
+//! to close, and at `Serialized`/`Multiple` waits ([`drain_shards`]) until
+//! every counted call has returned; [`end_finalize`] then stores `Finalized`,
+//! just before `MPI_Finalize` runs, and waits again for the completion calls
+//! admitted in between. A skipped `MPI_Finalize` leaves the state `Finalizing`
+//! for the rest of the process.
 //!
 //! [`enter_completion`] and [`check_completion`] are the entry for the calls
 //! that complete or test a request that is already pending. They differ from
 //! [`enter`] and [`check`] only in admitting `Finalizing`, under the thread
-//! rule of the granted level.
+//! rule of the granted level, including a counted call that read an active
+//! state just before the `Finalizing` store. The error-code lookup behind
+//! `Error::from_code` takes the same entry, so it never overlaps
+//! `MPI_Finalize`.
+//!
+//! A nonblocking scope holds a [`ScopeToken`] for its whole extent, at every
+//! thread level: [`open_scope`] refuses once `Finalizing` is stored, and
+//! [`scopes_on_this_thread`] lets `Mpi::drop` skip `MPI_Finalize` for a scope
+//! open on its own thread, whose requests the scope still completes.
 
 use std::cell::Cell;
 use std::io::Write;
@@ -50,7 +59,8 @@ const FINALIZING: u8 = 7;
 static STATE: AtomicU8 = AtomicU8::new(UNINIT);
 
 /// The granted [`ThreadLevel`] as a `u8`, stored by [`activate`] before
-/// `STATE`. Read only once `STATE` is `FINALIZING`, which no longer records it.
+/// `STATE`. Read once `STATE` is `FINALIZING`, which no longer records it, and
+/// by the debug overlap check of [`begin_call`].
 static LEVEL: AtomicU8 = AtomicU8::new(ThreadLevel::Single as u8);
 
 thread_local! {
@@ -61,6 +71,9 @@ thread_local! {
     /// This thread's index into `IN_FLIGHT`; `usize::MAX` until its first
     /// counted use.
     static SHARD: Cell<usize> = const { Cell::new(usize::MAX) };
+
+    /// How many nonblocking scopes are open on this thread.
+    static SCOPES_HERE: Cell<usize> = const { Cell::new(0) };
 }
 
 const SHARDS: usize = 64;
@@ -74,6 +87,9 @@ struct Shard(AtomicUsize);
 static IN_FLIGHT: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARDS];
 
 static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
+
+/// How many nonblocking scopes are open on any thread.
+static LIVE_SCOPES: AtomicUsize = AtomicUsize::new(0);
 
 /// Held by a guarded call or `Drop` path for as long as it may call MPI. At
 /// `Serialized`/`Multiple` it owns one count in a shard of `IN_FLIGHT`,
@@ -90,6 +106,22 @@ impl Drop for InFlight {
             // happens-before the `MPI_Finalize` that follows the drain.
             shard.0.fetch_sub(1, Ordering::Release);
         }
+    }
+}
+
+/// Held by a nonblocking scope for its whole extent, at every thread level.
+/// [`begin_finalize`] waits for the tokens of scopes on other threads, and
+/// [`scopes_on_this_thread`] feeds the skip decision for the finalizing thread.
+#[must_use]
+pub(crate) struct ScopeToken(());
+
+impl Drop for ScopeToken {
+    fn drop(&mut self) {
+        SCOPES_HERE.with(|here| here.set(here.get() - 1));
+        // Release: pairs with the SeqCst (hence acquiring) load in
+        // `wait_for_other_scopes`, so every MPI call the scope made
+        // happens-before the `MPI_Finalize` that follows the wait.
+        LIVE_SCOPES.fetch_sub(1, Ordering::Release);
     }
 }
 
@@ -161,6 +193,62 @@ pub(crate) fn activate(level: ThreadLevel) {
     ON_INIT_THREAD.with(|c| c.set(true));
 }
 
+/// Opens a nonblocking scope: returns its [`ScopeToken`], or
+/// `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or `Finalized`. The
+/// count rises before the scope's first request-creating call, so that call's
+/// per-call release cannot precede it.
+pub(crate) fn open_scope() -> std::result::Result<ScopeToken, c_int> {
+    // Relaxed: see `enter`'s comment.
+    let state = STATE.load(Ordering::Relaxed);
+    if state == FINALIZING || state == FINALIZED {
+        return Err(FERROMPI_ERR_FINALIZED);
+    }
+    if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
+        // Relaxed: at `Single`/`Funneled` only the init thread can create a
+        // request, and it is the thread that drops `Mpi`; a scope on another
+        // thread holds none, so only its count matters, not its order.
+        LIVE_SCOPES.fetch_add(1, Ordering::Relaxed);
+    } else {
+        // SeqCst: the increment of the pair with `begin_finalize`'s
+        // `Finalizing` store, as in `enter_counted`. Either the wait sees this
+        // count or the re-check below sees that store. Every other state takes
+        // this path, `Uninit` and `Initializing` included: a thread may open a
+        // scope before `Mpi` is initialized and post its first request after,
+        // and only this pair orders that count before the finalizer's wait.
+        LIVE_SCOPES.fetch_add(1, Ordering::SeqCst);
+        // SeqCst: reads `Finalizing` or `Finalized` if that store precedes the
+        // increment in the SeqCst order.
+        let state = STATE.load(Ordering::SeqCst);
+        if state == FINALIZING || state == FINALIZED {
+            LIVE_SCOPES.fetch_sub(1, Ordering::Release);
+            return Err(FERROMPI_ERR_FINALIZED);
+        }
+    }
+    SCOPES_HERE.with(|here| here.set(here.get() + 1));
+    Ok(ScopeToken(()))
+}
+
+/// How many nonblocking scopes are open on the calling thread.
+pub(crate) fn scopes_on_this_thread() -> usize {
+    SCOPES_HERE.with(Cell::get)
+}
+
+/// Waits until every scope open on another thread has closed. No timeout: a
+/// scope that never ends blocks this wait, as a blocked MPI call blocks
+/// [`drain_shards`].
+#[cold]
+fn wait_for_other_scopes() {
+    let here = scopes_on_this_thread();
+    // SeqCst: the load of the pair with `open_scope`'s increment, and an
+    // acquire of the Release decrement it observes.
+    while LIVE_SCOPES.load(Ordering::SeqCst) != here {
+        for _ in 0..64 {
+            std::hint::spin_loop();
+        }
+        std::thread::yield_now();
+    }
+}
+
 /// Waits until every shard reads zero, that is, until every counted call and
 /// `Drop` path has returned. No timeout: a thread blocked forever inside an
 /// MPI call blocks this wait, as it would block `MPI_Finalize`.
@@ -178,11 +266,12 @@ pub(crate) fn drain_shards() {
     }
 }
 
-/// Move an `Active` state to `Finalizing`, which refuses new calls. At
-/// `Serialized`/`Multiple`, then waits for every counted call to return.
-/// Returns `true`. Returns `false` and changes nothing in any other state, so
-/// a stub `Mpi` dropped without init (`Uninit`) — or a second drop after
-/// finalize — is a no-op.
+/// Move an `Active` state to `Finalizing`, which refuses new calls and scope
+/// opens, then wait for the scopes open on other threads to close and, at
+/// `Serialized`/`Multiple`, for every counted call to return. Returns `true`.
+/// Returns `false` and changes nothing in any other state, so a stub `Mpi`
+/// dropped without init (`Uninit`) — or a second drop after finalize — is a
+/// no-op.
 pub(crate) fn begin_finalize() -> bool {
     // Relaxed: `Mpi` is `!Send`, so this load only ever races with another
     // thread's `enter()` load, never with a second write on this thread.
@@ -195,6 +284,9 @@ pub(crate) fn begin_finalize() -> bool {
     // below; a call whose increment follows it reads `Finalizing` and is
     // refused. So no counted call can begin once `MPI_Finalize` does.
     STATE.store(FINALIZING, Ordering::SeqCst);
+    // Scopes before calls: a scope's own calls are counted ones, so by the
+    // time the drain runs, no scope is still making them.
+    wait_for_other_scopes();
     if prev >= ACTIVE_SERIALIZED {
         drain_shards();
     }
@@ -269,7 +361,9 @@ fn enter_other(state: u8) -> std::result::Result<InFlight, c_int> {
 /// [`enter`] for the calls that complete or test a request that is already
 /// pending. It differs only in `Finalizing`, which it admits under the thread
 /// rule of the granted level: the init-thread check at `Single`/`Funneled`, the
-/// counted path at `Serialized`/`Multiple`. `Finalized` is still refused.
+/// counted path at `Serialized`/`Multiple`. That includes a call that read an
+/// active state just before the `Finalizing` store. `Finalized` is still
+/// refused. Also the entry of the error-code lookup.
 #[inline(always)]
 pub(crate) fn enter_completion() -> std::result::Result<InFlight, c_int> {
     // Relaxed: see `enter`'s comment.
@@ -375,8 +469,9 @@ fn enter_counted(completion: bool) -> std::result::Result<InFlight, c_int> {
     Ok(token)
 }
 
-/// Set for the duration of one guarded FFI call while `STATE` is
-/// `Active(Serialized)`, to detect two such calls overlapping. Debug-only:
+/// Set for the duration of one guarded FFI call at the `Serialized` level,
+/// including while `Finalizing` or after a skipped `MPI_Finalize`, to detect
+/// two such calls overlapping. Debug-only:
 /// `Serialized` requires the caller to serialize its own MPI calls, so this
 /// is a diagnostic, not a correctness mechanism release builds must pay for.
 #[cfg(debug_assertions)]
@@ -404,15 +499,15 @@ fn release_in_call_flag() {
 }
 
 /// Called at the top of a guarded extern wrapper, after [`enter`] passes. At
-/// `Active(Serialized)`, takes [`SERIALIZED_IN_CALL`] and returns `Ok(true)`,
-/// or `Err(FERROMPI_ERR_THREAD_LEVEL)` if another call already holds it. In
-/// every other state, returns `Ok(false)` without touching the flag.
+/// the `Serialized` level, in `Active` and also while `Finalizing`, takes
+/// [`SERIALIZED_IN_CALL`] and returns `Ok(true)`, or
+/// `Err(FERROMPI_ERR_THREAD_LEVEL)` if another call already holds it. At every
+/// other level, returns `Ok(false)` without touching the flag.
 #[cfg(debug_assertions)]
 pub(crate) fn begin_call() -> std::result::Result<bool, c_int> {
-    // Relaxed: see `enter`'s comment — visibility of the `Active` state set
-    // on another thread is carried by that thread's own handle hand-off,
-    // not by this load's ordering.
-    if STATE.load(Ordering::Relaxed) == ACTIVE_SERIALIZED {
+    // Relaxed: see `enter_other_completion`'s comment; `LEVEL` is written once,
+    // before the handle that reaches this call exists. `Single` until then.
+    if LEVEL.load(Ordering::Relaxed) == ThreadLevel::Serialized as u8 {
         if take_in_call_flag() {
             Ok(true)
         } else {

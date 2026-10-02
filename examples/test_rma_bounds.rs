@@ -58,14 +58,14 @@ fn check_rejected(
     }
 }
 
-fn check_rejected_req(
+fn check_rejected_req<'a>(
     ok: &mut bool,
     label: &str,
     rank: i32,
     disp: i64,
     want: (&str, &str),
-    result: ferrompi::Result<Request>,
-    stray: &mut Vec<Request>,
+    result: ferrompi::Result<Request<'a>>,
+    stray: &mut Vec<Request<'a>>,
 ) {
     match result {
         Err(e) if is_rejection(&e, want) => {}

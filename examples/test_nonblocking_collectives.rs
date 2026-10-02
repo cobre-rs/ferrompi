@@ -218,8 +218,12 @@ fn main() {
     // Test 7: ibarrier
     // ========================================================================
     {
-        let req = world.ibarrier().expect("ibarrier failed");
-        req.wait().expect("ibarrier wait failed");
+        ferrompi::scope(|s| {
+            let req = world.ibarrier(s).expect("ibarrier failed");
+            req.wait().expect("ibarrier wait failed");
+            Ok(())
+        })
+        .expect("ibarrier scope failed");
 
         test_count += 1;
         if rank == 0 {

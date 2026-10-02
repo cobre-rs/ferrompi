@@ -489,7 +489,7 @@ impl Communicator {
         recvcounts: &[i32],
         displs: &[i32],
         root: i32,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         if self.rank == root {
             check_v_args(
                 "recvcounts",
@@ -575,7 +575,7 @@ impl Communicator {
         sendcounts: &[i32],
         displs: &[i32],
         root: i32,
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         if self.rank == root {
             check_v_args(
                 "sendcounts",
@@ -659,7 +659,7 @@ impl Communicator {
         recv: &mut [T],
         recvcounts: &[i32],
         displs: &[i32],
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         check_v_args(
             "recvcounts",
             "displs",
@@ -741,7 +741,7 @@ impl Communicator {
         sdispls: &[i32],
         recvcounts: &[i32],
         rdispls: &[i32],
-    ) -> Result<Request> {
+    ) -> Result<Request<'_>> {
         check_v_args(
             "sendcounts",
             "sdispls",

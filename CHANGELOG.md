@@ -94,11 +94,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accumulate calls, instead of `Error::Mpi` with class `Op` (blocking
   reductions) or a hang or abort at the target (RMA accumulates on MPICH).
   Migration: match `Error::InvalidArgument`.
+- **`Request` has a lifetime (`Request<'s>`) and is no longer `Send`**, and
+  **`ibarrier` takes the scope:** `world.ibarrier(s)` inside
+  `ferrompi::scope(|s| ...)`. Migration: wrap the code that creates and waits
+  the requests in `ferrompi::scope`, and keep each request on the thread that
+  created it.
 
 ### Added
 
 - `CollectiveOp<'a, T>`, the op type of the reducing collectives.
 - `AccumulateOp` and `FetchOp`, the op types of the RMA accumulate calls.
+- **`ferrompi::scope` and `Scope`**: nonblocking requests are created inside a
+  closure scope that completes every request before it returns or unwinds; a
+  request error at scope end is returned.
 
 ### Changed
 
@@ -112,6 +120,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped), `wait`/`test` on a pending request still complete it** instead of
   returning `Error::Finalized` and leaving it pending; every other call still
   returns `Error::Finalized`.
+- **`Error::from_code` no longer asks MPI for the error text while
+  `MPI_Finalize` is running or after it returned**, or on a thread the thread
+  level does not allow to call MPI: the error has class `Raw` and the message
+  `MPI error code N`. An error converted on a worker thread could previously
+  overlap `MPI_Finalize`, which MPI 3.1 libraries need not allow (Open MPI 4.1
+  crashes).
 
 ### Removed
 
