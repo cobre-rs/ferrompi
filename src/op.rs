@@ -207,6 +207,15 @@ enum CollectiveRepr<'a> {
 /// ```compile_fail,E0599
 /// let _ = ferrompi::CollectiveOp::<f64>::MAX_LOC;
 /// ```
+///
+/// A user op applies only to buffers of its own element type, which the
+/// user function's slices rely on:
+///
+/// ```compile_fail,E0277
+/// fn f(op: &ferrompi::UserOp<f64>) {
+///     let _: ferrompi::CollectiveOp<'_, f32> = op.into();
+/// }
+/// ```
 pub struct CollectiveOp<'a, T> {
     op: CollectiveRepr<'a>,
     // T appears only as a `fn` return, so it adds no auto-trait or drop bound.
