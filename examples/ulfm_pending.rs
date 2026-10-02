@@ -24,7 +24,7 @@
 //! mpiexec --with-ft ulfm -n 3 target/debug/examples/ulfm_pending <wait|wait_all|wait_any|irecv_full>
 //! ```
 
-use ferrompi::{Mpi, Request};
+use ferrompi::{Mpi, Request, Source};
 use std::time::Duration;
 
 /// Mirrors the C request table's slot count (`MAX_REQUESTS` in `csrc/ferrompi.c`).
@@ -57,14 +57,14 @@ fn main() {
         1 => {
             if mode == "irecv_full" {
                 let mut buf = [0i32; 1];
-                let result = world.irecv(&mut buf, -1, 7).map(|_| ());
+                let result = world.irecv(&mut buf, Source::Any, 7).map(|_| ());
                 println!("FAIL: {mode} returned while the receive is still pending: {result:?}");
                 std::mem::forget(fillers);
                 std::process::exit(1);
             }
 
             let mut buf = [0i32; 1];
-            let req = world.irecv(&mut buf, -1, 7).expect("irecv failed");
+            let req = world.irecv(&mut buf, Source::Any, 7).expect("irecv failed");
 
             match mode.as_str() {
                 "wait" => {

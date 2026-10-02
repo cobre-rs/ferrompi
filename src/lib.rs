@@ -193,7 +193,7 @@ pub use info::Info;
 pub use op::{ReduceOp, UserOp};
 pub use persistent::PersistentRequest;
 pub use request::Request;
-pub use status::Status;
+pub use status::{Source, Status, Tag};
 #[cfg(feature = "numa")]
 pub use topology::SlurmInfo;
 pub use topology::{HostEntry, TopologyInfo};

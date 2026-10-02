@@ -72,6 +72,14 @@ extern "C" {
  * MUST stay in sync with the mirrored const in src/error.rs. */
 #define FERROMPI_ERR_NOT_SUPPORTED   (-7008)
 
+/* Private codes for the wildcard receive sources and tags. The C layer
+ * translates them to the linked MPI's MPI_ANY_SOURCE, MPI_PROC_NULL and
+ * MPI_ANY_TAG, whose values differ per implementation. These MUST stay in
+ * sync with the mirrored consts in src/status.rs. */
+#define FERROMPI_ANY_SOURCE (-1)
+#define FERROMPI_PROC_NULL  (-2)
+#define FERROMPI_ANY_TAG    (-1)
+
 /* Written to a window-allocating shim's handle out-parameter when MPI
  * created the window but zeroing or registering it failed: the window is
  * never freed. */

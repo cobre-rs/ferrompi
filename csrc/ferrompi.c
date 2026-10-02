@@ -1074,6 +1074,19 @@ static int get_count64(const MPI_Status* status, MPI_Datatype dt, int64_t* count
     return ret;
 }
 
+// Translates the private source and tag codes (FERROMPI_ANY_SOURCE,
+// FERROMPI_PROC_NULL and FERROMPI_ANY_TAG in ferrompi.h) to the linked MPI's
+// constants; any other value is a rank or tag and passes through.
+static int source_to_mpi(int32_t s) {
+    if (s == FERROMPI_ANY_SOURCE) return MPI_ANY_SOURCE;
+    if (s == FERROMPI_PROC_NULL) return MPI_PROC_NULL;
+    return s;
+}
+
+static int tag_to_mpi(int32_t t) {
+    return (t == FERROMPI_ANY_TAG) ? MPI_ANY_TAG : t;
+}
+
 static int send_typed(const void* buf, int64_t count, MPI_Datatype dt,
                        int32_t dest, int32_t tag, int32_t comm_handle) {
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
@@ -1096,8 +1109,8 @@ static int recv_typed(void* buf, int64_t count, MPI_Datatype dt,
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Status status;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
+    int mpi_source = source_to_mpi(source);
+    int mpi_tag = tag_to_mpi(tag);
 
     int ret;
     if (count > INT_MAX) {
@@ -1155,8 +1168,8 @@ static int irecv_typed(void* buf, int64_t count, MPI_Datatype dt,
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Request req;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
+    int mpi_source = source_to_mpi(source);
+    int mpi_tag = tag_to_mpi(tag);
 
     int ret;
     if (count > INT_MAX) {
@@ -1252,8 +1265,8 @@ int ferrompi_sendrecv(
     if (send_dt == MPI_DATATYPE_NULL || recv_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Status status;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_recvtag = (recvtag == -1) ? MPI_ANY_TAG : recvtag;
+    int mpi_source = source_to_mpi(source);
+    int mpi_recvtag = tag_to_mpi(recvtag);
 
     int ret;
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
@@ -1290,8 +1303,8 @@ int ferrompi_probe(int32_t source, int32_t tag, int32_t comm_handle,
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
+    int mpi_source = source_to_mpi(source);
+    int mpi_tag = tag_to_mpi(tag);
 
     MPI_Status status;
     int ret = MPI_Probe(mpi_source, mpi_tag, comm, &status);
@@ -1310,8 +1323,8 @@ int ferrompi_iprobe(int32_t source, int32_t tag, int32_t comm_handle,
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
+    int mpi_source = source_to_mpi(source);
+    int mpi_tag = tag_to_mpi(tag);
 
     MPI_Status status;
     int f;
@@ -2198,8 +2211,8 @@ int ferrompi_recv_init(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
+    int mpi_source = source_to_mpi(source);
+    int mpi_tag = tag_to_mpi(tag);
 
     int ret;
     if (count > INT_MAX) {

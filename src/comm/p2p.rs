@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::ffi;
 use crate::persistent::PersistentRequest;
 use crate::request::{Request, RequestKind};
-use crate::status::Status;
+use crate::status::{Source, Status, Tag};
 
 impl Communicator {
     /// Send a slice of values to another process.
@@ -37,7 +37,8 @@ impl Communicator {
 
     /// Receive a slice of values from another process.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// Returns `(actual_source, actual_tag, actual_count)`; `actual_count` is
     /// `-1` when the message is not a whole number of `T`.
@@ -54,9 +55,11 @@ impl Communicator {
     pub fn recv<T: MpiDatatype>(
         &self,
         data: &mut [T],
-        source: i32,
-        tag: i32,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
     ) -> Result<(i32, i32, i64)> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         let mut actual_source: i32 = 0;
         let mut actual_tag: i32 = 0;
         let mut actual_count: i64 = 0;
@@ -120,13 +123,14 @@ impl Communicator {
     /// handle. The receive buffer **must not be read** until the request is
     /// completed via [`Request::wait()`] or [`Request::test()`].
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// # Arguments
     ///
     /// * `data` - Receive buffer (must remain valid until the request completes)
-    /// * `source` - Source rank (or -1 for any source)
-    /// * `tag` - Message tag (or -1 for any tag)
+    /// * `source` - Source rank, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag` - Message tag or [`Tag::Any`]
     ///
     /// # Example
     ///
@@ -139,7 +143,14 @@ impl Communicator {
     /// // ... do other work ...
     /// req.wait().unwrap();
     /// ```
-    pub fn irecv<T: MpiDatatype>(&self, data: &mut [T], source: i32, tag: i32) -> Result<Request> {
+    pub fn irecv<T: MpiDatatype>(
+        &self,
+        data: &mut [T],
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<Request> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf_mut(data);
         // SAFETY: the returned Request does not borrow data; keeping it alive and unread
@@ -156,7 +167,8 @@ impl Communicator {
     /// single operation. This is useful for avoiding deadlocks in ring-style
     /// communication patterns where each process both sends and receives.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `recvtag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// Returns `(actual_source, actual_tag, actual_count)`; `actual_count` is
     /// `-1` when the message is not a whole number of `T`.
@@ -167,8 +179,8 @@ impl Communicator {
     /// * `dest` - Destination rank
     /// * `sendtag` - Send message tag
     /// * `recv` - Receive buffer
-    /// * `source` - Source rank (or -1 for any source)
-    /// * `recvtag` - Receive message tag (or -1 for any tag)
+    /// * `source` - Source rank, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `recvtag` - Receive message tag or [`Tag::Any`]
     ///
     /// # Example
     ///
@@ -188,9 +200,11 @@ impl Communicator {
         dest: i32,
         sendtag: i32,
         recv: &mut [T],
-        source: i32,
-        recvtag: i32,
+        source: impl Into<Source>,
+        recvtag: impl Into<Tag>,
     ) -> Result<(i32, i32, i64)> {
+        let source = source.into().source_code("source")?;
+        let recvtag = recvtag.into().tag_code("recvtag")?;
         let mut actual_source: i32 = 0;
         let mut actual_tag: i32 = 0;
         let mut actual_count: i64 = 0;
@@ -228,7 +242,8 @@ impl Communicator {
     /// receiving the message. This is useful for determining the size of an
     /// incoming message before allocating a receive buffer.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// The type parameter `T` determines the MPI datatype used by
     /// `MPI_Get_count` to compute the element count in the returned
@@ -236,23 +251,29 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `source` - Source rank to match (or -1 for any source)
-    /// * `tag` - Message tag to match (or -1 for any tag)
+    /// * `source` - Source rank to match, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag` - Message tag to match or [`Tag::Any`]
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::Mpi;
+    /// # use ferrompi::{Mpi, Source, Tag};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// // Probe for any incoming f64 message
-    /// let status = world.probe::<f64>(-1, -1).unwrap();
+    /// let status = world.probe::<f64>(Source::Any, Tag::Any).unwrap();
     /// // Allocate a buffer of exactly the right size
     /// assert!(status.count >= 0, "message is not a whole number of f64");
     /// let mut buf = vec![0.0f64; status.count as usize];
     /// world.recv(&mut buf, status.source, status.tag).unwrap();
     /// ```
-    pub fn probe<T: MpiDatatype>(&self, source: i32, tag: i32) -> Result<Status> {
+    pub fn probe<T: MpiDatatype>(
+        &self,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<Status> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         let mut actual_source: i32 = 0;
         let mut actual_tag: i32 = 0;
         let mut count: i64 = 0;
@@ -282,7 +303,8 @@ impl Communicator {
     /// Checks whether a matching message is available without blocking.
     /// Returns `Some(Status)` if a message is available, `None` otherwise.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// The type parameter `T` determines the MPI datatype used by
     /// `MPI_Get_count` to compute the element count in the returned
@@ -290,23 +312,29 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `source` - Source rank to match (or -1 for any source)
-    /// * `tag` - Message tag to match (or -1 for any tag)
+    /// * `source` - Source rank to match, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag` - Message tag to match or [`Tag::Any`]
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::Mpi;
+    /// # use ferrompi::{Mpi, Source, Tag};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// // Poll for an incoming f64 message without blocking
-    /// if let Some(status) = world.iprobe::<f64>(-1, -1).unwrap() {
+    /// if let Some(status) = world.iprobe::<f64>(Source::Any, Tag::Any).unwrap() {
     ///     assert!(status.count >= 0, "message is not a whole number of f64");
     ///     let mut buf = vec![0.0f64; status.count as usize];
     ///     world.recv(&mut buf, status.source, status.tag).unwrap();
     /// }
     /// ```
-    pub fn iprobe<T: MpiDatatype>(&self, source: i32, tag: i32) -> Result<Option<Status>> {
+    pub fn iprobe<T: MpiDatatype>(
+        &self,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<Option<Status>> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         let mut flag: i32 = 0;
         let mut actual_source: i32 = 0;
         let mut actual_tag: i32 = 0;
@@ -574,15 +602,16 @@ impl Communicator {
     /// Initialize a persistent receive operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// Available in all MPI versions (MPI 1.1+).
     ///
     /// # Arguments
     ///
     /// * `data`   - Receive buffer (must remain valid for lifetime of handle)
-    /// * `source` - Source rank, or `-1` for `MPI_ANY_SOURCE`
-    /// * `tag`    - Message tag, or `-1` for `MPI_ANY_TAG`
+    /// * `source` - Source rank, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag`    - Message tag or [`Tag::Any`]
     ///
     /// # Example
     ///
@@ -600,9 +629,11 @@ impl Communicator {
     pub fn recv_init<T: MpiDatatype>(
         &self,
         data: &mut [T],
-        source: i32,
-        tag: i32,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
     ) -> Result<PersistentRequest> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf_mut(data);
         // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
@@ -686,7 +717,8 @@ impl Communicator {
     /// extent must equal `size_of::<T>()` and its data must lie within one `T`,
     /// otherwise the call returns [`Error::InvalidArgument`] without calling MPI.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// Returns a [`Status`] whose `count` is the number of `T` elements
     /// received; `count` is `-1` when the message is not a whole number of `T`.
@@ -695,8 +727,8 @@ impl Communicator {
     ///
     /// * `buf`      - Receive buffer; MPI count is `buf.len()`
     /// * `datatype` - Committed custom datatype describing each element
-    /// * `source`   - Source rank (or -1 for any source)
-    /// * `tag`      - Message tag (or -1 for any tag)
+    /// * `source`   - Source rank, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag`      - Message tag or [`Tag::Any`]
     ///
     /// # Errors
     ///
@@ -728,9 +760,11 @@ impl Communicator {
         &self,
         buf: &mut [T],
         datatype: &CustomDatatype,
-        source: i32,
-        tag: i32,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
     ) -> Result<Status> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         datatype.check_layout::<T>()?;
         let mut actual_source: i32 = 0;
         let mut actual_tag: i32 = 0;
@@ -838,7 +872,8 @@ impl Communicator {
     /// receive buffer **must not be read** until the request is completed via
     /// [`Request::wait()`] or [`Request::test()`].
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound.
     /// `datatype`'s extent must equal `size_of::<T>()` and its data must lie
@@ -849,8 +884,8 @@ impl Communicator {
     ///
     /// * `buf`      - Receive buffer (must remain valid until the request completes)
     /// * `datatype` - Committed custom datatype describing each element
-    /// * `source`   - Source rank (or -1 for any source)
-    /// * `tag`      - Message tag (or -1 for any tag)
+    /// * `source`   - Source rank, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag`      - Message tag or [`Tag::Any`]
     ///
     /// # Errors
     ///
@@ -882,9 +917,11 @@ impl Communicator {
         &self,
         buf: &mut [T],
         datatype: &CustomDatatype,
-        source: i32,
-        tag: i32,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
     ) -> Result<Request> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         datatype.check_layout::<T>()?;
         let mut request_handle: i64 = 0;
         // SAFETY: buf.as_mut_ptr() is exclusively writable for buf.len() elements; datatype.handle
