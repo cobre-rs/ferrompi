@@ -48,9 +48,13 @@ fn main() {
             *x = (i % 251) as u8;
         }
 
-        let req = world.isend(&a, 0, 1).expect("isend failed");
-        world.recv(&mut b, 0, 1).expect("recv failed");
-        req.wait().expect("wait failed");
+        ferrompi::scope(|s| {
+            let req = world.isend(s, &a, 0, 1).expect("isend failed");
+            world.recv(&mut b, 0, 1).expect("recv failed");
+            req.wait().expect("wait failed");
+            Ok(())
+        })
+        .expect("scope failed");
         all_ok &= report("isend/recv of 2^31+16 bytes", b == a);
 
         world.broadcast(&mut b, 0).expect("broadcast failed");
@@ -76,7 +80,7 @@ fn main() {
     } else {
         all_ok &= report(
             "isend of 2^31+16 bytes below MPI 4 returns Count",
-            common::is_count(&world.isend(&a, 0, 1)),
+            common::is_count(&ferrompi::scope(|s| world.isend(s, &a, 0, 1).map(|_| ()))),
         );
 
         all_ok &= report(

@@ -50,79 +50,83 @@ fn main() {
     let mut a = world.recv_init(&mut buf_a, 1, 98).expect("recv_init a");
     a.start().expect("start a");
     let mut b = world.recv_init(&mut buf_b, 1, 98).expect("recv_init b");
-    let mut reqs = vec![world.irecv(&mut buf_c, 1, 98).expect("irecv")];
-
     let flag = AtomicBool::new(false);
     let mut ok = true;
 
-    std::thread::scope(|s| {
-        let world_ref = &world;
-        let flag_ref = &flag;
-        let handle = s.spawn(move || {
-            flag_ref.store(true, Ordering::SeqCst);
-            world_ref.recv(&mut [0i32; 1], 1, 99)
+    ferrompi::scope(|ms| {
+        let mut reqs = vec![world.irecv(ms, &mut buf_c, 1, 98).expect("irecv")];
+
+        std::thread::scope(|s| {
+            let world_ref = &world;
+            let flag_ref = &flag;
+            let handle = s.spawn(move || {
+                flag_ref.store(true, Ordering::SeqCst);
+                world_ref.recv(&mut [0i32; 1], 1, 99)
+            });
+
+            while !flag.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(Duration::from_millis(200));
+
+            ok &= matches!(a.wait(), Err(Error::ThreadLevelViolation));
+            ok &= a.is_active();
+            ok &= matches!(a.test(), Err(Error::ThreadLevelViolation));
+            ok &= a.is_active();
+
+            ok &= matches!(
+                PersistentRequest::wait_all(slice::from_mut(&mut a)),
+                Err(Error::ThreadLevelViolation)
+            );
+            ok &= a.is_active();
+
+            ok &= matches!(b.start(), Err(Error::ThreadLevelViolation));
+            ok &= !b.is_active();
+            ok &= matches!(
+                PersistentRequest::start_all(slice::from_mut(&mut b)),
+                Err(Error::ThreadLevelViolation)
+            );
+            ok &= !b.is_active();
+
+            ok &= matches!(reqs[0].test(), Err(Error::ThreadLevelViolation));
+            ok &= !reqs[0].is_completed();
+            ok &= matches!(
+                Request::wait_all(&mut reqs),
+                Err(Error::ThreadLevelViolation)
+            );
+            ok &= !reqs[0].is_completed();
+            ok &= matches!(
+                Request::wait_any(&mut reqs),
+                Err(Error::ThreadLevelViolation)
+            );
+            ok &= !reqs[0].is_completed();
+            ok &= matches!(
+                Request::wait_some(&mut reqs),
+                Err(Error::ThreadLevelViolation)
+            );
+            ok &= !reqs[0].is_completed();
+            ok &= matches!(
+                Request::test_any(&mut reqs),
+                Err(Error::ThreadLevelViolation)
+            );
+            ok &= !reqs[0].is_completed();
+            ok &= matches!(
+                Request::test_some(&mut reqs),
+                Err(Error::ThreadLevelViolation)
+            );
+            ok &= !reqs[0].is_completed();
+
+            let recv_result = handle.join().expect("worker thread panicked");
+            ok &= recv_result.is_ok();
         });
 
-        while !flag.load(Ordering::SeqCst) {
-            std::thread::yield_now();
-        }
-        std::thread::sleep(Duration::from_millis(200));
-
-        ok &= matches!(a.wait(), Err(Error::ThreadLevelViolation));
-        ok &= a.is_active();
-        ok &= matches!(a.test(), Err(Error::ThreadLevelViolation));
-        ok &= a.is_active();
-
-        ok &= matches!(
-            PersistentRequest::wait_all(slice::from_mut(&mut a)),
-            Err(Error::ThreadLevelViolation)
-        );
-        ok &= a.is_active();
-
-        ok &= matches!(b.start(), Err(Error::ThreadLevelViolation));
-        ok &= !b.is_active();
-        ok &= matches!(
-            PersistentRequest::start_all(slice::from_mut(&mut b)),
-            Err(Error::ThreadLevelViolation)
-        );
-        ok &= !b.is_active();
-
-        ok &= matches!(reqs[0].test(), Err(Error::ThreadLevelViolation));
-        ok &= !reqs[0].is_completed();
-        ok &= matches!(
-            Request::wait_all(&mut reqs),
-            Err(Error::ThreadLevelViolation)
-        );
-        ok &= !reqs[0].is_completed();
-        ok &= matches!(
-            Request::wait_any(&mut reqs),
-            Err(Error::ThreadLevelViolation)
-        );
-        ok &= !reqs[0].is_completed();
-        ok &= matches!(
-            Request::wait_some(&mut reqs),
-            Err(Error::ThreadLevelViolation)
-        );
-        ok &= !reqs[0].is_completed();
-        ok &= matches!(
-            Request::test_any(&mut reqs),
-            Err(Error::ThreadLevelViolation)
-        );
-        ok &= !reqs[0].is_completed();
-        ok &= matches!(
-            Request::test_some(&mut reqs),
-            Err(Error::ThreadLevelViolation)
-        );
-        ok &= !reqs[0].is_completed();
-
-        let recv_result = handle.join().expect("worker thread panicked");
-        ok &= recv_result.is_ok();
-    });
-
-    ok &= a.wait().is_ok();
-    ok &= !a.is_active();
-    ok &= Request::wait_all(&mut reqs).is_ok();
-    ok &= reqs[0].is_completed();
+        ok &= a.wait().is_ok();
+        ok &= !a.is_active();
+        ok &= Request::wait_all(&mut reqs).is_ok();
+        ok &= reqs[0].is_completed();
+        Ok(())
+    })
+    .expect("scope failed");
 
     b.start().expect("start b (restart)");
     ok &= b.wait().is_ok();

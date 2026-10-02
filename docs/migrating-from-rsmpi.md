@@ -290,15 +290,21 @@ fn main() -> ferrompi::Result<()> {
 
     if rank == 0 {
         let data = vec![1.0f64, 2.0, 3.0];
-        // isend returns a Request; wait is explicit
-        let req = world.isend(&data, 1, 0)?;
-        // Do other work here if desired ...
-        req.wait()?; // consumes the Request
+        ferrompi::scope(|s| {
+            // isend returns a Request that belongs to the scope
+            let req = world.isend(s, &data, 1, 0)?;
+            // Do other work here if desired ...
+            req.wait()?; // consumes the Request
+            Ok(())
+        })?;
     } else {
         let mut buf = vec![0.0f64; 3];
-        // No scope wrapper needed
-        let req = world.irecv(&mut buf, 0, 0)?;
-        req.wait()?;
+        ferrompi::scope(|s| {
+            let req = world.irecv(s, &mut buf, 0, 0)?;
+            req.wait()?;
+            Ok(())
+        })?;
+        // buf is readable once the scope has returned
         println!("rank 1 received {:?}", buf);
     }
     Ok(())

@@ -660,9 +660,12 @@ impl Request<'_> {
     /// # let mpi = Mpi::init()?;
     /// # let world = mpi.world();
     /// # let mut buf = vec![0u8; 10];
-    /// # let mut req = world.irecv(&mut buf, 0, 0)?;
-    /// req.cancel()?;
-    /// req.wait()?;
+    /// ferrompi::scope(|s| {
+    ///     let mut req = world.irecv(s, &mut buf, 0, 0)?;
+    ///     req.cancel()?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })?;
     /// # Ok(()) }
     /// ```
     pub fn cancel(&mut self) -> Result<()> {

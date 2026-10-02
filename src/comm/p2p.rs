@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 use crate::ffi;
 use crate::persistent::PersistentRequest;
 use crate::request::{Request, RequestKind};
+use crate::scope::Scope;
 use crate::status::{Source, Status, Tag};
 
 impl Communicator {
@@ -88,8 +89,10 @@ impl Communicator {
     /// Nonblocking send.
     ///
     /// Initiates a send operation and returns immediately with a [`Request`]
-    /// handle. The send buffer **must not be modified** until the request is
-    /// completed via [`Request::wait()`] or [`Request::test()`].
+    /// that belongs to the scope `s`. `data` is borrowed for the scope, so it
+    /// cannot be modified until [`scope`](crate::scope) returns, and the scope
+    /// completes the send at the latest then; [`Request::wait()`] and
+    /// [`Request::test()`] are for the caller who needs it earlier.
     ///
     /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
     /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
@@ -97,7 +100,8 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `data` - Buffer to send (must remain valid until the request completes)
+    /// * `s` - The scope that owns the request
+    /// * `data` - Buffer to send, borrowed for the scope
     /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag` - Message tag
     ///
@@ -108,39 +112,48 @@ impl Communicator {
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// let data = vec![1.0f64, 2.0, 3.0];
-    /// let req = world.isend(&data, 1, 0).unwrap();
-    /// // ... do other work ...
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.isend(s, &data, 1, 0)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn isend<T: MpiDatatype>(
+    #[inline]
+    pub fn isend<'s, T: MpiDatatype>(
         &self,
-        data: &[T],
+        s: &'s Scope<'s, '_>,
+        data: &'s [T],
         dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<Request<'_>> {
+    ) -> Result<Request<'s>> {
         let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf(data);
-        // SAFETY: the returned Request does not borrow data; keeping it alive and unmodified
-        // until completion is the caller's obligation, which this signature does not enforce.
+        // SAFETY: data is borrowed for 's, and the scope completes every request it holds
+        // before 's ends, so the buffer outlives the span in which MPI may read it.
         let ret =
             unsafe { ffi::ferrompi_isend(p, n, dt, dest, tag, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "isend")?;
-        Ok(Request::new(request_handle, RequestKind::PointToPoint))
+        Ok(s.request(request_handle, RequestKind::PointToPoint))
     }
 
     /// Nonblocking receive.
     ///
     /// Initiates a receive operation and returns immediately with a [`Request`]
-    /// handle. The receive buffer **must not be read** until the request is
-    /// completed via [`Request::wait()`] or [`Request::test()`].
+    /// that belongs to the scope `s`. `data` is borrowed mutably for the scope:
+    /// it cannot be read until [`scope`](crate::scope) returns, even after the
+    /// request was waited, and the scope completes the receive at the latest
+    /// then.
     ///
     /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
     /// at once with no data.
     ///
     /// # Arguments
     ///
-    /// * `data` - Receive buffer (must remain valid until the request completes)
+    /// * `s` - The scope that owns the request
+    /// * `data` - Receive buffer, borrowed for the scope
     /// * `source` - Source rank, [`Source::Any`] or [`Source::ProcNull`]
     /// * `tag` - Message tag or [`Tag::Any`]
     ///
@@ -151,26 +164,34 @@ impl Communicator {
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// let mut buf = vec![0.0f64; 10];
-    /// let req = world.irecv(&mut buf, 0, 0).unwrap();
-    /// // ... do other work ...
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.irecv(s, &mut buf, 0, 0)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // buf is readable again here.
     /// ```
-    pub fn irecv<T: MpiDatatype>(
+    #[inline]
+    pub fn irecv<'s, T: MpiDatatype>(
         &self,
-        data: &mut [T],
+        s: &'s Scope<'s, '_>,
+        data: &'s mut [T],
         source: impl Into<Source>,
         tag: impl Into<Tag>,
-    ) -> Result<Request<'_>> {
+    ) -> Result<Request<'s>> {
         let source = source.into().source_code("source")?;
         let tag = tag.into().tag_code("tag")?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf_mut(data);
-        // SAFETY: the returned Request does not borrow data; keeping it alive and unread
-        // until completion is the caller's obligation, which this signature does not enforce.
+        // SAFETY: data is borrowed mutably for 's, and the scope completes every request it
+        // holds before 's ends, so the buffer outlives the span in which MPI may write it and
+        // nothing reads it meanwhile.
         let ret =
             unsafe { ffi::ferrompi_irecv(p, n, dt, source, tag, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "irecv")?;
-        Ok(Request::new(request_handle, RequestKind::PointToPoint))
+        Ok(s.request(request_handle, RequestKind::PointToPoint))
     }
 
     /// Blocking send-receive.
@@ -810,8 +831,10 @@ impl Communicator {
     /// Nonblocking send using a committed custom datatype.
     ///
     /// This is the custom-datatype counterpart of [`isend`](Self::isend). The
-    /// send buffer **must not be modified** until the request is completed via
-    /// [`Request::wait()`] or [`Request::test()`].
+    /// request belongs to the scope `s`, and `buf` and `datatype` are borrowed
+    /// for it: the buffer cannot be modified, and the datatype cannot be freed,
+    /// until [`scope`](crate::scope) returns. The scope completes the send at
+    /// the latest then.
     ///
     /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound.
     /// `datatype`'s extent must equal `size_of::<T>()` and its data must lie
@@ -824,8 +847,9 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `buf`      - Buffer to send (must remain valid until the request completes)
-    /// * `datatype` - Committed custom datatype describing each element
+    /// * `s`        - The scope that owns the request
+    /// * `buf`      - Buffer to send, borrowed for the scope
+    /// * `datatype` - Committed custom datatype describing each element, borrowed for the scope
     /// * `dest`     - Destination rank or [`Source::ProcNull`]
     /// * `tag`      - Message tag
     ///
@@ -852,22 +876,30 @@ impl Communicator {
     ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
     /// ]).unwrap();
     /// let buf = [Pair { v: 1.23456789, i: 42 }];
-    /// let req = world.isend_custom(&buf, &dt, 1, 0).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.isend_custom(s, &buf, &dt, 1, 0)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn isend_custom<T: PlainData>(
+    #[inline]
+    pub fn isend_custom<'s, T: PlainData>(
         &self,
-        buf: &[T],
-        datatype: &CustomDatatype,
+        s: &'s Scope<'s, '_>,
+        buf: &'s [T],
+        datatype: &'s CustomDatatype,
         dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<Request<'_>> {
+    ) -> Result<Request<'s>> {
         let dest = dest.into().dest_code()?;
         datatype.check_layout::<T>()?;
         let mut request_handle: i64 = 0;
         // SAFETY: buf.as_ptr() is valid for buf.len() elements; datatype.handle is an owned,
-        // committed CustomDatatype; the caller must keep the buffer alive until Request completion;
-        // check_layout above guarantees each element's data lies within its T, so MPI touches only buf.
+        // committed CustomDatatype; buf and datatype are borrowed for 's, and the scope completes
+        // every request it holds before 's ends, so both outlive the span in which MPI may use
+        // them; check_layout above guarantees each element's data lies within its T, so MPI
+        // touches only buf.
         let ret = unsafe {
             ffi::ferrompi_isend_custom(
                 buf.as_ptr().cast::<std::ffi::c_void>(),
@@ -880,14 +912,16 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "isend_custom")?;
-        Ok(Request::new(request_handle, RequestKind::PointToPoint))
+        Ok(s.request(request_handle, RequestKind::PointToPoint))
     }
 
     /// Nonblocking receive using a committed custom datatype.
     ///
     /// This is the custom-datatype counterpart of [`irecv`](Self::irecv). The
-    /// receive buffer **must not be read** until the request is completed via
-    /// [`Request::wait()`] or [`Request::test()`].
+    /// request belongs to the scope `s`, and `buf` and `datatype` are borrowed
+    /// for it: the buffer cannot be read, even after the request was waited, and
+    /// the datatype cannot be freed, until [`scope`](crate::scope) returns. The
+    /// scope completes the receive at the latest then.
     ///
     /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
     /// at once with no data.
@@ -899,8 +933,9 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `buf`      - Receive buffer (must remain valid until the request completes)
-    /// * `datatype` - Committed custom datatype describing each element
+    /// * `s`        - The scope that owns the request
+    /// * `buf`      - Receive buffer, borrowed for the scope
+    /// * `datatype` - Committed custom datatype describing each element, borrowed for the scope
     /// * `source`   - Source rank, [`Source::Any`] or [`Source::ProcNull`]
     /// * `tag`      - Message tag or [`Tag::Any`]
     ///
@@ -927,24 +962,32 @@ impl Communicator {
     ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
     /// ]).unwrap();
     /// let mut buf = [Pair { v: 0.0, i: 0 }];
-    /// let req = world.irecv_custom(&mut buf, &dt, 0, 0).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.irecv_custom(s, &mut buf, &dt, 0, 0)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn irecv_custom<T: PlainData>(
+    #[inline]
+    pub fn irecv_custom<'s, T: PlainData>(
         &self,
-        buf: &mut [T],
-        datatype: &CustomDatatype,
+        s: &'s Scope<'s, '_>,
+        buf: &'s mut [T],
+        datatype: &'s CustomDatatype,
         source: impl Into<Source>,
         tag: impl Into<Tag>,
-    ) -> Result<Request<'_>> {
+    ) -> Result<Request<'s>> {
         let source = source.into().source_code("source")?;
         let tag = tag.into().tag_code("tag")?;
         datatype.check_layout::<T>()?;
         let mut request_handle: i64 = 0;
         // SAFETY: buf.as_mut_ptr() is exclusively writable for buf.len() elements; datatype.handle
-        // is an owned, committed CustomDatatype; the caller must not read the buffer until
-        // Request completion; the PlainData bound on T makes any bytes MPI writes a valid T, and
-        // check_layout above guarantees each element's data lies within its T, so MPI touches only buf.
+        // is an owned, committed CustomDatatype; buf and datatype are borrowed for 's, and the scope
+        // completes every request it holds before 's ends, so both outlive the span in which MPI
+        // may use them and nothing reads buf meanwhile; the PlainData bound on T makes any bytes
+        // MPI writes a valid T, and check_layout above guarantees each element's data lies within
+        // its T, so MPI touches only buf.
         let ret = unsafe {
             ffi::ferrompi_irecv_custom(
                 buf.as_mut_ptr().cast::<std::ffi::c_void>(),
@@ -957,6 +1000,6 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "irecv_custom")?;
-        Ok(Request::new(request_handle, RequestKind::PointToPoint))
+        Ok(s.request(request_handle, RequestKind::PointToPoint))
     }
 }

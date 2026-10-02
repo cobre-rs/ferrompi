@@ -461,10 +461,14 @@ fn main() {
         let send_f = [1.0f64];
         let mut recv_f = [0.0f64];
         let ferrompi = || {
-            let rreq = world.irecv(black_box(&mut recv_f), 0, 0).unwrap();
-            let sreq = world.isend(black_box(&send_f), 0, 0).unwrap();
-            rreq.wait().unwrap();
-            sreq.wait().unwrap();
+            ferrompi::scope(|s| {
+                let rreq = world.irecv(s, black_box(&mut recv_f), 0, 0).unwrap();
+                let sreq = world.isend(s, black_box(&send_f), 0, 0).unwrap();
+                rreq.wait().unwrap();
+                sreq.wait().unwrap();
+                Ok(())
+            })
+            .unwrap();
         };
 
         compare("isend+irecv+wait", 20_000, direct, ferrompi);
@@ -508,16 +512,23 @@ fn main() {
 
         let send_f = [1.0f64; BATCH];
         let mut recv_f = [0.0f64; BATCH];
-        let mut reqs_f: Vec<Request> = Vec::with_capacity(2 * BATCH);
         let ferrompi = || {
-            for (i, x) in recv_f.chunks_mut(1).enumerate() {
-                reqs_f.push(world.irecv(x, 0, i as i32).unwrap());
-            }
-            for (i, x) in send_f.chunks(1).enumerate() {
-                reqs_f.push(world.isend(x, 0, i as i32).unwrap());
-            }
-            Request::wait_all(&mut reqs_f).unwrap();
-            reqs_f.clear();
+            ferrompi::scope(|s| {
+                let mut recv_chunks = recv_f.chunks_mut(1);
+                let mut send_chunks = send_f.chunks(1);
+                let mut reqs: [Request<'_>; 2 * BATCH] = std::array::from_fn(|i| {
+                    if i < BATCH {
+                        let x = recv_chunks.next().unwrap();
+                        world.irecv(s, x, 0, i as i32).unwrap()
+                    } else {
+                        let x = send_chunks.next().unwrap();
+                        world.isend(s, x, 0, (i - BATCH) as i32).unwrap()
+                    }
+                });
+                Request::wait_all(&mut reqs).unwrap();
+                Ok(())
+            })
+            .unwrap();
         };
 
         compare("8x(isend+irecv)+waitall", 5_000, direct, ferrompi);

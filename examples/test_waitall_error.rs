@@ -55,24 +55,46 @@ fn truncated_in_status(
 fn part1_and_1b(world: &Communicator, rank: i32, mpich: bool) {
     let mut small = [0i32; 1];
     let mut big = [0i32; 4];
+    let mut fresh_buf = [0i32; 1];
 
     if rank == 0 {
-        let mut reqs = vec![
-            world.irecv(&mut small, 1, 1).expect("part1: irecv small"),
-            world.irecv(&mut big, 1, 2).expect("part1: irecv big"),
-        ];
-        world.barrier().expect("part1: barrier after posting");
+        // The buffers stay borrowed until the scope returns, so their contents
+        // are checked after it, together with both parts' verdicts.
+        let (mut ok, mut ok1b) = ferrompi::scope(|s| {
+            let mut reqs = vec![
+                world
+                    .irecv(s, &mut small, 1, 1)
+                    .expect("part1: irecv small"),
+                world.irecv(s, &mut big, 1, 2).expect("part1: irecv big"),
+            ];
+            world.barrier().expect("part1: barrier after posting");
 
-        let mut ok = true;
-        let result = Request::wait_all(&mut reqs);
-        ok &= truncated_at(&result, 0);
-        ok &= reqs[0].is_completed();
-        if mpich {
-            ok &= !reqs[1].is_completed();
-        }
+            let mut ok = true;
+            let result = Request::wait_all(&mut reqs);
+            ok &= truncated_at(&result, 0);
+            ok &= reqs[0].is_completed();
+            if mpich {
+                ok &= !reqs[1].is_completed();
+            }
 
-        ok &= Request::wait_all(&mut reqs).is_ok();
-        ok &= reqs.iter().all(Request::is_completed);
+            ok &= Request::wait_all(&mut reqs).is_ok();
+            ok &= reqs.iter().all(Request::is_completed);
+
+            let mut ok1b = true;
+            ok1b &= matches!(reqs[0].test(), Ok(Some(_)));
+            ok1b &= matches!(reqs[1].test(), Ok(Some(_)));
+
+            let fresh = world
+                .irecv(s, &mut fresh_buf, 1, 3)
+                .expect("part1b: irecv fresh");
+            world.barrier().expect("part1b: barrier before send");
+
+            drop(reqs);
+
+            ok1b &= fresh.wait().is_ok();
+            Ok((ok, ok1b))
+        })
+        .expect("part1: scope failed");
         ok &= big == PAYLOAD;
         common::check(
             world,
@@ -80,19 +102,6 @@ fn part1_and_1b(world: &Communicator, rank: i32, mpich: bool) {
             "part 1: failed wait_all completes the failed request",
         );
 
-        let mut ok1b = true;
-        ok1b &= matches!(reqs[0].test(), Ok(Some(_)));
-        ok1b &= matches!(reqs[1].test(), Ok(Some(_)));
-
-        let mut fresh_buf = [0i32; 1];
-        let fresh = world
-            .irecv(&mut fresh_buf, 1, 3)
-            .expect("part1b: irecv fresh");
-        world.barrier().expect("part1b: barrier before send");
-
-        drop(reqs);
-
-        ok1b &= fresh.wait().is_ok();
         ok1b &= fresh_buf == [3];
         common::check(
             world,
@@ -105,14 +114,14 @@ fn part1_and_1b(world: &Communicator, rank: i32, mpich: bool) {
             .send(&PAYLOAD, 0, 1)
             .expect("part1: send small (truncates)");
         world.send(&PAYLOAD, 0, 2).expect("part1: send big");
+
+        world.barrier().expect("part1b: barrier before send");
+        world.send(&[3i32], 0, 3).expect("part1b: send fresh");
         common::check(
             world,
             true,
             "part 1: failed wait_all completes the failed request",
         );
-
-        world.barrier().expect("part1b: barrier before send");
-        world.send(&[3i32], 0, 3).expect("part1b: send fresh");
         common::check(
             world,
             true,
@@ -126,18 +135,26 @@ fn part2_wait_any_truncate(world: &Communicator, rank: i32) {
     let mut small = [0i32; 1];
 
     if rank == 0 {
-        let mut reqs = vec![
-            world.irecv(&mut other, 1, 12).expect("part2: irecv other"),
-            world.irecv(&mut small, 1, 11).expect("part2: irecv small"),
-        ];
-        world.barrier().expect("part2: barrier after posting");
+        let ok = ferrompi::scope(|s| {
+            let mut reqs = vec![
+                world
+                    .irecv(s, &mut other, 1, 12)
+                    .expect("part2: irecv other"),
+                world
+                    .irecv(s, &mut small, 1, 11)
+                    .expect("part2: irecv small"),
+            ];
+            world.barrier().expect("part2: barrier after posting");
 
-        let result = Request::wait_any(&mut reqs);
-        let mut ok = truncated_at(&result, 1);
-        ok &= reqs[1].is_completed() && !reqs[0].is_completed();
+            let result = Request::wait_any(&mut reqs);
+            let mut ok = truncated_at(&result, 1);
+            ok &= reqs[1].is_completed() && !reqs[0].is_completed();
 
-        world.barrier().expect("part2: barrier before other send");
-        ok &= Request::wait_all(&mut reqs).is_ok();
+            world.barrier().expect("part2: barrier before other send");
+            ok &= Request::wait_all(&mut reqs).is_ok();
+            Ok(ok)
+        })
+        .expect("scope failed");
 
         common::check(
             world,
@@ -166,18 +183,26 @@ fn part3_wait_some_in_status(world: &Communicator, rank: i32) {
     let mut small = [0i32; 1];
 
     if rank == 0 {
-        let mut reqs = vec![
-            world.irecv(&mut other, 1, 22).expect("part3: irecv other"),
-            world.irecv(&mut small, 1, 21).expect("part3: irecv small"),
-        ];
-        world.barrier().expect("part3: barrier after posting");
+        let ok = ferrompi::scope(|s| {
+            let mut reqs = vec![
+                world
+                    .irecv(s, &mut other, 1, 22)
+                    .expect("part3: irecv other"),
+                world
+                    .irecv(s, &mut small, 1, 21)
+                    .expect("part3: irecv small"),
+            ];
+            world.barrier().expect("part3: barrier after posting");
 
-        let result = Request::wait_some(&mut reqs);
-        let mut ok = truncated_in_status(&result, 1, 21);
-        ok &= reqs[1].is_completed() && !reqs[0].is_completed();
+            let result = Request::wait_some(&mut reqs);
+            let mut ok = truncated_in_status(&result, 1, 21);
+            ok &= reqs[1].is_completed() && !reqs[0].is_completed();
 
-        world.barrier().expect("part3: barrier before other send");
-        ok &= Request::wait_all(&mut reqs).is_ok();
+            world.barrier().expect("part3: barrier before other send");
+            ok &= Request::wait_all(&mut reqs).is_ok();
+            Ok(ok)
+        })
+        .expect("scope failed");
 
         common::check(
             world,
@@ -206,23 +231,31 @@ fn part4_test_any_truncate(world: &Communicator, rank: i32) {
     let mut small = [0i32; 1];
 
     if rank == 0 {
-        let mut reqs = vec![
-            world.irecv(&mut other, 1, 32).expect("part4: irecv other"),
-            world.irecv(&mut small, 1, 31).expect("part4: irecv small"),
-        ];
-        world.barrier().expect("part4: barrier after posting");
+        let ok = ferrompi::scope(|s| {
+            let mut reqs = vec![
+                world
+                    .irecv(s, &mut other, 1, 32)
+                    .expect("part4: irecv other"),
+                world
+                    .irecv(s, &mut small, 1, 31)
+                    .expect("part4: irecv small"),
+            ];
+            world.barrier().expect("part4: barrier after posting");
 
-        let result = loop {
-            match Request::test_any(&mut reqs) {
-                Ok(None) => continue,
-                other => break other,
-            }
-        };
-        let mut ok = truncated_at(&result, 1);
-        ok &= reqs[1].is_completed() && !reqs[0].is_completed();
+            let result = loop {
+                match Request::test_any(&mut reqs) {
+                    Ok(None) => continue,
+                    other => break other,
+                }
+            };
+            let mut ok = truncated_at(&result, 1);
+            ok &= reqs[1].is_completed() && !reqs[0].is_completed();
 
-        world.barrier().expect("part4: barrier before other send");
-        ok &= Request::wait_all(&mut reqs).is_ok();
+            world.barrier().expect("part4: barrier before other send");
+            ok &= Request::wait_all(&mut reqs).is_ok();
+            Ok(ok)
+        })
+        .expect("scope failed");
 
         common::check(
             world,
@@ -251,23 +284,31 @@ fn part5_test_some_in_status(world: &Communicator, rank: i32) {
     let mut small = [0i32; 1];
 
     if rank == 0 {
-        let mut reqs = vec![
-            world.irecv(&mut other, 1, 42).expect("part5: irecv other"),
-            world.irecv(&mut small, 1, 41).expect("part5: irecv small"),
-        ];
-        world.barrier().expect("part5: barrier after posting");
+        let ok = ferrompi::scope(|s| {
+            let mut reqs = vec![
+                world
+                    .irecv(s, &mut other, 1, 42)
+                    .expect("part5: irecv other"),
+                world
+                    .irecv(s, &mut small, 1, 41)
+                    .expect("part5: irecv small"),
+            ];
+            world.barrier().expect("part5: barrier after posting");
 
-        let result = loop {
-            match Request::test_some(&mut reqs) {
-                Ok(v) if v.is_empty() => continue,
-                other => break other,
-            }
-        };
-        let mut ok = truncated_in_status(&result, 1, 41);
-        ok &= reqs[1].is_completed() && !reqs[0].is_completed();
+            let result = loop {
+                match Request::test_some(&mut reqs) {
+                    Ok(v) if v.is_empty() => continue,
+                    other => break other,
+                }
+            };
+            let mut ok = truncated_in_status(&result, 1, 41);
+            ok &= reqs[1].is_completed() && !reqs[0].is_completed();
 
-        world.barrier().expect("part5: barrier before other send");
-        ok &= Request::wait_all(&mut reqs).is_ok();
+            world.barrier().expect("part5: barrier before other send");
+            ok &= Request::wait_all(&mut reqs).is_ok();
+            Ok(ok)
+        })
+        .expect("scope failed");
 
         common::check(
             world,

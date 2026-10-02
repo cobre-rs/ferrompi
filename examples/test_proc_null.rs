@@ -46,9 +46,12 @@ fn main() {
         "recv from ProcNull reports the ProcNull status",
     );
 
-    let r = world
-        .irecv(&mut buf, Source::ProcNull, Tag::Any)
-        .and_then(|req| req.wait());
+    let r = ferrompi::scope(|s| {
+        Ok(world
+            .irecv(s, &mut buf, Source::ProcNull, Tag::Any)
+            .and_then(|req| req.wait()))
+    })
+    .expect("scope failed");
     common::check(
         &world,
         r.is_ok() && buf == UNTOUCHED,
@@ -76,16 +79,20 @@ fn main() {
     );
 
     let mut ring = [0i32; 4];
-    let pending = world.irecv(&mut ring, prev, SENDRECV_TAG);
-    let r = world.sendrecv(
-        &[rank; 4],
-        next,
-        SENDRECV_TAG,
-        &mut buf,
-        Source::ProcNull,
-        Tag::Any,
-    );
-    let delivered = pending.and_then(|req| req.wait());
+    let (r, delivered) = ferrompi::scope(|s| {
+        let pending = world.irecv(s, &mut ring, prev, SENDRECV_TAG);
+        let r = world.sendrecv(
+            &[rank; 4],
+            next,
+            SENDRECV_TAG,
+            &mut buf,
+            Source::ProcNull,
+            Tag::Any,
+        );
+        let delivered = pending.and_then(|req| req.wait());
+        Ok((r, delivered))
+    })
+    .expect("scope failed");
     common::check(
         &world,
         r.is_ok() && buf == UNTOUCHED && delivered.is_ok() && ring == [prev; 4],
@@ -128,9 +135,12 @@ fn main() {
     let r = world.send(&send, Source::ProcNull, RING_TAG);
     common::check(&world, r.is_ok(), "send to ProcNull completes");
 
-    let r = world
-        .isend(&send, Source::ProcNull, RING_TAG)
-        .and_then(|req| req.wait());
+    let r = ferrompi::scope(|s| {
+        Ok(world
+            .isend(s, &send, Source::ProcNull, RING_TAG)
+            .and_then(|req| req.wait()))
+    })
+    .expect("scope failed");
     common::check(&world, r.is_ok(), "isend to ProcNull completes");
     common::check(
         &world,
@@ -175,16 +185,20 @@ fn main() {
     );
 
     ring = [0; 4];
-    let sent = world.isend(&send, next, RING_TAG);
-    let r = world.sendrecv(
-        &send,
-        Source::ProcNull,
-        SENDRECV_TAG,
-        &mut ring,
-        prev,
-        RING_TAG,
-    );
-    let waited = sent.and_then(|req| req.wait());
+    let (r, waited) = ferrompi::scope(|s| {
+        let sent = world.isend(s, &send, next, RING_TAG);
+        let r = world.sendrecv(
+            &send,
+            Source::ProcNull,
+            SENDRECV_TAG,
+            &mut ring,
+            prev,
+            RING_TAG,
+        );
+        let waited = sent.and_then(|req| req.wait());
+        Ok((r, waited))
+    })
+    .expect("scope failed");
     common::check(
         &world,
         waited.is_ok()
@@ -226,9 +240,13 @@ fn main() {
         "recv with a negative tag is an invalid tag",
     );
 
-    let sent = world.isend(&send, next, RING_TAG);
-    let received = world.recv(&mut buf, Source::Any, Tag::Any);
-    let waited = sent.and_then(|req| req.wait());
+    let (received, waited) = ferrompi::scope(|s| {
+        let sent = world.isend(s, &send, next, RING_TAG);
+        let received = world.recv(&mut buf, Source::Any, Tag::Any);
+        let waited = sent.and_then(|req| req.wait());
+        Ok((received, waited))
+    })
+    .expect("scope failed");
     common::check(
         &world,
         waited.is_ok()

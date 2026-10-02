@@ -40,64 +40,71 @@ fn main() {
     assert_eq!(world.size(), 3, "ulfm_pending requires exactly 3 processes");
 
     let mut filler_buf = vec![0i32; REQUEST_TABLE_SLOTS];
-    let mut fillers = Vec::new();
-    if world.rank() == 1 && mode == "irecv_full" {
-        for chunk in filler_buf.chunks_mut(1) {
-            fillers.push(world.irecv(chunk, 0, 8).expect("filler irecv failed"));
-        }
-    }
+    let mut buf = [0i32; 1];
 
-    world.barrier().expect("barrier failed");
-
-    match world.rank() {
-        0 => {
-            std::thread::sleep(Duration::from_secs(1));
-            std::process::exit(0);
-        }
-        1 => {
-            if mode == "irecv_full" {
-                let mut buf = [0i32; 1];
-                let result = world.irecv(&mut buf, Source::Any, 7).map(|_| ());
-                println!("FAIL: {mode} returned while the receive is still pending: {result:?}");
-                std::mem::forget(fillers);
-                std::process::exit(1);
+    // Every arm below exits or aborts, so the scope never returns.
+    let _: ferrompi::Result<()> = ferrompi::scope(|s| {
+        let mut fillers = Vec::new();
+        if world.rank() == 1 && mode == "irecv_full" {
+            for chunk in filler_buf.chunks_mut(1) {
+                fillers.push(world.irecv(s, chunk, 0, 8).expect("filler irecv failed"));
             }
+        }
 
-            let mut buf = [0i32; 1];
-            let req = world.irecv(&mut buf, Source::Any, 7).expect("irecv failed");
+        world.barrier().expect("barrier failed");
 
-            match mode.as_str() {
-                "wait" => {
-                    let result = req.wait();
+        match world.rank() {
+            0 => {
+                std::thread::sleep(Duration::from_secs(1));
+                std::process::exit(0);
+            }
+            1 => {
+                if mode == "irecv_full" {
+                    let result = world.irecv(s, &mut buf, Source::Any, 7).map(|_| ());
                     println!(
                         "FAIL: {mode} returned while the receive is still pending: {result:?}"
                     );
+                    std::mem::forget(fillers);
                     std::process::exit(1);
                 }
-                "wait_all" => {
-                    let mut reqs = vec![req];
-                    let result = Request::wait_all(&mut reqs);
-                    let completed = reqs[0].is_completed();
-                    println!(
-                        "FAIL: {mode} returned while the receive is still pending: {result:?}; completed={completed}"
-                    );
-                    std::mem::forget(reqs);
-                    std::process::exit(1);
+
+                let req = world
+                    .irecv(s, &mut buf, Source::Any, 7)
+                    .expect("irecv failed");
+
+                match mode.as_str() {
+                    "wait" => {
+                        let result = req.wait();
+                        println!(
+                            "FAIL: {mode} returned while the receive is still pending: {result:?}"
+                        );
+                        std::process::exit(1);
+                    }
+                    "wait_all" => {
+                        let mut reqs = vec![req];
+                        let result = Request::wait_all(&mut reqs);
+                        let completed = reqs[0].is_completed();
+                        println!(
+                            "FAIL: {mode} returned while the receive is still pending: {result:?}; completed={completed}"
+                        );
+                        std::mem::forget(reqs);
+                        std::process::exit(1);
+                    }
+                    "wait_any" => {
+                        let mut reqs = vec![req];
+                        let result = Request::wait_any(&mut reqs);
+                        let completed = reqs[0].is_completed();
+                        println!(
+                            "FAIL: {mode} returned while the receive is still pending: {result:?}; completed={completed}"
+                        );
+                        std::mem::forget(reqs);
+                        std::process::exit(1);
+                    }
+                    other => panic!("unknown mode: {other}"),
                 }
-                "wait_any" => {
-                    let mut reqs = vec![req];
-                    let result = Request::wait_any(&mut reqs);
-                    let completed = reqs[0].is_completed();
-                    println!(
-                        "FAIL: {mode} returned while the receive is still pending: {result:?}; completed={completed}"
-                    );
-                    std::mem::forget(reqs);
-                    std::process::exit(1);
-                }
-                other => panic!("unknown mode: {other}"),
             }
+            2 => std::process::abort(),
+            _ => unreachable!(),
         }
-        2 => std::process::abort(),
-        _ => unreachable!(),
-    }
+    });
 }

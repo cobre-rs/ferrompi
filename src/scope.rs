@@ -95,6 +95,7 @@ pub fn scope<'env, R>(f: impl for<'s> FnOnce(&'s Scope<'s, 'env>) -> Result<R>) 
 }
 
 impl<'s> Scope<'s, '_> {
+    #[inline]
     pub(crate) fn request(&'s self, handle: i64, kind: RequestKind) -> Request<'s> {
         let slot = self.registry.register(handle);
         Request::scoped(handle, kind, &self.registry, slot)

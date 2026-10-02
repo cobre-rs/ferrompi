@@ -32,12 +32,14 @@ fn main() -> Result<()> {
     let mut cancelled_empty = true;
     if rank == 1 {
         let mut buf = vec![0u8; 8];
-        let mut req = world.irecv(&mut buf, 0, 99)?;
-        // No message will arrive on tag 99, so get_status returns false.
-        let complete = req.get_status()?;
-        assert!(!complete, "get_status must report incomplete before cancel");
-        req.cancel()?;
-        cancelled_empty = is_empty_status(&req.wait()?);
+        cancelled_empty = ferrompi::scope(|s| {
+            let mut req = world.irecv(s, &mut buf, 0, 99)?;
+            // No message will arrive on tag 99, so get_status returns false.
+            let complete = req.get_status()?;
+            assert!(!complete, "get_status must report incomplete before cancel");
+            req.cancel()?;
+            Ok(is_empty_status(&req.wait()?))
+        })?;
         println!("rank 1: cancel+wait completed");
     }
     world.barrier()?;

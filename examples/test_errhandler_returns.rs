@@ -150,10 +150,14 @@ fn main() {
     // ========================================================================
     {
         let outgoing = [1i32; 4];
-        let req = world.isend(&outgoing, rank, 7).expect("isend failed");
         let mut incoming = [0i32; 1];
-        let ok = expect_class(world.recv(&mut incoming, rank, 7), MpiErrorClass::Truncate);
-        req.wait().expect("wait failed");
+        let ok = ferrompi::scope(|s| {
+            let req = world.isend(s, &outgoing, rank, 7).expect("isend failed");
+            let ok = expect_class(world.recv(&mut incoming, rank, 7), MpiErrorClass::Truncate);
+            req.wait().expect("wait failed");
+            Ok(ok)
+        })
+        .expect("scope failed");
         report(&world, rank, ok, "recv truncate -> Truncate");
     }
 

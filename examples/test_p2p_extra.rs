@@ -264,15 +264,19 @@ fn test_isend_irecv<T: ferrompi::MpiDatatype + TestValue>(
         .collect();
     let mut recv_data = vec![T::from_rank(0); buf_len];
 
-    // Post nonblocking receive first, then nonblocking send
-    let recv_req = world
-        .irecv(&mut recv_data, prev, tag)
-        .expect("irecv failed");
-    let send_req = world.isend(&send_data, next, tag).expect("isend failed");
+    ferrompi::scope(|s| {
+        // Post nonblocking receive first, then nonblocking send
+        let recv_req = world
+            .irecv(s, &mut recv_data, prev, tag)
+            .expect("irecv failed");
+        let send_req = world.isend(s, &send_data, next, tag).expect("isend failed");
 
-    // Wait for both to complete
-    send_req.wait().expect("isend wait failed");
-    recv_req.wait().expect("irecv wait failed");
+        // Wait for both to complete
+        send_req.wait().expect("isend wait failed");
+        recv_req.wait().expect("irecv wait failed");
+        Ok(())
+    })
+    .expect("scope failed");
 
     // Verify received data is from the previous rank
     verify_data(&recv_data, prev, rank, "isend/irecv");

@@ -19,25 +19,29 @@ fn main() {
     assert_eq!(mpi.thread_level(), ThreadLevel::Serialized);
 
     let mut buf = [0i32; 1];
-    let req = world.irecv(&mut buf, 0, 98).expect("irecv");
-
     let flag = AtomicBool::new(false);
 
-    std::thread::scope(|s| {
-        let world_ref = &world;
-        let flag_ref = &flag;
-        s.spawn(move || {
-            flag_ref.store(true, Ordering::SeqCst);
-            let _ = world_ref.recv(&mut [0i32; 1], 0, 99);
+    ferrompi::scope(|ms| {
+        let req = world.irecv(ms, &mut buf, 0, 98).expect("irecv");
+
+        std::thread::scope(|s| {
+            let world_ref = &world;
+            let flag_ref = &flag;
+            s.spawn(move || {
+                flag_ref.store(true, Ordering::SeqCst);
+                let _ = world_ref.recv(&mut [0i32; 1], 0, 99);
+            });
+
+            while !flag.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(Duration::from_millis(200));
+
+            let r = req.wait();
+            println!("FAIL: Request::wait returned under an overlap: {r:?}");
+            std::process::exit(1);
         });
-
-        while !flag.load(Ordering::SeqCst) {
-            std::thread::yield_now();
-        }
-        std::thread::sleep(Duration::from_millis(200));
-
-        let r = req.wait();
-        println!("FAIL: Request::wait returned under an overlap: {r:?}");
-        std::process::exit(1);
-    });
+        Ok(())
+    })
+    .expect("scope failed");
 }

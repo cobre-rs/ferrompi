@@ -109,6 +109,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MpiErrorClass`) instead of failing the whole call. Migration: take the
   indices with `.iter().map(|&(i, _)| i)`; check `status.error` for
   per-request failures.
+- **`isend`, `irecv`, `isend_custom` and `irecv_custom` take the scope first
+  and borrow their buffers (and datatype) for it:** `world.isend(s, &data,
+  dest, tag)` inside `ferrompi::scope(|s| ...)`; the buffers are usable again
+  when `scope` returns. Migration: wrap the requests' code in
+  `ferrompi::scope` and read receive buffers after it.
 
 ### Added
 

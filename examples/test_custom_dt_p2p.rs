@@ -128,38 +128,48 @@ fn main() {
 
         if rank == 0 {
             let buf = [Pair { v: 2.71, i: 99 }];
-            match world.isend_custom(&buf, &dt, 1, 1) {
-                Ok(req) => {
-                    if let Err(e) = req.wait() {
-                        eprintln!("rank 0: FAIL Test 2 — isend_custom req.wait() Err: {e}");
+            ferrompi::scope(|s| {
+                match world.isend_custom(s, &buf, &dt, 1, 1) {
+                    Ok(req) => {
+                        if let Err(e) = req.wait() {
+                            eprintln!("rank 0: FAIL Test 2 — isend_custom req.wait() Err: {e}");
+                            local_ok = false;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("rank 0: FAIL Test 2 — isend_custom returned Err: {e}");
                         local_ok = false;
                     }
                 }
-                Err(e) => {
-                    eprintln!("rank 0: FAIL Test 2 — isend_custom returned Err: {e}");
-                    local_ok = false;
-                }
-            }
+                Ok(())
+            })
+            .expect("Test 2: isend_custom scope failed");
         } else if rank == 1 {
             let mut buf = [Pair { v: 0.0, i: 0 }];
-            match world.irecv_custom(&mut buf, &dt, 0, 1) {
+            let received = ferrompi::scope(|s| match world.irecv_custom(s, &mut buf, &dt, 0, 1) {
                 Ok(req) => {
                     if let Err(e) = req.wait() {
                         eprintln!("rank 1: FAIL Test 2 — irecv_custom req.wait() Err: {e}");
                         local_ok = false;
+                        Ok(false)
                     } else {
-                        let expected = Pair { v: 2.71, i: 99 };
-                        if buf[0] != expected {
-                            eprintln!(
-                                "rank 1: FAIL Test 2 — irecv_custom payload mismatch: got {:?}, expected {:?}",
-                                buf[0], expected
-                            );
-                            local_ok = false;
-                        }
+                        Ok(true)
                     }
                 }
                 Err(e) => {
                     eprintln!("rank 1: FAIL Test 2 — irecv_custom returned Err: {e}");
+                    local_ok = false;
+                    Ok(false)
+                }
+            })
+            .expect("Test 2: irecv_custom scope failed");
+            if received {
+                let expected = Pair { v: 2.71, i: 99 };
+                if buf[0] != expected {
+                    eprintln!(
+                        "rank 1: FAIL Test 2 — irecv_custom payload mismatch: got {:?}, expected {:?}",
+                        buf[0], expected
+                    );
                     local_ok = false;
                 }
             }
@@ -233,56 +243,64 @@ fn main() {
             canary: [0; 63],
         };
 
-        let req1 = match world.isend_custom(&src[..1], &dt, rank, 3) {
-            Err(Error::InvalidArgument {
-                arg: "datatype", ..
-            }) => None,
-            Ok(req) => Some(req),
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 4 — isend_custom unexpected Err: {e}");
+        ferrompi::scope(|s| {
+            let req1 = match world.isend_custom(s, &src[..1], &dt, rank, 3) {
+                Err(Error::InvalidArgument {
+                    arg: "datatype", ..
+                }) => None,
+                Ok(req) => Some(req),
+                Err(e) => {
+                    eprintln!("rank {rank}: FAIL Test 4 — isend_custom unexpected Err: {e}");
+                    local_ok = false;
+                    None
+                }
+            };
+            if !matches!(
+                world.recv_custom(&mut frame.recv, &dt, rank, 3),
+                Err(Error::InvalidArgument {
+                    arg: "datatype",
+                    ..
+                })
+            ) {
+                eprintln!(
+                    "rank {rank}: FAIL Test 4 — recv_custom did not return Err(InvalidArgument)"
+                );
                 local_ok = false;
-                None
             }
-        };
-        if !matches!(
-            world.recv_custom(&mut frame.recv, &dt, rank, 3),
-            Err(Error::InvalidArgument {
-                arg: "datatype",
-                ..
-            })
-        ) {
-            eprintln!("rank {rank}: FAIL Test 4 — recv_custom did not return Err(InvalidArgument)");
-            local_ok = false;
-        }
 
-        let req2 = match world.irecv_custom(&mut frame.recv, &dt, rank, 5) {
-            Err(Error::InvalidArgument {
-                arg: "datatype", ..
-            }) => None,
-            Ok(req) => Some(req),
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 4 — irecv_custom unexpected Err: {e}");
+            let req2 = match world.irecv_custom(s, &mut frame.recv, &dt, rank, 5) {
+                Err(Error::InvalidArgument {
+                    arg: "datatype", ..
+                }) => None,
+                Ok(req) => Some(req),
+                Err(e) => {
+                    eprintln!("rank {rank}: FAIL Test 4 — irecv_custom unexpected Err: {e}");
+                    local_ok = false;
+                    None
+                }
+            };
+            if !matches!(
+                world.send_custom(&src[..1], &dt, rank, 5),
+                Err(Error::InvalidArgument {
+                    arg: "datatype",
+                    ..
+                })
+            ) {
+                eprintln!(
+                    "rank {rank}: FAIL Test 4 — send_custom did not return Err(InvalidArgument)"
+                );
                 local_ok = false;
-                None
             }
-        };
-        if !matches!(
-            world.send_custom(&src[..1], &dt, rank, 5),
-            Err(Error::InvalidArgument {
-                arg: "datatype",
-                ..
-            })
-        ) {
-            eprintln!("rank {rank}: FAIL Test 4 — send_custom did not return Err(InvalidArgument)");
-            local_ok = false;
-        }
 
-        for req in [req1, req2].into_iter().flatten() {
-            if let Err(e) = req.wait() {
-                eprintln!("rank {rank}: FAIL Test 4 — request wait Err: {e}");
-                local_ok = false;
+            for req in [req1, req2].into_iter().flatten() {
+                if let Err(e) = req.wait() {
+                    eprintln!("rank {rank}: FAIL Test 4 — request wait Err: {e}");
+                    local_ok = false;
+                }
             }
-        }
+            Ok(())
+        })
+        .expect("Test 4: scope failed");
 
         world.barrier().expect("barrier after Test 4 failed");
         if rank == 0 {
@@ -305,34 +323,40 @@ fn main() {
             canary: [0; 63],
         };
 
-        let req = match world.isend_custom(&src[..1], &dt, rank, 4) {
-            Err(Error::InvalidArgument {
-                arg: "datatype", ..
-            }) => None,
-            Ok(req) => Some(req),
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 5 — isend_custom unexpected Err: {e}");
+        ferrompi::scope(|s| {
+            let req = match world.isend_custom(s, &src[..1], &dt, rank, 4) {
+                Err(Error::InvalidArgument {
+                    arg: "datatype", ..
+                }) => None,
+                Ok(req) => Some(req),
+                Err(e) => {
+                    eprintln!("rank {rank}: FAIL Test 5 — isend_custom unexpected Err: {e}");
+                    local_ok = false;
+                    None
+                }
+            };
+            if !matches!(
+                world.recv_custom(&mut frame.recv, &dt, rank, 4),
+                Err(Error::InvalidArgument {
+                    arg: "datatype",
+                    ..
+                })
+            ) {
+                eprintln!(
+                    "rank {rank}: FAIL Test 5 — recv_custom did not return Err(InvalidArgument)"
+                );
                 local_ok = false;
-                None
             }
-        };
-        if !matches!(
-            world.recv_custom(&mut frame.recv, &dt, rank, 4),
-            Err(Error::InvalidArgument {
-                arg: "datatype",
-                ..
-            })
-        ) {
-            eprintln!("rank {rank}: FAIL Test 5 — recv_custom did not return Err(InvalidArgument)");
-            local_ok = false;
-        }
 
-        if let Some(req) = req {
-            if let Err(e) = req.wait() {
-                eprintln!("rank {rank}: FAIL Test 5 — isend_custom request wait Err: {e}");
-                local_ok = false;
+            if let Some(req) = req {
+                if let Err(e) = req.wait() {
+                    eprintln!("rank {rank}: FAIL Test 5 — isend_custom request wait Err: {e}");
+                    local_ok = false;
+                }
             }
-        }
+            Ok(())
+        })
+        .expect("Test 5: scope failed");
 
         world.barrier().expect("barrier after Test 5 failed");
         if rank == 0 {

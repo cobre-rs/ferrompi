@@ -41,7 +41,7 @@ fn main() {
                 Err(Error::ThreadLevelViolation)
             );
             ok &= matches!(
-                world_ref.irecv(&mut rbuf, 0, 1),
+                ferrompi::scope(|ms| world_ref.irecv(ms, &mut rbuf, 0, 1).map(|_| ())),
                 Err(Error::ThreadLevelViolation)
             );
             ok &= matches!(

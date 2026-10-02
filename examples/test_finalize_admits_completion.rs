@@ -1,7 +1,8 @@
-//! After `Mpi::drop` skips `MPI_Finalize` because a window is still alive,
-//! MPI stays initialized: `wait` completes a request that was pending when
-//! the handle dropped, every other call returns `Error::Finalized`, and the
-//! handles dropped afterwards are leaked without an MPI call.
+//! After `Mpi::drop` skips `MPI_Finalize` because a window is still alive and
+//! a nonblocking scope is open, MPI stays initialized: `wait` completes a
+//! request that was pending when the handle dropped, every other call returns
+//! `Error::Finalized`, and the handles dropped afterwards are leaked without
+//! an MPI call.
 //!
 //! Run with: mpiexec -n 1 ./target/debug/examples/test_finalize_admits_completion
 // mpi-test: np=1 expect=unfinalized valgrind
@@ -17,24 +18,28 @@ fn main() {
 
     let data = [1.0f64, 2.0, 3.0, 4.0];
     let mut buf = [0.0f64; 4];
-    let rreq = world.irecv(&mut buf, 0, 5).expect("irecv failed");
-    let sreq = world.isend(&data, 0, 5).expect("isend failed");
+    ferrompi::scope(|s| {
+        let rreq = world.irecv(s, &mut buf, 0, 5).expect("irecv failed");
+        let sreq = world.isend(s, &data, 0, 5).expect("isend failed");
 
-    drop(mpi);
+        drop(mpi);
 
-    assert!(
-        Mpi::is_finalized(),
-        "Mpi::is_finalized() must be true after a skipped MPI_Finalize"
-    );
-    rreq.wait()
-        .expect("wait on a pending receive must complete after the skip");
-    sreq.wait()
-        .expect("wait on a pending send must complete after the skip");
+        assert!(
+            Mpi::is_finalized(),
+            "Mpi::is_finalized() must be true after a skipped MPI_Finalize"
+        );
+        rreq.wait()
+            .expect("wait on a pending receive must complete after the skip");
+        sreq.wait()
+            .expect("wait on a pending send must complete after the skip");
+        assert!(
+            matches!(world.barrier(), Err(Error::Finalized)),
+            "a call that is not a completion must return Err(Finalized)"
+        );
+        Ok(())
+    })
+    .expect("scope failed");
     assert_eq!(buf, data, "the completed receive must hold the message");
-    assert!(
-        matches!(world.barrier(), Err(Error::Finalized)),
-        "a call that is not a completion must return Err(Finalized)"
-    );
 
     drop(group);
     drop(win);

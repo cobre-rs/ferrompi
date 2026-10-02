@@ -34,15 +34,22 @@ mod common;
 //     request now occupies the slot.
 //   - `flag` points to a valid i32 on the stack; it is only meaningful if
 //     the call succeeds, which it must not.
+//   - `status` is null, which the shim treats as MPI_STATUS_IGNORE; it is
+//     declared as an opaque pointer because the shim's status type is
+//     crate-private.
 extern "C" {
-    fn ferrompi_test(request: i64, flag: *mut i32) -> std::ffi::c_int;
+    fn ferrompi_test(
+        request: i64,
+        flag: *mut i32,
+        status: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int;
 }
 
 // Drains `reqs` through the Waitany loop idiom. Returns `Err` if any call
 // fails outright (the BASE behavior: the loop idiom cannot even reach
 // `Ok(None)`), `Ok(false)` if a call succeeds with an unexpected value, or
 // `Ok(true)` once every check passes.
-fn part1_check(reqs: &mut [Request], buf1: &[u8; 4], buf2: &[u8; 4]) -> ferrompi::Result<bool> {
+fn part1_check(reqs: &mut [Request]) -> ferrompi::Result<bool> {
     let first = Request::wait_any(reqs)?;
     let second = Request::wait_any(reqs)?;
     if !(first.is_some() && second.is_some() && first != second) {
@@ -60,7 +67,7 @@ fn part1_check(reqs: &mut [Request], buf1: &[u8; 4], buf2: &[u8; 4]) -> ferrompi
     if !Request::test_some(reqs)?.is_empty() {
         return Ok(false);
     }
-    Ok(buf1 == &[1u8; 4] && buf2 == &[2u8; 4])
+    Ok(true)
 }
 
 fn part1_wait_any_loop(world: &Communicator, rank: i32) {
@@ -69,13 +76,17 @@ fn part1_wait_any_loop(world: &Communicator, rank: i32) {
     let mut ok = true;
 
     if rank == 0 {
-        let mut reqs = vec![
-            world.irecv(&mut buf1, 1, 1).expect("part1: irecv tag1"),
-            world.irecv(&mut buf2, 1, 2).expect("part1: irecv tag2"),
-        ];
-        world.barrier().expect("part1: barrier after posting");
+        ok = ferrompi::scope(|s| {
+            let mut reqs = vec![
+                world.irecv(s, &mut buf1, 1, 1).expect("part1: irecv tag1"),
+                world.irecv(s, &mut buf2, 1, 2).expect("part1: irecv tag2"),
+            ];
+            world.barrier().expect("part1: barrier after posting");
 
-        ok = part1_check(&mut reqs, &buf1, &buf2).unwrap_or(false);
+            Ok(part1_check(&mut reqs).unwrap_or(false))
+        })
+        .expect("part1: scope failed");
+        ok &= buf1 == [1u8; 4] && buf2 == [2u8; 4];
     } else {
         world.barrier().expect("part1: barrier after posting");
         world.send(&[1u8; 4], 0, 1).expect("part1: send tag1");
@@ -93,21 +104,33 @@ fn part2_wait_all_completed_slice(world: &Communicator, rank: i32) {
     let mut ok = true;
 
     if rank == 0 {
-        let mut old = vec![
-            world.irecv(&mut old_a, 1, 3).expect("part2: irecv old_a"),
-            world.irecv(&mut old_b, 1, 4).expect("part2: irecv old_b"),
-        ];
-        world.barrier().expect("part2: barrier after posting old");
+        ok &= ferrompi::scope(|s| {
+            let mut old = vec![
+                world
+                    .irecv(s, &mut old_a, 1, 3)
+                    .expect("part2: irecv old_a"),
+                world
+                    .irecv(s, &mut old_b, 1, 4)
+                    .expect("part2: irecv old_b"),
+            ];
+            world.barrier().expect("part2: barrier after posting old");
 
-        Request::wait_all(&mut old).expect("part2: wait_all(old)");
+            Request::wait_all(&mut old).expect("part2: wait_all(old)");
 
-        let new_recv_a = world.irecv(&mut new_a, 1, 5).expect("part2: irecv new_a");
-        let new_recv_b = world.irecv(&mut new_b, 1, 6).expect("part2: irecv new_b");
-        world.barrier().expect("part2: barrier after posting new");
+            let new_recv_a = world
+                .irecv(s, &mut new_a, 1, 5)
+                .expect("part2: irecv new_a");
+            let new_recv_b = world
+                .irecv(s, &mut new_b, 1, 6)
+                .expect("part2: irecv new_b");
+            world.barrier().expect("part2: barrier after posting new");
 
-        ok &= Request::wait_all(&mut old).is_ok();
-        ok &= new_recv_a.wait().is_ok();
-        ok &= new_recv_b.wait().is_ok();
+            let mut scope_ok = Request::wait_all(&mut old).is_ok();
+            scope_ok &= new_recv_a.wait().is_ok();
+            scope_ok &= new_recv_b.wait().is_ok();
+            Ok(scope_ok)
+        })
+        .expect("part2: scope failed");
         ok &= new_a == [5u8; 4] && new_b == [6u8; 4];
     } else {
         world.barrier().expect("part2: barrier after posting old");
@@ -132,28 +155,33 @@ fn part3_stale_wait_any_entry(world: &Communicator, rank: i32) {
     let mut ok = true;
 
     if rank == 0 {
-        let mut reqs = vec![
-            world.irecv(&mut a_buf, 1, 11).expect("part3: irecv a"),
-            world.irecv(&mut b_buf, 1, 12).expect("part3: irecv b"),
-        ];
-        world.barrier().expect("part3: barrier after posting a,b");
+        ok &= ferrompi::scope(|s| {
+            let mut reqs = vec![
+                world.irecv(s, &mut a_buf, 1, 11).expect("part3: irecv a"),
+                world.irecv(s, &mut b_buf, 1, 12).expect("part3: irecv b"),
+            ];
+            world.barrier().expect("part3: barrier after posting a,b");
 
-        let first = Request::wait_any(&mut reqs)
-            .expect("part3: first wait_any")
-            .map(|(i, _)| i);
-        ok &= first == Some(0);
+            let mut scope_ok = true;
+            let first = Request::wait_any(&mut reqs)
+                .expect("part3: first wait_any")
+                .map(|(i, _)| i);
+            scope_ok &= first == Some(0);
 
-        let other = world
-            .irecv(&mut other_buf, 1, 13)
-            .expect("part3: irecv other");
-        world.barrier().expect("part3: barrier after posting other");
+            let other = world
+                .irecv(s, &mut other_buf, 1, 13)
+                .expect("part3: irecv other");
+            world.barrier().expect("part3: barrier after posting other");
 
-        let second = Request::wait_any(&mut reqs)
-            .expect("part3: second wait_any")
-            .map(|(i, _)| i);
-        ok &= second == Some(1);
-        ok &= !other.is_completed();
-        ok &= other.wait().is_ok();
+            let second = Request::wait_any(&mut reqs)
+                .expect("part3: second wait_any")
+                .map(|(i, _)| i);
+            scope_ok &= second == Some(1);
+            scope_ok &= !other.is_completed();
+            scope_ok &= other.wait().is_ok();
+            Ok(scope_ok)
+        })
+        .expect("part3: scope failed");
         ok &= a_buf == [11u8; 4] && b_buf == [12u8; 4] && other_buf == [13u8; 4];
     } else {
         world.barrier().expect("part3: barrier after posting a,b");
@@ -176,29 +204,33 @@ fn part4_failed_test(world: &Communicator, rank: i32) {
     let mut ok = true;
 
     if rank == 0 {
-        let mut a = world.irecv(&mut a_buf, 1, 21).expect("part4: irecv a");
-        world.barrier().expect("part4: barrier after posting a");
+        ok &= ferrompi::scope(|s| {
+            let mut a = world.irecv(s, &mut a_buf, 1, 21).expect("part4: irecv a");
+            world.barrier().expect("part4: barrier after posting a");
 
-        let result = loop {
-            match a.test() {
-                Ok(None) => continue,
-                other => break other,
-            }
-        };
-        ok &= matches!(
-            result,
-            Err(Error::Mpi {
-                class: MpiErrorClass::Truncate,
-                ..
-            })
-        );
-        ok &= a.is_completed();
+            let result = loop {
+                match a.test() {
+                    Ok(None) => continue,
+                    other => break other,
+                }
+            };
+            let mut scope_ok = matches!(
+                result,
+                Err(Error::Mpi {
+                    class: MpiErrorClass::Truncate,
+                    ..
+                })
+            );
+            scope_ok &= a.is_completed();
 
-        let b = world.irecv(&mut b_buf, 1, 22).expect("part4: irecv b");
-        world.barrier().expect("part4: barrier after posting b");
+            let b = world.irecv(s, &mut b_buf, 1, 22).expect("part4: irecv b");
+            world.barrier().expect("part4: barrier after posting b");
 
-        drop(a);
-        ok &= b.wait().is_ok();
+            drop(a);
+            scope_ok &= b.wait().is_ok();
+            Ok(scope_ok)
+        })
+        .expect("part4: scope failed");
         ok &= b_buf == [42];
     } else {
         world.barrier().expect("part4: barrier after posting a");
@@ -222,36 +254,44 @@ fn part5_stale_raw_handle(world: &Communicator, rank: i32) {
     let mut ok = true;
 
     if rank == 0 {
-        let a = world.irecv(&mut a_buf, 1, 31).expect("part5: irecv a");
-        let stale_handle = a.raw_handle();
-        world.barrier().expect("part5: barrier after posting a");
+        ok &= ferrompi::scope(|s| {
+            let a = world.irecv(s, &mut a_buf, 1, 31).expect("part5: irecv a");
+            let stale_handle = a.raw_handle();
+            world.barrier().expect("part5: barrier after posting a");
 
-        a.wait().expect("part5: wait a");
+            a.wait().expect("part5: wait a");
 
-        let b = world.irecv(&mut b_buf, 1, 32).expect("part5: irecv b");
-        common::check(
-            world,
-            (b.raw_handle() & 0xffff_ffff) == (stale_handle & 0xffff_ffff)
-                && b.raw_handle() != stale_handle,
-            "part 5 precondition: slot reused with a new generation",
-        );
-        world.barrier().expect("part5: barrier after posting b");
+            let b = world.irecv(s, &mut b_buf, 1, 32).expect("part5: irecv b");
+            common::check(
+                world,
+                (b.raw_handle() & 0xffff_ffff) == (stale_handle & 0xffff_ffff)
+                    && b.raw_handle() != stale_handle,
+                "part 5 precondition: slot reused with a new generation",
+            );
+            world.barrier().expect("part5: barrier after posting b");
 
-        let mut flag: i32 = 0;
-        let raw_ret = unsafe {
-            // SAFETY: see the invariant comment on the extern "C" block above.
-            ferrompi_test(stale_handle, std::ptr::addr_of_mut!(flag))
-        };
-        ok &= raw_ret != 0;
-        ok &= matches!(
-            Error::from_code(raw_ret),
-            Error::Mpi {
-                class: MpiErrorClass::Request,
-                ..
-            }
-        );
+            let mut flag: i32 = 0;
+            let raw_ret = unsafe {
+                // SAFETY: see the invariant comment on the extern "C" block above.
+                ferrompi_test(
+                    stale_handle,
+                    std::ptr::addr_of_mut!(flag),
+                    std::ptr::null_mut(),
+                )
+            };
+            let mut scope_ok = raw_ret != 0;
+            scope_ok &= matches!(
+                Error::from_code(raw_ret),
+                Error::Mpi {
+                    class: MpiErrorClass::Request,
+                    ..
+                }
+            );
 
-        ok &= b.wait().is_ok();
+            scope_ok &= b.wait().is_ok();
+            Ok(scope_ok)
+        })
+        .expect("part5: scope failed");
         ok &= b_buf == [32u8; 4];
     } else {
         world.barrier().expect("part5: barrier after posting a");

@@ -48,35 +48,40 @@ fn main() {
             .map(|i| vec![(rank * 100 + i as i32) as f64; 4])
             .collect();
 
-        // Post all receives first, then all sends (standard deadlock-free ordering).
-        let mut requests: Vec<Request> = Vec::with_capacity(N * 2);
-        for (i, buf) in recv_bufs.iter_mut().enumerate() {
-            let req = world
-                .irecv(buf, prev, 100 + i as i32)
-                .expect("irecv failed");
-            requests.push(req);
-        }
-        for (i, buf) in send_bufs.iter().enumerate() {
-            let req = world
-                .isend(buf, next, 100 + i as i32)
-                .expect("isend failed");
-            requests.push(req);
-        }
+        let (completions, total_posted) = ferrompi::scope(|sc| {
+            // Post all receives first, then all sends (standard deadlock-free ordering).
+            let mut requests: Vec<Request> = Vec::with_capacity(N * 2);
+            for (i, buf) in recv_bufs.iter_mut().enumerate() {
+                let req = world
+                    .irecv(sc, buf, prev, 100 + i as i32)
+                    .expect("irecv failed");
+                requests.push(req);
+            }
+            for (i, buf) in send_bufs.iter().enumerate() {
+                let req = world
+                    .isend(sc, buf, next, 100 + i as i32)
+                    .expect("isend failed");
+                requests.push(req);
+            }
 
-        let total_posted = requests.len();
-        let mut completions = 0usize;
+            let total_posted = requests.len();
+            let mut completions = 0usize;
 
-        // Loop until the vec is empty: wait_any returns an index into the
-        // current vec, then swap_remove removes that entry.
-        while !requests.is_empty() {
-            let idx = Request::wait_any(&mut requests)
-                .expect("wait_any failed")
-                .map(|(i, _)| i)
-                .expect("wait_any returned None on non-empty active request list");
-            // Remove the completed request (swap-remove preserves compactness).
-            requests.swap_remove(idx);
-            completions += 1;
-        }
+            // Loop until the vec is empty: wait_any returns an index into the
+            // current vec, then swap_remove removes that entry.
+            while !requests.is_empty() {
+                let idx = Request::wait_any(&mut requests)
+                    .expect("wait_any failed")
+                    .map(|(i, _)| i)
+                    .expect("wait_any returned None on non-empty active request list");
+                // Remove the completed request (swap-remove preserves compactness).
+                requests.swap_remove(idx);
+                completions += 1;
+            }
+
+            Ok((completions, total_posted))
+        })
+        .expect("scope failed");
 
         assert_eq!(
             completions, total_posted,
@@ -113,42 +118,47 @@ fn main() {
             .map(|i| vec![(rank * 10 + i as i32) as f64; 2])
             .collect();
 
-        let mut requests: Vec<Request> = Vec::with_capacity(N * 2);
-        for (i, buf) in recv_bufs2.iter_mut().enumerate() {
-            let req = world
-                .irecv(buf, prev, 200 + i as i32)
-                .expect("irecv Part 2 failed");
-            requests.push(req);
-        }
-        for (i, buf) in send_bufs2.iter().enumerate() {
-            let req = world
-                .isend(buf, next, 200 + i as i32)
-                .expect("isend Part 2 failed");
-            requests.push(req);
-        }
-
-        let total_posted = requests.len();
-        let mut all_completed_indices: Vec<usize> = Vec::new();
-        let mut statuses_ok = true;
-
-        // Drive with wait_some; accumulate all returned indices, then remove.
-        while !requests.is_empty() {
-            let batch = Request::wait_some(&mut requests).expect("wait_some failed");
-            // wait_some returning empty on a non-empty active list is an error.
-            assert!(
-                !batch.is_empty(),
-                "rank {rank}: wait_some returned empty on non-empty active request list"
-            );
-            statuses_ok &= batch.iter().all(|(_, s)| is_ring_status(s, prev, 2));
-            let batch: Vec<usize> = batch.iter().map(|&(i, _)| i).collect();
-            // Sort descending so swap-removes do not invalidate earlier indices.
-            let mut sorted = batch.clone();
-            sorted.sort_unstable_by(|a, b| b.cmp(a));
-            for idx in sorted {
-                requests.swap_remove(idx);
+        let (total_posted, all_completed_indices, statuses_ok) = ferrompi::scope(|sc| {
+            let mut requests: Vec<Request> = Vec::with_capacity(N * 2);
+            for (i, buf) in recv_bufs2.iter_mut().enumerate() {
+                let req = world
+                    .irecv(sc, buf, prev, 200 + i as i32)
+                    .expect("irecv Part 2 failed");
+                requests.push(req);
             }
-            all_completed_indices.extend(batch);
-        }
+            for (i, buf) in send_bufs2.iter().enumerate() {
+                let req = world
+                    .isend(sc, buf, next, 200 + i as i32)
+                    .expect("isend Part 2 failed");
+                requests.push(req);
+            }
+
+            let total_posted = requests.len();
+            let mut all_completed_indices: Vec<usize> = Vec::new();
+            let mut statuses_ok = true;
+
+            // Drive with wait_some; accumulate all returned indices, then remove.
+            while !requests.is_empty() {
+                let batch = Request::wait_some(&mut requests).expect("wait_some failed");
+                // wait_some returning empty on a non-empty active list is an error.
+                assert!(
+                    !batch.is_empty(),
+                    "rank {rank}: wait_some returned empty on non-empty active request list"
+                );
+                statuses_ok &= batch.iter().all(|(_, s)| is_ring_status(s, prev, 2));
+                let batch: Vec<usize> = batch.iter().map(|&(i, _)| i).collect();
+                // Sort descending so swap-removes do not invalidate earlier indices.
+                let mut sorted = batch.clone();
+                sorted.sort_unstable_by(|a, b| b.cmp(a));
+                for idx in sorted {
+                    requests.swap_remove(idx);
+                }
+                all_completed_indices.extend(batch);
+            }
+
+            Ok((total_posted, all_completed_indices, statuses_ok))
+        })
+        .expect("scope failed");
 
         assert_eq!(
             all_completed_indices.len(),
@@ -181,34 +191,39 @@ fn main() {
             .map(|i| vec![(rank * 1000 + i as i32) as f64; 4])
             .collect();
 
-        let mut requests: Vec<Request> = Vec::with_capacity(N * 2);
-        for (i, buf) in recv_bufs3.iter_mut().enumerate() {
-            let req = world
-                .irecv(buf, prev, 300 + i as i32)
-                .expect("irecv Part 3 failed");
-            requests.push(req);
-        }
-        for (i, buf) in send_bufs3.iter().enumerate() {
-            let req = world
-                .isend(buf, next, 300 + i as i32)
-                .expect("isend Part 3 failed");
-            requests.push(req);
-        }
-
-        let mut completions = 0usize;
-
-        while !requests.is_empty() {
-            match Request::test_any(&mut requests) {
-                Ok(Some((idx, _))) => {
-                    requests.swap_remove(idx);
-                    completions += 1;
-                }
-                Ok(None) => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(e) => panic!("test_any failed: {e}"),
+        let completions = ferrompi::scope(|sc| {
+            let mut requests: Vec<Request> = Vec::with_capacity(N * 2);
+            for (i, buf) in recv_bufs3.iter_mut().enumerate() {
+                let req = world
+                    .irecv(sc, buf, prev, 300 + i as i32)
+                    .expect("irecv Part 3 failed");
+                requests.push(req);
             }
-        }
+            for (i, buf) in send_bufs3.iter().enumerate() {
+                let req = world
+                    .isend(sc, buf, next, 300 + i as i32)
+                    .expect("isend Part 3 failed");
+                requests.push(req);
+            }
+
+            let mut completions = 0usize;
+
+            while !requests.is_empty() {
+                match Request::test_any(&mut requests) {
+                    Ok(Some((idx, _))) => {
+                        requests.swap_remove(idx);
+                        completions += 1;
+                    }
+                    Ok(None) => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(e) => panic!("test_any failed: {e}"),
+                }
+            }
+
+            Ok(completions)
+        })
+        .expect("scope failed");
 
         assert_eq!(
             completions,
@@ -244,41 +259,46 @@ fn main() {
             .map(|i| vec![(rank * 1000 + i as i32) as f64; 4])
             .collect();
 
-        let mut requests: Vec<Request> = Vec::with_capacity(N * 2);
-        for (i, buf) in recv_bufs4.iter_mut().enumerate() {
-            let req = world
-                .irecv(buf, prev, 400 + i as i32)
-                .expect("irecv Part 4 failed");
-            requests.push(req);
-        }
-        for (i, buf) in send_bufs4.iter().enumerate() {
-            let req = world
-                .isend(buf, next, 400 + i as i32)
-                .expect("isend Part 4 failed");
-            requests.push(req);
-        }
-
-        let mut completions = 0usize;
-        let mut statuses_ok = true;
-
-        while !requests.is_empty() {
-            match Request::test_some(&mut requests) {
-                Ok(batch) if !batch.is_empty() => {
-                    statuses_ok &= batch.iter().all(|(_, s)| is_ring_status(s, prev, 4));
-                    let batch: Vec<usize> = batch.iter().map(|&(i, _)| i).collect();
-                    let mut sorted = batch.clone();
-                    sorted.sort_unstable_by(|a, b| b.cmp(a));
-                    for idx in sorted {
-                        requests.swap_remove(idx);
-                    }
-                    completions += batch.len();
-                }
-                Ok(_) => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(e) => panic!("test_some failed: {e}"),
+        let (completions, statuses_ok) = ferrompi::scope(|sc| {
+            let mut requests: Vec<Request> = Vec::with_capacity(N * 2);
+            for (i, buf) in recv_bufs4.iter_mut().enumerate() {
+                let req = world
+                    .irecv(sc, buf, prev, 400 + i as i32)
+                    .expect("irecv Part 4 failed");
+                requests.push(req);
             }
-        }
+            for (i, buf) in send_bufs4.iter().enumerate() {
+                let req = world
+                    .isend(sc, buf, next, 400 + i as i32)
+                    .expect("isend Part 4 failed");
+                requests.push(req);
+            }
+
+            let mut completions = 0usize;
+            let mut statuses_ok = true;
+
+            while !requests.is_empty() {
+                match Request::test_some(&mut requests) {
+                    Ok(batch) if !batch.is_empty() => {
+                        statuses_ok &= batch.iter().all(|(_, s)| is_ring_status(s, prev, 4));
+                        let batch: Vec<usize> = batch.iter().map(|&(i, _)| i).collect();
+                        let mut sorted = batch.clone();
+                        sorted.sort_unstable_by(|a, b| b.cmp(a));
+                        for idx in sorted {
+                            requests.swap_remove(idx);
+                        }
+                        completions += batch.len();
+                    }
+                    Ok(_) => {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(e) => panic!("test_some failed: {e}"),
+                }
+            }
+
+            Ok((completions, statuses_ok))
+        })
+        .expect("scope failed");
 
         assert_eq!(
             completions,
@@ -320,37 +340,42 @@ fn main() {
             .map(|i| vec![(rank * 1000 + i as i32) as f64; 1])
             .collect();
 
-        let mut requests: Vec<Request> = Vec::with_capacity(BIG * 2);
-        for (i, buf) in recv_bufs5.iter_mut().enumerate() {
-            let req = world
-                .irecv(buf, prev, 500 + i as i32)
-                .expect("irecv Part 5 failed");
-            requests.push(req);
-        }
-        for (i, buf) in send_bufs5.iter().enumerate() {
-            let req = world
-                .isend(buf, next, 500 + i as i32)
-                .expect("isend Part 5 failed");
-            requests.push(req);
-        }
-
-        let mut completions = 0usize;
-        let mut statuses_ok = true;
-
-        while !requests.is_empty() {
-            let batch = Request::wait_some(&mut requests).expect("wait_some Part 5 failed");
-            assert!(
-                !batch.is_empty(),
-                "rank {rank}: wait_some Part 5 returned empty on non-empty active request list"
-            );
-            statuses_ok &= batch.iter().all(|(_, s)| is_ring_status(s, prev, 1));
-            let mut sorted: Vec<usize> = batch.iter().map(|&(i, _)| i).collect();
-            sorted.sort_unstable_by(|a, b| b.cmp(a));
-            completions += sorted.len();
-            for idx in sorted {
-                requests.swap_remove(idx);
+        let (completions, statuses_ok) = ferrompi::scope(|sc| {
+            let mut requests: Vec<Request> = Vec::with_capacity(BIG * 2);
+            for (i, buf) in recv_bufs5.iter_mut().enumerate() {
+                let req = world
+                    .irecv(sc, buf, prev, 500 + i as i32)
+                    .expect("irecv Part 5 failed");
+                requests.push(req);
             }
-        }
+            for (i, buf) in send_bufs5.iter().enumerate() {
+                let req = world
+                    .isend(sc, buf, next, 500 + i as i32)
+                    .expect("isend Part 5 failed");
+                requests.push(req);
+            }
+
+            let mut completions = 0usize;
+            let mut statuses_ok = true;
+
+            while !requests.is_empty() {
+                let batch = Request::wait_some(&mut requests).expect("wait_some Part 5 failed");
+                assert!(
+                    !batch.is_empty(),
+                    "rank {rank}: wait_some Part 5 returned empty on non-empty active request list"
+                );
+                statuses_ok &= batch.iter().all(|(_, s)| is_ring_status(s, prev, 1));
+                let mut sorted: Vec<usize> = batch.iter().map(|&(i, _)| i).collect();
+                sorted.sort_unstable_by(|a, b| b.cmp(a));
+                completions += sorted.len();
+                for idx in sorted {
+                    requests.swap_remove(idx);
+                }
+            }
+
+            Ok((completions, statuses_ok))
+        })
+        .expect("scope failed");
 
         assert_eq!(
             completions,

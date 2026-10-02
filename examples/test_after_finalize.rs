@@ -47,7 +47,10 @@ fn main() {
     );
     let mut buf = [0i32; 1];
     assert!(
-        matches!(world.irecv(&mut buf, 0, 0), Err(Error::Finalized)),
+        matches!(
+            ferrompi::scope(|s| world.irecv(s, &mut buf, 0, 0).map(|_| ())),
+            Err(Error::Finalized)
+        ),
         "irecv after finalize must return Err(Finalized)"
     );
     assert!(

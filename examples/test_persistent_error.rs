@@ -28,10 +28,10 @@
 //! Part 5 checks the other half of the same bookkeeping: the finalize sweep
 //! must not count a request that failed through `wait`/`test` as still
 //! active. Rank 0 keeps its two failed persistent requests alive (never
-//! dropped) alongside one plain nonblocking receive it deliberately never
+//! dropped) alongside one persistent receive it starts and deliberately never
 //! completes, then drops `Mpi` while all three are still alive. Only the
-//! never-completed plain receive should still be counted; the stderr
-//! directive below pins the expected count.
+//! never-completed receive should still be counted; the stderr directive
+//! below pins the expected count.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_error
 // mpi-test: np=2 valgrind
@@ -279,9 +279,9 @@ fn part4_partial_start_all(world: &Communicator, mpi: &Mpi, rank: i32, mpich: bo
 }
 
 // Rank 0 keeps two failed persistent requests (one completed through
-// `wait`, one through `test`) and one never-completed plain receive alive
-// across `drop(mpi)`, then finalizes while all three are still registered.
-// Only the never-completed plain receive should be counted active; the
+// `wait`, one through `test`) and one started, never-completed persistent
+// receive alive across `drop(mpi)`, then finalizes while all three are still
+// registered. Only the never-completed receive should be counted active; the
 // module-level `mpi-test-stderr` directive pins the expected count to
 // catch the finalize sweep miscounting either failed persistent request.
 fn part5_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
@@ -318,7 +318,10 @@ fn part5_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
 
         // Never waited: stays active until finalize, giving the sweep
         // exactly one request it must count.
-        let ctrl_req = world.irecv(&mut ctrl, 1, 78).expect("part5: irecv ctrl");
+        let mut ctrl_req = world
+            .recv_init(&mut ctrl, 1, 78)
+            .expect("part5: recv_init ctrl");
+        ctrl_req.start().expect("part5: start ctrl");
         world.barrier().expect("part5: barrier C");
 
         common::check(
