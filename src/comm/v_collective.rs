@@ -8,6 +8,77 @@ use crate::ffi;
 use crate::persistent::PersistentRequest;
 use crate::request::{Request, RequestKind};
 
+#[derive(Clone, Copy)]
+enum VFault {
+    CountsLen,
+    DisplsLen,
+    NegativeCount,
+    NegativeDispl,
+    PastEnd(i64),
+}
+
+#[inline]
+fn v_fault(counts: &[i32], displs: &[i32], size: usize, buf_len: usize) -> Option<VFault> {
+    if counts.len() != size {
+        return Some(VFault::CountsLen);
+    }
+    if displs.len() != size {
+        return Some(VFault::DisplsLen);
+    }
+    for (&count, &displ) in counts.iter().zip(displs) {
+        if count < 0 {
+            return Some(VFault::NegativeCount);
+        }
+        if count > 0 {
+            if displ < 0 {
+                return Some(VFault::NegativeDispl);
+            }
+            let end = i64::from(displ) + i64::from(count);
+            if end > buf_len as i64 {
+                return Some(VFault::PastEnd(end));
+            }
+        }
+    }
+    None
+}
+
+#[cold]
+#[inline(never)]
+fn v_error(
+    (counts_arg, displs_arg, buf_arg): (&'static str, &'static str, &'static str),
+    fault: VFault,
+    size: usize,
+    counts_len: usize,
+    displs_len: usize,
+    buf_len: usize,
+) -> Error {
+    match fault {
+        VFault::CountsLen => Error::BufferSize {
+            arg: counts_arg,
+            required: size,
+            actual: counts_len,
+        },
+        VFault::DisplsLen => Error::BufferSize {
+            arg: displs_arg,
+            required: size,
+            actual: displs_len,
+        },
+        VFault::NegativeCount => Error::InvalidArgument {
+            arg: counts_arg,
+            reason: "negative count",
+        },
+        VFault::NegativeDispl => Error::InvalidArgument {
+            arg: displs_arg,
+            reason: "negative displacement",
+        },
+        VFault::PastEnd(end) => Error::BufferSize {
+            arg: buf_arg,
+            required: end as usize,
+            actual: buf_len,
+        },
+    }
+}
+
 /// Checks one counts/displacements pair that MPI reads on this rank, naming the
 /// offending parameter in the error: each array holds exactly `size` entries
 /// (`BufferSize`), every count is non-negative and every positive-count block
@@ -24,45 +95,17 @@ fn check_v_args(
     buf_len: usize,
 ) -> Result<()> {
     let size = size as usize;
-    if counts.len() != size {
-        return Err(Error::BufferSize {
-            arg: counts_arg,
-            required: size,
-            actual: counts.len(),
-        });
+    match v_fault(counts, displs, size, buf_len) {
+        None => Ok(()),
+        Some(fault) => Err(v_error(
+            (counts_arg, displs_arg, buf_arg),
+            fault,
+            size,
+            counts.len(),
+            displs.len(),
+            buf_len,
+        )),
     }
-    if displs.len() != size {
-        return Err(Error::BufferSize {
-            arg: displs_arg,
-            required: size,
-            actual: displs.len(),
-        });
-    }
-    for (&count, &displ) in counts.iter().zip(displs) {
-        if count < 0 {
-            return Err(Error::InvalidArgument {
-                arg: counts_arg,
-                reason: "negative count",
-            });
-        }
-        if count > 0 {
-            if displ < 0 {
-                return Err(Error::InvalidArgument {
-                    arg: displs_arg,
-                    reason: "negative displacement",
-                });
-            }
-            let end = i64::from(displ) + i64::from(count);
-            if end > buf_len as i64 {
-                return Err(Error::BufferSize {
-                    arg: buf_arg,
-                    required: end as usize,
-                    actual: buf_len,
-                });
-            }
-        }
-    }
-    Ok(())
 }
 
 impl Communicator {
