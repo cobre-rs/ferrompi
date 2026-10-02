@@ -6,7 +6,7 @@ use crate::comm::{
 use crate::datatype::{buf, buf_mut, BytePermutable, DatatypeTag, MpiDatatype, MpiIndexedDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::op::CollectiveOp;
+use crate::op::{check_op, Builtin, CollectiveOp};
 use crate::ReduceOp;
 
 impl Communicator {
@@ -71,6 +71,8 @@ impl Communicator {
     ///
     /// # Errors
     ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
     /// - [`Error::BufferSize`] if this rank is `root` and `recv.len() != send.len()`
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
     ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
@@ -92,7 +94,7 @@ impl Communicator {
         op: impl Into<CollectiveOp<'a, T>>,
         root: i32,
     ) -> Result<()> {
-        let op = op.into();
+        let op = op.into().code(T::TAG)?;
         if self.rank == root {
             check_same_len("recv", send.len(), recv.len())?;
         }
@@ -100,7 +102,7 @@ impl Communicator {
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above at the root; MPI ignores recvbuf at
         // every other rank (MPI-4.1 section 6.9.1). The two slices cannot alias (&[T] vs &mut [T]).
-        let ret = unsafe { ffi::ferrompi_reduce(sp, rp, n, dt, op.code(), root, self.handle) };
+        let ret = unsafe { ffi::ferrompi_reduce(sp, rp, n, dt, op, root, self.handle) };
         Error::check_with_op(ret, "reduce")
     }
 
@@ -114,6 +116,11 @@ impl Communicator {
     /// * `value` - The scalar value to contribute from this process
     /// * `op` - a [`ReduceOp`], a `&`[`UserOp<T>`](crate::UserOp), or a [`CollectiveOp`]
     /// * `root` - Rank of the root process
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    /// define on `T` (a bitwise or logical op on `f32`/`f64`).
     ///
     /// # Example
     ///
@@ -155,8 +162,10 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if `op`
-    /// is a user op and `data.len()` exceeds `i32::MAX`, on every MPI version.
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `data.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -176,20 +185,18 @@ impl Communicator {
         op: impl Into<CollectiveOp<'a, T>>,
         root: i32,
     ) -> Result<()> {
-        let op = op.into();
+        let op = op.into().code(T::TAG)?;
         let (p, n, dt) = buf_mut(data);
         let ret = if self.rank() == root {
             // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
             // this NULL is unambiguous); ferrompi_reduce maps it to MPI_IN_PLACE, so data is
             // both input and output at root.
-            unsafe {
-                ffi::ferrompi_reduce(std::ptr::null(), p, n, dt, op.code(), root, self.handle)
-            }
+            unsafe { ffi::ferrompi_reduce(std::ptr::null(), p, n, dt, op, root, self.handle) }
         } else {
             // SAFETY: data is passed as both sendbuf and recvbuf because strict MPI builds
             // reject a NULL recvbuf at non-root; MPI ignores recvbuf there, so the computation
             // is unaffected.
-            unsafe { ffi::ferrompi_reduce(p, p, n, dt, op.code(), root, self.handle) }
+            unsafe { ffi::ferrompi_reduce(p, p, n, dt, op, root, self.handle) }
         };
         Error::check_with_op(ret, "reduce_inplace")
     }
@@ -204,6 +211,8 @@ impl Communicator {
     ///
     /// # Errors
     ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
     /// - [`Error::BufferSize`] if `send.len() != recv.len()`
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
     ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
@@ -258,13 +267,13 @@ impl Communicator {
         recv: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into();
+        let op = op.into().code(T::TAG)?;
         check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
         // (&[T] vs &mut [T]).
-        let ret = unsafe { ffi::ferrompi_allreduce(sp, rp, n, dt, op.code(), self.handle) };
+        let ret = unsafe { ffi::ferrompi_allreduce(sp, rp, n, dt, op, self.handle) };
         Error::check_with_op(ret, "allreduce")
     }
 
@@ -272,8 +281,10 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if `op`
-    /// is a user op and `data.len()` exceeds `i32::MAX`, on every MPI version.
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `data.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -289,19 +300,23 @@ impl Communicator {
         data: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into();
+        let op = op.into().code(T::TAG)?;
         let (p, n, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
         // NULL is unambiguous); ferrompi_allreduce maps it to MPI_IN_PLACE, so data serves as
         // both send and receive buffer.
-        let ret =
-            unsafe { ffi::ferrompi_allreduce(std::ptr::null(), p, n, dt, op.code(), self.handle) };
+        let ret = unsafe { ffi::ferrompi_allreduce(std::ptr::null(), p, n, dt, op, self.handle) };
         Error::check_with_op(ret, "allreduce_inplace")
     }
 
     /// All-reduce a single scalar value.
     ///
     /// Convenience method for reducing a single element.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    /// define on `T` (a bitwise or logical op on `f32`/`f64`).
     ///
     /// # Example
     ///
@@ -389,7 +404,7 @@ impl Communicator {
         recv: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into();
+        let op = op.into().code(T::TAG)?;
         check_same_len("recv", send.len(), recv.len())?;
         // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T
         // (T: MpiIndexedDatatype — one of the six predefined MPI paired types). They cannot
@@ -402,7 +417,7 @@ impl Communicator {
                 recv.as_mut_ptr().cast::<std::ffi::c_void>(),
                 send.len() as i64,
                 T::TAG as i32,
-                op.code(),
+                op,
                 self.handle,
             )
         };
@@ -459,15 +474,8 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<()> {
-        if !matches!(
-            op,
-            ReduceOp::BitwiseOr | ReduceOp::BitwiseAnd | ReduceOp::BitwiseXor
-        ) {
-            return Err(Error::InvalidArgument {
-                arg: "op",
-                reason: "only the bitwise ops apply to byte reductions",
-            });
-        }
+        let op = Builtin::Reduce(op);
+        check_op(op, DatatypeTag::Byte)?;
         check_same_len("recv", send.len(), recv.len())?;
         let byte_count = std::mem::size_of_val(send);
         // SAFETY:
@@ -485,7 +493,7 @@ impl Communicator {
                 recv.as_mut_ptr().cast::<std::ffi::c_void>(),
                 byte_count as i64,
                 DatatypeTag::Byte as i32,
-                op as i32,
+                op.code(),
                 self.handle,
             )
         };
@@ -506,6 +514,8 @@ impl Communicator {
     ///
     /// # Errors
     ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
     /// - [`Error::BufferSize`] if `send.len() != recv.len()`
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
     ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
@@ -527,13 +537,13 @@ impl Communicator {
         recv: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into();
+        let op = op.into().code(T::TAG)?;
         check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
         // (&[T] vs &mut [T]).
-        let ret = unsafe { ffi::ferrompi_scan(sp, rp, n, dt, op.code(), self.handle) };
+        let ret = unsafe { ffi::ferrompi_scan(sp, rp, n, dt, op, self.handle) };
         Error::check_with_op(ret, "scan")
     }
 
@@ -556,6 +566,8 @@ impl Communicator {
     ///
     /// # Errors
     ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
     /// - [`Error::BufferSize`] if `send.len() != recv.len()`
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
     ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
@@ -578,13 +590,13 @@ impl Communicator {
         recv: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into();
+        let op = op.into().code(T::TAG)?;
         check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
         // (&[T] vs &mut [T]). MPI leaves recv undefined on rank 0, documented above.
-        let ret = unsafe { ffi::ferrompi_exscan(sp, rp, n, dt, op.code(), self.handle) };
+        let ret = unsafe { ffi::ferrompi_exscan(sp, rp, n, dt, op, self.handle) };
         Error::check_with_op(ret, "exscan")
     }
 
@@ -592,6 +604,11 @@ impl Communicator {
     ///
     /// Convenience method for scanning a single element. On rank `i`, returns
     /// the reduction of the input values from ranks `0..=i`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    /// define on `T` (a bitwise or logical op on `f32`/`f64`).
     ///
     /// # Example
     ///
@@ -622,6 +639,11 @@ impl Communicator {
     ///
     /// **Per the MPI standard, the return value on rank 0 is undefined.**
     /// Callers must not rely on the result on rank 0.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    /// define on `T` (a bitwise or logical op on `f32`/`f64`).
     ///
     /// # Example
     ///
@@ -991,6 +1013,8 @@ impl Communicator {
     ///
     /// # Errors
     ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
     /// - [`Error::InvalidArgument`] if `send.len()` is not evenly divisible by the
     ///   communicator size
     /// - [`Error::BufferSize`] if `send.len() != recv.len() * size`
@@ -1014,7 +1038,7 @@ impl Communicator {
         recv: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into();
+        let op = op.into().code(T::TAG)?;
         check_same_len(
             "recv",
             rank_block("send", send.len(), self.size)?,
@@ -1024,8 +1048,7 @@ impl Communicator {
         let (rp, n, dt) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len() * size
         // is verified above.
-        let ret =
-            unsafe { ffi::ferrompi_reduce_scatter_block(sp, rp, n, dt, op.code(), self.handle) };
+        let ret = unsafe { ffi::ferrompi_reduce_scatter_block(sp, rp, n, dt, op, self.handle) };
         Error::check_with_op(ret, "reduce_scatter_block")
     }
 }
@@ -1183,6 +1206,33 @@ mod tests {
                 arg: "data",
                 reason: "length is not a multiple of the communicator size"
             })
+        ));
+    }
+
+    #[test]
+    fn allreduce_float_bitwise_op_returns_invalid_argument() {
+        let comm = test_comm(0, 1);
+        let send = vec![1.0f64; 4];
+        let mut recv = vec![0.0f64; 4];
+        let result = comm.allreduce(&send, &mut recv, ReduceOp::BitwiseOr);
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument {
+                arg: "op",
+                reason: "bitwise and logical ops do not apply to floating-point types"
+            })
+        ));
+    }
+
+    #[test]
+    fn allreduce_bad_op_with_short_recv_returns_invalid_argument_for_op() {
+        let comm = test_comm(0, 1);
+        let send = vec![1.0f64; 4];
+        let mut recv = vec![0.0f64; 3];
+        let result = comm.allreduce(&send, &mut recv, ReduceOp::LogicalAnd);
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument { arg: "op", .. })
         ));
     }
 

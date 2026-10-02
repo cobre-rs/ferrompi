@@ -89,6 +89,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   argument still compiles; replace `ReduceOp::Replace` with
   `AccumulateOp::REPLACE` (or `FetchOp::REPLACE`) and `ReduceOp::NoOp` with
   `FetchOp::NO_OP`.
+- **A bitwise or logical op on `f32`/`f64` returns `Error::InvalidArgument {
+  arg: "op", .. }` before any MPI call** in the blocking reductions and the RMA
+  accumulate calls, instead of `Error::Mpi` with class `Op` (blocking
+  reductions) or a hang or abort at the target (RMA accumulates on MPICH).
+  Migration: match `Error::InvalidArgument`.
 
 ### Added
 

@@ -19,7 +19,7 @@ use std::os::raw::c_void;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Arc;
 
-use crate::datatype::{MpiDatatype, MpiIndexedDatatype};
+use crate::datatype::{DatatypeTag, MpiDatatype, MpiIndexedDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::rt;
@@ -46,23 +46,26 @@ pub enum ReduceOp {
     Min = 2,
     /// Product of values
     Prod = 3,
-    /// Bitwise OR (`MPI_BOR`). Valid only for integer types; MPI returns
-    /// `MPI_ERR_OP` when used with floating-point types.
+    /// Bitwise OR (`MPI_BOR`). Valid for integer types; on a floating-point
+    /// type the call returns [`Error::InvalidArgument`].
     BitwiseOr = 4,
-    /// Bitwise AND (`MPI_BAND`). Valid only for integer types; MPI returns
-    /// `MPI_ERR_OP` when used with floating-point types.
+    /// Bitwise AND (`MPI_BAND`). Valid for integer types; on a floating-point
+    /// type the call returns [`Error::InvalidArgument`].
     BitwiseAnd = 5,
-    /// Bitwise XOR (`MPI_BXOR`). Valid only for integer types; MPI returns
-    /// `MPI_ERR_OP` when used with floating-point types.
+    /// Bitwise XOR (`MPI_BXOR`). Valid for integer types; on a floating-point
+    /// type the call returns [`Error::InvalidArgument`].
     BitwiseXor = 6,
     /// Logical OR (`MPI_LOR`). Interprets nonzero as `true`. Valid for
-    /// integer types.
+    /// integer types; on a floating-point type the call returns
+    /// [`Error::InvalidArgument`].
     LogicalOr = 7,
     /// Logical AND (`MPI_LAND`). Interprets nonzero as `true`. Valid for
-    /// integer types.
+    /// integer types; on a floating-point type the call returns
+    /// [`Error::InvalidArgument`].
     LogicalAnd = 8,
     /// Logical XOR (`MPI_LXOR`). Interprets nonzero as `true`. Valid for
-    /// integer types.
+    /// integer types; on a floating-point type the call returns
+    /// [`Error::InvalidArgument`].
     LogicalXor = 9,
 }
 
@@ -86,6 +89,94 @@ impl Builtin {
             Self::Replace => 12,
             Self::NoOp => 13,
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OpFault {
+    FloatBitwise,
+    PairNeedsLoc,
+    LocNeedsPair,
+    ByteNeedsBitwise,
+}
+
+#[inline]
+fn op_fault(op: Builtin, tag: DatatypeTag) -> Option<OpFault> {
+    match tag {
+        DatatypeTag::F32 | DatatypeTag::F64 => match op {
+            Builtin::Reduce(ReduceOp::Sum | ReduceOp::Max | ReduceOp::Min | ReduceOp::Prod)
+            | Builtin::Replace
+            | Builtin::NoOp => None,
+            Builtin::Reduce(
+                ReduceOp::BitwiseOr
+                | ReduceOp::BitwiseAnd
+                | ReduceOp::BitwiseXor
+                | ReduceOp::LogicalOr
+                | ReduceOp::LogicalAnd
+                | ReduceOp::LogicalXor,
+            ) => Some(OpFault::FloatBitwise),
+            Builtin::PairMax | Builtin::PairMin => Some(OpFault::LocNeedsPair),
+        },
+        DatatypeTag::I32
+        | DatatypeTag::I64
+        | DatatypeTag::U8
+        | DatatypeTag::U32
+        | DatatypeTag::U64 => match op {
+            Builtin::Reduce(_) | Builtin::Replace | Builtin::NoOp => None,
+            Builtin::PairMax | Builtin::PairMin => Some(OpFault::LocNeedsPair),
+        },
+        DatatypeTag::FloatInt
+        | DatatypeTag::DoubleInt
+        | DatatypeTag::LongInt
+        | DatatypeTag::Int2
+        | DatatypeTag::ShortInt
+        | DatatypeTag::LongDoubleInt => match op {
+            Builtin::PairMax | Builtin::PairMin => None,
+            Builtin::Reduce(_) | Builtin::Replace | Builtin::NoOp => Some(OpFault::PairNeedsLoc),
+        },
+        DatatypeTag::Byte => match op {
+            Builtin::Reduce(ReduceOp::BitwiseOr | ReduceOp::BitwiseAnd | ReduceOp::BitwiseXor) => {
+                None
+            }
+            Builtin::Reduce(
+                ReduceOp::Sum
+                | ReduceOp::Max
+                | ReduceOp::Min
+                | ReduceOp::Prod
+                | ReduceOp::LogicalOr
+                | ReduceOp::LogicalAnd
+                | ReduceOp::LogicalXor,
+            )
+            | Builtin::PairMax
+            | Builtin::PairMin
+            | Builtin::Replace
+            | Builtin::NoOp => Some(OpFault::ByteNeedsBitwise),
+        },
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn op_error(fault: OpFault) -> Error {
+    Error::InvalidArgument {
+        arg: "op",
+        reason: match fault {
+            OpFault::FloatBitwise => "bitwise and logical ops do not apply to floating-point types",
+            OpFault::PairNeedsLoc => "only MAX_LOC and MIN_LOC apply to pair types",
+            OpFault::LocNeedsPair => "MAX_LOC and MIN_LOC apply only to pair types",
+            OpFault::ByteNeedsBitwise => "only the bitwise ops apply to byte reductions",
+        },
+    }
+}
+
+/// Rejects a predefined op that MPI does not define on the element kind `tag`. On
+/// pair and byte tags it also rejects `MPI_REPLACE` and `MPI_NO_OP`, which
+/// MPI-4.1 §12.3.4 allows but no window element type reaches.
+#[inline]
+pub(crate) fn check_op(op: Builtin, tag: DatatypeTag) -> Result<()> {
+    match op_fault(op, tag) {
+        None => Ok(()),
+        Some(fault) => Err(op_error(fault)),
     }
 }
 
@@ -169,10 +260,10 @@ impl<T: MpiIndexedDatatype> CollectiveOp<'static, T> {
 }
 
 impl<T> CollectiveOp<'_, T> {
-    pub(crate) fn code(&self) -> i32 {
+    pub(crate) fn code(&self, tag: DatatypeTag) -> Result<i32> {
         match self.op {
-            CollectiveRepr::Builtin(op) => op.code(),
-            CollectiveRepr::User(registration) => registration.code(),
+            CollectiveRepr::Builtin(op) => check_op(op, tag).map(|()| op.code()),
+            CollectiveRepr::User(registration) => Ok(registration.code()),
         }
     }
 }
@@ -180,7 +271,7 @@ impl<T> CollectiveOp<'_, T> {
 /// The operation of the one-sided accumulate calls `accumulate` and
 /// `raccumulate`.
 ///
-/// MPI-4.1 §13.3.4 allows a predefined reduction operation or `MPI_REPLACE`
+/// MPI-4.1 §12.3.4 allows a predefined reduction operation or `MPI_REPLACE`
 /// there, never a user-defined operation, and allows `MPI_NO_OP` only in the
 /// fetching calls (see [`FetchOp`]). So it is built from a [`ReduceOp`], or is
 /// [`REPLACE`](Self::REPLACE).
@@ -223,7 +314,7 @@ pub struct AccumulateOp(Builtin);
 /// The operation of the fetching one-sided calls `get_accumulate` and
 /// `fetch_and_op`.
 ///
-/// MPI-4.1 §13.3.4 allows a predefined reduction operation, `MPI_REPLACE` or
+/// MPI-4.1 §12.3.4 allows a predefined reduction operation, `MPI_REPLACE` or
 /// `MPI_NO_OP` there, never a user-defined operation. So it is built from a
 /// [`ReduceOp`], or is [`REPLACE`](Self::REPLACE) or [`NO_OP`](Self::NO_OP).
 ///
@@ -254,8 +345,8 @@ impl AccumulateOp {
     pub const REPLACE: Self = Self(Builtin::Replace);
 
     #[cfg(feature = "rma")]
-    pub(crate) fn code(self) -> i32 {
-        self.0.code()
+    pub(crate) fn code(self, tag: DatatypeTag) -> Result<i32> {
+        check_op(self.0, tag).map(|()| self.0.code())
     }
 }
 
@@ -269,8 +360,8 @@ impl FetchOp {
     pub const NO_OP: Self = Self(Builtin::NoOp);
 
     #[cfg(feature = "rma")]
-    pub(crate) fn code(self) -> i32 {
-        self.0.code()
+    pub(crate) fn code(self, tag: DatatypeTag) -> Result<i32> {
+        check_op(self.0, tag).map(|()| self.0.code())
     }
 }
 
@@ -635,12 +726,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::datatype::DatatypeTag;
+    use crate::error::Error;
     use crate::ffi;
     use crate::DoubleInt;
 
-    use super::{ferrompi_op_drop_closure, rust_user_op_invoke, typed_adapter, MAX_OPS, REGISTRY};
+    use super::{check_op, ferrompi_op_drop_closure, rust_user_op_invoke, typed_adapter};
     use super::{
-        AccumulateOp, CollectiveOp, FetchOp, OpRegistration, ReduceOp, UserOp, USER_OP_CODE_BASE,
+        AccumulateOp, Builtin, CollectiveOp, FetchOp, OpRegistration, ReduceOp, UserOp, MAX_OPS,
+        REGISTRY, USER_OP_CODE_BASE,
     };
 
     /// The trampoline must hand the closure typed, full-length buffers built
@@ -871,12 +964,27 @@ mod tests {
             ReduceOp::LogicalAnd,
             ReduceOp::LogicalXor,
         ] {
-            assert_eq!(CollectiveOp::<f64>::from(op).code(), op as i32);
+            assert_eq!(
+                CollectiveOp::<i32>::from(op)
+                    .code(DatatypeTag::I32)
+                    .unwrap(),
+                op as i32
+            );
             assert_eq!(AccumulateOp::from(op).0.code(), op as i32);
             assert_eq!(FetchOp::from(op).0.code(), op as i32);
         }
-        assert_eq!(CollectiveOp::<DoubleInt>::MAX_LOC.code(), 10);
-        assert_eq!(CollectiveOp::<DoubleInt>::MIN_LOC.code(), 11);
+        assert_eq!(
+            CollectiveOp::<DoubleInt>::MAX_LOC
+                .code(DatatypeTag::DoubleInt)
+                .unwrap(),
+            10
+        );
+        assert_eq!(
+            CollectiveOp::<DoubleInt>::MIN_LOC
+                .code(DatatypeTag::DoubleInt)
+                .unwrap(),
+            11
+        );
         assert_eq!(AccumulateOp::REPLACE.0.code(), 12);
         assert_eq!(FetchOp::REPLACE.0.code(), 12);
         assert_eq!(FetchOp::NO_OP.0.code(), 13);
@@ -890,6 +998,164 @@ mod tests {
             registration: Arc::new(OpRegistration { slot: 9 }),
             _marker: PhantomData,
         };
-        assert_eq!(CollectiveOp::from(&op).code(), USER_OP_CODE_BASE + 9);
+        assert_eq!(
+            CollectiveOp::from(&op).code(DatatypeTag::F64).unwrap(),
+            USER_OP_CODE_BASE + 9
+        );
+    }
+
+    const FLOAT_TAGS: [DatatypeTag; 2] = [DatatypeTag::F32, DatatypeTag::F64];
+    const INT_TAGS: [DatatypeTag; 5] = [
+        DatatypeTag::I32,
+        DatatypeTag::I64,
+        DatatypeTag::U8,
+        DatatypeTag::U32,
+        DatatypeTag::U64,
+    ];
+    const PAIR_TAGS: [DatatypeTag; 6] = [
+        DatatypeTag::FloatInt,
+        DatatypeTag::DoubleInt,
+        DatatypeTag::LongInt,
+        DatatypeTag::Int2,
+        DatatypeTag::ShortInt,
+        DatatypeTag::LongDoubleInt,
+    ];
+    const FLOAT_OK: [ReduceOp; 4] = [ReduceOp::Sum, ReduceOp::Max, ReduceOp::Min, ReduceOp::Prod];
+    const BITWISE: [ReduceOp; 3] = [
+        ReduceOp::BitwiseOr,
+        ReduceOp::BitwiseAnd,
+        ReduceOp::BitwiseXor,
+    ];
+    const FLOAT_BAD: [ReduceOp; 6] = [
+        ReduceOp::BitwiseOr,
+        ReduceOp::BitwiseAnd,
+        ReduceOp::BitwiseXor,
+        ReduceOp::LogicalOr,
+        ReduceOp::LogicalAnd,
+        ReduceOp::LogicalXor,
+    ];
+
+    const FLOAT_BITWISE: &str = "bitwise and logical ops do not apply to floating-point types";
+    const PAIR_NEEDS_LOC: &str = "only MAX_LOC and MIN_LOC apply to pair types";
+    const LOC_NEEDS_PAIR: &str = "MAX_LOC and MIN_LOC apply only to pair types";
+    const BYTE_NEEDS_BITWISE: &str = "only the bitwise ops apply to byte reductions";
+
+    fn reduce_ops() -> impl Iterator<Item = Builtin> {
+        FLOAT_OK.into_iter().chain(FLOAT_BAD).map(Builtin::Reduce)
+    }
+
+    fn builtins() -> Vec<Builtin> {
+        reduce_ops()
+            .chain([
+                Builtin::PairMax,
+                Builtin::PairMin,
+                Builtin::Replace,
+                Builtin::NoOp,
+            ])
+            .collect()
+    }
+
+    fn assert_rejected(op: Builtin, tag: DatatypeTag, expected: &str) {
+        assert!(
+            matches!(
+                check_op(op, tag),
+                Err(Error::InvalidArgument { arg: "op", reason }) if reason == expected
+            ),
+            "{op:?} on {tag:?}"
+        );
+    }
+
+    #[test]
+    fn check_op_float_bitwise_returns_invalid_argument() {
+        for tag in FLOAT_TAGS {
+            for op in FLOAT_BAD {
+                assert_rejected(Builtin::Reduce(op), tag, FLOAT_BITWISE);
+            }
+        }
+    }
+
+    #[test]
+    fn check_op_pair_non_loc_returns_invalid_argument() {
+        let non_loc: Vec<Builtin> = builtins()
+            .into_iter()
+            .filter(|op| !matches!(op, Builtin::PairMax | Builtin::PairMin))
+            .collect();
+        assert_eq!(non_loc.len(), 12);
+        for tag in PAIR_TAGS {
+            for &op in &non_loc {
+                assert_rejected(op, tag, PAIR_NEEDS_LOC);
+            }
+        }
+    }
+
+    #[test]
+    fn check_op_loc_on_primitive_returns_invalid_argument() {
+        for tag in FLOAT_TAGS.into_iter().chain(INT_TAGS) {
+            for op in [Builtin::PairMax, Builtin::PairMin] {
+                assert_rejected(op, tag, LOC_NEEDS_PAIR);
+            }
+        }
+    }
+
+    #[test]
+    fn check_op_byte_non_bitwise_returns_invalid_argument() {
+        let non_bitwise: Vec<Builtin> = builtins()
+            .into_iter()
+            .filter(|op| !matches!(op, Builtin::Reduce(r) if BITWISE.contains(r)))
+            .collect();
+        assert_eq!(non_bitwise.len(), 11);
+        for op in non_bitwise {
+            assert_rejected(op, DatatypeTag::Byte, BYTE_NEEDS_BITWISE);
+        }
+    }
+
+    #[test]
+    fn check_op_accepts_every_op_mpi_defines() {
+        let mut accepted = 0;
+        let mut accept = |op: Builtin, tag: DatatypeTag| {
+            assert!(check_op(op, tag).is_ok(), "{op:?} on {tag:?}");
+            accepted += 1;
+        };
+        for tag in FLOAT_TAGS {
+            for op in FLOAT_OK {
+                accept(Builtin::Reduce(op), tag);
+            }
+            accept(Builtin::Replace, tag);
+            accept(Builtin::NoOp, tag);
+        }
+        for tag in INT_TAGS {
+            for op in reduce_ops().chain([Builtin::Replace, Builtin::NoOp]) {
+                accept(op, tag);
+            }
+        }
+        for tag in PAIR_TAGS {
+            accept(Builtin::PairMax, tag);
+            accept(Builtin::PairMin, tag);
+        }
+        for op in BITWISE {
+            accept(Builtin::Reduce(op), DatatypeTag::Byte);
+        }
+        assert_eq!(accepted, 87);
+
+        // The four rejection tests above cover exactly the rest of the 14 x 14 grid.
+        let rejected = FLOAT_TAGS.len() * FLOAT_BAD.len()
+            + PAIR_TAGS.len() * 12
+            + (FLOAT_TAGS.len() + INT_TAGS.len()) * 2
+            + 11;
+        let tags: Vec<DatatypeTag> = FLOAT_TAGS
+            .into_iter()
+            .chain(INT_TAGS)
+            .chain(PAIR_TAGS)
+            .chain([DatatypeTag::Byte])
+            .collect();
+        let grid = builtins().len() * tags.len();
+        assert_eq!(grid, 196);
+        assert_eq!(accepted + rejected, grid);
+        let ok_in_grid = builtins()
+            .into_iter()
+            .flat_map(|op| tags.iter().map(move |&tag| check_op(op, tag)))
+            .filter(Result::is_ok)
+            .count();
+        assert_eq!(ok_in_grid, accepted);
     }
 }
