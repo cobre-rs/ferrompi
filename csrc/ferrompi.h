@@ -145,6 +145,19 @@ int ferrompi_barrier(int32_t comm);
  * Generic Point-to-Point Communication
  * ============================================================ */
 
+/* A receive, probe or completion status. source and tag are what MPI
+ * reported; count is in elements of the call's datatype, -1 when the
+ * message is not a whole number of them; error is an MPI error class
+ * (MPI_Error_class of MPI_Status.MPI_ERROR), never an error code:
+ * MPI_SUCCESS unless a multi-request completion reports this request's
+ * own error. */
+typedef struct {
+    int32_t source;
+    int32_t tag;
+    int64_t count;
+    int32_t error;
+} ferrompi_status;
+
 int ferrompi_send(
     const void* buf,
     int64_t count,
@@ -161,9 +174,7 @@ int ferrompi_recv(
     int32_t source,
     int32_t tag,
     int32_t comm,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* actual_count
+    ferrompi_status* status
 );
 
 int ferrompi_isend(
@@ -198,9 +209,7 @@ int ferrompi_sendrecv(
     int32_t source,
     int32_t recvtag,
     int32_t comm,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* actual_count
+    ferrompi_status* status
 );
 
 /* ============================================================
@@ -211,9 +220,7 @@ int ferrompi_probe(
     int32_t source,
     int32_t tag,
     int32_t comm,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* count,
+    ferrompi_status* status,
     int32_t datatype_tag
 );
 
@@ -222,9 +229,7 @@ int ferrompi_iprobe(
     int32_t tag,
     int32_t comm,
     int32_t* flag,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* count,
+    ferrompi_status* status,
     int32_t datatype_tag
 );
 
@@ -708,9 +713,7 @@ int ferrompi_recv_custom(
     int32_t source,
     int32_t tag,
     int32_t comm,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* actual_count
+    ferrompi_status* status
 );
 
 int ferrompi_isend_custom(

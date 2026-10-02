@@ -50,8 +50,8 @@ impl Communicator {
     /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
     /// at once with no data.
     ///
-    /// Returns `(actual_source, actual_tag, actual_count)`; `actual_count` is
-    /// `-1` when the message is not a whole number of `T`.
+    /// Returns `(source, tag, count)`; `count` is `-1` when the message is not
+    /// a whole number of `T`.
     ///
     /// # Example
     ///
@@ -70,27 +70,13 @@ impl Communicator {
     ) -> Result<(i32, i32, i64)> {
         let source = source.into().source_code("source")?;
         let tag = tag.into().tag_code("tag")?;
-        let mut actual_source: i32 = 0;
-        let mut actual_tag: i32 = 0;
-        let mut actual_count: i64 = 0;
+        let mut status = ffi::FerrompiStatus::default();
 
         let (p, n, dt) = buf_mut(data);
         // SAFETY: this blocking call returns only after MPI is done with the buffer.
-        let ret = unsafe {
-            ffi::ferrompi_recv(
-                p,
-                n,
-                dt,
-                source,
-                tag,
-                self.handle,
-                &mut actual_source,
-                &mut actual_tag,
-                &mut actual_count,
-            )
-        };
+        let ret = unsafe { ffi::ferrompi_recv(p, n, dt, source, tag, self.handle, &mut status) };
         Error::check_with_op(ret, "recv")?;
-        Ok((actual_source, actual_tag, actual_count))
+        Ok((status.source, status.tag, status.count))
     }
 
     /// Nonblocking send.
@@ -190,8 +176,8 @@ impl Communicator {
     /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
     /// at once with no data.
     ///
-    /// Returns `(actual_source, actual_tag, actual_count)`; `actual_count` is
-    /// `-1` when the message is not a whole number of `T`.
+    /// Returns `(source, tag, count)`; `count` is `-1` when the message is not
+    /// a whole number of `T`.
     ///
     /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
     /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
@@ -230,9 +216,7 @@ impl Communicator {
         let dest = dest.into().dest_code()?;
         let source = source.into().source_code("source")?;
         let recvtag = recvtag.into().tag_code("recvtag")?;
-        let mut actual_source: i32 = 0;
-        let mut actual_tag: i32 = 0;
-        let mut actual_count: i64 = 0;
+        let mut status = ffi::FerrompiStatus::default();
 
         let (sp, sn, sdt) = buf(send);
         let (rp, rn, rdt) = buf_mut(recv);
@@ -251,13 +235,11 @@ impl Communicator {
                 source,
                 recvtag,
                 self.handle,
-                &mut actual_source,
-                &mut actual_tag,
-                &mut actual_count,
+                &mut status,
             )
         };
         Error::check_with_op(ret, "sendrecv")?;
-        Ok((actual_source, actual_tag, actual_count))
+        Ok((status.source, status.tag, status.count))
     }
 
     /// Blocking probe for an incoming message.
@@ -299,27 +281,16 @@ impl Communicator {
     ) -> Result<Status> {
         let source = source.into().source_code("source")?;
         let tag = tag.into().tag_code("tag")?;
-        let mut actual_source: i32 = 0;
-        let mut actual_tag: i32 = 0;
-        let mut count: i64 = 0;
+        let mut status = ffi::FerrompiStatus::default();
 
         // SAFETY: all arguments are scalar integers or exclusive output pointers; self.handle is owned.
-        let ret = unsafe {
-            ffi::ferrompi_probe(
-                source,
-                tag,
-                self.handle,
-                &mut actual_source,
-                &mut actual_tag,
-                &mut count,
-                T::TAG as i32,
-            )
-        };
+        let ret =
+            unsafe { ffi::ferrompi_probe(source, tag, self.handle, &mut status, T::TAG as i32) };
         Error::check_with_op(ret, "probe")?;
         Ok(Status {
-            source: actual_source,
-            tag: actual_tag,
-            count,
+            source: status.source,
+            tag: status.tag,
+            count: status.count,
         })
     }
 
@@ -361,9 +332,7 @@ impl Communicator {
         let source = source.into().source_code("source")?;
         let tag = tag.into().tag_code("tag")?;
         let mut flag: i32 = 0;
-        let mut actual_source: i32 = 0;
-        let mut actual_tag: i32 = 0;
-        let mut count: i64 = 0;
+        let mut status = ffi::FerrompiStatus::default();
 
         // SAFETY: all arguments are scalar integers or exclusive output pointers; self.handle is owned.
         let ret = unsafe {
@@ -372,18 +341,16 @@ impl Communicator {
                 tag,
                 self.handle,
                 &mut flag,
-                &mut actual_source,
-                &mut actual_tag,
-                &mut count,
+                &mut status,
                 T::TAG as i32,
             )
         };
         Error::check_with_op(ret, "iprobe")?;
         if flag != 0 {
             Ok(Some(Status {
-                source: actual_source,
-                tag: actual_tag,
-                count,
+                source: status.source,
+                tag: status.tag,
+                count: status.count,
             }))
         } else {
             Ok(None)
@@ -816,9 +783,7 @@ impl Communicator {
         let source = source.into().source_code("source")?;
         let tag = tag.into().tag_code("tag")?;
         datatype.check_layout::<T>()?;
-        let mut actual_source: i32 = 0;
-        let mut actual_tag: i32 = 0;
-        let mut actual_count: i64 = 0;
+        let mut status = ffi::FerrompiStatus::default();
 
         // SAFETY: buf.as_mut_ptr() is exclusively writable for buf.len() elements; datatype.handle
         // is an owned, committed CustomDatatype; the buffer outlives this blocking call; the
@@ -832,16 +797,14 @@ impl Communicator {
                 source,
                 tag,
                 self.handle,
-                &mut actual_source,
-                &mut actual_tag,
-                &mut actual_count,
+                &mut status,
             )
         };
         Error::check_with_op(ret, "recv_custom")?;
         Ok(Status {
-            source: actual_source,
-            tag: actual_tag,
-            count: actual_count,
+            source: status.source,
+            tag: status.tag,
+            count: status.count,
         })
     }
 

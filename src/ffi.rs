@@ -10,6 +10,18 @@ use std::os::raw::{c_char, c_double, c_int, c_void};
 pub type int32_t = i32;
 pub type int64_t = i64;
 
+/// Mirror of the C `ferrompi_status`.
+#[repr(C)]
+#[derive(Default)]
+pub struct FerrompiStatus {
+    pub source: int32_t,
+    pub tag: int32_t,
+    pub count: int64_t,
+    pub error: int32_t,
+}
+
+const _: () = assert!(std::mem::size_of::<FerrompiStatus>() == 24);
+
 // Lock type constants matching the C header defines
 #[cfg(feature = "rma")]
 pub const FERROMPI_LOCK_EXCLUSIVE: int32_t = 0;
@@ -246,9 +258,7 @@ guarded_extern! {
         source: int32_t,
         tag: int32_t,
         comm: int32_t,
-        actual_source: *mut int32_t,
-        actual_tag: *mut int32_t,
-        actual_count: *mut int64_t,
+        status: *mut FerrompiStatus,
     ) -> c_int;
 
     pub fn ferrompi_isend(
@@ -283,9 +293,7 @@ guarded_extern! {
         source: int32_t,
         recvtag: int32_t,
         comm: int32_t,
-        actual_source: *mut int32_t,
-        actual_tag: *mut int32_t,
-        actual_count: *mut int64_t,
+        status: *mut FerrompiStatus,
     ) -> c_int;
 
     // ============================================================
@@ -295,9 +303,7 @@ guarded_extern! {
         source: int32_t,
         tag: int32_t,
         comm: int32_t,
-        actual_source: *mut int32_t,
-        actual_tag: *mut int32_t,
-        count: *mut int64_t,
+        status: *mut FerrompiStatus,
         datatype_tag: int32_t,
     ) -> c_int;
 
@@ -306,9 +312,7 @@ guarded_extern! {
         tag: int32_t,
         comm: int32_t,
         flag: *mut int32_t,
-        actual_source: *mut int32_t,
-        actual_tag: *mut int32_t,
-        count: *mut int64_t,
+        status: *mut FerrompiStatus,
         datatype_tag: int32_t,
     ) -> c_int;
 
@@ -958,9 +962,7 @@ guarded_extern! {
         source: int32_t,
         tag: int32_t,
         comm: int32_t,
-        actual_source: *mut int32_t,
-        actual_tag: *mut int32_t,
-        actual_count: *mut int64_t,
+        status: *mut FerrompiStatus,
     ) -> c_int;
 
     pub fn ferrompi_isend_custom(
