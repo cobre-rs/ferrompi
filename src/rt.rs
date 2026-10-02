@@ -284,10 +284,15 @@ pub(crate) fn enter_completion() -> std::result::Result<InFlight, c_int> {
 }
 
 /// [`enter_completion`] for every state but `Active(Single)`/`Active(Funneled)`,
-/// out of line for the same reason as [`enter_other`], which it defers to
-/// outside `Finalizing`.
+/// out of line for the same reason as [`enter_other`]. Outside `Finalizing` it
+/// matches [`enter`], except that a counted call's re-check admits `Finalizing`:
+/// a call that read an active state just before `begin_finalize` stored
+/// `Finalizing` is not refused.
 #[inline(never)]
 fn enter_other_completion(state: u8) -> std::result::Result<InFlight, c_int> {
+    if state == ACTIVE_SERIALIZED || state == ACTIVE_MULTIPLE {
+        return enter_counted(true);
+    }
     if state != FINALIZING {
         return enter_other(state);
     }
