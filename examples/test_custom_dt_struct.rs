@@ -3,7 +3,7 @@
 //! Exercises:
 //! - Successful construction of a `{ f64, i32 }` struct type (8-byte f64 at
 //!   offset 0, i32 at offset 8) and `raw_handle() >= 0`
-//! - Indexed-basetype rejection returns `Error::InvalidOp` before any FFI call
+//! - Indexed-basetype rejection returns `Error::InvalidArgument` before any FFI call
 //! - Empty `fields` slice returns `Err` with class `Arg` without calling into
 //!   MPI
 //! - Drop frees the underlying MPI handle (no double-free on exit)
@@ -63,7 +63,7 @@ fn main() {
     }
 
     // ========================================================================
-    // Test 2: create_struct with a FloatInt field returns Err(Error::InvalidOp)
+    // Test 2: create_struct with a FloatInt field returns Err(Error::InvalidArgument)
     //         without calling into MPI (pre-FFI validation in the Rust wrapper)
     // ========================================================================
     {
@@ -73,16 +73,16 @@ fn main() {
             basetype: DatatypeTag::FloatInt,
         }];
         match CustomDatatype::create_struct(&fields) {
-            Err(Error::InvalidOp) => {
+            Err(Error::InvalidArgument { .. }) => {
                 if rank == 0 {
                     println!(
-                        "PASS: Test 2 — create_struct(FloatInt field) returned Err(InvalidOp)"
+                        "PASS: Test 2 — create_struct(FloatInt field) returned Err(InvalidArgument)"
                     );
                 }
             }
             other => {
                 eprintln!(
-                    "rank {rank}: FAIL Test 2 — expected Err(InvalidOp), got: {:?}",
+                    "rank {rank}: FAIL Test 2 — expected Err(InvalidArgument), got: {:?}",
                     other.err()
                 );
                 local_ok = false;

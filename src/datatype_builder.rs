@@ -117,17 +117,20 @@ impl CustomDatatype {
     /// constructors in this family.
     ///
     /// Returns `Ok(())` for the seven numeric primitives (`F32`, `F64`, `I32`,
-    /// `I64`, `U8`, `U32`, `U64`) and `Byte`. Returns [`Error::InvalidOp`] for
-    /// the indexed paired types (`FloatInt`, `DoubleInt`, etc.), which the
-    /// CustomDatatype builders do not accept.
-    fn validate_primitive_basetype(basetype: DatatypeTag) -> Result<()> {
+    /// `I64`, `U8`, `U32`, `U64`) and `Byte`. Returns [`Error::InvalidArgument`]
+    /// naming `arg` for the indexed paired types (`FloatInt`, `DoubleInt`, etc.),
+    /// which the CustomDatatype builders do not accept.
+    fn validate_primitive_basetype(basetype: DatatypeTag, arg: &'static str) -> Result<()> {
         match basetype {
             DatatypeTag::FloatInt
             | DatatypeTag::DoubleInt
             | DatatypeTag::LongInt
             | DatatypeTag::Int2
             | DatatypeTag::ShortInt
-            | DatatypeTag::LongDoubleInt => Err(Error::InvalidOp),
+            | DatatypeTag::LongDoubleInt => Err(Error::InvalidArgument {
+                arg,
+                reason: "pair types are not accepted as a base type",
+            }),
             DatatypeTag::F32
             | DatatypeTag::F64
             | DatatypeTag::I32
@@ -152,11 +155,11 @@ impl CustomDatatype {
     /// * `basetype` — the predefined primitive datatype to replicate. Must be
     ///   one of `F32`, `F64`, `I32`, `I64`, `U8`, `U32`, `U64`, or `Byte`.
     ///   Passing an indexed type (`FloatInt`, `DoubleInt`, etc.) returns
-    ///   [`Error::InvalidOp`] without invoking MPI.
+    ///   [`Error::InvalidArgument`] without invoking MPI.
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidOp`] — `basetype` is an indexed paired type.
+    /// - [`Error::InvalidArgument`] — `basetype` is an indexed paired type.
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count)
     ///   or [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg) — `count` is non-positive.
     /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
@@ -172,7 +175,7 @@ impl CustomDatatype {
     /// assert!(dt.raw_handle() >= 0);
     /// ```
     pub fn contiguous(count: i32, basetype: DatatypeTag) -> Result<Self> {
-        Self::validate_primitive_basetype(basetype)?;
+        Self::validate_primitive_basetype(basetype, "basetype")?;
 
         let mut handle: i32 = -1;
         // SAFETY: all arguments are scalar integers; no pointer or lifetime invariant at stake.
@@ -198,12 +201,12 @@ impl CustomDatatype {
     ///   blocks. May be negative (MPI allows reverse-direction strided types).
     /// * `basetype` — the predefined primitive datatype. Must be one of `F32`,
     ///   `F64`, `I32`, `I64`, `U8`, `U32`, `U64`, or `Byte`. Passing an indexed
-    ///   type (`FloatInt`, `DoubleInt`, etc.) returns [`Error::InvalidOp`]
+    ///   type (`FloatInt`, `DoubleInt`, etc.) returns [`Error::InvalidArgument`]
     ///   without invoking MPI.
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidOp`] — `basetype` is an indexed paired type.
+    /// - [`Error::InvalidArgument`] — `basetype` is an indexed paired type.
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count)
     ///   or [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg) — `count` is
     ///   zero or negative.
@@ -228,7 +231,7 @@ impl CustomDatatype {
         stride: i32,
         basetype: DatatypeTag,
     ) -> Result<Self> {
-        Self::validate_primitive_basetype(basetype)?;
+        Self::validate_primitive_basetype(basetype, "basetype")?;
 
         let mut handle: i32 = -1;
         // SAFETY: all arguments are scalar integers; no pointer or lifetime invariant at stake.
@@ -253,12 +256,12 @@ impl CustomDatatype {
     ///   [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg) without calling MPI.
     ///   Each field's `basetype` must be one of the primitive types (`F32`,
     ///   `F64`, `I32`, `I64`, `U8`, `U32`, `U64`, `Byte`). Passing an indexed
-    ///   type (`FloatInt`, `DoubleInt`, etc.) returns [`Error::InvalidOp`]
+    ///   type (`FloatInt`, `DoubleInt`, etc.) returns [`Error::InvalidArgument`]
     ///   before invoking MPI.
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidOp`] — any field has an indexed paired basetype.
+    /// - [`Error::InvalidArgument`] — any field has an indexed paired basetype.
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg)
     ///   — `fields` is empty.
     /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
@@ -283,7 +286,7 @@ impl CustomDatatype {
         let mut displacements: Vec<i64> = Vec::with_capacity(fields.len());
         let mut basetype_tags: Vec<i32> = Vec::with_capacity(fields.len());
         for f in fields {
-            Self::validate_primitive_basetype(f.basetype)?;
+            Self::validate_primitive_basetype(f.basetype, "fields")?;
             blocklengths.push(f.blocklength);
             displacements.push(f.displacement);
             basetype_tags.push(f.basetype as i32);
@@ -437,33 +440,47 @@ mod tests {
     use crate::datatype::DatatypeTag;
     use crate::error::Error;
 
-    /// Calling `contiguous` with an indexed basetype returns `Error::InvalidOp`
-    /// without invoking any FFI. This test does not require an MPI runtime.
+    /// Calling `contiguous` with an indexed basetype returns
+    /// `Error::InvalidArgument` without invoking any FFI. This test does not
+    /// require an MPI runtime.
     #[test]
     fn contiguous_rejects_indexed_basetype() {
         let result = CustomDatatype::contiguous(10, DatatypeTag::FloatInt);
         assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "expected Err(Error::InvalidOp), got: {:?}",
+            matches!(
+                result,
+                Err(Error::InvalidArgument {
+                    arg: "basetype",
+                    ..
+                })
+            ),
+            "expected Err(Error::InvalidArgument {{ arg: \"basetype\", .. }}), got: {:?}",
             result
         );
     }
 
-    /// Calling `vector` with an indexed basetype returns `Error::InvalidOp`
-    /// without invoking any FFI. This test does not require an MPI runtime.
+    /// Calling `vector` with an indexed basetype returns
+    /// `Error::InvalidArgument` without invoking any FFI. This test does not
+    /// require an MPI runtime.
     #[test]
     fn vector_rejects_indexed_basetype() {
         let result = CustomDatatype::vector(3, 2, 5, DatatypeTag::FloatInt);
         assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "expected Err(Error::InvalidOp), got: {:?}",
+            matches!(
+                result,
+                Err(Error::InvalidArgument {
+                    arg: "basetype",
+                    ..
+                })
+            ),
+            "expected Err(Error::InvalidArgument {{ arg: \"basetype\", .. }}), got: {:?}",
             result
         );
     }
 
     /// Calling `create_struct` with a field whose basetype is an indexed paired
-    /// type returns `Error::InvalidOp` without invoking any FFI. This test does
-    /// not require an MPI runtime.
+    /// type returns `Error::InvalidArgument` without invoking any FFI. This
+    /// test does not require an MPI runtime.
     #[test]
     fn create_struct_rejects_indexed_basetype() {
         let result = CustomDatatype::create_struct(&[StructField {
@@ -472,8 +489,8 @@ mod tests {
             basetype: DatatypeTag::FloatInt,
         }]);
         assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "expected Err(Error::InvalidOp), got: {:?}",
+            matches!(result, Err(Error::InvalidArgument { arg: "fields", .. })),
+            "expected Err(Error::InvalidArgument {{ arg: \"fields\", .. }}), got: {:?}",
             result
         );
     }

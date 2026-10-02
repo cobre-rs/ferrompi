@@ -3,7 +3,7 @@
 //! Exercises:
 //! - Successful construction and `raw_handle() >= 0`
 //! - Count=0 returns an MPI error (`Count` or `Arg` class, implementation-defined)
-//! - Indexed-basetype rejection returns `Error::InvalidOp` before any FFI call
+//! - Indexed-basetype rejection returns `Error::InvalidArgument` before any FFI call
 //! - Drop frees the underlying MPI handle (no double-free on exit)
 //!
 //! All assertions are protected by a sentinel allreduce(Min) before any
@@ -91,19 +91,21 @@ fn main() {
     }
 
     // ========================================================================
-    // Test 3: contiguous(5, FloatInt) returns Err(Error::InvalidOp) without
+    // Test 3: contiguous(5, FloatInt) returns Err(Error::InvalidArgument) without
     //         calling into MPI (pre-FFI validation in the Rust wrapper)
     // ========================================================================
     {
         match CustomDatatype::contiguous(5, DatatypeTag::FloatInt) {
-            Err(Error::InvalidOp) => {
+            Err(Error::InvalidArgument { .. }) => {
                 if rank == 0 {
-                    println!("PASS: Test 3 — contiguous(5, FloatInt) returned Err(InvalidOp)");
+                    println!(
+                        "PASS: Test 3 — contiguous(5, FloatInt) returned Err(InvalidArgument)"
+                    );
                 }
             }
             other => {
                 eprintln!(
-                    "rank {rank}: FAIL Test 3 — expected Err(InvalidOp), got: {:?}",
+                    "rank {rank}: FAIL Test 3 — expected Err(InvalidArgument), got: {:?}",
                     other.err()
                 );
                 local_ok = false;

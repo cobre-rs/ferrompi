@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a counts or displacements array of the wrong length or a block past
   the buffer, and `InvalidArgument` for a negative count or displacement.
   Migration: match the new variants; `arg` names the parameter.
+- **`CustomDatatype::contiguous`, `vector` and `create_struct`
+  reject a pair base type with `Error::InvalidArgument`** instead of
+  `Error::InvalidOp`. Migration: match `Error::InvalidArgument`; `arg` is
+  `basetype` for `contiguous` and `vector`, `fields` for `create_struct`.
 
 ### Fixed
 
