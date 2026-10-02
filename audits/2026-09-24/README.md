@@ -202,7 +202,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | ARC-13 | `SharedWindow` duplicates `Win`; `WinKind` dead | minor | one-way | 0.5.x WinKind / 0.7.0 (D-5) | fixed (b39adfb): WinKind removed; SharedWindow merge planned (ferrompi-0.7.0; design input: issue #28) |
 | ARC-14 | `numa` feature has no NUMA code, implies `rma` | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
 | ARC-15 | Naming/coverage asymmetries | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
-| ARC-16 | Magic `-1` sentinels; no typed source/tag | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
+| ARC-16 | Magic `-1` sentinels; no typed source/tag | minor | one-way | 0.7.0 | fixed (7ebb70f, c894c2e, 73a8c06, 3784942, 9fc0266) |
 | ARC-17 | RMA redundant `target_count`, duplicate tags | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
 | ARC-18 | Open MPI 5 capabilities unused (persistent collectives, `create_from_group` gated on `MPI_VERSION >= 4`; OMPI 5 reports 3.1) | minor | two-way | 0.5.x | fixed (213cfd0, d555791, c58cd05) |
 
