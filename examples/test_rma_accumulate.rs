@@ -5,13 +5,13 @@
 //!   1. Sum: rank 0 accumulates `[10, 20, 30, 40]` onto rank 1's window which
 //!      starts at `[1, 2, 3, 4]`; rank 1 must observe `[11, 22, 33, 44]`.
 //!   2. Replace: rank 0 accumulates `[100, 200, 300, 400]` with
-//!      `ReduceOp::Replace` onto rank 1's window; rank 1 must observe
+//!      `AccumulateOp::REPLACE` onto rank 1's window; rank 1 must observe
 //!      `[100, 200, 300, 400]`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_accumulate
 // mpi-test: np=2
 
-use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
+use ferrompi::{AccumulateOp, Mpi, ReduceOp, Win, WinFenceAssert};
 
 mod common;
 
@@ -76,7 +76,7 @@ fn main() {
 
     // ========================================================================
     // Test 2 (Replace): rank 1 initialises its window to [1, 2, 3, 4]; rank 0
-    // accumulates [100, 200, 300, 400] with ReduceOp::Replace; rank 1 asserts
+    // accumulates [100, 200, 300, 400] with AccumulateOp::REPLACE; rank 1 asserts
     // [100, 200, 300, 400] after the closing fence.
     // ========================================================================
     {
@@ -95,7 +95,7 @@ fn main() {
 
         if rank == 0 {
             let buf = [100.0f64, 200.0, 300.0, 400.0];
-            if let Err(e) = win.accumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Replace) {
+            if let Err(e) = win.accumulate(&buf, 1, 0, buf.len() as i64, AccumulateOp::REPLACE) {
                 eprintln!("FAIL: rank 0 Win::accumulate Replace returned error: {e}");
                 local_ok = false;
             }

@@ -31,28 +31,10 @@ use crate::rt;
 /// Reduction operations
 ///
 /// `MPI_MAXLOC` and `MPI_MINLOC` are [`CollectiveOp::MAX_LOC`] and
-/// [`CollectiveOp::MIN_LOC`], for the pair types only.
-///
-/// The `Replace` and `NoOp` variants are only available with the `rma` feature.
-///
-/// # Feature-gated variants
-///
-/// Without `--features rma`, referencing `ReduceOp::Replace` is a compile error:
-///
-#[cfg_attr(not(feature = "rma"), doc = "```compile_fail")]
-#[cfg_attr(
-    not(feature = "rma"),
-    doc = "// This must not compile without --features rma."
-)]
-#[cfg_attr(not(feature = "rma"), doc = "let _ = ferrompi::ReduceOp::Replace;")]
-#[cfg_attr(not(feature = "rma"), doc = "```")]
-#[cfg_attr(feature = "rma", doc = "```no_run")]
-#[cfg_attr(
-    feature = "rma",
-    doc = "// With --features rma, ReduceOp::Replace is available."
-)]
-#[cfg_attr(feature = "rma", doc = "let _ = ferrompi::ReduceOp::Replace;")]
-#[cfg_attr(feature = "rma", doc = "```")]
+/// [`CollectiveOp::MIN_LOC`], for the pair types only. The one-sided
+/// accumulate calls add `MPI_REPLACE` ([`AccumulateOp::REPLACE`],
+/// [`FetchOp::REPLACE`]) and `MPI_NO_OP` ([`FetchOp::NO_OP`]), which no
+/// collective accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ReduceOp {
@@ -82,24 +64,6 @@ pub enum ReduceOp {
     /// Logical XOR (`MPI_LXOR`). Interprets nonzero as `true`. Valid for
     /// integer types.
     LogicalXor = 9,
-    /// Replace the target buffer with the source value (`MPI_REPLACE`).
-    ///
-    /// Only valid for `MPI_Accumulate`-family operations. Passing to
-    /// `allreduce`, `reduce`, `scan`, etc. returns `MPI_ERR_OP` from MPI.
-    ///
-    /// This variant is only present when the `rma` feature is enabled.
-    #[cfg(feature = "rma")]
-    Replace = 12,
-    /// No-op: leaves the target buffer unchanged (`MPI_NO_OP`).
-    ///
-    /// Only valid for `MPI_Accumulate`-family operations. Passing to
-    /// `allreduce`, `reduce`, `scan`, etc. returns `MPI_ERR_OP` from MPI.
-    ///
-    /// # Compile-time availability
-    ///
-    /// This variant is only present when the `rma` feature is enabled.
-    #[cfg(feature = "rma")]
-    NoOp = 13,
 }
 
 /// A predefined MPI operation, before the shim maps its code to an `MPI_Op`.
@@ -108,6 +72,8 @@ pub(crate) enum Builtin {
     Reduce(ReduceOp),
     PairMax,
     PairMin,
+    Replace,
+    NoOp,
 }
 
 impl Builtin {
@@ -117,6 +83,8 @@ impl Builtin {
             Self::Reduce(op) => op as i32,
             Self::PairMax => 10,
             Self::PairMin => 11,
+            Self::Replace => 12,
+            Self::NoOp => 13,
         }
     }
 }
@@ -206,6 +174,103 @@ impl<T> CollectiveOp<'_, T> {
             CollectiveRepr::Builtin(op) => op.code(),
             CollectiveRepr::User(registration) => registration.code(),
         }
+    }
+}
+
+/// The operation of the one-sided accumulate calls `accumulate` and
+/// `raccumulate`.
+///
+/// MPI-4.1 §13.3.4 allows a predefined reduction operation or `MPI_REPLACE`
+/// there, never a user-defined operation, and allows `MPI_NO_OP` only in the
+/// fetching calls (see [`FetchOp`]). So it is built from a [`ReduceOp`], or is
+/// [`REPLACE`](Self::REPLACE).
+///
+/// ```
+/// use ferrompi::{AccumulateOp, ReduceOp};
+///
+/// let _ = AccumulateOp::REPLACE;
+/// let _: AccumulateOp = ReduceOp::Sum.into();
+/// ```
+///
+/// A user op is not an accumulate op:
+///
+/// ```compile_fail,E0277
+/// fn f(op: &ferrompi::UserOp<f64>) {
+///     let _ = ferrompi::AccumulateOp::from(op);
+/// }
+/// ```
+///
+/// `MPI_NO_OP` is not an accumulate op:
+///
+/// ```compile_fail,E0599
+/// let _ = ferrompi::AccumulateOp::NO_OP;
+/// ```
+///
+/// `MPI_REPLACE` is not a collective op:
+///
+/// ```compile_fail,E0277
+/// let mpi = ferrompi::Mpi::init().unwrap();
+/// let world = mpi.world();
+/// let send = [1.0_f64];
+/// let mut recv = [0.0_f64];
+/// world
+///     .allreduce(&send, &mut recv, ferrompi::AccumulateOp::REPLACE)
+///     .unwrap();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccumulateOp(Builtin);
+
+/// The operation of the fetching one-sided calls `get_accumulate` and
+/// `fetch_and_op`.
+///
+/// MPI-4.1 §13.3.4 allows a predefined reduction operation, `MPI_REPLACE` or
+/// `MPI_NO_OP` there, never a user-defined operation. So it is built from a
+/// [`ReduceOp`], or is [`REPLACE`](Self::REPLACE) or [`NO_OP`](Self::NO_OP).
+///
+/// ```
+/// use ferrompi::{FetchOp, ReduceOp};
+///
+/// let _ = FetchOp::REPLACE;
+/// let _ = FetchOp::NO_OP;
+/// let _: FetchOp = ReduceOp::Sum.into();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FetchOp(Builtin);
+
+impl From<ReduceOp> for AccumulateOp {
+    fn from(op: ReduceOp) -> Self {
+        Self(Builtin::Reduce(op))
+    }
+}
+
+impl From<ReduceOp> for FetchOp {
+    fn from(op: ReduceOp) -> Self {
+        Self(Builtin::Reduce(op))
+    }
+}
+
+impl AccumulateOp {
+    /// `MPI_REPLACE`: the target takes the origin value, like `MPI_Put`.
+    pub const REPLACE: Self = Self(Builtin::Replace);
+
+    #[cfg(feature = "rma")]
+    pub(crate) fn code(self) -> i32 {
+        self.0.code()
+    }
+}
+
+impl FetchOp {
+    /// `MPI_REPLACE`: the target takes the origin value and the call returns
+    /// the value it held before (a swap).
+    pub const REPLACE: Self = Self(Builtin::Replace);
+
+    /// `MPI_NO_OP`: the target is unchanged and the call returns its value (an
+    /// atomic get).
+    pub const NO_OP: Self = Self(Builtin::NoOp);
+
+    #[cfg(feature = "rma")]
+    pub(crate) fn code(self) -> i32 {
+        self.0.code()
     }
 }
 
@@ -574,7 +639,9 @@ mod tests {
     use crate::DoubleInt;
 
     use super::{ferrompi_op_drop_closure, rust_user_op_invoke, typed_adapter, MAX_OPS, REGISTRY};
-    use super::{CollectiveOp, OpRegistration, ReduceOp, UserOp, USER_OP_CODE_BASE};
+    use super::{
+        AccumulateOp, CollectiveOp, FetchOp, OpRegistration, ReduceOp, UserOp, USER_OP_CODE_BASE,
+    };
 
     /// The trampoline must hand the closure typed, full-length buffers built
     /// from MPI's raw pointers. Uses slot `MAX_OPS - 1`, which no other test
@@ -756,27 +823,37 @@ mod tests {
         assert_send_sync::<UserOp<u8>>();
     }
 
+    /// The exhaustive `match` has no wildcard and no `cfg`, so a variant added
+    /// under one feature configuration fails to compile in that configuration.
     #[test]
     fn reduce_op_repr_values() {
-        let ops = [
-            (ReduceOp::Sum, 0),
-            (ReduceOp::Max, 1),
-            (ReduceOp::Min, 2),
-            (ReduceOp::Prod, 3),
-            (ReduceOp::BitwiseOr, 4),
-            (ReduceOp::BitwiseAnd, 5),
-            (ReduceOp::BitwiseXor, 6),
-            (ReduceOp::LogicalOr, 7),
-            (ReduceOp::LogicalAnd, 8),
-            (ReduceOp::LogicalXor, 9),
-        ];
-        for (op, expected) in ops {
-            assert_eq!(op as i32, expected);
+        fn expected(op: ReduceOp) -> i32 {
+            match op {
+                ReduceOp::Sum => 0,
+                ReduceOp::Max => 1,
+                ReduceOp::Min => 2,
+                ReduceOp::Prod => 3,
+                ReduceOp::BitwiseOr => 4,
+                ReduceOp::BitwiseAnd => 5,
+                ReduceOp::BitwiseXor => 6,
+                ReduceOp::LogicalOr => 7,
+                ReduceOp::LogicalAnd => 8,
+                ReduceOp::LogicalXor => 9,
+            }
         }
-        #[cfg(feature = "rma")]
-        {
-            assert_eq!(ReduceOp::Replace as i32, 12);
-            assert_eq!(ReduceOp::NoOp as i32, 13);
+        for op in [
+            ReduceOp::Sum,
+            ReduceOp::Max,
+            ReduceOp::Min,
+            ReduceOp::Prod,
+            ReduceOp::BitwiseOr,
+            ReduceOp::BitwiseAnd,
+            ReduceOp::BitwiseXor,
+            ReduceOp::LogicalOr,
+            ReduceOp::LogicalAnd,
+            ReduceOp::LogicalXor,
+        ] {
+            assert_eq!(op as i32, expected(op));
         }
     }
 
@@ -795,9 +872,14 @@ mod tests {
             ReduceOp::LogicalXor,
         ] {
             assert_eq!(CollectiveOp::<f64>::from(op).code(), op as i32);
+            assert_eq!(AccumulateOp::from(op).0.code(), op as i32);
+            assert_eq!(FetchOp::from(op).0.code(), op as i32);
         }
         assert_eq!(CollectiveOp::<DoubleInt>::MAX_LOC.code(), 10);
         assert_eq!(CollectiveOp::<DoubleInt>::MIN_LOC.code(), 11);
+        assert_eq!(AccumulateOp::REPLACE.0.code(), 12);
+        assert_eq!(FetchOp::REPLACE.0.code(), 12);
+        assert_eq!(FetchOp::NO_OP.0.code(), 13);
     }
 
     /// Slot 9 is never allocated by any test, so dropping this registration

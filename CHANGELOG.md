@@ -80,10 +80,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   argument still compiles; replace `allreduce_with_op(&send, &mut recv, &op)`
   with `allreduce(&send, &mut recv, &op)`. A user op above `i32::MAX` elements
   returns `Error::Mpi` with class `Count` on every MPI version.
+- **`ReduceOp::Replace` and `ReduceOp::NoOp` are replaced by
+  `AccumulateOp::REPLACE`, `FetchOp::REPLACE` and `FetchOp::NO_OP`**, present
+  with and without the `rma` feature; `accumulate`/`raccumulate` take `impl
+  Into<AccumulateOp>` and `get_accumulate`/`fetch_and_op` take `impl
+  Into<FetchOp>`, so a user op in an accumulate, `NO_OP` in `accumulate`, or
+  `REPLACE` in a collective is a compile error. Migration: a `ReduceOp`
+  argument still compiles; replace `ReduceOp::Replace` with
+  `AccumulateOp::REPLACE` (or `FetchOp::REPLACE`) and `ReduceOp::NoOp` with
+  `FetchOp::NO_OP`.
 
 ### Added
 
 - `CollectiveOp<'a, T>`, the op type of the reducing collectives.
+- `AccumulateOp` and `FetchOp`, the op types of the RMA accumulate calls.
 
 ### Changed
 

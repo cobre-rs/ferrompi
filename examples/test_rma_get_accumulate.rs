@@ -7,13 +7,13 @@
 //!      closing fence, `result == [10, 20, 30, 40]` (pre-update) and rank 1's
 //!      window equals `[11, 22, 33, 44]` (post-update).
 //!   2. NoOp: rank 1's window starts at `[99]`; rank 0 calls
-//!      `get_accumulate([0], &mut result, 1, 0, 1, NoOp)`; after the closing
+//!      `get_accumulate([0], &mut result, 1, 0, 1, FetchOp::NO_OP)`; after the closing
 //!      fence, `result == [99]` and rank 1's window is unchanged at `[99]`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_get_accumulate
 // mpi-test: np=2
 
-use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
+use ferrompi::{FetchOp, Mpi, ReduceOp, Win, WinFenceAssert};
 
 mod common;
 
@@ -90,7 +90,7 @@ fn main() {
 
     // ========================================================================
     // Test 2 (NoOp = atomic read): rank 1 initialises its window to [99];
-    // rank 0 calls get_accumulate with origin=[0] and ReduceOp::NoOp.
+    // rank 0 calls get_accumulate with origin=[0] and FetchOp::NO_OP.
     // After the closing fence:
     //   - rank 0's result must equal [99] (the pre-update value)
     //   - rank 1's window must remain [99] (unchanged)
@@ -109,7 +109,7 @@ fn main() {
 
         if rank == 0 {
             let origin = [0i32];
-            if let Err(e) = win.get_accumulate(&origin, &mut result, 1, 0, N as i64, ReduceOp::NoOp)
+            if let Err(e) = win.get_accumulate(&origin, &mut result, 1, 0, N as i64, FetchOp::NO_OP)
             {
                 eprintln!("FAIL: rank 0 Win::get_accumulate NoOp returned error: {e}");
                 local_ok = false;

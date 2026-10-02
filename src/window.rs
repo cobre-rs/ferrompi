@@ -65,7 +65,7 @@ use crate::request::{Request, RequestKind};
 use crate::rt;
 use crate::Communicator;
 use crate::MpiDatatype;
-use crate::ReduceOp;
+use crate::{AccumulateOp, FetchOp};
 
 // ============================================================================
 // WinFenceAssert — bitflags for MPI_Win_fence assert hints
@@ -2212,10 +2212,8 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// closes**. You must call [`Win::fence`] (or a matching `complete`/`unlock`)
     /// after the accumulate to guarantee the operation is complete.
     ///
-    /// Any [`ReduceOp`] variant is accepted, including
-    /// [`ReduceOp::Replace`] (semantically equivalent to `MPI_Put`) and
-    /// [`ReduceOp::NoOp`] (leaves the target unchanged but still participates
-    /// in epoch synchronization). Both require the `rma` feature.
+    /// `op` is a [`ReduceOp`](crate::ReduceOp) or [`AccumulateOp::REPLACE`]
+    /// (semantically `MPI_Put`); a user op is not accepted (MPI-4.1 §13.3.4).
     ///
     /// # Arguments
     ///
@@ -2286,8 +2284,9 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_rank: i32,
         target_disp: i64,
         target_count: i64,
-        op: ReduceOp,
+        op: impl Into<AccumulateOp>,
     ) -> Result<()> {
+        let op = op.into();
         self.check_target(
             target_rank,
             target_disp,
@@ -2300,8 +2299,8 @@ impl<T: MpiDatatype> Win<'_, T> {
         // tie the buffer to the epoch, so keeping it alive and unmodified until then is
         // the caller's documented obligation. `target_rank`, `target_disp`, and
         // `target_count` were checked above against the target rank's exposed window, so
-        // MPI accesses only memory the target exposed. `op as i32` is a valid `ReduceOp`
-        // discriminant that the shim maps to an `MPI_Op`.
+        // MPI accesses only memory the target exposed. `op.code()` is a predefined op code
+        // that the shim maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_accumulate(
                 p,
@@ -2311,7 +2310,7 @@ impl<T: MpiDatatype> Win<'_, T> {
                 target_disp,
                 target_count,
                 dt,
-                op as i32,
+                op.code(),
                 self.win_handle,
             )
         };
@@ -2330,10 +2329,8 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// unlock that closes the passive-target epoch. This is the same
     /// local-completion contract as [`Win::rput`].
     ///
-    /// Any [`ReduceOp`] variant is accepted, including [`ReduceOp::Replace`]
-    /// (semantically equivalent to `MPI_Rput` with request semantics) and
-    /// [`ReduceOp::NoOp`] (leaves the target unchanged but still participates
-    /// in epoch synchronization). Both require the `rma` feature.
+    /// `op` is a [`ReduceOp`](crate::ReduceOp) or [`AccumulateOp::REPLACE`]
+    /// (semantically `MPI_Rput`); a user op is not accepted (MPI-4.1 §13.3.4).
     ///
     /// # Arguments
     ///
@@ -2415,8 +2412,9 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_rank: i32,
         target_disp: i64,
         target_count: i64,
-        op: ReduceOp,
+        op: impl Into<AccumulateOp>,
     ) -> Result<Request> {
+        let op = op.into();
         self.check_target(
             target_rank,
             target_disp,
@@ -2430,8 +2428,8 @@ impl<T: MpiDatatype> Win<'_, T> {
         // signature does not tie the buffer to the `Request`, so keeping it alive and
         // unmodified until then is the caller's documented obligation. `target_rank`,
         // `target_disp`, and `target_count` were checked above against the target rank's
-        // exposed window, so MPI accesses only memory the target exposed. `op as i32` is a
-        // valid `ReduceOp` discriminant that the shim maps to an `MPI_Op`.
+        // exposed window, so MPI accesses only memory the target exposed. `op.code()` is a
+        // predefined op code that the shim maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_raccumulate(
                 p,
@@ -2441,7 +2439,7 @@ impl<T: MpiDatatype> Win<'_, T> {
                 target_disp,
                 target_count,
                 dt,
-                op as i32,
+                op.code(),
                 self.win_handle,
                 &mut request_handle,
             )
@@ -2459,10 +2457,12 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// epoch closes**. You must call [`Win::fence`] (or a matching
     /// `complete`/`unlock`) before reading `result`.
     ///
-    /// `ReduceOp::NoOp` is the canonical "atomic get" pattern: `result` receives
-    /// the target's current value and the target memory is left unchanged.
-    /// `ReduceOp::Replace` replaces the target value and also returns the
-    /// pre-update value in `result`.
+    /// `op` is a [`ReduceOp`](crate::ReduceOp), [`FetchOp::NO_OP`] or
+    /// [`FetchOp::REPLACE`]; a user op is not accepted (MPI-4.1 §13.3.4).
+    /// [`FetchOp::NO_OP`] is the canonical "atomic get" pattern: `result`
+    /// receives the target's current value and the target memory is left
+    /// unchanged. [`FetchOp::REPLACE`] replaces the target value and also
+    /// returns the pre-update value in `result`.
     ///
     /// # Arguments
     ///
@@ -2550,8 +2550,9 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_rank: i32,
         target_disp: i64,
         target_count: i64,
-        op: ReduceOp,
+        op: impl Into<FetchOp>,
     ) -> Result<()> {
+        let op = op.into();
         self.check_target(
             target_rank,
             target_disp,
@@ -2567,8 +2568,8 @@ impl<T: MpiDatatype> Win<'_, T> {
         // caller's documented obligation. `origin` (`&[T]`) and `result` (`&mut [T]`)
         // cannot alias. `target_rank`, `target_disp`, and `target_count` were checked
         // above against the target rank's exposed window, so MPI accesses only memory the
-        // target exposed. `op as i32` is a valid `ReduceOp` discriminant that the shim
-        // maps to an `MPI_Op`.
+        // target exposed. `op.code()` is a predefined op code that the shim maps to an
+        // `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_get_accumulate(
                 o_ptr,
@@ -2581,7 +2582,7 @@ impl<T: MpiDatatype> Win<'_, T> {
                 target_disp,
                 target_count,
                 dt,
-                op as i32,
+                op.code(),
                 self.win_handle,
             )
         };
@@ -2603,6 +2604,10 @@ impl<T: MpiDatatype> Win<'_, T> {
     /// `complete`, or `unlock`). Call [`PendingFetchResult::resolve`] **only
     /// after closing the epoch** — reading it earlier is undefined behaviour per
     /// MPI-3 §11.6.
+    ///
+    /// `op` is a [`ReduceOp`](crate::ReduceOp), [`FetchOp::NO_OP`] (an atomic
+    /// get) or [`FetchOp::REPLACE`] (a swap); a user op is not accepted
+    /// (MPI-4.1 §13.3.4).
     ///
     /// # Arguments
     ///
@@ -2671,8 +2676,9 @@ impl<T: MpiDatatype> Win<'_, T> {
         origin: T,
         target_rank: i32,
         target_disp: i64,
-        op: ReduceOp,
+        op: impl Into<FetchOp>,
     ) -> Result<PendingFetchResult<T>> {
+        let op = op.into();
         self.check_target(target_rank, target_disp, 1, &[])?;
         use std::mem::MaybeUninit;
         // Box the origin and result so they have heap-stable addresses
@@ -2697,8 +2703,8 @@ impl<T: MpiDatatype> Win<'_, T> {
         // `resolve` is `unsafe` for that reason. `result_ptr`'s allocation is freed
         // exactly once by `PendingFetchResult`'s `Drop`, on both the `resolve` and
         // drop-without-resolve paths. `T::TAG` matches T's memory layout per the
-        // `MpiDatatype` invariant. `op as i32` is a valid `ReduceOp` discriminant that
-        // the shim maps to an `MPI_Op`. `target_rank` and `target_disp` were checked
+        // `MpiDatatype` invariant. `op.code()` is a predefined op code that the shim
+        // maps to an `MPI_Op`. `target_rank` and `target_disp` were checked
         // above (with `target_count` 1) against the target rank's exposed window, so MPI
         // accesses only memory the target exposed. `win_handle` is a valid handle owned
         // by `self`.
@@ -2709,7 +2715,7 @@ impl<T: MpiDatatype> Win<'_, T> {
                 T::TAG as i32,
                 target_rank,
                 target_disp,
-                op as i32,
+                op.code(),
                 self.win_handle,
             )
         };

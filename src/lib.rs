@@ -82,7 +82,7 @@
 //!
 //! | Feature | Description | Dependencies |
 //! |---------|-------------|--------------|
-//! | `rma`   | RMA and shared-memory windows (`Win`, `SharedWindow`, lock guards, RMA operations, `ReduceOp::Replace`/`NoOp`) | — |
+//! | `rma`   | RMA and shared-memory windows (`Win`, `SharedWindow`, lock guards, RMA operations) | — |
 //! | `numa`  | The `slurm` module and `SlurmInfo` | `rma` |
 //!
 //! `numa` needs no system library: it implies `rma` and adds only the SLURM
@@ -190,7 +190,7 @@ pub use datatype_builder::{CustomDatatype, StructField};
 pub use error::{Error, MpiErrorClass, ResourceKind, Result};
 pub use group::{Group, GroupComparison, RankRange};
 pub use info::Info;
-pub use op::{CollectiveOp, ReduceOp, UserOp};
+pub use op::{AccumulateOp, CollectiveOp, FetchOp, ReduceOp, UserOp};
 pub use persistent::PersistentRequest;
 pub use request::Request;
 pub use status::{Source, Status, Tag};

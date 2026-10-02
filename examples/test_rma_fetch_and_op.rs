@@ -7,14 +7,14 @@
 //!      returned value equals `100` (pre-update) and rank 1's window slot 0
 //!      equals `101` (post-update).
 //!   2. Replace: rank 1's window slot 0 starts at `42i32`; rank 0 calls
-//!      `fetch_and_op(999, 1, 0, Replace)`; after the closing fence, rank 0's
+//!      `fetch_and_op(999, 1, 0, FetchOp::REPLACE)`; after the closing fence, rank 0's
 //!      returned value equals `42` (pre-update) and rank 1's window slot 0
 //!      equals `999` (post-update).
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_fetch_and_op
 // mpi-test: np=2
 
-use ferrompi::{Mpi, PendingFetchResult, ReduceOp, Win, WinFenceAssert};
+use ferrompi::{FetchOp, Mpi, PendingFetchResult, ReduceOp, Win, WinFenceAssert};
 
 mod common;
 
@@ -93,7 +93,7 @@ fn main() {
 
     // ========================================================================
     // Test 2 (Replace + fetch): rank 1 initialises its window slot 0 to 42i32.
-    // Rank 0 calls fetch_and_op(999, 1, 0, Replace). After the closing fence:
+    // Rank 0 calls fetch_and_op(999, 1, 0, FetchOp::REPLACE). After the closing fence:
     //   - rank 0's returned value must equal 42 (pre-update)
     //   - rank 1's window slot 0 must equal 999 (post-update)
     // ========================================================================
@@ -111,7 +111,7 @@ fn main() {
         // populated; must call .resolve() only after the epoch closes.
         let mut pending: Option<PendingFetchResult<i32>> = None;
         if rank == 0 {
-            match win.fetch_and_op(999i32, 1, 0, ReduceOp::Replace) {
+            match win.fetch_and_op(999i32, 1, 0, FetchOp::REPLACE) {
                 Ok(p) => pending = Some(p),
                 Err(e) => {
                     eprintln!("FAIL: rank 0 Win::fetch_and_op Replace returned error: {e}");
