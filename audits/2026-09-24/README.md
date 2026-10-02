@@ -194,7 +194,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | ARC-05 | Thread-safety model inconsistent | major | mixed | 0.5.x (D-3) | fixed (49cb30c) |
 | ARC-06 | Buffer-safety model (umbrella SND-01…05) | critical | one-way | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
 | ARC-07 | Ops and datatypes not parameters | major | one-way | 0.7.0 | planned (ferrompi-0.7.0): op parameter; datatype parameter deferred (D-33) |
-| ARC-08 | Error model misleads and loses context | major | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
+| ARC-08 | Error model misleads and loses context | major | one-way | 0.7.0 | fixed (f371c7a, b36ca61, 5710b2b, 9c534c8, 529957e, 3b4e20d, 87416c3, db2a5d4) |
 | ARC-09 | `Status` always discarded | major | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
 | ARC-10 | Copy-pasted families drifted (root of SND-06) | major | two-way | 0.5.x (validators) | fixed (c402d59) |
 | ARC-11 | Capability gaps (in-place nonblocking, mprobe, HW_GUIDED…) | minor | additive | 0.7.0 | planned (ferrompi-0.7.0); HW_GUIDED wont-fix (D-31) |
