@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scatter_inplace` and `reduce_inplace`; they no longer return an error
   there.
 
+### Removed
+
+- **`Error::InvalidBuffer` and `Error::InvalidOp`.** Migration: match
+  `Error::BufferSize`, `Error::InvalidArgument` or `Error::InvalidState`;
+  each names the argument or state.
+
 ### Fixed
 
 - **A full user-op table returns `Error::ResourceExhausted` with resource

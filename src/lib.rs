@@ -295,7 +295,7 @@ pub enum ThreadLevel {
 ///
 /// A call that would fail one of the checks above (finalized, wrong
 /// thread) and is also given invalid arguments may return the argument
-/// error (for example [`Error::InvalidBuffer`]) instead of
+/// error (for example [`Error::BufferSize`]) instead of
 /// `Err(`[`Error::Finalized`]`)`/`Err(`[`Error::ThreadLevelViolation`]`)`;
 /// the order in which these checks run is not part of the API.
 ///

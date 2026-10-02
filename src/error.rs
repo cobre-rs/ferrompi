@@ -342,15 +342,6 @@ pub enum Error {
         operation: Option<&'static str>,
     },
 
-    /// Invalid buffer provided (e.g., send/recv buffer size mismatch).
-    #[error("Invalid buffer")]
-    InvalidBuffer,
-
-    /// Invalid reduction operation for the method being called
-    /// (e.g., passing a non-MAXLOC/MINLOC op to `allreduce_indexed`).
-    #[error("Invalid reduction operation for this method")]
-    InvalidOp,
-
     /// Operation not supported. Two sources:
     /// - an MPI 4.0 operation (a persistent collective or
     ///   [`Mpi::create_from_group`](crate::Mpi::create_from_group)) when
@@ -582,9 +573,6 @@ mod tests {
 
     #[test]
     fn error_display_formats_correctly() {
-        let err = Error::InvalidBuffer;
-        assert_eq!(format!("{err}"), "Invalid buffer");
-
         let err = Error::AlreadyInitialized;
         assert_eq!(format!("{err}"), "MPI has already been initialized");
 
