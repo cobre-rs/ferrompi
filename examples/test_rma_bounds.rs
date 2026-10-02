@@ -3,8 +3,9 @@
 //! Every `Win` RMA method (`put`, `get`, `accumulate`, `get_accumulate`,
 //! `rput`, `rget`, `raccumulate`, `fetch_and_op`, `compare_and_swap`) must
 //! reject an out-of-bounds target — a bad rank (including -1), a negative
-//! displacement, an access past the target's exposed window, or a buffer
-//! length that does not match `target_count` — with `Err(InvalidBuffer)`
+//! displacement, an access past the target's exposed window, a negative
+//! `target_count`, or a buffer length that does not match `target_count` —
+//! with `Err(InvalidArgument)` or `Err(BufferSize)` naming the argument,
 //! before any MPI call. Rank 0 is the origin; rank 1 is the target. Canary
 //! words around every buffer prove no out-of-bounds write reaches memory.
 //!
@@ -19,6 +20,15 @@ mod common;
 
 const CANARY: u64 = 0xC0FFEE;
 
+const BAD_RANK: (&str, &str) = ("target_rank", "rank outside the window's communicator");
+const NEGATIVE_DISP: (&str, &str) = ("target_disp", "negative displacement");
+const NEGATIVE_COUNT: (&str, &str) = ("target_count", "negative count");
+const PAST_WINDOW: (&str, &str) = ("target_disp", "access extends past the target's window");
+
+fn is_rejection(err: &Error, want: (&str, &str)) -> bool {
+    matches!(err, Error::InvalidArgument { arg, reason, .. } if (*arg, *reason) == want)
+}
+
 #[repr(C)]
 struct Frame {
     win: [u64; 4],
@@ -31,9 +41,19 @@ struct Small {
     canary: [u64; 7],
 }
 
-fn check_rejected(ok: &mut bool, label: &str, rank: i32, disp: i64, result: ferrompi::Result<()>) {
-    if !matches!(result, Err(Error::InvalidBuffer)) {
-        eprintln!("FAIL: {label} ({rank}, {disp}) did not return Err(InvalidBuffer): {result:?}");
+fn check_rejected(
+    ok: &mut bool,
+    label: &str,
+    rank: i32,
+    disp: i64,
+    want: (&str, &str),
+    result: ferrompi::Result<()>,
+) {
+    if !matches!(&result, Err(e) if is_rejection(e, want)) {
+        eprintln!(
+            "FAIL: {label} ({rank}, {disp}) did not return Err(InvalidArgument {{ arg: {:?}, reason: {:?} }}): {result:?}",
+            want.0, want.1
+        );
         *ok = false;
     }
 }
@@ -43,17 +63,18 @@ fn check_rejected_req(
     label: &str,
     rank: i32,
     disp: i64,
+    want: (&str, &str),
     result: ferrompi::Result<Request>,
     stray: &mut Vec<Request>,
 ) {
     match result {
-        Err(Error::InvalidBuffer) => {}
+        Err(e) if is_rejection(&e, want) => {}
         Err(e) => {
             eprintln!("FAIL: {label} ({rank}, {disp}) returned unexpected error: {e}");
             *ok = false;
         }
         Ok(req) => {
-            eprintln!("FAIL: {label} ({rank}, {disp}) did not return Err(InvalidBuffer)");
+            eprintln!("FAIL: {label} ({rank}, {disp}) did not return Err(InvalidArgument)");
             *ok = false;
             stray.push(req);
         }
@@ -65,17 +86,18 @@ fn check_rejected_pending(
     label: &str,
     rank: i32,
     disp: i64,
+    want: (&str, &str),
     result: ferrompi::Result<PendingFetchResult<u64>>,
     stray: &mut Vec<PendingFetchResult<u64>>,
 ) {
     match result {
-        Err(Error::InvalidBuffer) => {}
+        Err(e) if is_rejection(&e, want) => {}
         Err(e) => {
             eprintln!("FAIL: {label} ({rank}, {disp}) returned unexpected error: {e}");
             *ok = false;
         }
         Ok(p) => {
-            eprintln!("FAIL: {label} ({rank}, {disp}) did not return Err(InvalidBuffer)");
+            eprintln!("FAIL: {label} ({rank}, {disp}) did not return Err(InvalidArgument)");
             *ok = false;
             stray.push(p);
         }
@@ -87,7 +109,8 @@ fn check_rejected_pending(
 /// buffer and `target_count` 4, and the two single-element methods
 /// (`fetch_and_op`, `compare_and_swap`), against every out-of-bounds
 /// `(target_rank, target_disp)` case in one fence epoch. Only rank 0
-/// issues calls; every one must return `Err(InvalidBuffer)`. `len` is
+/// issues calls; every one must return `Err(InvalidArgument)` naming the
+/// rejected argument. `len` is
 /// `win`'s exposed length in elements. Returns the aggregate local
 /// verdict (`true` on every rank but 0, which has no cases to fail).
 fn run_bounds_cases(world: &Communicator, win: &Win<'_, u64>, name: &str, len: i64) -> bool {
@@ -104,13 +127,19 @@ fn run_bounds_cases(world: &Communicator, win: &Win<'_, u64>, name: &str, len: i
         let mut get_buf = [0u64; 4];
         let mut result = [0u64; 4];
 
-        for &(rank, disp) in &[(1, (len - 2).max(0)), (1, -1), (size, 0), (-1, 0)] {
+        for &(rank, disp, want) in &[
+            (1, (len - 2).max(0), PAST_WINDOW),
+            (1, -1, NEGATIVE_DISP),
+            (size, 0, BAD_RANK),
+            (-1, 0, BAD_RANK),
+        ] {
             let label = |op: &str| format!("{name}/{op}");
             check_rejected(
                 &mut ok,
                 &label("put"),
                 rank,
                 disp,
+                want,
                 win.put(&origin, rank, disp, 4),
             );
             check_rejected(
@@ -118,6 +147,7 @@ fn run_bounds_cases(world: &Communicator, win: &Win<'_, u64>, name: &str, len: i
                 &label("accumulate"),
                 rank,
                 disp,
+                want,
                 win.accumulate(&origin, rank, disp, 4, ReduceOp::Sum),
             );
             check_rejected(
@@ -125,6 +155,7 @@ fn run_bounds_cases(world: &Communicator, win: &Win<'_, u64>, name: &str, len: i
                 &label("get"),
                 rank,
                 disp,
+                want,
                 win.get(&mut get_buf, rank, disp, 4),
             );
             check_rejected(
@@ -132,6 +163,7 @@ fn run_bounds_cases(world: &Communicator, win: &Win<'_, u64>, name: &str, len: i
                 &label("get_accumulate"),
                 rank,
                 disp,
+                want,
                 win.get_accumulate(&origin, &mut result, rank, disp, 4, ReduceOp::Sum),
             );
             check_rejected_req(
@@ -139,6 +171,7 @@ fn run_bounds_cases(world: &Communicator, win: &Win<'_, u64>, name: &str, len: i
                 &label("rput"),
                 rank,
                 disp,
+                want,
                 win.rput(&origin, rank, disp, 4),
                 &mut stray_requests,
             );
@@ -147,6 +180,7 @@ fn run_bounds_cases(world: &Communicator, win: &Win<'_, u64>, name: &str, len: i
                 &label("rget"),
                 rank,
                 disp,
+                want,
                 win.rget(&mut get_buf, rank, disp, 4),
                 &mut stray_requests,
             );
@@ -155,18 +189,25 @@ fn run_bounds_cases(world: &Communicator, win: &Win<'_, u64>, name: &str, len: i
                 &label("raccumulate"),
                 rank,
                 disp,
+                want,
                 win.raccumulate(&origin, rank, disp, 4, ReduceOp::Sum),
                 &mut stray_requests,
             );
         }
 
-        for &(rank, disp) in &[(1, len), (1, -1), (size, 0), (-1, 0)] {
+        for &(rank, disp, want) in &[
+            (1, len, PAST_WINDOW),
+            (1, -1, NEGATIVE_DISP),
+            (size, 0, BAD_RANK),
+            (-1, 0, BAD_RANK),
+        ] {
             let label = |op: &str| format!("{name}/{op}");
             check_rejected_pending(
                 &mut ok,
                 &label("fetch_and_op"),
                 rank,
                 disp,
+                want,
                 win.fetch_and_op(1u64, rank, disp, ReduceOp::Sum),
                 &mut stray_pending,
             );
@@ -175,6 +216,7 @@ fn run_bounds_cases(world: &Communicator, win: &Win<'_, u64>, name: &str, len: i
                 &label("compare_and_swap"),
                 rank,
                 disp,
+                want,
                 win.compare_and_swap(2u64, 1u64, rank, disp),
                 &mut stray_pending,
             );
@@ -268,23 +310,56 @@ fn main() {
         .expect("length-mismatch opening fence failed");
     if rank == 0 {
         let four = [1u64, 2, 3, 4];
-        if win_a.put(&four, 1, 0, 2).is_ok() {
-            eprintln!("FAIL: put target_count 2 != origin.len() 4 accepted");
+        let result = win_a.put(&four, 1, 0, 2);
+        if !matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "origin",
+                required: 2,
+                actual: 4,
+                ..
+            })
+        ) {
+            eprintln!(
+                "FAIL: put target_count 2 != origin.len() 4 did not return Err(BufferSize {{ arg: \"origin\", required: 2, actual: 4 }}): {result:?}"
+            );
             local_ok = false;
         }
-        if win_a.put(&four, 1, 0, -4).is_ok() {
-            eprintln!("FAIL: put with negative target_count accepted");
+        let result = win_a.put(&four, 1, 0, -4);
+        if !matches!(&result, Err(e) if is_rejection(e, NEGATIVE_COUNT)) {
+            eprintln!(
+                "FAIL: put with negative target_count did not return Err(InvalidArgument {{ arg: \"target_count\" }}): {result:?}"
+            );
             local_ok = false;
         }
-        if win_a.get(&mut small.buf, 1, 0, 4).is_ok() {
-            eprintln!("FAIL: get of 4 elements into a 1-element origin accepted");
+        let result = win_a.get(&mut small.buf, 1, 0, 4);
+        if !matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "origin",
+                required: 4,
+                actual: 1,
+                ..
+            })
+        ) {
+            eprintln!(
+                "FAIL: get of 4 elements into a 1-element origin did not return Err(BufferSize {{ arg: \"origin\", required: 4, actual: 1 }}): {result:?}"
+            );
             local_ok = false;
         }
-        if win_a
-            .get_accumulate(&four, &mut small.buf, 1, 0, 4, ReduceOp::Sum)
-            .is_ok()
-        {
-            eprintln!("FAIL: get_accumulate with a 1-element result accepted");
+        let result = win_a.get_accumulate(&four, &mut small.buf, 1, 0, 4, ReduceOp::Sum);
+        if !matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "result",
+                required: 4,
+                actual: 1,
+                ..
+            })
+        ) {
+            eprintln!(
+                "FAIL: get_accumulate with a 1-element result did not return Err(BufferSize {{ arg: \"result\", required: 4, actual: 1 }}): {result:?}"
+            );
             local_ok = false;
         }
     }

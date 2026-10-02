@@ -376,10 +376,14 @@ pub struct SharedWindow<T: MpiDatatype> {
 }
 
 fn win_size_and_disp_unit<T>(count: usize) -> Result<(i64, i32)> {
+    let overflow = || Error::InvalidArgument {
+        arg: "count",
+        reason: "window byte size overflows",
+    };
     let byte_size = count
         .checked_mul(std::mem::size_of::<T>())
-        .ok_or(Error::InvalidBuffer)?;
-    let size = i64::try_from(byte_size).map_err(|_| Error::InvalidBuffer)?;
+        .ok_or_else(overflow)?;
+    let size = i64::try_from(byte_size).map_err(|_| overflow())?;
     let disp_unit = std::mem::size_of::<T>() as i32;
     Ok((size, disp_unit))
 }
@@ -447,21 +451,25 @@ fn window_word<T>(count: usize) -> u64 {
 ///
 /// When the allgather succeeds on every rank, every rank holds the same
 /// `words`: if any word is [`WINDOW_WORD_REJECT`], every rank returns
-/// `Err(Error::InvalidBuffer)` before any rank has created a window. An
-/// allgather error can reach some ranks only; the other ranks can then
-/// block in the window-creation call.
+/// `Err(Error::InvalidArgument)` naming `count` before any rank has created a
+/// window. An allgather error can reach some ranks only; the other ranks can
+/// then block in the window-creation call.
 fn exchange_window_words(comm: &Communicator, word: u64) -> Result<Box<[u64]>> {
     let mut words = vec![0u64; comm.size() as usize];
     comm.allgather(&[word], &mut words)?;
     if words.contains(&WINDOW_WORD_REJECT) {
-        return Err(Error::InvalidBuffer);
+        return Err(Error::InvalidArgument {
+            arg: "count",
+            reason: "a rank's window length cannot be exchanged",
+        });
     }
     Ok(words.into_boxed_slice())
 }
 
 /// Validates an RMA target against `words` (see [`window_word`]): rejects a
-/// `target_rank` outside `0..words.len()`, a negative `target_count` or a
-/// `buffer_lens` entry unequal to it, a negative `target_disp`, and an access
+/// `target_rank` outside `0..words.len()`, a negative `target_count`, a
+/// `buffer_lens` entry unequal to it (reported under that entry's name), a
+/// negative `target_disp`, and an access
 /// `target_disp * disp_unit(target_rank) + target_count * elem_size` that
 /// overflows `u64` or exceeds the target's exposed byte length.
 fn check_rma_target(
@@ -470,31 +478,54 @@ fn check_rma_target(
     target_rank: i32,
     target_disp: i64,
     target_count: i64,
-    buffer_lens: &[usize],
+    buffer_lens: &[(&'static str, usize)],
 ) -> Result<()> {
     if target_rank < 0 || target_rank as usize >= words.len() {
-        return Err(Error::InvalidBuffer);
+        return Err(Error::InvalidArgument {
+            arg: "target_rank",
+            reason: "rank outside the window's communicator",
+        });
     }
-    if target_count < 0 || buffer_lens.iter().any(|&len| len as i64 != target_count) {
-        return Err(Error::InvalidBuffer);
+    if target_count < 0 {
+        return Err(Error::InvalidArgument {
+            arg: "target_count",
+            reason: "negative count",
+        });
+    }
+    if let Some(&(arg, actual)) = buffer_lens
+        .iter()
+        .find(|&&(_, len)| len as i64 != target_count)
+    {
+        return Err(Error::BufferSize {
+            arg,
+            required: target_count as usize,
+            actual,
+        });
     }
     if target_disp < 0 {
-        return Err(Error::InvalidBuffer);
+        return Err(Error::InvalidArgument {
+            arg: "target_disp",
+            reason: "negative displacement",
+        });
     }
+    let past_window = || Error::InvalidArgument {
+        arg: "target_disp",
+        reason: "access extends past the target's window",
+    };
     let word = words[target_rank as usize];
     let disp_unit = word >> WINDOW_WORD_DISP_SHIFT;
     let len = word & WINDOW_WORD_LEN_MASK;
     let disp_bytes = (target_disp as u64)
         .checked_mul(disp_unit)
-        .ok_or(Error::InvalidBuffer)?;
+        .ok_or_else(past_window)?;
     let count_bytes = (target_count as u64)
         .checked_mul(elem_size as u64)
-        .ok_or(Error::InvalidBuffer)?;
+        .ok_or_else(past_window)?;
     let total = disp_bytes
         .checked_add(count_bytes)
-        .ok_or(Error::InvalidBuffer)?;
+        .ok_or_else(past_window)?;
     if total > len {
-        return Err(Error::InvalidBuffer);
+        return Err(past_window());
     }
     Ok(())
 }
@@ -1063,8 +1094,8 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Any rank's exposed byte length does not fit in 56 bits
-    ///   (`Error::InvalidBuffer` on every rank).
+    /// - Any rank's `buf` exposed byte length does not fit in 56 bits
+    ///   (`Error::InvalidArgument` on every rank).
     /// - The length exchange fails (`Error::Mpi` with
     ///   `operation: Some("allgather")`); this can happen on some ranks only,
     ///   and the other ranks can then block creating the window.
@@ -1150,8 +1181,8 @@ impl<T: MpiDatatype> Win<'static, T> {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Any rank's exposed byte length does not fit in 56 bits
-    ///   (`Error::InvalidBuffer` on every rank).
+    /// - Any rank's `local_count` exposed byte length does not fit in 56 bits
+    ///   (`Error::InvalidArgument` on every rank).
     /// - The length exchange fails (`Error::Mpi` with
     ///   `operation: Some("allgather")`); this can happen on some ranks only,
     ///   and the other ranks can then block creating the window.
@@ -1732,7 +1763,7 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_rank: i32,
         target_disp: i64,
         target_count: i64,
-        buffer_lens: &[usize],
+        buffer_lens: &[(&'static str, usize)],
     ) -> Result<()> {
         check_rma_target(
             &self.words,
@@ -1762,10 +1793,12 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, a
-    ///   buffer's length differs from `target_count`, or the access does not
-    ///   fit in the target rank's window.
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_count` or
+    ///   `target_disp` is negative, or the access does not fit in the target
+    ///   rank's window.
+    /// * [`Error::BufferSize`] — if `origin`'s length differs from
+    ///   `target_count`.
     /// * [`Error::Mpi`] — if `MPI_Put` fails.
     ///
     /// # Safety Contract
@@ -1812,7 +1845,12 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<()> {
-        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        self.check_target(
+            target_rank,
+            target_disp,
+            target_count,
+            &[("origin", origin.len())],
+        )?;
         let (p, n, dt) = buf(origin);
         // SAFETY: the call must be inside an active access epoch, which the caller must
         // ensure. `origin` is read by MPI until the epoch closes; the signature does not
@@ -1872,10 +1910,12 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, a
-    ///   buffer's length differs from `target_count`, or the access does not
-    ///   fit in the target rank's window.
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_count` or
+    ///   `target_disp` is negative, or the access does not fit in the target
+    ///   rank's window.
+    /// * [`Error::BufferSize`] — if `origin`'s length differs from
+    ///   `target_count`.
     /// * [`Error::Mpi`] — if `MPI_Rput` fails.
     /// * [`Error::ResourceExhausted`] with resource
     ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
@@ -1916,7 +1956,12 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<Request> {
-        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        self.check_target(
+            target_rank,
+            target_disp,
+            target_count,
+            &[("origin", origin.len())],
+        )?;
         let (p, n, dt) = buf(origin);
         let mut request_handle: i64 = 0;
         // SAFETY: the call must be inside an active access epoch, which the caller must
@@ -1961,10 +2006,12 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, a
-    ///   buffer's length differs from `target_count`, or the access does not
-    ///   fit in the target rank's window.
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_count` or
+    ///   `target_disp` is negative, or the access does not fit in the target
+    ///   rank's window.
+    /// * [`Error::BufferSize`] — if `origin`'s length differs from
+    ///   `target_count`.
     /// * [`Error::Mpi`] — if `MPI_Get` fails.
     ///
     /// # Safety Contract
@@ -2016,7 +2063,12 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<()> {
-        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        self.check_target(
+            target_rank,
+            target_disp,
+            target_count,
+            &[("origin", origin.len())],
+        )?;
         let (p, n, dt) = buf_mut(origin);
         // SAFETY: the call must be inside an active access epoch, which the caller must
         // ensure. `origin` is written by MPI until the epoch closes; the signature does
@@ -2067,10 +2119,12 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, a
-    ///   buffer's length differs from `target_count`, or the access does not
-    ///   fit in the target rank's window.
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_count` or
+    ///   `target_disp` is negative, or the access does not fit in the target
+    ///   rank's window.
+    /// * [`Error::BufferSize`] — if `origin`'s length differs from
+    ///   `target_count`.
     /// * [`Error::Mpi`] — if `MPI_Rget` fails.
     /// * [`Error::ResourceExhausted`] with resource
     ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
@@ -2119,7 +2173,12 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_disp: i64,
         target_count: i64,
     ) -> Result<Request> {
-        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        self.check_target(
+            target_rank,
+            target_disp,
+            target_count,
+            &[("origin", origin.len())],
+        )?;
         let (p, n, dt) = buf_mut(origin);
         let mut request_handle: i64 = 0;
         // SAFETY: the call must be inside an active access epoch, which the caller must
@@ -2170,10 +2229,12 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, a
-    ///   buffer's length differs from `target_count`, or the access does not
-    ///   fit in the target rank's window.
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_count` or
+    ///   `target_disp` is negative, or the access does not fit in the target
+    ///   rank's window.
+    /// * [`Error::BufferSize`] — if `origin`'s length differs from
+    ///   `target_count`.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
     /// * [`Error::Mpi`] — if `MPI_Accumulate` fails for any other reason.
@@ -2227,7 +2288,12 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_count: i64,
         op: ReduceOp,
     ) -> Result<()> {
-        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        self.check_target(
+            target_rank,
+            target_disp,
+            target_count,
+            &[("origin", origin.len())],
+        )?;
         let (p, n, dt) = buf(origin);
         // SAFETY: the call must be inside an active access epoch, which the caller must
         // ensure. `origin` is read by MPI until the epoch closes; the signature does not
@@ -2289,10 +2355,12 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, a
-    ///   buffer's length differs from `target_count`, or the access does not
-    ///   fit in the target rank's window.
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_count` or
+    ///   `target_disp` is negative, or the access does not fit in the target
+    ///   rank's window.
+    /// * [`Error::BufferSize`] — if `origin`'s length differs from
+    ///   `target_count`.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
     /// * [`Error::ResourceExhausted`] with resource
@@ -2349,7 +2417,12 @@ impl<T: MpiDatatype> Win<'_, T> {
         target_count: i64,
         op: ReduceOp,
     ) -> Result<Request> {
-        self.check_target(target_rank, target_disp, target_count, &[origin.len()])?;
+        self.check_target(
+            target_rank,
+            target_disp,
+            target_count,
+            &[("origin", origin.len())],
+        )?;
         let (p, n, dt) = buf(origin);
         let mut request_handle: i64 = 0;
         // SAFETY: the call must be inside an active access epoch, which the caller must
@@ -2406,10 +2479,12 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, a
-    ///   buffer's length differs from `target_count`, or the access does not
-    ///   fit in the target rank's window.
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_count` or
+    ///   `target_disp` is negative, or the access does not fit in the target
+    ///   rank's window.
+    /// * [`Error::BufferSize`] — if the length of `origin` or `result` differs
+    ///   from `target_count`.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
     ///   for the element type (e.g., `BitwiseOr` on `f64`).
     /// * [`Error::Mpi`] — if `MPI_Get_accumulate` fails for any other reason.
@@ -2481,7 +2556,7 @@ impl<T: MpiDatatype> Win<'_, T> {
             target_rank,
             target_disp,
             target_count,
-            &[origin.len(), result.len()],
+            &[("origin", origin.len()), ("result", result.len())],
         )?;
         let (o_ptr, o_n, dt) = buf(origin);
         let (r_ptr, r_n, _) = buf_mut(result);
@@ -2540,7 +2615,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
     ///   window's communicator (including -1), `target_disp` is negative, or
     ///   the access does not fit in the target rank's window.
     /// * [`Error::Mpi`] with class `MpiErrorClass::Op` — if `op` is not valid
@@ -2714,7 +2789,7 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
     ///
     /// # Errors
     ///
-    /// * [`Error::InvalidBuffer`] — if `target_rank` is not a rank of the
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
     ///   window's communicator (including -1), `target_disp` is negative, or
     ///   the access does not fit in the target rank's window.
     /// * [`Error::Mpi`] — if `MPI_Compare_and_swap` fails (e.g., the MPI
@@ -3143,39 +3218,71 @@ mod tests {
     #[test]
     fn check_rma_target_boundaries() {
         let words = [window_word::<u64>(4), window_word::<u8>(3)];
+        let run =
+            |elem_size: usize, rank: i32, disp: i64, count: i64, lens: &[(&'static str, usize)]| {
+                check_rma_target(&words, elem_size, rank, disp, count, lens)
+            };
 
-        // (elem_size, rank, disp, count, lens)
-        let ok_cases: &[(usize, i32, i64, i64, &[usize])] = &[
-            (8, 0, 0, 4, &[4]),
-            (8, 0, 3, 1, &[1]),
-            (8, 0, 4, 0, &[0]),
-            (1, 1, 0, 3, &[3, 3]),
-        ];
-        for &(elem_size, rank, disp, count, lens) in ok_cases {
+        assert!(run(8, 0, 0, 4, &[("origin", 4)]).is_ok());
+        assert!(run(8, 0, 3, 1, &[("origin", 1)]).is_ok());
+        assert!(run(8, 0, 4, 0, &[("origin", 0)]).is_ok());
+        assert!(run(1, 1, 0, 3, &[("origin", 3), ("result", 3)]).is_ok());
+
+        let past_window = "access extends past the target's window";
+        for (result, arg, reason) in [
+            (
+                run(8, 0, 2, 4, &[("origin", 4)]),
+                "target_disp",
+                past_window,
+            ),
+            (run(8, 0, 4, 1, &[]), "target_disp", past_window),
+            (
+                run(8, 0, i64::MAX, 1, &[("origin", 1)]),
+                "target_disp",
+                past_window,
+            ),
+            (
+                run(8, 0, -1, 1, &[("origin", 1)]),
+                "target_disp",
+                "negative displacement",
+            ),
+            (run(8, 0, 0, -1, &[]), "target_count", "negative count"),
+            (
+                run(8, 2, 0, 1, &[("origin", 1)]),
+                "target_rank",
+                "rank outside the window's communicator",
+            ),
+            (
+                run(8, -1, 0, 1, &[("origin", 1)]),
+                "target_rank",
+                "rank outside the window's communicator",
+            ),
+        ] {
             assert!(
-                check_rma_target(&words, elem_size, rank, disp, count, lens).is_ok(),
-                "expected Ok for ({elem_size}, {rank}, {disp}, {count}, {lens:?})"
+                matches!(
+                    &result,
+                    Err(Error::InvalidArgument { arg: a, reason: r }) if *a == arg && *r == reason
+                ),
+                "expected InvalidArgument {{ arg: {arg}, reason: {reason} }}, got {result:?}"
             );
         }
 
-        let err_cases: &[(usize, i32, i64, i64, &[usize])] = &[
-            (8, 0, 2, 4, &[4]),
-            (8, 0, 4, 1, &[]),
-            (8, 0, 0, 4, &[3]),
-            (1, 1, 0, 3, &[3, 2]),
-            (8, 0, 0, -1, &[]),
-            (8, 0, -1, 1, &[1]),
-            (8, 2, 0, 1, &[1]),
-            (8, -1, 0, 1, &[1]),
-            (8, 0, i64::MAX, 1, &[1]),
-        ];
-        for &(elem_size, rank, disp, count, lens) in err_cases {
+        for (result, arg, required, actual) in [
+            (run(8, 0, 0, 4, &[("origin", 3)]), "origin", 4, 3),
+            (
+                run(1, 1, 0, 3, &[("origin", 3), ("result", 2)]),
+                "result",
+                3,
+                2,
+            ),
+        ] {
             assert!(
                 matches!(
-                    check_rma_target(&words, elem_size, rank, disp, count, lens),
-                    Err(Error::InvalidBuffer)
+                    &result,
+                    Err(Error::BufferSize { arg: a, required: q, actual: c })
+                        if *a == arg && *q == required && *c == actual
                 ),
-                "expected Err(InvalidBuffer) for ({elem_size}, {rank}, {disp}, {count}, {lens:?})"
+                "expected BufferSize {{ arg: {arg}, required: {required}, actual: {actual} }}, got {result:?}"
             );
         }
     }

@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arg: "datatype", .. }`** instead of `Error::InvalidBuffer`. Migration:
   match `Error::InvalidArgument`; `reason` tells a wrong extent from data
   outside one element.
+- **RMA target and window-size checks return `Error::InvalidArgument` or
+  `Error::BufferSize`** naming the argument (`target_rank`, `target_disp`,
+  `target_count`, `origin`, `result`, `count`) instead of
+  `Error::InvalidBuffer`. Migration: match the new variants; `arg` names the
+  argument.
 
 ### Fixed
 
