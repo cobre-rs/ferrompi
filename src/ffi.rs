@@ -1001,16 +1001,6 @@ guarded_extern! {
         out_handle: *mut int32_t,
     ) -> c_int;
 
-    /// MPI_Allreduce using a user-defined reduction op.
-    pub fn ferrompi_allreduce_user_op(
-        sendbuf: *const c_void,
-        recvbuf: *mut c_void,
-        count: int64_t,
-        datatype_tag: int32_t,
-        op_handle: int32_t,
-        comm: int32_t,
-    ) -> c_int;
-
     // ============================================================
     // RMA / Window
     // ============================================================

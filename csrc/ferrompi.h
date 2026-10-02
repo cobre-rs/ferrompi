@@ -80,6 +80,11 @@ extern "C" {
 #define FERROMPI_PROC_NULL  (-2)
 #define FERROMPI_ANY_TAG    (-1)
 
+/* Op codes at or above FERROMPI_OP_USER_BASE name the user op in slot
+ * (code - FERROMPI_OP_USER_BASE); smaller codes are the predefined ops get_op
+ * switches on. MUST stay in sync with the mirrored const in src/op.rs. */
+#define FERROMPI_OP_USER_BASE 64
+
 /* Written to a window-allocating shim's handle out-parameter when MPI
  * created the window but zeroing or registering it failed: the window is
  * never freed. */
@@ -751,15 +756,6 @@ int ferrompi_op_free(int32_t handle);
 
 /** Release the op slot without calling MPI_Op_free. The caller must already have dropped the Rust closure. */
 int ferrompi_op_free_slot_only(int32_t handle);
-
-int ferrompi_allreduce_user_op(
-    const void* sendbuf,
-    void* recvbuf,
-    int64_t count,
-    int32_t datatype_tag,
-    int32_t op_handle,
-    int32_t comm
-);
 
 #ifdef __cplusplus
 }

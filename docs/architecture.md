@@ -236,10 +236,11 @@ The list below distinguishes what belongs in C from what belongs in Rust.
   and returns `MPI_ERR_COUNT` otherwise. The v-collective shims (`gatherv`,
   `scatterv`, `allgatherv`, `alltoallv`, and their nonblocking/persistent
   forms) return `MPI_ERR_COUNT` above `INT_MAX` on every MPI version, since
-  their count arrays stay `int32_t`. `ferrompi_allreduce_user_op` does too,
-  because its op is a classic `MPI_User_function` with an `int` length. This
-  branching requires C preprocessor guards that would be unreadable as inline
-  Rust assembly or build-script code generation.
+  their count arrays stay `int32_t`. Every reduction shim returns
+  `MPI_ERR_COUNT` above `INT_MAX` for a user op code, because a user op is a
+  classic `MPI_User_function` with an `int` length. This branching requires C
+  preprocessor guards that would be unreadable as inline Rust assembly or
+  build-script code generation.
 - **`install_errors_return`** — called on each newly-created communicator
   handle to set `MPI_ERRORS_RETURN`, converting MPI aborts into
   `Err(Error::Mpi { .. })`; `ferrompi_comm_create_from_group` instead passes

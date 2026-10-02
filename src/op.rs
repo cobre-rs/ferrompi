@@ -383,6 +383,17 @@ pub(crate) struct OpRegistration {
     pub(crate) slot: i32,
 }
 
+/// Op codes at or above this name the user op in slot `code - USER_OP_CODE_BASE`;
+/// smaller codes are the predefined ops `get_op` switches on. Mirrors
+/// `FERROMPI_OP_USER_BASE` in csrc/ferrompi.h; keep in sync.
+pub(crate) const USER_OP_CODE_BASE: i32 = 64;
+
+impl OpRegistration {
+    pub(crate) fn code(&self) -> i32 {
+        USER_OP_CODE_BASE + self.slot
+    }
+}
+
 impl<T: MpiDatatype> UserOp<T> {
     /// Create a commutative user-defined reduction op.
     ///
@@ -510,7 +521,8 @@ impl Drop for OpRegistration {
         }
         // Drop ordering (ADR-0005 Decision 3):
         //   1. ferrompi_op_free → MPI_Op_free (MPI will not invoke the
-        //      trampoline after this returns).
+        //      trampoline after this returns, because no pending operation
+        //      references the op: the last OpRegistration holder is gone).
         //   2. ferrompi_op_free → ferrompi_op_drop_closure (Rust callback,
         //      drops the Box).
         //   3. ferrompi_op_free → free_op_slot (reclaims the C-side slot).
@@ -538,11 +550,12 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
+    use crate::datatype::DatatypeTag;
     use crate::ffi;
     use crate::DoubleInt;
 
     use super::{ferrompi_op_drop_closure, rust_user_op_invoke, typed_adapter, MAX_OPS, REGISTRY};
-    use super::{CollectiveOp, ReduceOp, UserOp};
+    use super::{CollectiveOp, ReduceOp, UserOp, USER_OP_CODE_BASE};
 
     /// The trampoline must hand the closure typed, full-length buffers built
     /// from MPI's raw pointers. Uses slot `MAX_OPS - 1`, which no other test
@@ -630,6 +643,89 @@ mod tests {
         // MPI call is made.
         let ret = unsafe { ffi::ferrompi_op_free(5) };
         assert_eq!(ret, 0, "must skip MPI_Op_free on an unused slot");
+    }
+
+    /// A user op is a classic `MPI_User_function` with an `int` length, so every
+    /// reduction shim refuses a count above `i32::MAX` for it, before any MPI
+    /// call or request allocation. Needs no MPI runtime: the refusal returns
+    /// ahead of every MPI function, and the lookups before it are table reads.
+    #[test]
+    fn user_op_code_refuses_large_counts_in_every_reduction_shim() {
+        let count = i64::from(i32::MAX) + 1;
+        let dt = DatatypeTag::F64 as i32;
+        let op = USER_OP_CODE_BASE;
+        let sb = std::ptr::null();
+        let rb = std::ptr::null_mut();
+        let mut reqs = [-1_i64; 10];
+        let [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9] = &mut reqs;
+
+        let rets = [
+            // SAFETY: the guard returns before any buffer access.
+            ("reduce", unsafe {
+                ffi::ferrompi_reduce(sb, rb, count, dt, op, 0, 0)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("allreduce", unsafe {
+                ffi::ferrompi_allreduce(sb, rb, count, dt, op, 0)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("scan", unsafe {
+                ffi::ferrompi_scan(sb, rb, count, dt, op, 0)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("exscan", unsafe {
+                ffi::ferrompi_exscan(sb, rb, count, dt, op, 0)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("reduce_scatter_block", unsafe {
+                ffi::ferrompi_reduce_scatter_block(sb, rb, count, dt, op, 0)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("iallreduce", unsafe {
+                ffi::ferrompi_iallreduce(sb, rb, count, dt, op, 0, r0)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("ireduce", unsafe {
+                ffi::ferrompi_ireduce(sb, rb, count, dt, op, 0, 0, r1)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("iscan", unsafe {
+                ffi::ferrompi_iscan(sb, rb, count, dt, op, 0, r2)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("iexscan", unsafe {
+                ffi::ferrompi_iexscan(sb, rb, count, dt, op, 0, r3)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("ireduce_scatter_block", unsafe {
+                ffi::ferrompi_ireduce_scatter_block(sb, rb, count, dt, op, 0, r4)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("allreduce_init", unsafe {
+                ffi::ferrompi_allreduce_init(sb, rb, count, dt, op, 0, r5)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("reduce_init", unsafe {
+                ffi::ferrompi_reduce_init(sb, rb, count, dt, op, 0, 0, r6)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("scan_init", unsafe {
+                ffi::ferrompi_scan_init(sb, rb, count, dt, op, 0, r7)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("exscan_init", unsafe {
+                ffi::ferrompi_exscan_init(sb, rb, count, dt, op, 0, r8)
+            }),
+            // SAFETY: the guard returns before any buffer access.
+            ("reduce_scatter_block_init", unsafe {
+                ffi::ferrompi_reduce_scatter_block_init(sb, rb, count, dt, op, 0, r9)
+            }),
+        ];
+
+        for (shim, ret) in rets {
+            assert_ne!(ret, 0, "{shim} must refuse a user op above i32::MAX");
+        }
+        assert_eq!(reqs, [-1; 10], "a refusal must leave every request unset");
     }
 
     /// `Arc<OpRegistration>` keeps the auto traits only while the registration

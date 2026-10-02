@@ -164,8 +164,8 @@ static atomic_int next_datatype_hint;
 //     sweep):
 //       stages through a local; loads (acquire), invokes MPI_Op_free
 //       on the local, stores (release) the result back.
-//   - READER ferrompi_allreduce_user_op:
-//       atomic_load_explicit(acquire) before the MPI_Allreduce call.
+//   - READER get_op, for a user op code:
+//       atomic_load_explicit(acquire) before the MPI call.
 // The acquire/release pairing guarantees that any thread observing
 // op_used[h] == 1 (via the existing op_used acquire protocol) and then
 // loading op_table[h] sees either the valid post-create MPI_Op or
@@ -659,7 +659,11 @@ static void free_datatype_slot(int32_t handle) {
     }
 }
 
-// Map operation code to MPI_Op
+// Map operation code to MPI_Op.  A code in [FERROMPI_OP_USER_BASE,
+// FERROMPI_OP_USER_BASE + MAX_OPS) names the user op in that slot.  A slot
+// that holds MPI_OP_NULL yields MPI_OP_NULL, which MPI reports as class Op;
+// Rust cannot reach this, since a borrowed UserOp keeps its slot live for
+// the call.
 static MPI_Op get_op(int32_t op) {
     switch (op) {
         case 0: return MPI_SUM;
@@ -676,9 +680,19 @@ static MPI_Op get_op(int32_t op) {
         case 11: return MPI_MINLOC;
         case 12: return MPI_REPLACE;
         case 13: return MPI_NO_OP;
-        default: return MPI_OP_NULL;
+        default:
+            if (op >= FERROMPI_OP_USER_BASE && op < FERROMPI_OP_USER_BASE + MAX_OPS) {
+                return atomic_load_explicit(&op_table[op - FERROMPI_OP_USER_BASE],
+                                            memory_order_acquire);
+            }
+            return MPI_OP_NULL;
     }
 }
+
+// A user op is a classic MPI_User_function with an int length; MPICH narrows a
+// larger count into it without splitting the reduction, so a user op above
+// INT_MAX elements is refused on every MPI version, never sent to a _c call.
+static int is_user_op(int32_t op) { return op >= FERROMPI_OP_USER_BASE; }
 
 // MPI_LONG_INT / MPI_LONG_DOUBLE_INT are exposed only where their C layout is
 // verified against the Rust LongInt / LongDoubleInt structs.
@@ -836,7 +850,7 @@ int ferrompi_finalize(int32_t* active_requests) {
     *active_requests = active;
 
     // Free every live user op: frees the MPI op and drops the Rust closure
-    // through the same path as UserOp's Drop; a failed MPI_Op_free keeps both.
+    // through the same path as OpRegistration's Drop; a failed MPI_Op_free keeps both.
     for (int i = 0; i < MAX_OPS; i++) {
         if (atomic_load_explicit(&op_used[i], memory_order_acquire)) {
             ferrompi_op_free(i);
@@ -1390,6 +1404,7 @@ int ferrompi_reduce(
     MPI_Op mpi_op = get_op(op);
     const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         return MPI_Reduce_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm);
 #else
@@ -1413,6 +1428,7 @@ int ferrompi_allreduce(
     MPI_Op mpi_op = get_op(op);
     const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         return MPI_Allreduce_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, comm);
 #else
@@ -1435,6 +1451,7 @@ int ferrompi_scan(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         return MPI_Scan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm);
 #else
@@ -1457,6 +1474,7 @@ int ferrompi_exscan(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         return MPI_Exscan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm);
 #else
@@ -1583,6 +1601,7 @@ int ferrompi_reduce_scatter_block(
     MPI_Op mpi_op = get_op(op);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     if (recvcount > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         return MPI_Reduce_scatter_block_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op, comm);
 #else
@@ -1713,6 +1732,7 @@ int ferrompi_iallreduce(
     int ret;
     
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Iallreduce_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
 #else
@@ -1751,6 +1771,7 @@ int ferrompi_ireduce(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Ireduce_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm, &req);
 #else
@@ -1932,6 +1953,7 @@ int ferrompi_iscan(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Iscan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
 #else
@@ -1969,6 +1991,7 @@ int ferrompi_iexscan(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Iexscan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
 #else
@@ -2154,6 +2177,7 @@ int ferrompi_ireduce_scatter_block(
     int ret;
 
     if (recvcount > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Ireduce_scatter_block_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op, comm, &req);
 #else
@@ -2442,6 +2466,7 @@ int ferrompi_allreduce_init(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Allreduce_init_c(sb, recvbuf, (MPI_Count)count, dt,
                                     mpi_op, comm, MPI_INFO_NULL, &req);
@@ -2524,6 +2549,7 @@ int ferrompi_reduce_init(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Reduce_init_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm,
                                  MPI_INFO_NULL, &req);
@@ -2646,6 +2672,7 @@ int ferrompi_scan_init(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Scan_init_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm,
                                MPI_INFO_NULL, &req);
@@ -2685,6 +2712,7 @@ int ferrompi_exscan_init(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Exscan_init_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm,
                                  MPI_INFO_NULL, &req);
@@ -2897,6 +2925,7 @@ int ferrompi_reduce_scatter_block_init(
     int ret;
 
     if (recvcount > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Reduce_scatter_block_init_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op,
                                                comm, MPI_INFO_NULL, &req);
@@ -4660,19 +4689,24 @@ int ferrompi_op_create_user(int32_t slot, int32_t commute, int32_t* out_handle) 
 int ferrompi_op_free(int32_t handle) {
     if (handle < 0 || handle >= MAX_OPS) return MPI_ERR_ARG;
     if (!atomic_load_explicit(&op_used[handle], memory_order_acquire)) return MPI_SUCCESS;  /* already freed */
-    /* Step 1: MPI_Op_free — MPI will not invoke the trampoline after this.
+    /* Step 1: MPI_Op_free — MPI will not invoke the trampoline after this,
+     * because no pending operation references the op: the last OpRegistration
+     * holder is gone.
      * Stage through a local because MPI_Op_free takes a non-atomic MPI_Op*;
      * after it returns, tmp == MPI_OP_NULL, which we store back atomically. */
     MPI_Op tmp = atomic_load_explicit(&op_table[handle], memory_order_acquire);
     int ret = MPI_Op_free(&tmp);
     atomic_store_explicit(&op_table[handle], tmp, memory_order_release);
-    /* If MPI_Op_free failed (rare: MPI_ERR_OP on a predefined op, or an
-     * implementation rejecting a free while the op is referenced by an
-     * outstanding non-blocking collective), the op is still live and may
-     * be invoked.  Dropping the Rust closure now would leave the trampoline
-     * with dangling closure-data pointers (UB on next invocation).  Return
-     * the error without releasing closure or slot; the caller must retry
-     * the free after the offending collective completes. */
+    /* If MPI_Op_free failed (an MPI-internal error; op_table never holds a
+     * predefined op), the op is still live and may be invoked.  Dropping the
+     * Rust closure now would leave the trampoline with dangling closure-data
+     * pointers (UB on next invocation).  Return the error without releasing
+     * closure or slot.
+     * Freeing an op that pending operations still reference is legal
+     * (MPI-4.1 section 2.5.1): they complete and the op is deallocated
+     * afterwards, so a referenced op is not a failure to retry.  The callers
+     * are the last drop of the op's registration, which only logs the error,
+     * and the finalize sweep; neither retries. */
     if (ret != MPI_SUCCESS) {
         return ret;
     }
@@ -4695,26 +4729,5 @@ int ferrompi_op_free_slot_only(int32_t handle) {
     if (handle < 0 || handle >= MAX_OPS) return MPI_ERR_ARG;
     free_op_slot(handle);
     return MPI_SUCCESS;
-}
-
-/* MPI_Allreduce using a user-defined op identified by op_handle (slot). */
-int ferrompi_allreduce_user_op(
-    const void* sendbuf,
-    void* recvbuf,
-    int64_t count,
-    int32_t datatype_tag,
-    int32_t op_handle,
-    int32_t comm_handle
-) {
-    MPI_Comm comm = get_comm(comm_handle);
-    MPI_Datatype dt = get_datatype(datatype_tag);
-    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    if (op_handle < 0 || op_handle >= MAX_OPS) return MPI_ERR_ARG;
-    MPI_Op op = atomic_load_explicit(&op_table[op_handle], memory_order_acquire);
-    if (op == MPI_OP_NULL) return MPI_ERR_OP;
-    /* A user op is a classic MPI_User_function with an int length; MPICH
-     * narrows a larger count into it without splitting the reduction. */
-    if (count > INT_MAX) return MPI_ERR_COUNT;
-    return MPI_Allreduce(sendbuf, recvbuf, (int)count, dt, op, comm);
 }
 
