@@ -163,7 +163,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | COR-06 | `MPI_ERRORS_RETURN` not on `MPI_COMM_SELF` | major | reading | 0.5.x | fixed (19daebb) |
 | COR-07 | Finalize/re-init lifecycle aborts; `UserOp` drop after finalize | major | repro | 0.5.x | fixed (e1c123c) |
 | COR-08 | Finalize sweep frees active requests / collectively frees windows | minor | reading | 0.5.x | fixed (8c8bf37, 459d6ea) |
-| COR-09 | `-1` = PROC_NULL (MPICH) vs ANY_SOURCE (Open MPI) | minor | repro | 0.7.0 | planned (ferrompi-0.7.0) |
+| COR-09 | `-1` = PROC_NULL (MPICH) vs ANY_SOURCE (Open MPI) | minor | repro | 0.7.0 | fixed (7ebb70f, c894c2e) |
 | COR-10 | `cancel()` allowed on collective/RMA requests | minor | repro | 0.5.x | fixed (4947bc4) |
 | COR-11 | `LongDoubleInt`/`LongInt` layout wrong on macOS arm64 / Windows | minor | reading | 0.5.x | fixed (3a01966): target gating; per-target layouts wont-fix (D-32) |
 | COR-12 | Pre-MPI-4 stubs never yield `NotSupported`; 3 contradicting docs | minor | reading | 0.5.x | fixed (58f8fdc, 134bfed, 98236f8): stub mapping, ADR-0004, docs/mpi-compatibility.md |
