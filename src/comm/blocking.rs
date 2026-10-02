@@ -6,7 +6,7 @@ use crate::comm::{
 use crate::datatype::{buf, buf_mut, BytePermutable, DatatypeTag, MpiDatatype, MpiIndexedDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::op::{CollectiveOp, UserOp};
+use crate::op::CollectiveOp;
 use crate::ReduceOp;
 
 impl Communicator {
@@ -63,15 +63,17 @@ impl Communicator {
     /// # Arguments
     ///
     /// * `send` - Data to send from this process
-    /// * `recv` - Buffer for the result; must have `send.len()` elements on
-    ///   every rank (its contents matter only at the root)
-    /// * `op` - Reduction operation
+    /// * `recv` - Buffer for the result at the root, which must have
+    ///   `send.len()` elements there; ignored at other ranks, where it may be
+    ///   empty
+    /// * `op` - a [`ReduceOp`], a `&`[`UserOp<T>`](crate::UserOp), or a [`CollectiveOp`]
     /// * `root` - Rank of the root process
     ///
     /// # Errors
     ///
-    /// Returns [`Error::BufferSize`] if `recv.len() != send.len()`, on
-    /// any rank.
+    /// - [`Error::BufferSize`] if this rank is `root` and `recv.len() != send.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -83,19 +85,22 @@ impl Communicator {
     /// let mut recv = vec![0.0f64; 10];
     /// world.reduce(&send, &mut recv, ReduceOp::Sum, 0).unwrap();
     /// ```
-    pub fn reduce<T: MpiDatatype>(
+    pub fn reduce<'a, T: MpiDatatype>(
         &self,
         send: &[T],
         recv: &mut [T],
-        op: ReduceOp,
+        op: impl Into<CollectiveOp<'a, T>>,
         root: i32,
     ) -> Result<()> {
-        check_same_len("recv", send.len(), recv.len())?;
+        let op = op.into();
+        if self.rank == root {
+            check_same_len("recv", send.len(), recv.len())?;
+        }
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]).
-        let ret = unsafe { ffi::ferrompi_reduce(sp, rp, n, dt, op as i32, root, self.handle) };
+        // SAFETY: send.len() == recv.len() is verified above at the root; MPI ignores recvbuf at
+        // every other rank (MPI-4.1 section 6.9.1). The two slices cannot alias (&[T] vs &mut [T]).
+        let ret = unsafe { ffi::ferrompi_reduce(sp, rp, n, dt, op.code(), root, self.handle) };
         Error::check_with_op(ret, "reduce")
     }
 
@@ -107,7 +112,7 @@ impl Communicator {
     /// # Arguments
     ///
     /// * `value` - The scalar value to contribute from this process
-    /// * `op` - Reduction operation
+    /// * `op` - a [`ReduceOp`], a `&`[`UserOp<T>`](crate::UserOp), or a [`CollectiveOp`]
     /// * `root` - Rank of the root process
     ///
     /// # Example
@@ -121,7 +126,12 @@ impl Communicator {
     ///     println!("Sum of all ranks: {sum}");
     /// }
     /// ```
-    pub fn reduce_scalar<T: MpiDatatype>(&self, value: T, op: ReduceOp, root: i32) -> Result<T> {
+    pub fn reduce_scalar<'a, T: MpiDatatype>(
+        &self,
+        value: T,
+        op: impl Into<CollectiveOp<'a, T>>,
+        root: i32,
+    ) -> Result<T> {
         let send = [value];
         let mut recv = [value]; // placeholder, will be overwritten at root
         self.reduce(&send, &mut recv, op, root)?;
@@ -140,8 +150,13 @@ impl Communicator {
     /// # Arguments
     ///
     /// * `data` - Buffer to reduce (input on all ranks, output only at root)
-    /// * `op` - Reduction operation
+    /// * `op` - a [`ReduceOp`], a `&`[`UserOp<T>`](crate::UserOp), or a [`CollectiveOp`]
     /// * `root` - Rank of the root process
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if `op`
+    /// is a user op and `data.len()` exceeds `i32::MAX`, on every MPI version.
     ///
     /// # Example
     ///
@@ -155,25 +170,26 @@ impl Communicator {
     ///     println!("Reduced result: {:?}", &data[..3]);
     /// }
     /// ```
-    pub fn reduce_inplace<T: MpiDatatype>(
+    pub fn reduce_inplace<'a, T: MpiDatatype>(
         &self,
         data: &mut [T],
-        op: ReduceOp,
+        op: impl Into<CollectiveOp<'a, T>>,
         root: i32,
     ) -> Result<()> {
+        let op = op.into();
         let (p, n, dt) = buf_mut(data);
         let ret = if self.rank() == root {
             // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
             // this NULL is unambiguous); ferrompi_reduce maps it to MPI_IN_PLACE, so data is
             // both input and output at root.
             unsafe {
-                ffi::ferrompi_reduce(std::ptr::null(), p, n, dt, op as i32, root, self.handle)
+                ffi::ferrompi_reduce(std::ptr::null(), p, n, dt, op.code(), root, self.handle)
             }
         } else {
             // SAFETY: data is passed as both sendbuf and recvbuf because strict MPI builds
             // reject a NULL recvbuf at non-root; MPI ignores recvbuf there, so the computation
             // is unaffected.
-            unsafe { ffi::ferrompi_reduce(p, p, n, dt, op as i32, root, self.handle) }
+            unsafe { ffi::ferrompi_reduce(p, p, n, dt, op.code(), root, self.handle) }
         };
         Error::check_with_op(ret, "reduce_inplace")
     }
@@ -184,7 +200,13 @@ impl Communicator {
     ///
     /// * `send` - Data to send from this process
     /// * `recv` - Buffer for result
-    /// * `op` - Reduction operation
+    /// * `op` - a [`ReduceOp`], a `&`[`UserOp<T>`](crate::UserOp), or a [`CollectiveOp`]
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -196,23 +218,62 @@ impl Communicator {
     /// let mut recv = vec![0.0f64; 10];
     /// world.allreduce(&send, &mut recv, ReduceOp::Sum).unwrap();
     /// ```
+    ///
+    /// A user-defined op is passed by reference:
+    ///
+    /// ```no_run
+    /// use ferrompi::{Mpi, UserOp};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    ///
+    /// let op: UserOp<f64> = UserOp::new(|invec: &[f64], inoutvec: &mut [f64]| {
+    ///     for (x, y) in invec.iter().zip(inoutvec.iter_mut()) {
+    ///         *y = x.max(*y);
+    ///     }
+    /// }).unwrap();
+    ///
+    /// let send = vec![world.rank() as f64 + 1.5_f64];
+    /// let mut recv = vec![0.0_f64];
+    /// world.allreduce(&send, &mut recv, &op).unwrap();
+    /// // recv[0] == (world.size() - 1) as f64 + 1.5
+    /// ```
+    ///
+    /// `MAX_LOC` is not defined on a primitive type:
+    ///
+    /// ```compile_fail,E0277
+    /// use ferrompi::{CollectiveOp, Mpi};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    ///
+    /// let send = [1.0f64];
+    /// let mut recv = [0.0f64];
+    /// world.allreduce(&send, &mut recv, CollectiveOp::MAX_LOC).unwrap();
+    /// ```
     #[inline]
-    pub fn allreduce<T: MpiDatatype>(
+    pub fn allreduce<'a, T: MpiDatatype>(
         &self,
         send: &[T],
         recv: &mut [T],
-        op: ReduceOp,
+        op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
+        let op = op.into();
         check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
         // (&[T] vs &mut [T]).
-        let ret = unsafe { ffi::ferrompi_allreduce(sp, rp, n, dt, op as i32, self.handle) };
+        let ret = unsafe { ffi::ferrompi_allreduce(sp, rp, n, dt, op.code(), self.handle) };
         Error::check_with_op(ret, "allreduce")
     }
 
     /// All-reduce values in place.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if `op`
+    /// is a user op and `data.len()` exceeds `i32::MAX`, on every MPI version.
     ///
     /// # Example
     ///
@@ -223,13 +284,18 @@ impl Communicator {
     /// let mut data = vec![world.rank() as f64; 10];
     /// world.allreduce_inplace(&mut data, ReduceOp::Sum).unwrap();
     /// ```
-    pub fn allreduce_inplace<T: MpiDatatype>(&self, data: &mut [T], op: ReduceOp) -> Result<()> {
+    pub fn allreduce_inplace<'a, T: MpiDatatype>(
+        &self,
+        data: &mut [T],
+        op: impl Into<CollectiveOp<'a, T>>,
+    ) -> Result<()> {
+        let op = op.into();
         let (p, n, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
         // NULL is unambiguous); ferrompi_allreduce maps it to MPI_IN_PLACE, so data serves as
         // both send and receive buffer.
         let ret =
-            unsafe { ffi::ferrompi_allreduce(std::ptr::null(), p, n, dt, op as i32, self.handle) };
+            unsafe { ffi::ferrompi_allreduce(std::ptr::null(), p, n, dt, op.code(), self.handle) };
         Error::check_with_op(ret, "allreduce_inplace")
     }
 
@@ -246,66 +312,15 @@ impl Communicator {
     /// let sum = world.allreduce_scalar(world.rank() as f64, ReduceOp::Sum).unwrap();
     /// println!("Sum of all ranks: {sum}");
     /// ```
-    pub fn allreduce_scalar<T: MpiDatatype>(&self, value: T, op: ReduceOp) -> Result<T> {
+    pub fn allreduce_scalar<'a, T: MpiDatatype>(
+        &self,
+        value: T,
+        op: impl Into<CollectiveOp<'a, T>>,
+    ) -> Result<T> {
         let send = [value];
         let mut recv = [value]; // placeholder, will be overwritten
         self.allreduce(&send, &mut recv, op)?;
         Ok(recv[0])
-    }
-
-    /// All-reduce values using a user-defined reduction operation.
-    ///
-    /// Invokes `MPI_Allreduce` with the `MPI_Op` registered inside `op`.
-    /// Every rank must call this with the same `op`, the same count, and the
-    /// same datatype `T`.
-    ///
-    /// # Arguments
-    ///
-    /// * `send` - Data contributed by this process
-    /// * `recv` - Output buffer; must be the same length as `send`
-    /// * `op`   - A user-defined reduction op created with [`UserOp::new`]
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
-    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
-    ///   `send.len()` exceeds `i32::MAX`, on every MPI version
-    /// - An MPI error if the library rejects the call
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{Mpi, UserOp};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    ///
-    /// let op: UserOp<f64> = UserOp::new(|invec: &[f64], inoutvec: &mut [f64]| {
-    ///     for (x, y) in invec.iter().zip(inoutvec.iter_mut()) {
-    ///         *y = x.max(*y);
-    ///     }
-    /// }).unwrap();
-    ///
-    /// let send = vec![world.rank() as f64 + 1.5_f64];
-    /// let mut recv = vec![0.0_f64];
-    /// world.allreduce_with_op(&send, &mut recv, &op).unwrap();
-    /// // recv[0] == (world.size() - 1) as f64 + 1.5
-    /// ```
-    pub fn allreduce_with_op<T: MpiDatatype>(
-        &self,
-        send: &[T],
-        recv: &mut [T],
-        op: &UserOp<T>,
-    ) -> Result<()> {
-        check_same_len("recv", send.len(), recv.len())?;
-        let (sp, n, dt) = buf(send);
-        let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]). The op code names a live op because `op` is borrowed for
-        // the call.
-        let ret =
-            unsafe { ffi::ferrompi_allreduce(sp, rp, n, dt, op.registration.code(), self.handle) };
-        Error::check_with_op(ret, "allreduce_user_op")
     }
 
     /// All-reduce paired value+index types using `MPI_MAXLOC` or `MPI_MINLOC`.
@@ -487,11 +502,13 @@ impl Communicator {
     ///
     /// * `send` - Data to contribute from this process
     /// * `recv` - Buffer for the prefix-reduced result (must be same length as `send`)
-    /// * `op` - Reduction operation
+    /// * `op` - a [`ReduceOp`], a `&`[`UserOp<T>`](crate::UserOp), or a [`CollectiveOp`]
     ///
     /// # Errors
     ///
-    /// Returns [`Error::BufferSize`] if `send.len() != recv.len()`.
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -504,13 +521,19 @@ impl Communicator {
     /// world.scan(&send, &mut recv, ReduceOp::Sum).unwrap();
     /// // On rank i, recv[j] == (i + 1) * send[j]
     /// ```
-    pub fn scan<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], op: ReduceOp) -> Result<()> {
+    pub fn scan<'a, T: MpiDatatype>(
+        &self,
+        send: &[T],
+        recv: &mut [T],
+        op: impl Into<CollectiveOp<'a, T>>,
+    ) -> Result<()> {
+        let op = op.into();
         check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
         // (&[T] vs &mut [T]).
-        let ret = unsafe { ffi::ferrompi_scan(sp, rp, n, dt, op as i32, self.handle) };
+        let ret = unsafe { ffi::ferrompi_scan(sp, rp, n, dt, op.code(), self.handle) };
         Error::check_with_op(ret, "scan")
     }
 
@@ -529,11 +552,13 @@ impl Communicator {
     /// * `send` - Data to contribute from this process
     /// * `recv` - Buffer for the prefix-reduced result (must be same length as `send`;
     ///   **undefined on rank 0**)
-    /// * `op` - Reduction operation
+    /// * `op` - a [`ReduceOp`], a `&`[`UserOp<T>`](crate::UserOp), or a [`CollectiveOp`]
     ///
     /// # Errors
     ///
-    /// Returns [`Error::BufferSize`] if `send.len() != recv.len()`.
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -547,13 +572,19 @@ impl Communicator {
     /// // On rank i > 0, recv[j] == i * send[j]
     /// // On rank 0, recv is undefined per the MPI standard.
     /// ```
-    pub fn exscan<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], op: ReduceOp) -> Result<()> {
+    pub fn exscan<'a, T: MpiDatatype>(
+        &self,
+        send: &[T],
+        recv: &mut [T],
+        op: impl Into<CollectiveOp<'a, T>>,
+    ) -> Result<()> {
+        let op = op.into();
         check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
         // (&[T] vs &mut [T]). MPI leaves recv undefined on rank 0, documented above.
-        let ret = unsafe { ffi::ferrompi_exscan(sp, rp, n, dt, op as i32, self.handle) };
+        let ret = unsafe { ffi::ferrompi_exscan(sp, rp, n, dt, op.code(), self.handle) };
         Error::check_with_op(ret, "exscan")
     }
 
@@ -571,7 +602,11 @@ impl Communicator {
     /// let prefix_sum = world.scan_scalar(1.0f64, ReduceOp::Sum).unwrap();
     /// // On rank i, prefix_sum == (i + 1) as f64
     /// ```
-    pub fn scan_scalar<T: MpiDatatype>(&self, value: T, op: ReduceOp) -> Result<T> {
+    pub fn scan_scalar<'a, T: MpiDatatype>(
+        &self,
+        value: T,
+        op: impl Into<CollectiveOp<'a, T>>,
+    ) -> Result<T> {
         let send = [value];
         let mut recv = [value]; // placeholder, will be overwritten
         self.scan(&send, &mut recv, op)?;
@@ -598,7 +633,11 @@ impl Communicator {
     /// // On rank i > 0, prefix_sum == i as f64
     /// // On rank 0, the result is undefined per the MPI standard.
     /// ```
-    pub fn exscan_scalar<T: MpiDatatype>(&self, value: T, op: ReduceOp) -> Result<T> {
+    pub fn exscan_scalar<'a, T: MpiDatatype>(
+        &self,
+        value: T,
+        op: impl Into<CollectiveOp<'a, T>>,
+    ) -> Result<T> {
         let send = [value];
         let mut recv = [value]; // placeholder, will be overwritten by MPI (except rank 0)
         self.exscan(&send, &mut recv, op)?;
@@ -952,9 +991,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidArgument`] if `send.len()` is not evenly divisible
-    /// by the communicator size, or [`Error::BufferSize`] if
-    /// `send.len() != recv.len() * size`.
+    /// - [`Error::InvalidArgument`] if `send.len()` is not evenly divisible by the
+    ///   communicator size
+    /// - [`Error::BufferSize`] if `send.len() != recv.len() * size`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `recv.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -967,12 +1008,13 @@ impl Communicator {
     /// let mut recv = vec![0.0f64; 5];
     /// world.reduce_scatter_block(&send, &mut recv, ReduceOp::Sum).unwrap();
     /// ```
-    pub fn reduce_scatter_block<T: MpiDatatype>(
+    pub fn reduce_scatter_block<'a, T: MpiDatatype>(
         &self,
         send: &[T],
         recv: &mut [T],
-        op: ReduceOp,
+        op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
+        let op = op.into();
         check_same_len(
             "recv",
             rank_block("send", send.len(), self.size)?,
@@ -983,7 +1025,7 @@ impl Communicator {
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len() * size
         // is verified above.
         let ret =
-            unsafe { ffi::ferrompi_reduce_scatter_block(sp, rp, n, dt, op as i32, self.handle) };
+            unsafe { ffi::ferrompi_reduce_scatter_block(sp, rp, n, dt, op.code(), self.handle) };
         Error::check_with_op(ret, "reduce_scatter_block")
     }
 }

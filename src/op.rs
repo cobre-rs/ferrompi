@@ -121,13 +121,17 @@ impl Builtin {
     }
 }
 
-// Covariant in 'a; T appears only as a `fn` return, so it adds no auto-trait or drop bound.
-type OpMarker<'a, T> = PhantomData<(&'a (), fn() -> T)>;
+#[derive(Debug, Clone, Copy)]
+enum CollectiveRepr<'a> {
+    Builtin(Builtin),
+    User(&'a Arc<OpRegistration>),
+}
 
 /// The operation of a reducing collective on elements of type `T`.
 ///
-/// For a primitive `T` ([`MpiDatatype`]) it is built from a [`ReduceOp`]. For
-/// a pair `T` ([`MpiIndexedDatatype`]) the only operations are
+/// For a primitive `T` ([`MpiDatatype`]) it is built from a [`ReduceOp`], or
+/// from a `&`[`UserOp<T>`], which the call borrows. For a pair `T`
+/// ([`MpiIndexedDatatype`]) the only operations are
 /// [`MAX_LOC`](Self::MAX_LOC) and [`MIN_LOC`](Self::MIN_LOC), so `MAX_LOC` or
 /// `MIN_LOC` on a primitive type, or any other predefined op on a pair type,
 /// does not compile.
@@ -145,8 +149,9 @@ type OpMarker<'a, T> = PhantomData<(&'a (), fn() -> T)>;
 /// let _ = ferrompi::CollectiveOp::<f64>::MAX_LOC;
 /// ```
 pub struct CollectiveOp<'a, T> {
-    op: Builtin,
-    _marker: OpMarker<'a, T>,
+    op: CollectiveRepr<'a>,
+    // T appears only as a `fn` return, so it adds no auto-trait or drop bound.
+    _marker: PhantomData<fn() -> T>,
 }
 
 impl<T> Clone for CollectiveOp<'_, T> {
@@ -166,7 +171,16 @@ impl<T> std::fmt::Debug for CollectiveOp<'_, T> {
 impl<T: MpiDatatype> From<ReduceOp> for CollectiveOp<'_, T> {
     fn from(op: ReduceOp) -> Self {
         Self {
-            op: Builtin::Reduce(op),
+            op: CollectiveRepr::Builtin(Builtin::Reduce(op)),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'a, T: MpiDatatype> From<&'a UserOp<T>> for CollectiveOp<'a, T> {
+    fn from(op: &'a UserOp<T>) -> Self {
+        Self {
+            op: CollectiveRepr::User(&op.registration),
             _marker: PhantomData,
         }
     }
@@ -175,20 +189,23 @@ impl<T: MpiDatatype> From<ReduceOp> for CollectiveOp<'_, T> {
 impl<T: MpiIndexedDatatype> CollectiveOp<'static, T> {
     /// `MPI_MAXLOC`: the maximum value and the index that came with it.
     pub const MAX_LOC: Self = Self {
-        op: Builtin::PairMax,
+        op: CollectiveRepr::Builtin(Builtin::PairMax),
         _marker: PhantomData,
     };
 
     /// `MPI_MINLOC`: the minimum value and the index that came with it.
     pub const MIN_LOC: Self = Self {
-        op: Builtin::PairMin,
+        op: CollectiveRepr::Builtin(Builtin::PairMin),
         _marker: PhantomData,
     };
 }
 
 impl<T> CollectiveOp<'_, T> {
     pub(crate) fn code(&self) -> i32 {
-        self.op.code()
+        match self.op {
+            CollectiveRepr::Builtin(op) => op.code(),
+            CollectiveRepr::User(registration) => registration.code(),
+        }
     }
 }
 
@@ -370,7 +387,7 @@ pub unsafe extern "C" fn ferrompi_op_drop_closure(slot: i32) {
 ///
 /// let send = vec![world.rank() as f64 + 1.5_f64];
 /// let mut recv = vec![0.0_f64];
-/// world.allreduce_with_op(&send, &mut recv, &op).unwrap();
+/// world.allreduce(&send, &mut recv, &op).unwrap();
 /// ```
 pub struct UserOp<T: MpiDatatype> {
     pub(crate) registration: Arc<OpRegistration>,
@@ -500,8 +517,9 @@ where
                 return;
             }
             // SAFETY: invec/inoutvec point to `len` elements of the datatype the
-            // op was applied with, which allreduce_with_op always passes as T's
-            // own; MPI's buffers are aligned for that datatype; the two buffers
+            // op was applied with, which every reduction passes as T's own
+            // because CollectiveOp<'a, T> ties the op's T to the buffers' T;
+            // MPI's buffers are aligned for that datatype; the two buffers
             // are distinct; T: MpiDatatype is Copy with a stable layout.
             let (invec, inoutvec) = unsafe {
                 (
@@ -547,6 +565,7 @@ impl Drop for OpRegistration {
 
 #[cfg(test)]
 mod tests {
+    use std::marker::PhantomData;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
 
@@ -555,7 +574,7 @@ mod tests {
     use crate::DoubleInt;
 
     use super::{ferrompi_op_drop_closure, rust_user_op_invoke, typed_adapter, MAX_OPS, REGISTRY};
-    use super::{CollectiveOp, ReduceOp, UserOp, USER_OP_CODE_BASE};
+    use super::{CollectiveOp, OpRegistration, ReduceOp, UserOp, USER_OP_CODE_BASE};
 
     /// The trampoline must hand the closure typed, full-length buffers built
     /// from MPI's raw pointers. Uses slot `MAX_OPS - 1`, which no other test
@@ -779,5 +798,16 @@ mod tests {
         }
         assert_eq!(CollectiveOp::<DoubleInt>::MAX_LOC.code(), 10);
         assert_eq!(CollectiveOp::<DoubleInt>::MIN_LOC.code(), 11);
+    }
+
+    /// Slot 9 is never allocated by any test, so dropping this registration
+    /// makes no MPI call.
+    #[test]
+    fn collective_op_user_code_is_the_registration_code() {
+        let op = UserOp::<f64> {
+            registration: Arc::new(OpRegistration { slot: 9 }),
+            _marker: PhantomData,
+        };
+        assert_eq!(CollectiveOp::from(&op).code(), USER_OP_CODE_BASE + 9);
     }
 }

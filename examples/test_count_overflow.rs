@@ -1,6 +1,6 @@
 //! Regression test for the `count > INT_MAX` guard across the 30 scalar-count
-//! shims (blocking/nonblocking p2p and collectives, plus the user-op
-//! reduction), the 6 v-collective shims, and the 7 RMA shims.
+//! shims (blocking/nonblocking p2p and collectives, plus every blocking
+//! reduction with a user op), the 6 v-collective shims, and the 7 RMA shims.
 //!
 //! On MPI < 4, a scalar count above `INT_MAX` must return
 //! `Err(Error::Mpi { class: MpiErrorClass::Count, .. })` before any MPI
@@ -129,8 +129,8 @@ fn rma_put(world: &Communicator) {
     );
 }
 
-/// A user op's classic function takes an `int` length: `allreduce_with_op`
-/// must reject a count above `INT_MAX` on every MPI version.
+/// A user op's classic function takes an `int` length: every blocking reduction
+/// with a user op must reject a count above `INT_MAX` on every MPI version.
 fn user_op_reduction(world: &Communicator) {
     // Zeroed allocations whose pages the fixed shim never touches: the guard
     // must fire before any MPI call reads or writes them.
@@ -143,12 +143,33 @@ fn user_op_reduction(world: &Communicator) {
         }
     })
     .expect("UserOp::new failed");
-    let allreduce_with_op_ok =
-        common::is_count(&world.allreduce_with_op(&send, &mut recv, &max_op));
+
+    let allreduce_ok = common::is_count(&world.allreduce(&send, &mut recv, &max_op));
     common::check(
         world,
-        allreduce_with_op_ok,
-        "allreduce_with_op of 2^32+16 bytes returns Count",
+        allreduce_ok,
+        "allreduce of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let reduce_ok = common::is_count(&world.reduce(&send, &mut recv, &max_op, 0));
+    common::check(
+        world,
+        reduce_ok,
+        "reduce of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let scan_ok = common::is_count(&world.scan(&send, &mut recv, &max_op));
+    common::check(
+        world,
+        scan_ok,
+        "scan of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let exscan_ok = common::is_count(&world.exscan(&send, &mut recv, &max_op));
+    common::check(
+        world,
+        exscan_ok,
+        "exscan of 2^32+16 bytes with a user op returns Count",
     );
 }
 

@@ -16,8 +16,8 @@
 //!   (point-to-point, collectives including persistent ones, RMA); below
 //!   MPI 4.0 it returns [`Error::Mpi`] with class [`MpiErrorClass::Count`]. The V-collectives
 //!   (`gatherv`, `scatterv`, `allgatherv`, `alltoallv`, and their persistent forms), which take
-//!   counts as `i32` arrays, and `allreduce_with_op`, whose user function takes an `int` length,
-//!   return that error on every MPI version.
+//!   counts as `i32` arrays, and every reduction with a user op, whose user function takes an
+//!   `int` length, return that error on every MPI version.
 //! - **Scalar and in-place variants**: `reduce_scalar`, `allreduce_scalar`, `reduce_inplace`,
 //!   `allreduce_inplace`, `scan_scalar`, `exscan_scalar`
 //! - **Point-to-point**: `send`, `recv`, `isend`, `irecv`, `sendrecv`, `probe`, `iprobe`

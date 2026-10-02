@@ -73,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   any other op on a pair type, or `MAX_LOC` on a primitive type, is a compile
   error instead of an `Error::InvalidArgument` or an MPI error. Migration:
   `world.allreduce_indexed(&send, &mut recv, CollectiveOp::MAX_LOC)`.
+- **The blocking reductions take `op: impl Into<CollectiveOp<T>>`, and
+  `allreduce_with_op` is removed:** `reduce`, `allreduce`, `scan`, `exscan`,
+  `reduce_scatter_block` and their scalar and in-place forms accept a
+  `ReduceOp`, a `&UserOp<T>` or a `CollectiveOp`. Migration: a `ReduceOp`
+  argument still compiles; replace `allreduce_with_op(&send, &mut recv, &op)`
+  with `allreduce(&send, &mut recv, &op)`. A user op above `i32::MAX` elements
+  returns `Error::Mpi` with class `Count` on every MPI version.
 
 ### Added
 
@@ -84,6 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accept non-root ranks**, where `data` is the rank's own block, like
   `scatter_inplace` and `reduce_inplace`; they no longer return an error
   there.
+- **`reduce` checks `recv`'s length only at the root**; another rank may pass
+  an empty buffer, as for `gather` and `scatter`.
 
 ### Removed
 

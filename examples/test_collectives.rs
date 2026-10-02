@@ -639,12 +639,49 @@ fn main() {
     }
 
     // ========================================================================
+    // Test 26: reduce with an empty recv at every non-root rank
+    //   MPI reads recvbuf only at the root. The empty u8 slice's pointer is 0x1,
+    //   which Open MPI also uses for MPI_IN_PLACE.
+    // ========================================================================
+    {
+        let send = vec![(rank + 1) as f64; 3];
+        let mut root_recv = vec![0.0f64; 3];
+        let recv: &mut [f64] = if rank == 0 { &mut root_recv } else { &mut [] };
+        world
+            .reduce(&send, recv, ReduceOp::Sum, 0)
+            .expect("reduce with an empty non-root recv failed");
+        if rank == 0 {
+            let expected = (size * (size + 1) / 2) as f64;
+            for (i, &v) in root_recv.iter().enumerate() {
+                assert!(
+                    (v - expected).abs() < 1e-10,
+                    "reduce (empty non-root recv) recv[{i}] = {v}, expected {expected}"
+                );
+            }
+        }
+
+        let send = [1u8; 3];
+        let mut root_recv = [0u8; 3];
+        let recv: &mut [u8] = if rank == 0 { &mut root_recv } else { &mut [] };
+        world
+            .reduce(&send, recv, ReduceOp::Sum, 0)
+            .expect("reduce of u8 with an empty non-root recv failed");
+        if rank == 0 {
+            assert_eq!(
+                root_recv, [size as u8; 3],
+                "reduce of u8 (empty non-root recv)"
+            );
+            println!("PASS: reduce (empty non-root recv)");
+        }
+    }
+
+    // ========================================================================
     // Final barrier and summary
     // ========================================================================
     world.barrier().expect("final barrier failed");
     if rank == 0 {
         println!("\n========================================");
-        println!("All collective tests passed! (25 tests)");
+        println!("All collective tests passed! (26 tests)");
         println!("========================================");
     }
 }
