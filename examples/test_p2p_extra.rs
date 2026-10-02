@@ -8,7 +8,7 @@
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_p2p_extra
 // mpi-test: np=2..
 
-use ferrompi::Mpi;
+use ferrompi::{Mpi, Source, Tag};
 
 /// Helper trait for test values — provides a canonical test value
 /// derived from an MPI rank, so we can verify data integrity.
@@ -354,12 +354,16 @@ fn main() {
             world.send(&data, 1, tag).expect("probe test: send failed");
         } else if rank == 1 {
             let status = world.probe::<i32>(0, tag).expect("probe::<i32> failed");
-            assert_eq!(status.source, 0, "probe::<i32> source mismatch");
-            assert_eq!(status.tag, tag, "probe::<i32> tag mismatch");
-            assert_eq!(status.count, 7, "probe::<i32> count mismatch");
+            assert_eq!(
+                status.source,
+                Source::Rank(0),
+                "probe::<i32> source mismatch"
+            );
+            assert_eq!(status.tag, Tag::Value(tag), "probe::<i32> tag mismatch");
+            assert_eq!(status.count, Some(7), "probe::<i32> count mismatch");
 
             // Receive the probed message
-            let mut buf = vec![0i32; status.count as usize];
+            let mut buf = vec![0i32; status.count.unwrap()];
             world
                 .recv(&mut buf, 0, tag)
                 .expect("recv after probe::<i32> failed");
@@ -392,11 +396,15 @@ fn main() {
                 std::hint::spin_loop();
             }
             let status = status.expect("iprobe::<i32>: message never arrived");
-            assert_eq!(status.source, 0, "iprobe::<i32> source mismatch");
-            assert_eq!(status.tag, tag, "iprobe::<i32> tag mismatch");
-            assert_eq!(status.count, 3, "iprobe::<i32> count mismatch");
+            assert_eq!(
+                status.source,
+                Source::Rank(0),
+                "iprobe::<i32> source mismatch"
+            );
+            assert_eq!(status.tag, Tag::Value(tag), "iprobe::<i32> tag mismatch");
+            assert_eq!(status.count, Some(3), "iprobe::<i32> count mismatch");
 
-            let mut buf = vec![0i32; status.count as usize];
+            let mut buf = vec![0i32; status.count.unwrap()];
             world
                 .recv(&mut buf, 0, tag)
                 .expect("recv after iprobe::<i32> failed");
@@ -427,8 +435,8 @@ fn main() {
                 .probe::<i32>(0, tag)
                 .expect("probe::<i32> of partial message failed");
             assert_eq!(
-                status.count, -1,
-                "probe::<i32> of 3 bytes must report count -1"
+                status.count, None,
+                "probe::<i32> of 3 bytes must report no whole-element count"
             );
 
             let status = world
@@ -436,8 +444,8 @@ fn main() {
                 .expect("iprobe::<i32> of partial message failed")
                 .expect("iprobe::<i32>: message still queued but not found");
             assert_eq!(
-                status.count, -1,
-                "iprobe::<i32> of 3 bytes must report count -1"
+                status.count, None,
+                "iprobe::<i32> of 3 bytes must report no whole-element count"
             );
 
             let mut buf = [0u8; 3];

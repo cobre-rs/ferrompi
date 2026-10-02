@@ -6,7 +6,7 @@
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_nonblocking
 // mpi-test: np=2..
 
-use ferrompi::Mpi;
+use ferrompi::{Mpi, Source, Tag};
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -217,12 +217,12 @@ fn main() {
             world.send(&data, 1, tag).expect("probe test: send failed");
         } else if rank == 1 {
             let status = world.probe::<f64>(0, tag).expect("probe failed");
-            assert_eq!(status.source, 0, "probe source mismatch");
-            assert_eq!(status.tag, tag, "probe tag mismatch");
-            assert_eq!(status.count, 7, "probe count mismatch");
+            assert_eq!(status.source, Source::Rank(0), "probe source mismatch");
+            assert_eq!(status.tag, Tag::Value(tag), "probe tag mismatch");
+            assert_eq!(status.count, Some(7), "probe count mismatch");
 
             // Now receive the probed message
-            let mut buf = vec![0.0f64; status.count as usize];
+            let mut buf = vec![0.0f64; status.count.unwrap()];
             world
                 .recv(&mut buf, 0, tag)
                 .expect("recv after probe failed");
@@ -257,11 +257,11 @@ fn main() {
                 std::hint::spin_loop();
             }
             let status = status.expect("iprobe: message never arrived");
-            assert_eq!(status.source, 0, "iprobe source mismatch");
-            assert_eq!(status.tag, tag, "iprobe tag mismatch");
-            assert_eq!(status.count, 3, "iprobe count mismatch");
+            assert_eq!(status.source, Source::Rank(0), "iprobe source mismatch");
+            assert_eq!(status.tag, Tag::Value(tag), "iprobe tag mismatch");
+            assert_eq!(status.count, Some(3), "iprobe count mismatch");
 
-            let mut buf = vec![0.0f64; status.count as usize];
+            let mut buf = vec![0.0f64; status.count.unwrap()];
             world
                 .recv(&mut buf, 0, tag)
                 .expect("recv after iprobe failed");

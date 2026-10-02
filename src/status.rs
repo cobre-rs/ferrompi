@@ -5,7 +5,8 @@
 //! [`Source`] and [`Tag`] types that select which messages a receive or probe
 //! matches.
 
-use crate::error::{Error, Result};
+use crate::error::{Error, MpiErrorClass, Result};
+use crate::ffi;
 
 // Private codes carried across the FFI for the wildcard sources and tags; the C
 // layer translates them to the linked MPI's constants. These MUST match the
@@ -118,25 +119,51 @@ impl Tag {
 ///
 /// // Blocking probe for any f64 message
 /// let status = world.probe::<f64>(Source::Any, Tag::Any).unwrap();
-/// println!("Message from rank {} with tag {}, {} elements",
+/// println!("Message from {:?} with tag {:?}, {:?} elements",
 ///          status.source, status.tag, status.count);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Status {
-    /// Source rank of the message.
-    pub source: i32,
-    /// Tag of the message.
-    pub tag: i32,
-    /// Number of elements of the probed type in the message, from `MPI_Get_count`;
-    /// `-1` when the message is not a whole number of elements (MPI reports
-    /// `MPI_UNDEFINED`).
-    pub count: i64,
+    /// The matched source: [`Source::Rank`] for a message,
+    /// [`Source::ProcNull`] for a receive or probe from `PROC_NULL`.
+    pub source: Source,
+    /// The matched tag: [`Tag::Value`] for a message, [`Tag::Any`] only for a
+    /// receive or probe from `PROC_NULL`.
+    pub tag: Tag,
+    /// Number of elements of the call's datatype in the message, from
+    /// `MPI_Get_count`; `None` when the message is not a whole number of
+    /// elements (MPI reports `MPI_UNDEFINED`).
+    pub count: Option<usize>,
+    /// `Some` only for a request whose own error MPI reported in a
+    /// multi-request completion; `None` for a single-request call.
+    pub error: Option<MpiErrorClass>,
+}
+
+impl Status {
+    pub(crate) fn from_ffi(raw: ffi::FerrompiStatus) -> Status {
+        Status {
+            source: match raw.source {
+                PROC_NULL_CODE => Source::ProcNull,
+                ANY_SOURCE_CODE => Source::Any,
+                rank => Source::Rank(rank),
+            },
+            tag: match raw.tag {
+                ANY_TAG_CODE => Tag::Any,
+                value => Tag::Value(value),
+            },
+            count: usize::try_from(raw.count).ok(),
+            // `raw.error` is already an error class (see `ferrompi_status`), never an error code.
+            error: (raw.error != 0).then(|| MpiErrorClass::from_raw(raw.error)),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Source, Tag, ANY_SOURCE_CODE, ANY_TAG_CODE, PROC_NULL_CODE};
-    use crate::error::Error;
+    use super::{Source, Status, Tag, ANY_SOURCE_CODE, ANY_TAG_CODE, PROC_NULL_CODE};
+    use crate::error::{Error, MpiErrorClass};
+    use crate::ffi::FerrompiStatus;
 
     #[test]
     fn source_code_any() {
@@ -241,5 +268,57 @@ mod tests {
         assert_eq!(Source::from(-1), Source::Rank(-1));
         assert_eq!(Tag::from(3), Tag::Value(3));
         assert_eq!(Tag::from(-1), Tag::Value(-1));
+    }
+
+    fn raw(source: i32, tag: i32, count: i64, error: i32) -> FerrompiStatus {
+        FerrompiStatus {
+            source,
+            tag,
+            count,
+            error,
+        }
+    }
+
+    #[test]
+    fn status_from_ffi_rank_and_value() {
+        let status = Status::from_ffi(raw(3, 7, 5, 0));
+        assert_eq!(status.source, Source::Rank(3));
+        assert_eq!(status.tag, Tag::Value(7));
+        assert_eq!(status.count, Some(5));
+        assert_eq!(status.error, None);
+    }
+
+    #[test]
+    fn status_from_ffi_proc_null() {
+        let status = Status::from_ffi(raw(PROC_NULL_CODE, ANY_TAG_CODE, 0, 0));
+        assert_eq!(status.source, Source::ProcNull);
+        assert_eq!(status.tag, Tag::Any);
+        assert_eq!(status.count, Some(0));
+        assert_eq!(status.error, None);
+    }
+
+    #[test]
+    fn status_from_ffi_any_source() {
+        let status = Status::from_ffi(raw(ANY_SOURCE_CODE, 0, 0, 0));
+        assert_eq!(status.source, Source::Any);
+    }
+
+    #[test]
+    fn status_from_ffi_partial_count_is_none() {
+        let status = Status::from_ffi(raw(0, 0, -1, 0));
+        assert_eq!(status.count, None);
+    }
+
+    #[test]
+    fn status_from_ffi_error_zero_is_none() {
+        assert_eq!(Status::from_ffi(raw(0, 0, 0, 0)).error, None);
+    }
+
+    #[test]
+    fn status_from_ffi_nonzero_error_class() {
+        assert_eq!(
+            Status::from_ffi(raw(0, 0, 0, 999)).error,
+            Some(MpiErrorClass::Raw(999))
+        );
     }
 }

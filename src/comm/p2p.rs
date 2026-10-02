@@ -245,7 +245,7 @@ impl Communicator {
     /// Blocking probe for an incoming message.
     ///
     /// Waits until a matching message is available and returns status
-    /// information (source rank, tag, element count) without actually
+    /// information (source, tag, element count) without actually
     /// receiving the message. This is useful for determining the size of an
     /// incoming message before allocating a receive buffer.
     ///
@@ -270,8 +270,7 @@ impl Communicator {
     /// // Probe for any incoming f64 message
     /// let status = world.probe::<f64>(Source::Any, Tag::Any).unwrap();
     /// // Allocate a buffer of exactly the right size
-    /// assert!(status.count >= 0, "message is not a whole number of f64");
-    /// let mut buf = vec![0.0f64; status.count as usize];
+    /// let mut buf = vec![0.0f64; status.count.expect("whole number of f64")];
     /// world.recv(&mut buf, status.source, status.tag).unwrap();
     /// ```
     pub fn probe<T: MpiDatatype>(
@@ -287,11 +286,7 @@ impl Communicator {
         let ret =
             unsafe { ffi::ferrompi_probe(source, tag, self.handle, &mut status, T::TAG as i32) };
         Error::check_with_op(ret, "probe")?;
-        Ok(Status {
-            source: status.source,
-            tag: status.tag,
-            count: status.count,
-        })
+        Ok(Status::from_ffi(status))
     }
 
     /// Nonblocking probe for an incoming message.
@@ -319,8 +314,7 @@ impl Communicator {
     /// # let world = mpi.world();
     /// // Poll for an incoming f64 message without blocking
     /// if let Some(status) = world.iprobe::<f64>(Source::Any, Tag::Any).unwrap() {
-    ///     assert!(status.count >= 0, "message is not a whole number of f64");
-    ///     let mut buf = vec![0.0f64; status.count as usize];
+    ///     let mut buf = vec![0.0f64; status.count.expect("whole number of f64")];
     ///     world.recv(&mut buf, status.source, status.tag).unwrap();
     /// }
     /// ```
@@ -347,11 +341,7 @@ impl Communicator {
         };
         Error::check_with_op(ret, "iprobe")?;
         if flag != 0 {
-            Ok(Some(Status {
-                source: status.source,
-                tag: status.tag,
-                count: status.count,
-            }))
+            Ok(Some(Status::from_ffi(status)))
         } else {
             Ok(None)
         }
@@ -738,7 +728,7 @@ impl Communicator {
     /// at once with no data.
     ///
     /// Returns a [`Status`] whose `count` is the number of `T` elements
-    /// received; `count` is `-1` when the message is not a whole number of `T`.
+    /// received; `count` is `None` when the message is not a whole number of `T`.
     ///
     /// # Arguments
     ///
@@ -771,7 +761,7 @@ impl Communicator {
     /// ]).unwrap();
     /// let mut buf = [Pair { v: 0.0, i: 0 }];
     /// let status = world.recv_custom(&mut buf, &dt, 0, 0).unwrap();
-    /// assert_eq!(status.count, 1);
+    /// assert_eq!(status.count, Some(1));
     /// ```
     pub fn recv_custom<T: PlainData>(
         &self,
@@ -801,11 +791,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "recv_custom")?;
-        Ok(Status {
-            source: status.source,
-            tag: status.tag,
-            count: status.count,
-        })
+        Ok(Status::from_ffi(status))
     }
 
     /// Nonblocking send using a committed custom datatype.

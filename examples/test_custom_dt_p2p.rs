@@ -99,9 +99,9 @@ fn main() {
                             buf[0], expected
                         );
                         local_ok = false;
-                    } else if status.count != 1 {
+                    } else if status.count != Some(1) {
                         eprintln!(
-                            "rank 1: FAIL Test 1 — recv_custom status.count = {}, expected 1",
+                            "rank 1: FAIL Test 1 — recv_custom status.count = {:?}, expected Some(1)",
                             status.count
                         );
                         local_ok = false;

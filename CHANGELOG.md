@@ -59,6 +59,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Some` color returns `Error::InvalidArgument` before any MPI call. Migration:
   `split(Some(color), key)`, `split(None, key)` for `UNDEFINED`; match
   `Some(rank)`.
+- **`Status` is `#[non_exhaustive]` with typed fields:** `source: Source`,
+  `tag: Tag`, `count: Option<usize>` (`None` when the message is not a whole
+  number of elements) and a new `error: Option<MpiErrorClass>`. A `PROC_NULL`
+  receive reports `Source::ProcNull`, `Tag::Any`, `Some(0)` on every MPI.
+  Migration: compare against `Source::Rank(r)`/`Tag::Value(t)`; replace
+  `count < 0` checks with `count.is_none()`.
 
 ### Changed
 

@@ -146,7 +146,9 @@ int ferrompi_barrier(int32_t comm);
  * ============================================================ */
 
 /* A receive, probe or completion status. source and tag are what MPI
- * reported; count is in elements of the call's datatype, -1 when the
+ * reported, except that MPI_PROC_NULL, MPI_ANY_SOURCE and MPI_ANY_TAG are
+ * replaced by FERROMPI_PROC_NULL, FERROMPI_ANY_SOURCE and FERROMPI_ANY_TAG;
+ * count is in elements of the call's datatype, -1 when the
  * message is not a whole number of them; error is an MPI error class
  * (MPI_Error_class of MPI_Status.MPI_ERROR), never an error code:
  * MPI_SUCCESS unless a multi-request completion reports this request's

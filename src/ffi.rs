@@ -21,6 +21,10 @@ pub struct FerrompiStatus {
 }
 
 const _: () = assert!(std::mem::size_of::<FerrompiStatus>() == 24);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, source) == 0);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, tag) == 4);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, count) == 8);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, error) == 16);
 
 // Lock type constants matching the C header defines
 #[cfg(feature = "rma")]

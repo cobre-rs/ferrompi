@@ -13,6 +13,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stddef.h>
 
 // Every int32_t* to int* cast below (count, displacement and rank-array
 // arguments passed to the underlying MPI call, and the rank-range triples
@@ -1075,12 +1076,24 @@ static int get_count64(const MPI_Status* status, MPI_Datatype dt, int64_t* count
 }
 
 _Static_assert(sizeof(ferrompi_status) == 24, "ferrompi_status layout");
+_Static_assert(offsetof(ferrompi_status, source) == 0, "ferrompi_status.source offset");
+_Static_assert(offsetof(ferrompi_status, tag) == 4, "ferrompi_status.tag offset");
+_Static_assert(offsetof(ferrompi_status, count) == 8, "ferrompi_status.count offset");
+_Static_assert(offsetof(ferrompi_status, error) == 16, "ferrompi_status.error offset");
 
-// Fills the status of a single-request receive or probe. MPI leaves
-// MPI_Status.MPI_ERROR unset for those calls, so error is MPI_SUCCESS.
+// Fills the status of a single-request receive or probe. The linked MPI's
+// MPI_PROC_NULL, MPI_ANY_SOURCE and MPI_ANY_TAG are translated back to the
+// private codes in ferrompi.h, the inverse of source_to_mpi and tag_to_mpi. MPI
+// leaves MPI_Status.MPI_ERROR unset for those calls, so error is MPI_SUCCESS.
 static int fill_status(const MPI_Status* st, MPI_Datatype dt, ferrompi_status* out) {
-    out->source = st->MPI_SOURCE;
-    out->tag = st->MPI_TAG;
+    if (st->MPI_SOURCE == MPI_PROC_NULL) {
+        out->source = FERROMPI_PROC_NULL;
+    } else if (st->MPI_SOURCE == MPI_ANY_SOURCE) {
+        out->source = FERROMPI_ANY_SOURCE;
+    } else {
+        out->source = st->MPI_SOURCE;
+    }
+    out->tag = (st->MPI_TAG == MPI_ANY_TAG) ? FERROMPI_ANY_TAG : st->MPI_TAG;
     out->error = MPI_SUCCESS;
     return get_count64(st, dt, &out->count);
 }
