@@ -161,52 +161,50 @@ fn main() {
     // ========================================================================
     {
         let tag = 400;
-        if size >= 2 {
-            let partner = if rank % 2 == 0 { rank + 1 } else { rank - 1 };
-            if partner < size {
-                if rank % 2 == 0 {
-                    let send_data = vec![(rank * 11) as f64; 3];
-                    world.send(&send_data, partner, tag).expect("send failed");
+        let partner = if rank % 2 == 0 { rank + 1 } else { rank - 1 };
+        if partner < size {
+            if rank % 2 == 0 {
+                let send_data = vec![(rank * 11) as f64; 3];
+                world.send(&send_data, partner, tag).expect("send failed");
 
-                    let mut recv_data = vec![0.0f64; 3];
-                    let status = world
-                        .recv(&mut recv_data, partner, tag)
-                        .expect("recv failed");
-                    assert_eq!(
-                        status.source,
-                        Source::Rank(partner),
-                        "rank {rank}: recv source = {:?}, expected {partner}",
-                        status.source
+                let mut recv_data = vec![0.0f64; 3];
+                let status = world
+                    .recv(&mut recv_data, partner, tag)
+                    .expect("recv failed");
+                assert_eq!(
+                    status.source,
+                    Source::Rank(partner),
+                    "rank {rank}: recv source = {:?}, expected {partner}",
+                    status.source
+                );
+                let expected = (partner * 11) as f64;
+                for &v in &recv_data {
+                    assert!(
+                        (v - expected).abs() < f64::EPSILON,
+                        "rank {rank}: send/recv got {v}, expected {expected}"
                     );
-                    let expected = (partner * 11) as f64;
-                    for &v in &recv_data {
-                        assert!(
-                            (v - expected).abs() < f64::EPSILON,
-                            "rank {rank}: send/recv got {v}, expected {expected}"
-                        );
-                    }
-                } else {
-                    let mut recv_data = vec![0.0f64; 3];
-                    let status = world
-                        .recv(&mut recv_data, partner, tag)
-                        .expect("recv failed");
-                    assert_eq!(
-                        status.source,
-                        Source::Rank(partner),
-                        "rank {rank}: recv source = {:?}, expected {partner}",
-                        status.source
-                    );
-                    let expected = (partner * 11) as f64;
-                    for &v in &recv_data {
-                        assert!(
-                            (v - expected).abs() < f64::EPSILON,
-                            "rank {rank}: send/recv got {v}, expected {expected}"
-                        );
-                    }
-
-                    let send_data = vec![(rank * 11) as f64; 3];
-                    world.send(&send_data, partner, tag).expect("send failed");
                 }
+            } else {
+                let mut recv_data = vec![0.0f64; 3];
+                let status = world
+                    .recv(&mut recv_data, partner, tag)
+                    .expect("recv failed");
+                assert_eq!(
+                    status.source,
+                    Source::Rank(partner),
+                    "rank {rank}: recv source = {:?}, expected {partner}",
+                    status.source
+                );
+                let expected = (partner * 11) as f64;
+                for &v in &recv_data {
+                    assert!(
+                        (v - expected).abs() < f64::EPSILON,
+                        "rank {rank}: send/recv got {v}, expected {expected}"
+                    );
+                }
+
+                let send_data = vec![(rank * 11) as f64; 3];
+                world.send(&send_data, partner, tag).expect("send failed");
             }
         }
         if rank == 0 {
@@ -222,7 +220,7 @@ fn main() {
     // Rank 0 sends to rank 1, rank 1 probes before receiving
     {
         let tag = 500;
-        if rank == 0 && size >= 2 {
+        if rank == 0 {
             let data = vec![42.0f64; 7];
             world.send(&data, 1, tag).expect("probe test: send failed");
         } else if rank == 1 {
@@ -253,7 +251,7 @@ fn main() {
     // Rank 0 sends to rank 1, rank 1 polls with iprobe
     {
         let tag = 600;
-        if rank == 0 && size >= 2 {
+        if rank == 0 {
             let data = vec![99.0f64; 3];
             world.send(&data, 1, tag).expect("iprobe test: send failed");
         } else if rank == 1 {

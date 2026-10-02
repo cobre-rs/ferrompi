@@ -59,8 +59,7 @@ fn main() {
     {
         match CustomDatatype::vector(0, 2, 5, DatatypeTag::F64) {
             Err(Error::Mpi { class, .. }) => {
-                let accepted = matches!(class, MpiErrorClass::Count | MpiErrorClass::Arg);
-                if accepted {
+                if matches!(class, MpiErrorClass::Count | MpiErrorClass::Arg) {
                     if rank == 0 {
                         println!("PASS: Test 2 — vector(0, 2, 5, F64) returned Err({class:?}) (implementation-defined Count or Arg)");
                     }

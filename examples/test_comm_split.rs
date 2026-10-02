@@ -44,7 +44,6 @@ fn main() {
             "rank {rank}: even/odd split sub_size = {sub_size}, expected {expected_size}"
         );
 
-        // In the sub-communicator, ranks should be 0..sub_size-1
         assert!(
             sub_rank >= 0 && sub_rank < sub_size,
             "rank {rank}: sub_rank {sub_rank} out of range [0, {sub_size})"
@@ -141,7 +140,6 @@ fn main() {
     // Test 4: Split with a None color (opt-out)
     // ========================================================================
     {
-        // Rank 0 opts out of the split
         let color = if rank == 0 {
             None
         } else {
@@ -217,7 +215,6 @@ fn main() {
             node_rank >= 0 && node_rank < node_size,
             "rank {rank}: node_rank {node_rank} out of range [0, {node_size})"
         );
-        // node_size should be >= 1 and <= size
         assert!(
             node_size >= 1 && node_size <= size,
             "rank {rank}: node_size {node_size} out of range [1, {size}]"

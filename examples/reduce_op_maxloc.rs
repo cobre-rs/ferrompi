@@ -10,7 +10,7 @@
 //! Run with: mpiexec -n 4 cargo run --example reduce_op_maxloc
 // mpi-test: np=4
 
-use ferrompi::{DoubleInt, Mpi, ReduceOp, Result};
+use ferrompi::{DoubleInt, Error, Mpi, ReduceOp, Result};
 
 fn main() -> Result<()> {
     let mpi = Mpi::init()?;
@@ -154,7 +154,6 @@ fn main() -> Result<()> {
     // Test 4: Invalid op returns Err — guard is enforced
     // ============================================================
     {
-        use ferrompi::Error;
         let send = [DoubleInt {
             value: 1.0,
             index: rank,

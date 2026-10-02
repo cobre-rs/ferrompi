@@ -21,11 +21,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Calculate neighbors in the ring
     let next = (rank + 1) % size;
     let prev = (rank + size - 1) % size;
 
-    // Data to send
     let send_data = vec![rank as f64 * 100.0 + 1.0, rank as f64 * 100.0 + 2.0];
     let mut recv_data = vec![0.0; 2];
 
@@ -50,7 +48,6 @@ fn main() -> Result<()> {
         world.send(&send_data, next, 0)?;
     }
 
-    // Verify we got the right data
     let expected = vec![prev as f64 * 100.0 + 1.0, prev as f64 * 100.0 + 2.0];
     assert_eq!(recv_data, expected, "Data mismatch!");
 

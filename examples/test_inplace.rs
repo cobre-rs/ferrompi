@@ -47,7 +47,6 @@ fn gather(world: &Communicator) -> Result<()> {
     let size = world.size();
     if rank == 0 {
         let mut data = vec![0i32; size as usize];
-        data[0] = 0;
         world.gather_inplace(&mut data, 0)?;
         let expected: Vec<i32> = (0..size).map(|r| r * 10).collect();
         assert_eq!(
@@ -146,7 +145,6 @@ fn igather(world: &Communicator) -> Result<()> {
     let size = world.size();
     if rank == 0 {
         let mut data = vec![0i32; size as usize];
-        data[0] = 0;
         let req = world.igather_inplace(&mut data, 0)?;
         req.wait()?;
         let expected: Vec<i32> = (0..size).map(|r| r * 10).collect();
@@ -255,7 +253,6 @@ fn gather_init(world: &Communicator) -> Result<()> {
 
     if rank == 0 {
         let mut data = vec![0i32; size as usize];
-        data[0] = 0;
         let mut req = world.gather_init_inplace(&mut data, 0)?;
         for iter in 0..ITERATIONS {
             data[0] = 0; // re-seed: a persistent request borrows nothing.

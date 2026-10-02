@@ -56,7 +56,7 @@ use crate::rt;
 /// ```
 pub struct PersistentRequest {
     handle: i64,
-    active: bool, // True if started but not yet waited
+    active: bool,
 }
 
 impl PersistentRequest {

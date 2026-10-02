@@ -81,10 +81,10 @@ fn scatter_inplace_args<T: MpiDatatype>(
     if is_root {
         let per = rank_block("data", data.len(), size)? as i64;
         let (sp, _, dt) = buf(data);
-        Ok((sp, per, std::ptr::null_mut::<std::ffi::c_void>(), 0i64, dt))
+        Ok((sp, per, std::ptr::null_mut(), 0, dt))
     } else {
         let (rp, rn, dt) = buf_mut(data);
-        Ok((std::ptr::null::<std::ffi::c_void>(), 0i64, rp, rn, dt))
+        Ok((std::ptr::null(), 0, rp, rn, dt))
     }
 }
 
@@ -263,7 +263,6 @@ mod tests {
 
     #[test]
     fn split_type_repr_value() {
-        // SplitType::Shared has repr value 0
         assert_eq!(SplitType::Shared as i32, 0);
     }
 
