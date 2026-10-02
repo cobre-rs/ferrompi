@@ -1,9 +1,9 @@
 //! Regression example for write-back on every batch completion: a failed
-//! `wait_all`/`wait_any`/`wait_some`/`test_any`/`test_some` (and the
-//! persistent `wait_all`) must still write MPI's own completion state back
-//! into the request table, whatever the return code. Part 7 covers a
-//! persistent `wait_all` whose failing request had already finished inside
-//! MPI before the call returned.
+//! `wait_all`/`wait_any`/`test_any` (and the persistent `wait_all`), and a
+//! `wait_some`/`test_some` that reports a failed request, must still write
+//! MPI's own completion state back into the request table, whatever the
+//! return code. Part 7 covers a persistent `wait_all` whose failing request
+//! had already finished inside MPI before the call returned.
 //!
 //! Rank 1 sends 4 `i32` into rank 0's 1-element receives, which truncates
 //! (`MPI_ERR_TRUNCATE`). Barriers order each send after rank 0 has posted
@@ -14,7 +14,9 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_waitall_error
 // mpi-test: np=2 valgrind
 
-use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, PersistentRequest, Request};
+use ferrompi::{
+    Communicator, Error, Mpi, MpiErrorClass, PersistentRequest, Request, Source, Status, Tag,
+};
 use std::time::Duration;
 
 mod common;
@@ -32,6 +34,22 @@ fn truncated_at<T>(result: &ferrompi::Result<T>, index: usize) -> bool {
         }) => message.ends_with(&format!("(request {index})")),
         _ => false,
     }
+}
+
+/// True iff `result` holds exactly one completion: request `index`, received
+/// from rank 1 with `tag`, whose status reports a truncation.
+fn truncated_in_status(
+    result: &ferrompi::Result<Vec<(usize, Status)>>,
+    index: usize,
+    tag: i32,
+) -> bool {
+    matches!(result, Ok(v) if matches!(
+        v.as_slice(),
+        [(i, s)] if *i == index
+            && s.source == Source::Rank(1)
+            && s.tag == Tag::Value(tag)
+            && s.error == Some(MpiErrorClass::Truncate)
+    ))
 }
 
 fn part1_and_1b(world: &Communicator, rank: i32, mpich: bool) {
@@ -155,7 +173,7 @@ fn part3_wait_some_in_status(world: &Communicator, rank: i32) {
         world.barrier().expect("part3: barrier after posting");
 
         let result = Request::wait_some(&mut reqs);
-        let mut ok = truncated_at(&result, 1);
+        let mut ok = truncated_in_status(&result, 1, 21);
         ok &= reqs[1].is_completed() && !reqs[0].is_completed();
 
         world.barrier().expect("part3: barrier before other send");
@@ -164,7 +182,7 @@ fn part3_wait_some_in_status(world: &Communicator, rank: i32) {
         common::check(
             world,
             ok,
-            "part 3: wait_some reports the truncating request in-status",
+            "part 3: wait_some reports the truncating request in its status",
         );
     } else {
         world.barrier().expect("part3: barrier after posting");
@@ -178,7 +196,7 @@ fn part3_wait_some_in_status(world: &Communicator, rank: i32) {
         common::check(
             world,
             true,
-            "part 3: wait_some reports the truncating request in-status",
+            "part 3: wait_some reports the truncating request in its status",
         );
     }
 }
@@ -245,7 +263,7 @@ fn part5_test_some_in_status(world: &Communicator, rank: i32) {
                 other => break other,
             }
         };
-        let mut ok = truncated_at(&result, 1);
+        let mut ok = truncated_in_status(&result, 1, 41);
         ok &= reqs[1].is_completed() && !reqs[0].is_completed();
 
         world.barrier().expect("part5: barrier before other send");
@@ -254,7 +272,7 @@ fn part5_test_some_in_status(world: &Communicator, rank: i32) {
         common::check(
             world,
             ok,
-            "part 5: test_some reports the truncating request in-status",
+            "part 5: test_some reports the truncating request in its status",
         );
     } else {
         world.barrier().expect("part5: barrier after posting");
@@ -268,7 +286,7 @@ fn part5_test_some_in_status(world: &Communicator, rank: i32) {
         common::check(
             world,
             true,
-            "part 5: test_some reports the truncating request in-status",
+            "part 5: test_some reports the truncating request in its status",
         );
     }
 }

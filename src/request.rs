@@ -7,6 +7,7 @@ use crate::scope::Registry;
 use crate::status::Status;
 #[cfg(debug_assertions)]
 use std::io::Write;
+use std::mem::MaybeUninit;
 
 /// Element count at or below which request-handle scratch buffers live on the
 /// stack. Draining a handful-to-few-dozen in-flight requests on the completion
@@ -72,25 +73,59 @@ fn mark_completed(r: &mut Request<'_>) {
     r.release();
 }
 
-/// Run `f` with a zeroed `i32` index scratch buffer of length `len`,
-/// stack-allocated when small. Used for the `*some` output indices.
+/// Run `f` with a zeroed `i32` index scratch buffer and an uninitialized
+/// status scratch buffer, both of length `len` and stack-allocated when small.
+/// Used for the `*some` outputs: the shim writes `statuses[k]` for each
+/// reported index, and nothing else.
 #[inline]
-fn with_index_buf<R>(len: usize, f: impl FnOnce(&mut [i32]) -> R) -> R {
+fn with_index_buf<R>(
+    len: usize,
+    f: impl FnOnce(&mut [i32], &mut [MaybeUninit<ffi::FerrompiStatus>]) -> R,
+) -> R {
     if len <= HANDLE_STACK_CAP {
         let mut buf = [0i32; HANDLE_STACK_CAP];
-        f(&mut buf[..len])
+        let mut statuses = [const { MaybeUninit::uninit() }; HANDLE_STACK_CAP];
+        f(&mut buf[..len], &mut statuses[..len])
     } else {
         let mut buf = vec![0i32; len];
-        f(&mut buf)
+        let mut statuses = Vec::with_capacity(len);
+        f(&mut buf, &mut statuses.spare_capacity_mut()[..len])
     }
+}
+
+/// The `(index, Status)` pairs a `*some` shim reported. Empty unless `ret` is
+/// success and `outcount` is positive.
+fn some_results(
+    ret: i32,
+    outcount: i64,
+    indices: &[i32],
+    statuses: &[MaybeUninit<ffi::FerrompiStatus>],
+) -> Vec<(usize, Status)> {
+    if ret != 0 || outcount <= 0 {
+        return Vec::new();
+    }
+    let n = outcount as usize;
+    indices[..n]
+        .iter()
+        .zip(&statuses[..n])
+        .map(|(&index, status)| {
+            // SAFETY: the shim returned success with `outcount` positive, and then
+            // writes every field of statuses[k] for each k < outcount (it
+            // fills a status for each reported index on success and on
+            // MPI_ERR_IN_STATUS, which it turns into success only when a
+            // reported request failed). `n` is that outcount, and slicing to
+            // it bounds-checks it against the buffer.
+            let raw = unsafe { status.assume_init_read() };
+            (index as usize, Status::from_ffi(raw))
+        })
+        .collect()
 }
 
 /// Check a batch wait/test return code, appending the failing request's
 /// slice index to an `Error::Mpi` message. `failed` is the caller-slice
 /// index of the failing request as the C shim wrote it (`-1` when it
 /// found none). Shared by `Request::wait_all`, `Request::wait_any`,
-/// `Request::wait_some`, `Request::test_any`, `Request::test_some` and
-/// `PersistentRequest::wait_all`.
+/// `Request::test_any` and `PersistentRequest::wait_all`.
 pub(crate) fn check_batch(ret: i32, operation: &'static str, failed: i64) -> Result<()> {
     match Error::check_with_op(ret, operation) {
         Err(Error::Mpi {
@@ -416,33 +451,38 @@ impl Request<'_> {
 
     /// Wait until at least one request in a collection completes.
     ///
-    /// Returns the indices of all requests that completed in this call.
-    /// Returns `Ok(vec![])` when no requests were active (all null, all
-    /// already completed, or a mix of the two).
+    /// Returns each completed request's index in `requests` and [`Status`], in
+    /// completion order. A request that failed has `error: Some(class)`, and
+    /// the others in the same call still complete and are reported. `Err` is
+    /// returned only when the call itself fails. Returns `Ok(vec![])` when no
+    /// requests were active (all null, all already completed, or a mix of the
+    /// two).
+    ///
+    /// For a receive the `Status` holds the matched source, tag and element
+    /// count. For an entry with `error: Some(_)` they are as MPI reported them,
+    /// defined when the receive matched (a `Truncate`, say). For a send,
+    /// collective or RMA request it is the empty status, and so is a cancelled
+    /// receive; only `error` has meaning.
     ///
     /// Completed entries are skipped. The completed `Request`s are marked
     /// completed in place. Removing them from the vector is optional, not
     /// required for correctness.
-    ///
-    /// On a failed request, the returned error carries that request's own
-    /// class and code, and its message ends with `(request N)`, `N` being
-    /// its index in `requests`.
-    pub fn wait_some(requests: &mut [Request<'_>]) -> Result<Vec<usize>> {
+    pub fn wait_some(requests: &mut [Request<'_>]) -> Result<Vec<(usize, Status)>> {
         if requests.is_empty() {
             return Ok(vec![]);
         }
         let len = requests.len();
         let mut outcount: i64 = 0;
-        let mut failed: i64 = -1;
         let (ret, completed) = with_handles(
             requests,
             handle_or_skip,
             |handles, done| {
-                with_index_buf(len, |indices| {
+                with_index_buf(len, |indices, statuses| {
                     // SAFETY: with_handles / with_index_buf supply valid,
-                    // appropriately-sized [i64] handle, [u8] done and [i32] index
-                    // buffers whose lengths match `count`; outcount and failed are
-                    // valid stack-allocated output parameters.
+                    // appropriately-sized [i64] handle, [u8] done, [i32] index
+                    // and status buffers whose lengths match `count`; outcount
+                    // is a valid stack-allocated output parameter. MaybeUninit
+                    // has the layout of FerrompiStatus.
                     let ret = unsafe {
                         ffi::ferrompi_waitsome(
                             handles.len() as i64,
@@ -450,27 +490,16 @@ impl Request<'_> {
                             &mut outcount,
                             indices.as_mut_ptr(),
                             done.as_mut_ptr(),
-                            &mut failed,
+                            statuses.as_mut_ptr().cast(),
                         )
                     };
-                    // outcount == -1 means all null or a rejected result. outcount and
-                    // indices are written whatever ret is, so collect from them
-                    // unconditionally. Only collect the completed indices while the
-                    // index buffer is in scope.
-                    let completed: Vec<usize> = if outcount > 0 {
-                        indices[..outcount as usize]
-                            .iter()
-                            .map(|&i| i as usize)
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    (ret, completed)
+                    // outcount == -1 means all null or a rejected result.
+                    (ret, some_results(ret, outcount, indices, statuses))
                 })
             },
             mark_completed,
         );
-        check_batch(ret, "waitsome", failed)?;
+        Error::check_with_op(ret, "waitsome")?;
         Ok(completed)
     }
 
@@ -532,32 +561,38 @@ impl Request<'_> {
 
     /// Test how many requests in a collection have completed (non-blocking).
     ///
-    /// Returns the indices of all requests that have completed at the moment of
-    /// the call. Returns `Ok(vec![])` when none have completed or all were null.
+    /// Returns each request that has completed at the moment of the call, as
+    /// its index in `requests` and [`Status`], in completion order. A request
+    /// that failed has `error: Some(class)`, and the others in the same call
+    /// still complete and are reported. `Err` is returned only when the call
+    /// itself fails. Returns `Ok(vec![])` when none have completed or all were
+    /// null.
+    ///
+    /// For a receive the `Status` holds the matched source, tag and element
+    /// count. For an entry with `error: Some(_)` they are as MPI reported them,
+    /// defined when the receive matched (a `Truncate`, say). For a send,
+    /// collective or RMA request it is the empty status, and so is a cancelled
+    /// receive; only `error` has meaning.
     ///
     /// Completed entries are skipped. The completed `Request`s are marked
     /// completed in place. Removing them from the vector is optional, not
     /// required for correctness.
-    ///
-    /// On a failed request, the returned error carries that request's own
-    /// class and code, and its message ends with `(request N)`, `N` being
-    /// its index in `requests`.
-    pub fn test_some(requests: &mut [Request<'_>]) -> Result<Vec<usize>> {
+    pub fn test_some(requests: &mut [Request<'_>]) -> Result<Vec<(usize, Status)>> {
         if requests.is_empty() {
             return Ok(vec![]);
         }
         let len = requests.len();
         let mut outcount: i64 = 0;
-        let mut failed: i64 = -1;
         let (ret, completed) = with_handles(
             requests,
             handle_or_skip,
             |handles, done| {
-                with_index_buf(len, |indices| {
+                with_index_buf(len, |indices, statuses| {
                     // SAFETY: with_handles / with_index_buf supply valid,
-                    // appropriately-sized [i64] handle, [u8] done and [i32] index
-                    // buffers whose lengths match `count`; outcount and failed are
-                    // valid stack-allocated output parameters.
+                    // appropriately-sized [i64] handle, [u8] done, [i32] index
+                    // and status buffers whose lengths match `count`; outcount
+                    // is a valid stack-allocated output parameter. MaybeUninit
+                    // has the layout of FerrompiStatus.
                     let ret = unsafe {
                         ffi::ferrompi_testsome(
                             handles.len() as i64,
@@ -565,27 +600,16 @@ impl Request<'_> {
                             &mut outcount,
                             indices.as_mut_ptr(),
                             done.as_mut_ptr(),
-                            &mut failed,
+                            statuses.as_mut_ptr().cast(),
                         )
                     };
                     // outcount == -1 means all null; 0 means none completed yet.
-                    // outcount and indices are written whatever ret is, so collect
-                    // from them unconditionally. Collect completed indices only
-                    // while the index buffer is alive.
-                    let completed: Vec<usize> = if outcount > 0 {
-                        indices[..outcount as usize]
-                            .iter()
-                            .map(|&i| i as usize)
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    (ret, completed)
+                    (ret, some_results(ret, outcount, indices, statuses))
                 })
             },
             mark_completed,
         );
-        check_batch(ret, "testsome", failed)?;
+        Error::check_with_op(ret, "testsome")?;
         Ok(completed)
     }
 
@@ -739,10 +763,13 @@ impl Drop for Request<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{with_handles, Owner, Request, RequestKind, HANDLE_STACK_CAP};
+    use super::{
+        some_results, with_handles, with_index_buf, Owner, Request, RequestKind, HANDLE_STACK_CAP,
+    };
     use crate::error::Error;
-    use crate::status::Status;
-    use std::mem::forget;
+    use crate::ffi::FerrompiStatus;
+    use crate::status::{Source, Status, Tag};
+    use std::mem::{forget, MaybeUninit};
 
     fn test_request(completed: bool, kind: RequestKind) -> Request<'static> {
         Request {
@@ -823,6 +850,38 @@ mod tests {
     }
 
     #[test]
+    fn with_index_buf_hands_out_len_entries_on_both_paths() {
+        for len in [3, HANDLE_STACK_CAP, HANDLE_STACK_CAP + 1] {
+            let lens = with_index_buf(len, |indices, statuses| (indices.len(), statuses.len()));
+            assert_eq!(lens, (len, len));
+        }
+    }
+
+    #[test]
+    fn some_results_reports_only_the_filled_entries_on_success() {
+        let raw = |source, tag, error| {
+            MaybeUninit::new(FerrompiStatus {
+                source,
+                tag,
+                count: 2,
+                error,
+            })
+        };
+        let statuses = [raw(1, 21, 0), raw(4, 9, 0), MaybeUninit::uninit()];
+        let indices = [2, 0, 0];
+        let got = some_results(0, 2, &indices, &statuses);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0, 2);
+        assert_eq!(got[0].1.source, Source::Rank(1));
+        assert_eq!(got[0].1.tag, Tag::Value(21));
+        assert_eq!(got[1].0, 0);
+        assert_eq!(got[1].1.source, Source::Rank(4));
+        assert!(some_results(0, 0, &indices, &statuses).is_empty());
+        assert!(some_results(0, -1, &indices, &statuses).is_empty());
+        assert!(some_results(1, 2, &indices, &statuses).is_empty());
+    }
+
+    #[test]
     fn wait_any_empty_vec_returns_none() {
         let mut v: Vec<Request> = vec![];
         assert_eq!(Request::wait_any(&mut v).unwrap(), None);
@@ -831,7 +890,7 @@ mod tests {
     #[test]
     fn wait_some_empty_vec_returns_empty() {
         let mut v: Vec<Request> = vec![];
-        assert_eq!(Request::wait_some(&mut v).unwrap(), Vec::<usize>::new());
+        assert!(Request::wait_some(&mut v).unwrap().is_empty());
     }
 
     #[test]
@@ -843,7 +902,7 @@ mod tests {
     #[test]
     fn test_some_empty_vec_returns_empty() {
         let mut v: Vec<Request> = vec![];
-        assert_eq!(Request::test_some(&mut v).unwrap(), Vec::<usize>::new());
+        assert!(Request::test_some(&mut v).unwrap().is_empty());
     }
 
     #[test]

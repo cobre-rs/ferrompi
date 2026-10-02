@@ -115,8 +115,10 @@ impl Tag {
 /// incoming message without consuming it, and by
 /// [`Request::wait`](crate::Request::wait),
 /// [`test`](crate::Request::test),
-/// [`wait_any`](crate::Request::wait_any) and
-/// [`test_any`](crate::Request::test_any) to describe the receive they
+/// [`wait_any`](crate::Request::wait_any),
+/// [`test_any`](crate::Request::test_any),
+/// [`wait_some`](crate::Request::wait_some) and
+/// [`test_some`](crate::Request::test_some) to describe the receive they
 /// completed.
 ///
 /// # The empty status
@@ -153,8 +155,9 @@ pub struct Status {
     /// `MPI_Get_count`; `None` when the message is not a whole number of
     /// elements (MPI reports `MPI_UNDEFINED`). `Some(0)` in the empty status.
     pub count: Option<usize>,
-    /// `Some` only for a request whose own error MPI reported in a
-    /// multi-request completion; `None` for a single-request call.
+    /// `Some(class)` only for an entry of [`wait_some`](crate::Request::wait_some)
+    /// or [`test_some`](crate::Request::test_some) whose request failed (MPI
+    /// reported it through `MPI_ERR_IN_STATUS`); `None` from every other call.
     pub error: Option<MpiErrorClass>,
 }
 
@@ -179,7 +182,8 @@ impl Status {
                 value => Tag::Value(value),
             },
             count: usize::try_from(raw.count).ok(),
-            // `raw.error` is already an error class (see `ferrompi_status`), never an error code.
+            // C applied `MPI_Error_class` to MPI's error code, so `raw.error` is a class
+            // (see `ferrompi_status`), never a code.
             error: (raw.error != 0).then(|| MpiErrorClass::from_raw(raw.error)),
         }
     }

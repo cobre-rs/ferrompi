@@ -1131,8 +1131,9 @@ static int fill_status(const MPI_Status* st, MPI_Datatype dt, ferrompi_status* o
 // RMA) leaves source, tag and count undefined (MPI-4.1 3.7.3, 6.12), so st is
 // not read; neither does a cancelled receive (3.8.4), which is why
 // MPI_Test_cancelled is evaluated before any other field. Both report the
-// empty status. MPI_ERROR is never read: MPI sets it only when a
-// multi-request call returns MPI_ERR_IN_STATUS (3.2.5, 3.7.5). A completed
+// empty status. MPI_ERROR is never read here: MPI sets it only when a
+// multi-request call returns MPI_ERR_IN_STATUS (3.2.5, 3.7.5), and
+// ferrompi_waitsome and ferrompi_testsome read it themselves. A completed
 // request is never reported failed because MPI_Get_count did: count then
 // stays -1.
 static void completion_status(MPI_Datatype dt, const MPI_Status* st, ferrompi_status* out) {
@@ -1148,6 +1149,14 @@ static void completion_status(MPI_Datatype dt, const MPI_Status* st, ferrompi_st
     out->tag = FERROMPI_ANY_TAG;
     out->count = 0;
     out->error = MPI_SUCCESS;
+}
+
+// The error class of an MPI error code, MPI_ERR_UNKNOWN when MPI_Error_class
+// itself fails. MPI_Status.MPI_ERROR holds a code, and a code is not its class
+// on MPICH, so ferrompi_status.error never takes the raw code.
+static int32_t error_class_of(int code) {
+    int cls;
+    return MPI_Error_class(code, &cls) == MPI_SUCCESS ? (int32_t)cls : (int32_t)MPI_ERR_UNKNOWN;
 }
 
 // Translates the private source and tag codes (FERROMPI_ANY_SOURCE,
@@ -3682,8 +3691,7 @@ int ferrompi_waitany(int64_t count, const int64_t* request_handles,
 
 int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
                       int64_t* outcount, int32_t* indices, uint8_t* done,
-                      int64_t* failed_index) {
-    *failed_index = -1;
+                      ferrompi_status* statuses) {
     if (count <= 0) { *outcount = -1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
@@ -3737,24 +3745,32 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
         *outcount = -1;
     } else {
         *outcount = (int64_t)out;
+        // MPI writes sts[0..out) for these two returns only (MPI-4.1 3.2.5,
+        // 3.7.5). statuses[k] belongs to request indices[k] (completion
+        // order, not caller order), and that request's slot is still live
+        // here: only write_back frees it.
+        int in_status = (ret == MPI_ERR_IN_STATUS);
+        int filled = in_status || ret == MPI_SUCCESS;
+        int any_failed = 0;
         for (int i = 0; i < out; i++) {
             indices[i] = (int32_t)tmp_indices[i];
             done[tmp_indices[i]] = 1;
-        }
-    }
-    write_back(count, request_handles, reqs, done);
-
-    // statuses[k] belongs to request indices[k] (completion order, not
-    // caller order); report the caller's index of the first real failure.
-    if (ret == MPI_ERR_IN_STATUS) {
-        for (int i = 0; i < out; i++) {
-            if (sts[i].MPI_ERROR != MPI_SUCCESS && sts[i].MPI_ERROR != MPI_ERR_PENDING) {
-                *failed_index = tmp_indices[i];
-                ret = sts[i].MPI_ERROR;
-                break;
+            if (!filled) continue;
+            int64_t slot = request_slot(request_handles[tmp_indices[i]]);
+            completion_status(slot < 0 ? MPI_DATATYPE_NULL : request_dtype[slot], &sts[i],
+                              &statuses[i]);
+            // MPI_ERROR holds a code and is valid only after MPI_ERR_IN_STATUS.
+            if (in_status && sts[i].MPI_ERROR != MPI_SUCCESS) {
+                statuses[i].error = error_class_of(sts[i].MPI_ERROR);
+                any_failed = 1;
             }
         }
+        // Every completed request is reported in statuses, failed ones included.
+        // MPI_ERR_IN_STATUS with no reported request failed names an error the
+        // statuses do not carry, so it stays an error.
+        if (in_status && any_failed) ret = MPI_SUCCESS;
     }
+    write_back(count, request_handles, reqs, done);
 
     if (sts != stack_sts) free(sts);
     if (tmp_indices != stack_idx) free(tmp_indices);
@@ -3810,8 +3826,7 @@ int ferrompi_testany(int64_t count, const int64_t* request_handles,
 
 int ferrompi_testsome(int64_t count, const int64_t* request_handles,
                       int64_t* outcount, int32_t* indices, uint8_t* done,
-                      int64_t* failed_index) {
-    *failed_index = -1;
+                      ferrompi_status* statuses) {
     if (count <= 0) { *outcount = -1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
@@ -3864,24 +3879,32 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
         *outcount = -1;
     } else {
         *outcount = (int64_t)out;
+        // MPI writes sts[0..out) for these two returns only (MPI-4.1 3.2.5,
+        // 3.7.5). statuses[k] belongs to request indices[k] (completion
+        // order, not caller order), and that request's slot is still live
+        // here: only write_back frees it.
+        int in_status = (ret == MPI_ERR_IN_STATUS);
+        int filled = in_status || ret == MPI_SUCCESS;
+        int any_failed = 0;
         for (int i = 0; i < out; i++) {
             indices[i] = (int32_t)tmp_indices[i];
             done[tmp_indices[i]] = 1;
-        }
-    }
-    write_back(count, request_handles, reqs, done);
-
-    // statuses[k] belongs to request indices[k] (completion order, not
-    // caller order); report the caller's index of the first real failure.
-    if (ret == MPI_ERR_IN_STATUS) {
-        for (int i = 0; i < out; i++) {
-            if (sts[i].MPI_ERROR != MPI_SUCCESS && sts[i].MPI_ERROR != MPI_ERR_PENDING) {
-                *failed_index = tmp_indices[i];
-                ret = sts[i].MPI_ERROR;
-                break;
+            if (!filled) continue;
+            int64_t slot = request_slot(request_handles[tmp_indices[i]]);
+            completion_status(slot < 0 ? MPI_DATATYPE_NULL : request_dtype[slot], &sts[i],
+                              &statuses[i]);
+            // MPI_ERROR holds a code and is valid only after MPI_ERR_IN_STATUS.
+            if (in_status && sts[i].MPI_ERROR != MPI_SUCCESS) {
+                statuses[i].error = error_class_of(sts[i].MPI_ERROR);
+                any_failed = 1;
             }
         }
+        // Every completed request is reported in statuses, failed ones included.
+        // MPI_ERR_IN_STATUS with no reported request failed names an error the
+        // statuses do not carry, so it stays an error.
+        if (in_status && any_failed) ret = MPI_SUCCESS;
     }
+    write_back(count, request_handles, reqs, done);
 
     if (sts != stack_sts) free(sts);
     if (tmp_indices != stack_idx) free(tmp_indices);

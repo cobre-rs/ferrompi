@@ -1264,7 +1264,7 @@ guarded_extern! {
         outcount: *mut int64_t,
         indices: *mut int32_t,
         done: *mut u8,
-        failed_index: *mut int64_t,
+        statuses: *mut FerrompiStatus,
     ) -> c_int;
 
     pub fn ferrompi_testany(
@@ -1282,6 +1282,6 @@ guarded_extern! {
         outcount: *mut int64_t,
         indices: *mut int32_t,
         done: *mut u8,
-        failed_index: *mut int64_t,
+        statuses: *mut FerrompiStatus,
     ) -> c_int;
 }

@@ -104,6 +104,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or RMA request reports the empty status (`Source::Any`, `Tag::Any`,
   `count: Some(0)`). Migration: `while !req.test()? {}` becomes
   `while req.test()?.is_none() {}`; take the index with `.map(|(i, _)| i)`.
+- **`Request::wait_some`/`test_some` return `Vec<(usize, Status)>`**, and a
+  failed request in the batch is reported in its `Status.error` (an
+  `MpiErrorClass`) instead of failing the whole call. Migration: take the
+  indices with `.iter().map(|&(i, _)| i)`; check `status.error` for
+  per-request failures.
 
 ### Added
 
