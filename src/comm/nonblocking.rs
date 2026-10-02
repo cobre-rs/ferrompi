@@ -65,7 +65,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<Request> {
-        check_same_len(send.len(), recv.len())?;
+        check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -95,7 +95,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidBuffer`] if `recv.len() != send.len()`, on
+    /// Returns [`Error::BufferSize`] if `recv.len() != send.len()`, on
     /// any rank.
     ///
     /// # Example
@@ -116,7 +116,7 @@ impl Communicator {
         op: ReduceOp,
         root: i32,
     ) -> Result<Request> {
-        check_same_len(send.len(), recv.len())?;
+        check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -154,7 +154,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidBuffer`] if this rank is `root` and `recv.len() < send.len() *
+    /// [`Error::BufferSize`] if this rank is `root` and `recv.len() < send.len() *
     /// size()`.
     ///
     /// # Example
@@ -175,7 +175,7 @@ impl Communicator {
         root: i32,
     ) -> Result<Request> {
         if self.rank == root {
-            check_rank_slots(recv.len(), send.len(), self.size)?;
+            check_rank_slots("recv", recv.len(), send.len(), self.size)?;
         }
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -200,7 +200,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidBuffer`] if `recv.len() < send.len() * size()`.
+    /// [`Error::BufferSize`] if `recv.len() < send.len() * size()`.
     ///
     /// # Example
     ///
@@ -214,7 +214,7 @@ impl Communicator {
     /// req.wait().unwrap();
     /// ```
     pub fn iallgather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<Request> {
-        check_rank_slots(recv.len(), send.len(), self.size)?;
+        check_rank_slots("recv", recv.len(), send.len(), self.size)?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -237,7 +237,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidBuffer`] if this rank is `root` and `send.len() < recv.len() *
+    /// [`Error::BufferSize`] if this rank is `root` and `send.len() < recv.len() *
     /// size()`.
     ///
     /// # Example
@@ -258,7 +258,7 @@ impl Communicator {
         root: i32,
     ) -> Result<Request> {
         if self.rank == root {
-            check_rank_slots(send.len(), recv.len(), self.size)?;
+            check_rank_slots("send", send.len(), recv.len(), self.size)?;
         }
         let mut request_handle: i64 = 0;
         let (sp, _, _) = buf(send);
@@ -308,7 +308,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidBuffer`] if `send.len() != recv.len()`.
+    /// Returns [`Error::BufferSize`] if `send.len() != recv.len()`.
     ///
     /// # Example
     ///
@@ -327,7 +327,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<Request> {
-        check_same_len(send.len(), recv.len())?;
+        check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -354,7 +354,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidBuffer`] if `send.len() != recv.len()`.
+    /// Returns [`Error::BufferSize`] if `send.len() != recv.len()`.
     ///
     /// # Example
     ///
@@ -373,7 +373,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<Request> {
-        check_same_len(send.len(), recv.len())?;
+        check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -395,8 +395,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidBuffer`] if `send.len() != recv.len()` or
-    /// `send.len()` is not evenly divisible by the communicator size.
+    /// Returns [`Error::BufferSize`] if `send.len() != recv.len()`, or
+    /// [`Error::InvalidArgument`] if `send.len()` is not evenly divisible by the
+    /// communicator size.
     ///
     /// # Example
     ///
@@ -411,8 +412,8 @@ impl Communicator {
     /// req.wait().unwrap();
     /// ```
     pub fn ialltoall<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<Request> {
-        check_same_len(send.len(), recv.len())?;
-        let count = rank_block(send.len(), self.size)? as i64;
+        check_same_len("recv", send.len(), recv.len())?;
+        let count = rank_block("send", send.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -437,7 +438,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidBuffer`] if `send.len() != recv.len() * size`.
+    /// Returns [`Error::InvalidArgument`] if `send.len()` is not evenly divisible
+    /// by the communicator size, or [`Error::BufferSize`] if
+    /// `send.len() != recv.len() * size`.
     ///
     /// # Example
     ///
@@ -457,7 +460,11 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<Request> {
-        check_same_len(rank_block(send.len(), self.size)?, recv.len())?;
+        check_same_len(
+            "recv",
+            rank_block("send", send.len(), self.size)?,
+            recv.len(),
+        )?;
         let mut request_handle: i64 = 0;
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
@@ -493,7 +500,7 @@ impl Communicator {
     /// # Errors
     ///
     /// - `Error::InvalidOp` if this rank is not `root`.
-    /// - `Error::InvalidBuffer` if `data.len()` is not divisible by `size()`.
+    /// - `Error::InvalidArgument` if `data.len()` is not divisible by `size()`.
     ///
     /// # Example
     ///
@@ -511,7 +518,7 @@ impl Communicator {
         if self.rank() != root {
             return Err(Error::InvalidOp);
         }
-        let recvcount = rank_block(data.len(), self.size)? as i64;
+        let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
@@ -548,7 +555,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - `Error::InvalidBuffer` if `data.len()` is not divisible by `size()`.
+    /// - `Error::InvalidArgument` if `data.len()` is not divisible by `size()`.
     ///
     /// # Example
     ///
@@ -564,7 +571,7 @@ impl Communicator {
     /// req.wait().unwrap();
     /// ```
     pub fn iallgather_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<Request> {
-        let recvcount = rank_block(data.len(), self.size)? as i64;
+        let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
@@ -600,7 +607,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - `Error::InvalidBuffer` at root if `data.len()` is not divisible by `size()`.
+    /// - `Error::InvalidArgument` at root if `data.len()` is not divisible by `size()`.
     ///
     /// # Example
     ///
@@ -660,7 +667,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - `Error::InvalidBuffer` if `data.len()` is not divisible by `size()`.
+    /// - `Error::InvalidArgument` if `data.len()` is not divisible by `size()`.
     ///
     /// # Example
     ///
@@ -675,7 +682,7 @@ impl Communicator {
     /// req.wait().unwrap();
     /// ```
     pub fn ialltoall_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<Request> {
-        let recvcount = rank_block(data.len(), self.size)? as i64;
+        let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
@@ -712,7 +719,14 @@ mod tests {
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.iallreduce(&send, &mut recv, ReduceOp::Sum);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 10,
+                actual: 5
+            })
+        ));
     }
 
     #[test]
@@ -721,7 +735,14 @@ mod tests {
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.ireduce(&send, &mut recv, ReduceOp::Sum, 0);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 10,
+                actual: 5
+            })
+        ));
     }
 
     #[test]
@@ -730,7 +751,14 @@ mod tests {
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.iscan(&send, &mut recv, ReduceOp::Sum);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 10,
+                actual: 5
+            })
+        ));
     }
 
     #[test]
@@ -739,7 +767,14 @@ mod tests {
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.iexscan(&send, &mut recv, ReduceOp::Sum);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 10,
+                actual: 5
+            })
+        ));
     }
 
     #[test]
@@ -755,7 +790,13 @@ mod tests {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
         let result = comm.iallgather_inplace(&mut data);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument {
+                arg: "data",
+                reason: "length is not a multiple of the communicator size"
+            })
+        ));
     }
 
     #[test]
@@ -763,6 +804,12 @@ mod tests {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
         let result = comm.ialltoall_inplace(&mut data);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument {
+                arg: "data",
+                reason: "length is not a multiple of the communicator size"
+            })
+        ));
     }
 }

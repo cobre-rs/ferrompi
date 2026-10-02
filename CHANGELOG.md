@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its struct variants are `#[non_exhaustive]`.** Migration: patterns on
   `Error::Mpi { … }` and `Error::ResourceExhausted { … }` need a trailing
   `..`.
+- **Collective buffer-length errors are `Error::BufferSize { arg,
+  required, actual }`** (or `Error::InvalidArgument` for a length that is
+  not a multiple of the communicator size) instead of
+  `Error::InvalidBuffer`. Migration: match the new variants; `arg` names
+  the parameter.
 
 ### Fixed
 

@@ -16,37 +16,55 @@ mod p2p;
 mod persistent;
 mod v_collective;
 
-/// Checks that a buffer of `whole` elements holds one `block`-element slot per
-/// rank of a `size`-rank communicator (`whole >= block * size`, with the product
-/// computed by checked arithmetic).
-fn check_rank_slots(whole: usize, block: usize, size: i32) -> Result<()> {
+/// Checks that the buffer `arg` of `whole` elements holds one `block`-element
+/// slot per rank of a `size`-rank communicator (`whole >= block * size`, with the
+/// product computed by checked arithmetic).
+fn check_rank_slots(arg: &'static str, whole: usize, block: usize, size: i32) -> Result<()> {
     let needed = block
         .checked_mul(size as usize)
-        .ok_or(Error::InvalidBuffer)?;
+        .ok_or(Error::InvalidArgument {
+            arg,
+            reason: "block length times communicator size overflows",
+        })?;
     if whole < needed {
-        return Err(Error::InvalidBuffer);
+        return Err(Error::BufferSize {
+            arg,
+            required: needed,
+            actual: whole,
+        });
     }
     Ok(())
 }
 
-/// Checks that two buffers hold the same number of elements.
-fn check_same_len(a: usize, b: usize) -> Result<()> {
-    if a != b {
-        return Err(Error::InvalidBuffer);
+/// Checks that the buffer `arg` of `actual` elements has the `required` length,
+/// that of the buffer it must match.
+fn check_same_len(arg: &'static str, required: usize, actual: usize) -> Result<()> {
+    if required != actual {
+        return Err(Error::BufferSize {
+            arg,
+            required,
+            actual,
+        });
     }
     Ok(())
 }
 
-/// Returns the per-rank block count of a buffer of `whole` elements split
-/// evenly across a `size`-rank communicator; Err when `size <= 0` or
+/// Returns the per-rank block count of the buffer `arg` of `whole` elements
+/// split evenly across a `size`-rank communicator; Err when `size <= 0` or
 /// `whole % size != 0`.
-fn rank_block(whole: usize, size: i32) -> Result<usize> {
+fn rank_block(arg: &'static str, whole: usize, size: i32) -> Result<usize> {
     if size <= 0 {
-        return Err(Error::InvalidBuffer);
+        return Err(Error::InvalidArgument {
+            arg: "communicator",
+            reason: "communicator size is not positive",
+        });
     }
     let size = size as usize;
     if whole % size != 0 {
-        return Err(Error::InvalidBuffer);
+        return Err(Error::InvalidArgument {
+            arg,
+            reason: "length is not a multiple of the communicator size",
+        });
     }
     Ok(whole / size)
 }
@@ -61,7 +79,7 @@ fn scatter_inplace_args<T: MpiDatatype>(
     size: i32,
 ) -> Result<(*const c_void, i64, *mut c_void, i64, i32)> {
     if is_root {
-        let per = rank_block(data.len(), size)? as i64;
+        let per = rank_block("data", data.len(), size)? as i64;
         let (sp, _, dt) = buf(data);
         Ok((sp, per, std::ptr::null_mut::<std::ffi::c_void>(), 0i64, dt))
     } else {
@@ -107,9 +125,10 @@ pub enum SplitType {
 ///
 /// # Argument validation
 ///
-/// Collective methods that document an [`Error::InvalidBuffer`] condition check it
-/// on the calling rank before any MPI call. The check is local: ranks that already
-/// entered the collective are not told about the failure and may block.
+/// Collective methods that document an [`Error::BufferSize`] or
+/// [`Error::InvalidArgument`] condition check it on the calling rank before any
+/// MPI call. The check is local: ranks that already entered the collective are not
+/// told about the failure and may block.
 ///
 /// # Errors in collective calls
 ///
@@ -256,33 +275,65 @@ mod tests {
 
     #[test]
     fn check_rank_slots_boundaries() {
-        assert!(check_rank_slots(8, 2, 4).is_ok());
+        assert!(check_rank_slots("recv", 8, 2, 4).is_ok());
         assert!(matches!(
-            check_rank_slots(7, 2, 4),
-            Err(Error::InvalidBuffer)
+            check_rank_slots("recv", 7, 2, 4),
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 8,
+                actual: 7
+            })
         ));
-        assert!(check_rank_slots(9, 2, 4).is_ok());
-        assert!(check_rank_slots(0, 0, 4).is_ok());
+        assert!(check_rank_slots("recv", 9, 2, 4).is_ok());
+        assert!(check_rank_slots("recv", 0, 0, 4).is_ok());
         assert!(matches!(
-            check_rank_slots(usize::MAX, usize::MAX / 2 + 1, 2),
-            Err(Error::InvalidBuffer)
+            check_rank_slots("send", usize::MAX, usize::MAX / 2 + 1, 2),
+            Err(Error::InvalidArgument {
+                arg: "send",
+                reason: "block length times communicator size overflows"
+            })
         ));
     }
 
     #[test]
     fn check_same_len_boundaries() {
-        assert!(check_same_len(5, 5).is_ok());
-        assert!(matches!(check_same_len(5, 4), Err(Error::InvalidBuffer)));
-        assert!(check_same_len(0, 0).is_ok());
+        assert!(check_same_len("recv", 5, 5).is_ok());
+        assert!(matches!(
+            check_same_len("recv", 5, 4),
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 5,
+                actual: 4
+            })
+        ));
+        assert!(check_same_len("recv", 0, 0).is_ok());
     }
 
     #[test]
     fn rank_block_boundaries() {
-        assert_eq!(rank_block(8, 4).unwrap(), 2);
-        assert!(matches!(rank_block(7, 4), Err(Error::InvalidBuffer)));
-        assert_eq!(rank_block(0, 4).unwrap(), 0);
-        assert!(matches!(rank_block(8, 0), Err(Error::InvalidBuffer)));
-        assert!(matches!(rank_block(8, -1), Err(Error::InvalidBuffer)));
+        assert_eq!(rank_block("send", 8, 4).unwrap(), 2);
+        assert!(matches!(
+            rank_block("send", 7, 4),
+            Err(Error::InvalidArgument {
+                arg: "send",
+                reason: "length is not a multiple of the communicator size"
+            })
+        ));
+        assert_eq!(rank_block("send", 0, 4).unwrap(), 0);
+        assert!(matches!(
+            rank_block("send", 8, 0),
+            Err(Error::InvalidArgument {
+                arg: "communicator",
+                reason: "communicator size is not positive"
+            })
+        ));
+        assert!(matches!(
+            rank_block("send", 8, -1),
+            Err(Error::InvalidArgument {
+                arg: "communicator",
+                reason: "communicator size is not positive"
+            })
+        ));
     }
 
     #[test]
@@ -308,7 +359,10 @@ mod tests {
         let mut indivisible_data = [0i32, 1, 2];
         assert!(matches!(
             scatter_inplace_args(&mut indivisible_data, true, 2),
-            Err(Error::InvalidBuffer)
+            Err(Error::InvalidArgument {
+                arg: "data",
+                reason: "length is not a multiple of the communicator size"
+            })
         ));
     }
 }

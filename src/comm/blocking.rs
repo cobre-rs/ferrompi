@@ -70,7 +70,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidBuffer`] if `recv.len() != send.len()`, on
+    /// Returns [`Error::BufferSize`] if `recv.len() != send.len()`, on
     /// any rank.
     ///
     /// # Example
@@ -90,7 +90,7 @@ impl Communicator {
         op: ReduceOp,
         root: i32,
     ) -> Result<()> {
-        check_same_len(send.len(), recv.len())?;
+        check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
@@ -203,7 +203,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<()> {
-        check_same_len(send.len(), recv.len())?;
+        check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
@@ -267,7 +267,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `send.len() != recv.len()`
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
     ///   `send.len()` exceeds `i32::MAX`, on every MPI version
     /// - An MPI error if the library rejects the call
@@ -297,7 +297,7 @@ impl Communicator {
         recv: &mut [T],
         op: &UserOp<T>,
     ) -> Result<()> {
-        check_same_len(send.len(), recv.len())?;
+        check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
@@ -328,7 +328,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `send.len() != recv.len()`
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
     /// - [`Error::InvalidOp`] if `op` is not `MaxLoc` or `MinLoc`
     /// - An MPI error if the library rejects the combination
     ///
@@ -363,7 +363,7 @@ impl Communicator {
         if !matches!(op, ReduceOp::MaxLoc | ReduceOp::MinLoc) {
             return Err(Error::InvalidOp);
         }
-        check_same_len(send.len(), recv.len())?;
+        check_same_len("recv", send.len(), recv.len())?;
         // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T
         // (T: MpiIndexedDatatype — one of the six predefined MPI paired types). They cannot
         // alias (Rust borrow rules). send.len() == recv.len() verified above. op has been
@@ -405,7 +405,7 @@ impl Communicator {
     /// # Errors
     ///
     /// - [`Error::InvalidOp`] if `op` is not one of the three bitwise ops
-    /// - [`Error::InvalidBuffer`] if `send.len() != recv.len()`
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
     /// - [`Error::Mpi`] if the MPI layer rejects the call
     ///
     /// # Example
@@ -438,7 +438,7 @@ impl Communicator {
         ) {
             return Err(Error::InvalidOp);
         }
-        check_same_len(send.len(), recv.len())?;
+        check_same_len("recv", send.len(), recv.len())?;
         let byte_count = std::mem::size_of_val(send);
         // SAFETY:
         // - send and recv are valid slices of T where T: BytePermutable (Copy + Send + 'static).
@@ -476,7 +476,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidBuffer`] if `send.len() != recv.len()`.
+    /// Returns [`Error::BufferSize`] if `send.len() != recv.len()`.
     ///
     /// # Example
     ///
@@ -490,7 +490,7 @@ impl Communicator {
     /// // On rank i, recv[j] == (i + 1) * send[j]
     /// ```
     pub fn scan<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], op: ReduceOp) -> Result<()> {
-        check_same_len(send.len(), recv.len())?;
+        check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
@@ -518,7 +518,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidBuffer`] if `send.len() != recv.len()`.
+    /// Returns [`Error::BufferSize`] if `send.len() != recv.len()`.
     ///
     /// # Example
     ///
@@ -533,7 +533,7 @@ impl Communicator {
     /// // On rank 0, recv is undefined per the MPI standard.
     /// ```
     pub fn exscan<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], op: ReduceOp) -> Result<()> {
-        check_same_len(send.len(), recv.len())?;
+        check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
@@ -604,7 +604,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidBuffer`] if this rank is `root` and `recv.len() < send.len() *
+    /// [`Error::BufferSize`] if this rank is `root` and `recv.len() < send.len() *
     /// size()`.
     ///
     /// # Example
@@ -619,7 +619,7 @@ impl Communicator {
     /// ```
     pub fn gather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], root: i32) -> Result<()> {
         if self.rank == root {
-            check_rank_slots(recv.len(), send.len(), self.size)?;
+            check_rank_slots("recv", recv.len(), send.len(), self.size)?;
         }
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -634,7 +634,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidBuffer`] if `recv.len() < send.len() * size()`.
+    /// [`Error::BufferSize`] if `recv.len() < send.len() * size()`.
     ///
     /// # Example
     ///
@@ -647,7 +647,7 @@ impl Communicator {
     /// world.allgather(&send, &mut recv).unwrap();
     /// ```
     pub fn allgather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<()> {
-        check_rank_slots(recv.len(), send.len(), self.size)?;
+        check_rank_slots("recv", recv.len(), send.len(), self.size)?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). The every-rank receive-length
@@ -670,7 +670,7 @@ impl Communicator {
     /// # Errors
     ///
     /// - `Error::InvalidOp` if this rank is not `root`.
-    /// - `Error::InvalidBuffer` if `data.len()` is not divisible by `size()`.
+    /// - `Error::InvalidArgument` if `data.len()` is not divisible by `size()`.
     ///
     /// # Example
     ///
@@ -693,7 +693,7 @@ impl Communicator {
         if self.rank() != root {
             return Err(Error::InvalidOp);
         }
-        let recvcount = rank_block(data.len(), self.size)? as i64;
+        let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
         // NULL is unambiguous); ferrompi_gather maps it to MPI_IN_PLACE, so data serves as both
@@ -716,7 +716,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns `Error::InvalidBuffer` if `data.len()` is not divisible by `size()`.
+    /// Returns `Error::InvalidArgument` if `data.len()` is not divisible by `size()`.
     ///
     /// # Example
     ///
@@ -733,7 +733,7 @@ impl Communicator {
     /// // data[r] == r * 10 for all r, on every rank
     /// ```
     pub fn allgather_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<()> {
-        let recvcount = rank_block(data.len(), self.size)? as i64;
+        let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
         // NULL is unambiguous); ferrompi_allgather maps it to MPI_IN_PLACE. recvcount is checked
@@ -756,7 +756,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns `Error::InvalidBuffer` at root if `data.len()` is not divisible by
+    /// Returns `Error::InvalidArgument` at root if `data.len()` is not divisible by
     /// `size()`.
     ///
     /// # Example
@@ -812,7 +812,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns `Error::InvalidBuffer` if `data.len()` is not divisible by `size()`.
+    /// Returns `Error::InvalidArgument` if `data.len()` is not divisible by `size()`.
     ///
     /// # Example
     ///
@@ -831,7 +831,7 @@ impl Communicator {
     /// }
     /// ```
     pub fn alltoall_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<()> {
-        let recvcount = rank_block(data.len(), self.size)? as i64;
+        let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
         // NULL is unambiguous); ferrompi_alltoall maps it to MPI_IN_PLACE. recvcount is checked
@@ -849,7 +849,7 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidBuffer`] if this rank is `root` and `send.len() < recv.len() *
+    /// [`Error::BufferSize`] if this rank is `root` and `send.len() < recv.len() *
     /// size()`.
     ///
     /// # Example
@@ -864,7 +864,7 @@ impl Communicator {
     /// ```
     pub fn scatter<T: MpiDatatype>(&self, send: &[T], recv: &mut [T], root: i32) -> Result<()> {
         if self.rank == root {
-            check_rank_slots(send.len(), recv.len(), self.size)?;
+            check_rank_slots("send", send.len(), recv.len(), self.size)?;
         }
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
@@ -886,8 +886,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidBuffer`] if `send.len() != recv.len()` or
-    /// `send.len()` is not evenly divisible by the communicator size.
+    /// Returns [`Error::BufferSize`] if `send.len() != recv.len()`, or
+    /// [`Error::InvalidArgument`] if `send.len()` is not evenly divisible by the
+    /// communicator size.
     ///
     /// # Example
     ///
@@ -901,8 +902,8 @@ impl Communicator {
     /// world.alltoall(&send, &mut recv).unwrap();
     /// ```
     pub fn alltoall<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<()> {
-        check_same_len(send.len(), recv.len())?;
-        let count = rank_block(send.len(), self.size)? as i64;
+        check_same_len("recv", send.len(), recv.len())?;
+        let count = rank_block("send", send.len(), self.size)? as i64;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len() and
@@ -923,7 +924,9 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidBuffer`] if `send.len() != recv.len() * size`.
+    /// Returns [`Error::InvalidArgument`] if `send.len()` is not evenly divisible
+    /// by the communicator size, or [`Error::BufferSize`] if
+    /// `send.len() != recv.len() * size`.
     ///
     /// # Example
     ///
@@ -942,7 +945,11 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
     ) -> Result<()> {
-        check_same_len(rank_block(send.len(), self.size)?, recv.len())?;
+        check_same_len(
+            "recv",
+            rank_block("send", send.len(), self.size)?,
+            recv.len(),
+        )?;
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len() * size
@@ -966,7 +973,14 @@ mod tests {
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5]; // different length
         let result = comm.reduce(&send, &mut recv, ReduceOp::Sum, 0);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 10,
+                actual: 5
+            })
+        ));
     }
 
     #[test]
@@ -975,7 +989,14 @@ mod tests {
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.allreduce(&send, &mut recv, ReduceOp::Sum);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 10,
+                actual: 5
+            })
+        ));
     }
 
     #[test]
@@ -984,7 +1005,14 @@ mod tests {
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.scan(&send, &mut recv, ReduceOp::Sum);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 10,
+                actual: 5
+            })
+        ));
     }
 
     #[test]
@@ -993,7 +1021,14 @@ mod tests {
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
         let result = comm.exscan(&send, &mut recv, ReduceOp::Sum);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 10,
+                actual: 5
+            })
+        ));
     }
 
     #[test]
@@ -1014,7 +1049,14 @@ mod tests {
             5
         ];
         let result = comm.allreduce_indexed(&send, &mut recv, ReduceOp::MaxLoc);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 10,
+                actual: 5
+            })
+        ));
     }
 
     #[test]
@@ -1030,7 +1072,13 @@ mod tests {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 5]; // 5 is not divisible by 4
         let result = comm.gather_inplace(&mut data, 0);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument {
+                arg: "data",
+                reason: "length is not a multiple of the communicator size"
+            })
+        ));
     }
 
     #[test]
@@ -1038,7 +1086,13 @@ mod tests {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7]; // 7 is not divisible by 4
         let result = comm.allgather_inplace(&mut data);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument {
+                arg: "data",
+                reason: "length is not a multiple of the communicator size"
+            })
+        ));
     }
 
     #[test]
@@ -1046,7 +1100,13 @@ mod tests {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 5]; // 5 is not divisible by 4
         let result = comm.scatter_inplace(&mut data, 0);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument {
+                arg: "data",
+                reason: "length is not a multiple of the communicator size"
+            })
+        ));
     }
 
     #[test]
@@ -1054,7 +1114,13 @@ mod tests {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7]; // 7 is not divisible by 4
         let result = comm.alltoall_inplace(&mut data);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument {
+                arg: "data",
+                reason: "length is not a multiple of the communicator size"
+            })
+        ));
     }
 
     #[test]
@@ -1109,6 +1175,13 @@ mod tests {
         let send = [1u32; 4];
         let mut recv = [0u32; 3];
         let result = comm.allreduce_bytes(&send, &mut recv, ReduceOp::BitwiseOr);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 }
