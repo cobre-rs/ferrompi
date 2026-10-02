@@ -59,6 +59,7 @@ fn main() {
         while !requests.is_empty() {
             let idx = Request::wait_any(&mut requests)
                 .expect("wait_any failed")
+                .map(|(i, _)| i)
                 .expect("wait_any returned None on non-empty active request list");
             // Remove the completed request (swap-remove preserves compactness).
             requests.swap_remove(idx);
@@ -178,7 +179,7 @@ fn main() {
 
         while !requests.is_empty() {
             match Request::test_any(&mut requests) {
-                Ok(Some(idx)) => {
+                Ok(Some((idx, _))) => {
                     requests.swap_remove(idx);
                     completions += 1;
                 }

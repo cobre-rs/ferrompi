@@ -138,7 +138,9 @@ fn part3_stale_wait_any_entry(world: &Communicator, rank: i32) {
         ];
         world.barrier().expect("part3: barrier after posting a,b");
 
-        let first = Request::wait_any(&mut reqs).expect("part3: first wait_any");
+        let first = Request::wait_any(&mut reqs)
+            .expect("part3: first wait_any")
+            .map(|(i, _)| i);
         ok &= first == Some(0);
 
         let other = world
@@ -146,7 +148,9 @@ fn part3_stale_wait_any_entry(world: &Communicator, rank: i32) {
             .expect("part3: irecv other");
         world.barrier().expect("part3: barrier after posting other");
 
-        let second = Request::wait_any(&mut reqs).expect("part3: second wait_any");
+        let second = Request::wait_any(&mut reqs)
+            .expect("part3: second wait_any")
+            .map(|(i, _)| i);
         ok &= second == Some(1);
         ok &= !other.is_completed();
         ok &= other.wait().is_ok();
@@ -177,7 +181,7 @@ fn part4_failed_test(world: &Communicator, rank: i32) {
 
         let result = loop {
             match a.test() {
-                Ok(false) => continue,
+                Ok(None) => continue,
                 other => break other,
             }
         };

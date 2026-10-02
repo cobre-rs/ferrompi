@@ -99,6 +99,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ferrompi::scope(|s| ...)`. Migration: wrap the code that creates and waits
   the requests in `ferrompi::scope`, and keep each request on the thread that
   created it.
+- **`Request::wait` returns `Status`, `test` returns `Option<Status>`, and
+  `wait_any`/`test_any` return `Option<(usize, Status)>`.** A send, collective
+  or RMA request reports the empty status (`Source::Any`, `Tag::Any`,
+  `count: Some(0)`). Migration: `while !req.test()? {}` becomes
+  `while req.test()?.is_none() {}`; take the index with `.map(|(i, _)| i)`.
 
 ### Added
 

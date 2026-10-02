@@ -20,6 +20,10 @@ fn is_proc_null_status(st: &Status) -> bool {
     st.source == Source::ProcNull && st.tag == Tag::Any && st.count == Some(0) && st.error.is_none()
 }
 
+fn is_empty_status(st: &Status) -> bool {
+    st.source == Source::Any && st.tag == Tag::Any && st.count == Some(0) && st.error.is_none()
+}
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -49,6 +53,11 @@ fn main() {
         &world,
         r.is_ok() && buf == UNTOUCHED,
         "irecv from ProcNull completes and leaves the buffer untouched",
+    );
+    common::check(
+        &world,
+        r.as_ref().is_ok_and(is_proc_null_status),
+        "irecv from ProcNull waits to the ProcNull status",
     );
 
     let r = world.probe::<i32>(Source::ProcNull, Tag::Any);
@@ -123,6 +132,11 @@ fn main() {
         .isend(&send, Source::ProcNull, RING_TAG)
         .and_then(|req| req.wait());
     common::check(&world, r.is_ok(), "isend to ProcNull completes");
+    common::check(
+        &world,
+        r.as_ref().is_ok_and(is_empty_status),
+        "isend to ProcNull waits to the empty status",
+    );
 
     mpi.buffer_attach(vec![0u8; 64 * 1024].into_boxed_slice())
         .expect("buffer_attach failed");

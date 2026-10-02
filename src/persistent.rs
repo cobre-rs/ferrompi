@@ -127,7 +127,7 @@ impl PersistentRequest {
         // registered in the C-side request table; self.active was true on
         // entry (checked above), so start() was called and MPI holds an
         // in-flight operation on this handle for ferrompi_wait to complete.
-        let ret = unsafe { ffi::ferrompi_wait(self.handle) };
+        let ret = unsafe { ffi::ferrompi_wait(self.handle, std::ptr::null_mut()) };
         // A debug build's Serialized overlap check rejects the call before MPI
         // sees it; the request is then still active. Otherwise MPI completed it
         // whatever it returned: it is inactive now, or freed if the library
@@ -152,7 +152,7 @@ impl PersistentRequest {
         // registered in the C-side request table; self.active was true on
         // entry (checked above). flag is a local out-parameter written by
         // ferrompi_test before this function reads it below.
-        let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag) };
+        let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag, std::ptr::null_mut()) };
         // flag is set when MPI completed the request, even with an error.
         if flag != 0 {
             self.active = false;
@@ -258,7 +258,7 @@ impl Drop for PersistentRequest {
             // Calls the unguarded raw wrapper (not the lifecycle-guarded one):
             // rt::drop_guard above already handles the FFI lifecycle check, so
             // this call must still attempt the wait once reached.
-            unsafe { ffi::raw::ferrompi_wait(self.handle) };
+            unsafe { ffi::raw::ferrompi_wait(self.handle, std::ptr::null_mut()) };
         }
         // SAFETY: self.handle is a valid persistent MPI request handle. If it was
         // active, ferrompi_wait above has already completed the operation, so

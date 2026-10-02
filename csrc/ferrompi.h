@@ -157,7 +157,9 @@ int ferrompi_barrier(int32_t comm);
  * message is not a whole number of them; error is an MPI error class
  * (MPI_Error_class of MPI_Status.MPI_ERROR), never an error code:
  * MPI_SUCCESS unless a multi-request completion reports this request's
- * own error. */
+ * own error. A send, collective or RMA request, a cancelled receive and an
+ * already-completed request have no source, tag or count of their own: they
+ * report source FERROMPI_ANY_SOURCE, tag FERROMPI_ANY_TAG and count 0. */
 typedef struct {
     int32_t source;
     int32_t tag;
@@ -524,9 +526,13 @@ int32_t ferrompi_error_class_index(int error_class);
  * Request Management
  * ============================================================ */
 
-int ferrompi_wait(int64_t request);
+/* status may be NULL (MPI_STATUS_IGNORE) in the four single-completion calls
+ * below (wait, test, waitany, testany). It is filled only when the call
+ * returns MPI_SUCCESS and completes a request: for waitany and testany, with
+ * the status of the returned index. */
+int ferrompi_wait(int64_t request, ferrompi_status* status);
 
-int ferrompi_test(int64_t request, int32_t* flag);
+int ferrompi_test(int64_t request, int32_t* flag, ferrompi_status* status);
 
 int ferrompi_waitall(int64_t count, const int64_t* requests, uint8_t* done,
                       int64_t* failed_index);
@@ -539,13 +545,14 @@ int ferrompi_request_get_status(int64_t request, int32_t* flag);
 /** Request cancellation of a pending operation (MPI_Cancel). Does not free the request handle. */
 int ferrompi_cancel(int64_t request);
 
-int ferrompi_waitany(int64_t count, const int64_t* requests, int32_t* index, uint8_t* done);
+int ferrompi_waitany(int64_t count, const int64_t* requests, int32_t* index, uint8_t* done,
+                      ferrompi_status* status);
 
 int ferrompi_waitsome(int64_t count, const int64_t* requests, int64_t* outcount,
                        int32_t* indices, uint8_t* done, int64_t* failed_index);
 
 int ferrompi_testany(int64_t count, const int64_t* requests, int32_t* index,
-                      int32_t* flag, uint8_t* done);
+                      int32_t* flag, uint8_t* done, ferrompi_status* status);
 
 int ferrompi_testsome(int64_t count, const int64_t* requests, int64_t* outcount,
                        int32_t* indices, uint8_t* done, int64_t* failed_index);

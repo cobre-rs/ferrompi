@@ -1,21 +1,26 @@
 //! Cancel semantics across request kinds.
 //!
 //! 1. Rank 1 posts an irecv for a message that never arrives, then probes
-//!    with `get_status`, cancels, and waits: point-to-point cancel succeeds.
-//!    Rank 0 does nothing.
+//!    with `get_status`, cancels, and waits: point-to-point cancel succeeds
+//!    and the wait reports the empty status. Rank 0 does nothing.
 //! 2. Every rank posts an `iallreduce`; `cancel()` on it must return
 //!    `Err(NotSupported)`, and the still-pending request then completes
-//!    normally via `wait()`.
+//!    normally via `wait()`, reporting the empty status.
 //! 3. (with the `rma` feature) every rank `rput`s into its own window under
 //!    a shared lock; `cancel()` on the returned request must return
-//!    `Err(NotSupported)`, and it then completes normally via `wait()`.
+//!    `Err(NotSupported)`, and it then completes normally via `wait()`,
+//!    reporting the empty status.
 // mpi-test: np=2
 
-use ferrompi::{Error, Mpi, ReduceOp, Result};
+use ferrompi::{Error, Mpi, ReduceOp, Result, Source, Status, Tag};
 #[cfg(feature = "rma")]
 use ferrompi::{LockType, Win};
 
 mod common;
+
+fn is_empty_status(st: &Status) -> bool {
+    st.source == Source::Any && st.tag == Tag::Any && st.count == Some(0) && st.error.is_none()
+}
 
 fn main() -> Result<()> {
     let mpi = Mpi::init()?;
@@ -24,6 +29,7 @@ fn main() -> Result<()> {
     let size = world.size();
 
     // Test 1: cancel of a point-to-point request.
+    let mut cancelled_empty = true;
     if rank == 1 {
         let mut buf = vec![0u8; 8];
         let mut req = world.irecv(&mut buf, 0, 99)?;
@@ -31,10 +37,15 @@ fn main() -> Result<()> {
         let complete = req.get_status()?;
         assert!(!complete, "get_status must report incomplete before cancel");
         req.cancel()?;
-        req.wait()?;
+        cancelled_empty = is_empty_status(&req.wait()?);
         println!("rank 1: cancel+wait completed");
     }
     world.barrier()?;
+    common::check(
+        &world,
+        cancelled_empty,
+        "cancelled irecv waits to the empty status",
+    );
 
     // Test 2: cancel of a nonblocking-collective request is refused.
     {
@@ -47,9 +58,14 @@ fn main() -> Result<()> {
             cancel_ok,
             "cancel on iallreduce returns NotSupported",
         );
-        req.wait()?;
+        let status = req.wait()?;
         let recv_ok = recv == [size as f64; 4];
         common::check(&world, recv_ok, "iallreduce completes after refused cancel");
+        common::check(
+            &world,
+            is_empty_status(&status),
+            "iallreduce waits to the empty status",
+        );
     }
 
     // Test 3: cancel of an RMA request is refused.
@@ -60,7 +76,12 @@ fn main() -> Result<()> {
         let mut req = win.rput(&[7], rank, 0, 1)?;
         let cancel_ok = matches!(req.cancel(), Err(Error::NotSupported(_)));
         common::check(&world, cancel_ok, "cancel on rput returns NotSupported");
-        req.wait()?;
+        let status = req.wait()?;
+        common::check(
+            &world,
+            is_empty_status(&status),
+            "rput waits to the empty status",
+        );
         drop(guard);
     }
 

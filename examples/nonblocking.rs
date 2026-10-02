@@ -156,7 +156,7 @@ fn main() -> Result<()> {
 
         // Poll until complete
         let mut polls = 0;
-        while !request.test()? {
+        while request.test()?.is_none() {
             polls += 1;
             // Do a tiny bit of work between polls
             std::hint::spin_loop();

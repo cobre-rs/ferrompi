@@ -123,6 +123,13 @@ static uint8_t request_state[MAX_REQUESTS];
 #define REQUEST_PERSISTENT 1
 #define REQUEST_ACTIVE     2
 
+// Per-slot receive datatype, a column of the request table like
+// request_state: the datatype a receive was posted with, MPI_DATATYPE_NULL
+// for every other request (send, collective, RMA). It is the request's kind,
+// recorded at creation: only a receive has a source, tag and count to
+// report. Read before free_request releases the slot.
+static MPI_Datatype request_dtype[MAX_REQUESTS];
+
 // Window table
 // win_used uses C11 atomics to eliminate data races under MPI_THREAD_MULTIPLE.
 // alloc_win uses a CAS loop; free_win uses atomic_store (release); readers use
@@ -329,6 +336,7 @@ static int64_t alloc_request(MPI_Request req, int persistent) {
                 int64_t idx = (int64_t)widx * 64 + bit;
                 request_table[idx] = req;
                 request_state[idx] = persistent ? REQUEST_PERSISTENT : 0;
+                request_dtype[idx] = MPI_DATATYPE_NULL;
                 // Relaxed: sequenced after the acq_rel fetch_or above, whose
                 // acquire component already synchronizes-with the release
                 // fetch_and of whichever free_request last vacated this slot,
@@ -416,6 +424,12 @@ static void mark_inactive(int64_t handle) {
         return;
     }
     request_state[slot] &= (uint8_t)~REQUEST_ACTIVE;
+}
+
+// Record the datatype a receive was posted with. handle is the one
+// alloc_request just returned, so it names a live slot: the low 32 bits.
+static void set_recv_dtype(int64_t handle, MPI_Datatype dt) {
+    request_dtype[(uint64_t)handle & 0xffffffffu] = dt;
 }
 
 #if defined(MPIX_ERR_PROC_FAILED_PENDING)
@@ -1112,6 +1126,30 @@ static int fill_status(const MPI_Status* st, MPI_Datatype dt, ferrompi_status* o
     return get_count64(st, dt, &out->count);
 }
 
+// Fills the status a completed single-request call reports. dt is the
+// request's request_dtype. A request without a datatype (send, collective,
+// RMA) leaves source, tag and count undefined (MPI-4.1 3.7.3, 6.12), so st is
+// not read; neither does a cancelled receive (3.8.4), which is why
+// MPI_Test_cancelled is evaluated before any other field. Both report the
+// empty status. MPI_ERROR is never read: MPI sets it only when a
+// multi-request call returns MPI_ERR_IN_STATUS (3.2.5, 3.7.5). A completed
+// request is never reported failed because MPI_Get_count did: count then
+// stays -1.
+static void completion_status(MPI_Datatype dt, const MPI_Status* st, ferrompi_status* out) {
+    if (dt != MPI_DATATYPE_NULL) {
+        int cancelled = 0;
+        (void)MPI_Test_cancelled(st, &cancelled);
+        if (!cancelled) {
+            (void)fill_status(st, dt, out);
+            return;
+        }
+    }
+    out->source = FERROMPI_ANY_SOURCE;
+    out->tag = FERROMPI_ANY_TAG;
+    out->count = 0;
+    out->error = MPI_SUCCESS;
+}
+
 // Translates the private source and tag codes (FERROMPI_ANY_SOURCE,
 // FERROMPI_PROC_NULL and FERROMPI_ANY_TAG in ferrompi.h) to the linked MPI's
 // constants; any other value is a rank or tag and passes through.
@@ -1231,6 +1269,7 @@ static int irecv_typed(void* buf, int64_t count, MPI_Datatype dt,
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
         }
+        set_recv_dtype(*request_handle, dt);
     }
 
     return ret;
@@ -3375,13 +3414,19 @@ static void write_back(int64_t count, const int64_t* handles,
     }
 }
 
-int ferrompi_wait(int64_t request_handle) {
-    MPI_Request* req = get_request_ptr(request_handle);
-    if (!req) {
+int ferrompi_wait(int64_t request_handle, ferrompi_status* status) {
+    int64_t slot = request_slot(request_handle);
+    if (slot < 0) {
         return MPI_ERR_REQUEST;
     }
-    int ret = MPI_Wait(req, MPI_STATUS_IGNORE);
+    MPI_Request* req = &request_table[slot];
+    MPI_Datatype dt = request_dtype[slot];
+    MPI_Status st;
+    int ret = MPI_Wait(req, status ? &st : MPI_STATUS_IGNORE);
     abort_if_pending_after_failure(ret);
+    if (status && ret == MPI_SUCCESS) {
+        completion_status(dt, &st, status);
+    }
     // MPI_Wait completed the request whatever it returned: a nonblocking
     // request is freed; a persistent one is inactive, or freed too by Open
     // MPI when it failed.
@@ -3393,14 +3438,20 @@ int ferrompi_wait(int64_t request_handle) {
     return ret;
 }
 
-int ferrompi_test(int64_t request_handle, int32_t* flag) {
-    MPI_Request* req = get_request_ptr(request_handle);
-    if (!req) {
+int ferrompi_test(int64_t request_handle, int32_t* flag, ferrompi_status* status) {
+    int64_t slot = request_slot(request_handle);
+    if (slot < 0) {
         return MPI_ERR_REQUEST;
     }
+    MPI_Request* req = &request_table[slot];
+    MPI_Datatype dt = request_dtype[slot];
+    MPI_Status st;
     int f = 0;
-    int ret = MPI_Test(req, &f, MPI_STATUS_IGNORE);
+    int ret = MPI_Test(req, &f, status ? &st : MPI_STATUS_IGNORE);
     abort_if_pending_after_failure(ret);
+    if (status && f && ret == MPI_SUCCESS) {
+        completion_status(dt, &st, status);
+    }
     // MPI frees a nonblocking request that completes whether or not MPI_Test
     // itself reports an error (e.g. a truncated receive still nulls the
     // request), so free the slot and report completion on that condition
@@ -3586,7 +3637,7 @@ static int some_result_in_range(int64_t count, int out, const int* indices) {
 }
 
 int ferrompi_waitany(int64_t count, const int64_t* request_handles,
-                     int32_t* index, uint8_t* done) {
+                     int32_t* index, uint8_t* done, ferrompi_status* status) {
     *index = -1;
     if (count <= 0) { return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
@@ -3606,7 +3657,8 @@ int ferrompi_waitany(int64_t count, const int64_t* request_handles,
         reqs[i] = *req;
     }
     int idx = MPI_UNDEFINED;
-    int ret = MPI_Waitany((int)count, reqs, &idx, MPI_STATUS_IGNORE);
+    MPI_Status st;
+    int ret = MPI_Waitany((int)count, reqs, &idx, status ? &st : MPI_STATUS_IGNORE);
     abort_if_pending_after_failure(ret);
     // An index outside the list is treated as no completion reported.
     if (idx != MPI_UNDEFINED && (idx < 0 || idx >= count)) {
@@ -3617,6 +3669,12 @@ int ferrompi_waitany(int64_t count, const int64_t* request_handles,
         done[idx] = 1;
     }
     *index = (idx == MPI_UNDEFINED) ? -1 : (int32_t)idx;
+    // MPI fills only the status of the returned index (MPI-4.1 3.7.5). The
+    // slot is still live here: only write_back frees it.
+    if (status && ret == MPI_SUCCESS && idx != MPI_UNDEFINED) {
+        int64_t slot = request_slot(request_handles[idx]);
+        completion_status(slot < 0 ? MPI_DATATYPE_NULL : request_dtype[slot], &st, status);
+    }
     write_back(count, request_handles, reqs, done);
     if (reqs != stack_reqs) free(reqs);
     return ret;
@@ -3705,7 +3763,8 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
 }
 
 int ferrompi_testany(int64_t count, const int64_t* request_handles,
-                     int32_t* index, int32_t* flag, uint8_t* done) {
+                     int32_t* index, int32_t* flag, uint8_t* done,
+                     ferrompi_status* status) {
     *index = -1;
     if (count <= 0) { *flag = 1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
@@ -3726,7 +3785,8 @@ int ferrompi_testany(int64_t count, const int64_t* request_handles,
     }
     int idx = MPI_UNDEFINED;
     int f = 0;
-    int ret = MPI_Testany((int)count, reqs, &idx, &f, MPI_STATUS_IGNORE);
+    MPI_Status st;
+    int ret = MPI_Testany((int)count, reqs, &idx, &f, status ? &st : MPI_STATUS_IGNORE);
     abort_if_pending_after_failure(ret);
     if (idx != MPI_UNDEFINED && (idx < 0 || idx >= count)) {
         idx = MPI_UNDEFINED;
@@ -3737,6 +3797,12 @@ int ferrompi_testany(int64_t count, const int64_t* request_handles,
     }
     *flag = (int32_t)f;
     *index = (idx == MPI_UNDEFINED) ? -1 : (int32_t)idx;
+    // As in ferrompi_waitany: only the returned index has a status, and its
+    // slot is still live until write_back.
+    if (status && ret == MPI_SUCCESS && f && idx != MPI_UNDEFINED) {
+        int64_t slot = request_slot(request_handles[idx]);
+        completion_status(slot < 0 ? MPI_DATATYPE_NULL : request_dtype[slot], &st, status);
+    }
     write_back(count, request_handles, reqs, done);
     if (reqs != stack_reqs) free(reqs);
     return ret;

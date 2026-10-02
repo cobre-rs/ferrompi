@@ -63,8 +63,8 @@ fn part1_and_1b(world: &Communicator, rank: i32, mpich: bool) {
         );
 
         let mut ok1b = true;
-        ok1b &= matches!(reqs[0].test(), Ok(true));
-        ok1b &= matches!(reqs[1].test(), Ok(true));
+        ok1b &= matches!(reqs[0].test(), Ok(Some(_)));
+        ok1b &= matches!(reqs[1].test(), Ok(Some(_)));
 
         let mut fresh_buf = [0i32; 1];
         let fresh = world

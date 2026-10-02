@@ -38,8 +38,29 @@ fn main() {
         let send_req = world.isend(&send_data, next, tag).expect("isend failed");
 
         // Wait for both to complete
-        send_req.wait().expect("isend wait failed");
-        recv_req.wait().expect("irecv wait failed");
+        let send_status = send_req.wait().expect("isend wait failed");
+        let recv_status = recv_req.wait().expect("irecv wait failed");
+
+        assert_eq!(
+            (
+                recv_status.source,
+                recv_status.tag,
+                recv_status.count,
+                recv_status.error
+            ),
+            (Source::Rank(prev), Tag::Value(tag), Some(2), None),
+            "rank {rank}: irecv wait status mismatch"
+        );
+        assert_eq!(
+            (
+                send_status.source,
+                send_status.tag,
+                send_status.count,
+                send_status.error
+            ),
+            (Source::Any, Tag::Any, Some(0), None),
+            "rank {rank}: isend wait status is not the empty status"
+        );
 
         // Verify received data is from the previous rank
         let expected = vec![prev as f64 * 10.0 + 1.0, prev as f64 * 10.0 + 2.0];
@@ -302,7 +323,7 @@ fn main() {
 
         // Poll recv with test()
         let mut polls = 0u64;
-        while !recv_req.test().expect("test failed") {
+        while recv_req.test().expect("test failed").is_none() {
             polls += 1;
             std::hint::spin_loop();
         }

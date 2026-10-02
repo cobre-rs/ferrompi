@@ -1233,9 +1233,13 @@ guarded_extern! {
     // finalizing, unlike every call above.
     // ============================================================
     @completion
-    pub fn ferrompi_wait(request: int64_t) -> c_int;
+    pub fn ferrompi_wait(request: int64_t, status: *mut FerrompiStatus) -> c_int;
 
-    pub fn ferrompi_test(request: int64_t, flag: *mut int32_t) -> c_int;
+    pub fn ferrompi_test(
+        request: int64_t,
+        flag: *mut int32_t,
+        status: *mut FerrompiStatus,
+    ) -> c_int;
 
     pub fn ferrompi_waitall(
         count: int64_t,
@@ -1251,6 +1255,7 @@ guarded_extern! {
         requests: *const int64_t,
         index: *mut int32_t,
         done: *mut u8,
+        status: *mut FerrompiStatus,
     ) -> c_int;
 
     pub fn ferrompi_waitsome(
@@ -1268,6 +1273,7 @@ guarded_extern! {
         index: *mut int32_t,
         flag: *mut int32_t,
         done: *mut u8,
+        status: *mut FerrompiStatus,
     ) -> c_int;
 
     pub fn ferrompi_testsome(

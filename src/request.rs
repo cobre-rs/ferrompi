@@ -4,6 +4,7 @@ use crate::error::{Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LE
 use crate::ffi;
 use crate::rt;
 use crate::scope::Registry;
+use crate::status::Status;
 #[cfg(debug_assertions)]
 use std::io::Write;
 
@@ -127,7 +128,7 @@ pub(crate) enum RequestKind {
 /// **The caller must ensure that all buffers passed to the nonblocking operation
 /// (e.g., `isend`, `irecv`, `iallreduce`) remain valid and are not moved,
 /// reallocated, or dropped until the `Request` is completed (via `wait()` or
-/// `test()` returning `true`) or dropped.** MPI holds raw pointers to these
+/// `test()` returning `Some`) or dropped.** MPI holds raw pointers to these
 /// buffers; violating this invariant is undefined behavior.
 ///
 /// For a request that is not created through a [`scope`](crate::scope) this
@@ -249,6 +250,13 @@ impl Request<'_> {
     /// Blocks until the operation is finished. After this returns successfully,
     /// the associated buffers can be safely accessed.
     ///
+    /// For a receive the returned [`Status`] holds the matched source, tag and
+    /// element count. For a send, collective or RMA request the `Status` is the
+    /// empty status, and so is a cancelled receive or a request that was
+    /// already completed (a [`test`](Request::test) that failed after MPI
+    /// completed it, say); only `error` has meaning, and this single-request
+    /// call leaves it `None`.
+    ///
     /// On a thread the active thread level does not allow, the wait is
     /// rejected and this call drops the still-in-flight `self` before
     /// returning, which aborts the process for a request that no scope owns (see
@@ -260,16 +268,27 @@ impl Request<'_> {
     /// thread's MPI call can neither run nor hand the request back, so it
     /// prints a message and aborts the process.
     #[inline]
-    pub fn wait(mut self) -> Result<()> {
+    pub fn wait(self) -> Result<Status> {
         if self.completed {
-            return Ok(());
+            return Ok(Status::EMPTY);
         }
+        let mut status = ffi::FerrompiStatus::default();
+        self.wait_raw(&mut status)?;
+        Ok(Status::from_ffi(status))
+    }
+
+    /// The body of [`wait`](Request::wait) for a request that is not yet
+    /// completed, out of line so that the inline wrapper decodes `status` only
+    /// when its caller uses the result.
+    #[inline(never)]
+    fn wait_raw(mut self, status: &mut ffi::FerrompiStatus) -> Result<()> {
         Error::check_with_op(rt::check_completion(), "wait")?;
         // SAFETY: self.handle is a valid MPI request handle registered in the
         // C-side request table by the nonblocking constructor that produced
-        // this Request; self.completed was false on entry (checked above), so
-        // MPI_Wait has not already consumed this handle.
-        let ret = unsafe { ffi::ferrompi_wait(self.handle) };
+        // this Request; self.completed was false on entry (checked by wait),
+        // so MPI_Wait has not already consumed this handle. status is a valid
+        // out-parameter.
+        let ret = unsafe { ffi::ferrompi_wait(self.handle, status) };
         #[cfg(debug_assertions)]
         if ret == FERROMPI_ERR_THREAD_LEVEL {
             // rt::check_completion() above already returns this same sentinel
@@ -295,26 +314,43 @@ impl Request<'_> {
 
     /// Test if this operation has completed without blocking.
     ///
-    /// Returns `true` if the operation is complete, `false` otherwise.
+    /// Returns `Some(`[`Status`]`)` if the operation is complete, `None`
+    /// otherwise. For a receive the `Status` holds the matched source, tag and
+    /// element count. For a send, collective or RMA request the `Status` is the
+    /// empty status, and so is a cancelled receive or a request that was
+    /// already completed; only `error` has meaning, and these single-request
+    /// calls leave it `None`.
     ///
     /// # Note
     ///
-    /// If this returns `true`, the request is consumed and you should not call
+    /// If this returns `Some`, the request is consumed and you should not call
     /// `wait()` or `test()` again. A test that fails with an error still marks
     /// the request completed when MPI completed it (e.g. a truncated
     /// receive), so a later `Drop` does not attempt a second `MPI_Wait` on the
     /// same slot.
     #[inline]
-    pub fn test(&mut self) -> Result<bool> {
+    pub fn test(&mut self) -> Result<Option<Status>> {
         if self.completed {
-            return Ok(true);
+            return Ok(Some(Status::EMPTY));
         }
+        let mut status = ffi::FerrompiStatus::default();
+        Ok(self
+            .test_raw(&mut status)?
+            .then(|| Status::from_ffi(status)))
+    }
+
+    /// The body of [`test`](Request::test) for a request that is not yet
+    /// completed, out of line like [`wait_raw`](Request::wait_raw). Returns
+    /// whether MPI completed it.
+    #[inline(never)]
+    fn test_raw(&mut self, status: &mut ffi::FerrompiStatus) -> Result<bool> {
         let mut flag: i32 = 0;
         // SAFETY: self.handle is a valid MPI request handle registered in the
-        // C-side request table; self.completed was false on entry (checked
-        // above), so MPI_Test has not already consumed this handle. flag is a
-        // local out-parameter written before this function reads it below.
-        let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag) };
+        // C-side request table; self.completed was false on entry (checked by
+        // test), so MPI_Test has not already consumed this handle. flag is a
+        // local out-parameter written before this function reads it below;
+        // status is a valid out-parameter.
+        let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag, status) };
         // Set completed from flag BEFORE the `?` below: ferrompi_test frees
         // the slot and reports flag=1 whenever MPI completed the request,
         // even when it returns an error (e.g. MPI_ERR_TRUNCATE), so Drop must
@@ -330,11 +366,16 @@ impl Request<'_> {
     /// Wait for any one request in a collection to complete.
     ///
     /// Blocks until at least one not-yet-completed request completes and
-    /// returns its index. Completed entries are skipped; `wait_any` returns
-    /// `Ok(None)` once every entry in the slice is completed (or the slice
-    /// was empty), which is what lets the standard MPI Waitany loop idiom —
-    /// calling `wait_any` repeatedly on the same slice without removing
-    /// completed entries — terminate.
+    /// returns its index and [`Status`]. Completed entries are skipped;
+    /// `wait_any` returns `Ok(None)` once every entry in the slice is completed
+    /// (or the slice was empty), which is what lets the standard MPI Waitany
+    /// loop idiom — calling `wait_any` repeatedly on the same slice without
+    /// removing completed entries — terminate.
+    ///
+    /// For a receive the `Status` holds the matched source, tag and element
+    /// count. For a send, collective or RMA request the `Status` is the empty
+    /// status, and so is a cancelled receive; only `error` has meaning, and
+    /// this call leaves it `None`.
     ///
     /// The completed `Request` is marked completed in place. Removing it
     /// from the vector is optional, not required for correctness.
@@ -343,14 +384,15 @@ impl Request<'_> {
     /// class and code. When the MPI library reports which request failed
     /// (MPICH and Open MPI do), the message also ends with `(request N)`,
     /// `N` being its index in `requests`.
-    pub fn wait_any(requests: &mut [Request<'_>]) -> Result<Option<usize>> {
+    pub fn wait_any(requests: &mut [Request<'_>]) -> Result<Option<(usize, Status)>> {
         if requests.is_empty() {
             return Ok(None);
         }
         let mut index: i32 = 0;
+        let mut status = ffi::FerrompiStatus::default();
         // SAFETY: with_handles provides a valid, contiguous [i64] of the request
         // handles and a same-length [u8] done buffer, both sized to the count we
-        // pass; index is a valid stack-allocated i32 output parameter.
+        // pass; index and status are valid stack-allocated output parameters.
         let ret = with_handles(
             requests,
             handle_or_skip,
@@ -360,6 +402,7 @@ impl Request<'_> {
                     handles.as_ptr(),
                     &mut index,
                     done.as_mut_ptr(),
+                    &mut status,
                 )
             },
             mark_completed,
@@ -368,7 +411,7 @@ impl Request<'_> {
         if index < 0 {
             return Ok(None);
         }
-        Ok(Some(index as usize))
+        Ok(Some((index as usize, Status::from_ffi(status))))
     }
 
     /// Wait until at least one request in a collection completes.
@@ -433,8 +476,13 @@ impl Request<'_> {
 
     /// Test whether any one request in a collection has completed (non-blocking).
     ///
-    /// Returns `Ok(Some(idx))` if a request completed, `Ok(None)` if no request
-    /// has completed yet or all requests were already null.
+    /// Returns `Ok(Some((idx, status)))` if a request completed, `Ok(None)` if
+    /// no request has completed yet or all requests were already null.
+    ///
+    /// For a receive the [`Status`] holds the matched source, tag and element
+    /// count. For a send, collective or RMA request the `Status` is the empty
+    /// status, and so is a cancelled receive; only `error` has meaning, and
+    /// this call leaves it `None`.
     ///
     /// Completed entries are skipped, so calling `test_any` again after every
     /// entry has completed keeps returning `Ok(None)` rather than erroring.
@@ -445,15 +493,17 @@ impl Request<'_> {
     /// class and code. When the MPI library reports which request failed
     /// (MPICH and Open MPI do), the message also ends with `(request N)`,
     /// `N` being its index in `requests`.
-    pub fn test_any(requests: &mut [Request<'_>]) -> Result<Option<usize>> {
+    pub fn test_any(requests: &mut [Request<'_>]) -> Result<Option<(usize, Status)>> {
         if requests.is_empty() {
             return Ok(None);
         }
         let mut index: i32 = 0;
         let mut flag: i32 = 0;
+        let mut status = ffi::FerrompiStatus::default();
         // SAFETY: with_handles provides a valid, contiguous [i64] of the request
         // handles and a same-length [u8] done buffer, both sized to the count we
-        // pass; index and flag are valid stack-allocated i32 output parameters.
+        // pass; index, flag and status are valid stack-allocated output
+        // parameters.
         let ret = with_handles(
             requests,
             handle_or_skip,
@@ -464,6 +514,7 @@ impl Request<'_> {
                     &mut index,
                     &mut flag,
                     done.as_mut_ptr(),
+                    &mut status,
                 )
             },
             mark_completed,
@@ -476,7 +527,7 @@ impl Request<'_> {
             // All requests were null — nothing to mark.
             return Ok(None);
         }
-        Ok(Some(index as usize))
+        Ok(Some((index as usize, Status::from_ffi(status))))
     }
 
     /// Test how many requests in a collection have completed (non-blocking).
@@ -661,10 +712,10 @@ impl Drop for Request<'_> {
     /// peer posts the matching operation; if the peer never does, this
     /// deadlocks. A scoped request does nothing here: its scope completes it.
     ///
-    /// Maintainers: the `self.completed = true` assignment in `Request::wait`
-    /// is the only guard that prevents a double-wait here. Any refactoring of
-    /// `wait()` must preserve that assignment, or this `Drop` impl becomes
-    /// unsound (double-freeing the request handle).
+    /// Maintainers: the `self.completed = true` assignment in
+    /// `Request::wait_raw` is the only guard that prevents a double-wait here.
+    /// Any refactoring of `wait()` must preserve that assignment, or this
+    /// `Drop` impl becomes unsound (double-freeing the request handle).
     ///
     /// After `Mpi` is dropped this does nothing; below `Serialized` on a
     /// non-init thread it aborts the process.
@@ -681,7 +732,7 @@ impl Drop for Request<'_> {
             // Calls the unguarded raw wrapper (not the lifecycle-guarded one):
             // rt::drop_guard above already handles the FFI lifecycle check, so
             // this call must still attempt the wait once reached.
-            unsafe { ffi::raw::ferrompi_wait(self.handle) };
+            unsafe { ffi::raw::ferrompi_wait(self.handle, std::ptr::null_mut()) };
         }
     }
 }
@@ -690,6 +741,7 @@ impl Drop for Request<'_> {
 mod tests {
     use super::{with_handles, Owner, Request, RequestKind, HANDLE_STACK_CAP};
     use crate::error::Error;
+    use crate::status::Status;
     use std::mem::forget;
 
     fn test_request(completed: bool, kind: RequestKind) -> Request<'static> {
@@ -702,21 +754,21 @@ mod tests {
     }
 
     #[test]
-    fn test_when_already_completed_returns_true() {
+    fn test_when_already_completed_returns_empty_status() {
         let mut req = test_request(true, RequestKind::PointToPoint);
         let result = req.test();
-        assert!(matches!(result, Ok(true)));
+        assert!(matches!(result, Ok(Some(Status::EMPTY))));
         forget(req);
     }
 
     #[test]
     fn wait_when_already_completed_returns_ok() {
         // wait() takes self by value (consuming).
-        // With completed: true, it returns Ok(()) before any FFI call.
+        // With completed: true, it returns Ok(Status::EMPTY) before any FFI call.
         // Drop then runs, but !self.completed is false, so Drop is a no-op.
         let req = test_request(true, RequestKind::PointToPoint);
         let result = req.wait();
-        assert!(result.is_ok());
+        assert!(matches!(result, Ok(Status::EMPTY)));
         // No forget() needed — wait() consumed the value, and Drop was a no-op
     }
 

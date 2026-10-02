@@ -109,10 +109,23 @@ impl Tag {
 /// Returned by [`Communicator::recv`](crate::Communicator::recv),
 /// [`Communicator::sendrecv`](crate::Communicator::sendrecv) and
 /// [`Communicator::recv_custom`](crate::Communicator::recv_custom) to describe
-/// the message just received, and by
+/// the message just received, by
 /// [`Communicator::probe`](crate::Communicator::probe) and
 /// [`Communicator::iprobe`](crate::Communicator::iprobe) to describe an
-/// incoming message without consuming it.
+/// incoming message without consuming it, and by
+/// [`Request::wait`](crate::Request::wait),
+/// [`test`](crate::Request::test),
+/// [`wait_any`](crate::Request::wait_any) and
+/// [`test_any`](crate::Request::test_any) to describe the receive they
+/// completed.
+///
+/// # The empty status
+///
+/// A send, nonblocking-collective or RMA request, a cancelled receive, and a
+/// request that was already completed have no message to describe (MPI leaves
+/// the source, tag and count of the first four undefined). They report the
+/// empty status instead: [`Source::Any`], [`Tag::Any`] and `count: Some(0)`.
+/// For a send request only `error` has meaning.
 ///
 /// # Example
 ///
@@ -129,15 +142,16 @@ impl Tag {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Status {
-    /// The matched source: [`Source::Rank`] for a message,
-    /// [`Source::ProcNull`] for a receive or probe from `PROC_NULL`.
+    /// The matched source: [`Source::Rank`] for a received or probed message,
+    /// [`Source::ProcNull`] for a receive or probe from `PROC_NULL`,
+    /// [`Source::Any`] in the empty status.
     pub source: Source,
-    /// The matched tag: [`Tag::Value`] for a message, [`Tag::Any`] only for a
-    /// receive or probe from `PROC_NULL`.
+    /// The matched tag: [`Tag::Value`] for a message; [`Tag::Any`] for a
+    /// receive or probe from `PROC_NULL` and in the empty status.
     pub tag: Tag,
     /// Number of elements of the call's datatype in the message, from
     /// `MPI_Get_count`; `None` when the message is not a whole number of
-    /// elements (MPI reports `MPI_UNDEFINED`).
+    /// elements (MPI reports `MPI_UNDEFINED`). `Some(0)` in the empty status.
     pub count: Option<usize>,
     /// `Some` only for a request whose own error MPI reported in a
     /// multi-request completion; `None` for a single-request call.
@@ -145,6 +159,14 @@ pub struct Status {
 }
 
 impl Status {
+    pub(crate) const EMPTY: Status = Status {
+        source: Source::Any,
+        tag: Tag::Any,
+        count: Some(0),
+        error: None,
+    };
+
+    #[inline]
     pub(crate) fn from_ffi(raw: ffi::FerrompiStatus) -> Status {
         Status {
             source: match raw.source {
@@ -305,6 +327,14 @@ mod tests {
     fn status_from_ffi_any_source() {
         let status = Status::from_ffi(raw(ANY_SOURCE_CODE, 0, 0, 0));
         assert_eq!(status.source, Source::Any);
+    }
+
+    #[test]
+    fn empty_status_decodes_from_private_codes() {
+        assert_eq!(
+            Status::from_ffi(raw(ANY_SOURCE_CODE, ANY_TAG_CODE, 0, 0)),
+            Status::EMPTY
+        );
     }
 
     #[test]
