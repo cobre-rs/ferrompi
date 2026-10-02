@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Collective buffer-length errors are `Error::BufferSize { arg,
   required, actual }`** (or `Error::InvalidArgument` for a length that is
   not a multiple of the communicator size) instead of
-  `Error::InvalidBuffer`. Migration: match the new variants; `arg` names
-  the parameter.
+  `Error::InvalidBuffer`; the variable-count collectives report `BufferSize`
+  for a counts or displacements array of the wrong length or a block past
+  the buffer, and `InvalidArgument` for a negative count or displacement.
+  Migration: match the new variants; `arg` names the parameter.
 
 ### Fixed
 

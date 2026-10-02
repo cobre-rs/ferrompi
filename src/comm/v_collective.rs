@@ -8,20 +8,58 @@ use crate::ffi;
 use crate::persistent::PersistentRequest;
 use crate::request::{Request, RequestKind};
 
-/// Checks one counts/displacements pair that MPI reads on this rank: each array
-/// holds exactly `size` entries, every count is non-negative, and every block
-/// with a positive count lies inside a `buf_len`-element buffer (computed in i64).
-fn check_v_args(counts: &[i32], displs: &[i32], size: i32, buf_len: usize) -> Result<()> {
-    if counts.len() != size as usize || displs.len() != size as usize {
-        return Err(Error::InvalidBuffer);
+/// Checks one counts/displacements pair that MPI reads on this rank, naming the
+/// offending parameter in the error: each array holds exactly `size` entries
+/// (`BufferSize`), every count is non-negative and every positive-count block
+/// starts at a non-negative displacement (`InvalidArgument`), and every
+/// positive-count block lies inside a `buf_len`-element buffer (`BufferSize`,
+/// computed in i64). The first fault in that order is reported.
+fn check_v_args(
+    counts_arg: &'static str,
+    displs_arg: &'static str,
+    buf_arg: &'static str,
+    counts: &[i32],
+    displs: &[i32],
+    size: i32,
+    buf_len: usize,
+) -> Result<()> {
+    let size = size as usize;
+    if counts.len() != size {
+        return Err(Error::BufferSize {
+            arg: counts_arg,
+            required: size,
+            actual: counts.len(),
+        });
     }
-    let buf_len = buf_len as i64;
+    if displs.len() != size {
+        return Err(Error::BufferSize {
+            arg: displs_arg,
+            required: size,
+            actual: displs.len(),
+        });
+    }
     for (&count, &displ) in counts.iter().zip(displs) {
         if count < 0 {
-            return Err(Error::InvalidBuffer);
+            return Err(Error::InvalidArgument {
+                arg: counts_arg,
+                reason: "negative count",
+            });
         }
-        if count > 0 && (displ < 0 || i64::from(displ) + i64::from(count) > buf_len) {
-            return Err(Error::InvalidBuffer);
+        if count > 0 {
+            if displ < 0 {
+                return Err(Error::InvalidArgument {
+                    arg: displs_arg,
+                    reason: "negative displacement",
+                });
+            }
+            let end = i64::from(displ) + i64::from(count);
+            if end > buf_len as i64 {
+                return Err(Error::BufferSize {
+                    arg: buf_arg,
+                    required: end as usize,
+                    actual: buf_len,
+                });
+            }
         }
     }
     Ok(())
@@ -49,9 +87,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
-    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
-    ///   positive count starts at a negative displacement or ends past the end of `recv`.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `recvcounts` or `displs`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `recv`.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -81,7 +121,15 @@ impl Communicator {
         root: i32,
     ) -> Result<()> {
         if self.rank == root {
-            check_v_args(recvcounts, displs, self.size, recv.len())?;
+            check_v_args(
+                "recvcounts",
+                "displs",
+                "recv",
+                recvcounts,
+                displs,
+                self.size,
+                recv.len(),
+            )?;
         }
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -121,9 +169,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts` or
-    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
-    ///   positive count starts at a negative displacement or ends past the end of `send`.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `sendcounts` or `displs`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `send`.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -152,7 +202,15 @@ impl Communicator {
         root: i32,
     ) -> Result<()> {
         if self.rank == root {
-            check_v_args(sendcounts, displs, self.size, send.len())?;
+            check_v_args(
+                "sendcounts",
+                "displs",
+                "send",
+                sendcounts,
+                displs,
+                self.size,
+                send.len(),
+            )?;
         }
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
@@ -191,9 +249,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
-    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
-    ///   positive count starts at a negative displacement or ends past the end of `recv`.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `recvcounts` or `displs`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `recv`.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -220,7 +280,15 @@ impl Communicator {
         recvcounts: &[i32],
         displs: &[i32],
     ) -> Result<()> {
-        check_v_args(recvcounts, displs, self.size, recv.len())?;
+        check_v_args(
+            "recvcounts",
+            "displs",
+            "recv",
+            recvcounts,
+            displs,
+            self.size,
+            recv.len(),
+        )?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
@@ -258,10 +326,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts`/`sdispls`
-    ///   or `recvcounts`/`rdispls` does not have `size()` entries, a count is negative, or a
-    ///   block with a positive count starts at a negative displacement or ends past the end
-    ///   of `send`/`recv` respectively.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `sendcounts`/`sdispls` or `recvcounts`/`rdispls`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `send`/`recv` respectively.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -288,8 +357,24 @@ impl Communicator {
         recvcounts: &[i32],
         rdispls: &[i32],
     ) -> Result<()> {
-        check_v_args(sendcounts, sdispls, self.size, send.len())?;
-        check_v_args(recvcounts, rdispls, self.size, recv.len())?;
+        check_v_args(
+            "sendcounts",
+            "sdispls",
+            "send",
+            sendcounts,
+            sdispls,
+            self.size,
+            send.len(),
+        )?;
+        check_v_args(
+            "recvcounts",
+            "rdispls",
+            "recv",
+            recvcounts,
+            rdispls,
+            self.size,
+            recv.len(),
+        )?;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). sendcounts/sdispls and
@@ -329,9 +414,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
-    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
-    ///   positive count starts at a negative displacement or ends past the end of `recv`.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `recvcounts` or `displs`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `recv`.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -361,7 +448,15 @@ impl Communicator {
         root: i32,
     ) -> Result<Request> {
         if self.rank == root {
-            check_v_args(recvcounts, displs, self.size, recv.len())?;
+            check_v_args(
+                "recvcounts",
+                "displs",
+                "recv",
+                recvcounts,
+                displs,
+                self.size,
+                recv.len(),
+            )?;
         }
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -405,9 +500,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts` or
-    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
-    ///   positive count starts at a negative displacement or ends past the end of `send`.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `sendcounts` or `displs`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `send`.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -437,7 +534,15 @@ impl Communicator {
         root: i32,
     ) -> Result<Request> {
         if self.rank == root {
-            check_v_args(sendcounts, displs, self.size, send.len())?;
+            check_v_args(
+                "sendcounts",
+                "displs",
+                "send",
+                sendcounts,
+                displs,
+                self.size,
+                send.len(),
+            )?;
         }
         let mut request_handle: i64 = 0;
         let (sp, _, _) = buf(send);
@@ -480,9 +585,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
-    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
-    ///   positive count starts at a negative displacement or ends past the end of `recv`.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `recvcounts` or `displs`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `recv`.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -510,7 +617,15 @@ impl Communicator {
         recvcounts: &[i32],
         displs: &[i32],
     ) -> Result<Request> {
-        check_v_args(recvcounts, displs, self.size, recv.len())?;
+        check_v_args(
+            "recvcounts",
+            "displs",
+            "recv",
+            recvcounts,
+            displs,
+            self.size,
+            recv.len(),
+        )?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -552,10 +667,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts`/`sdispls`
-    ///   or `recvcounts`/`rdispls` does not have `size()` entries, a count is negative, or a
-    ///   block with a positive count starts at a negative displacement or ends past the end
-    ///   of `send`/`recv` respectively.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `sendcounts`/`sdispls` or `recvcounts`/`rdispls`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `send`/`recv` respectively.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -583,8 +699,24 @@ impl Communicator {
         recvcounts: &[i32],
         rdispls: &[i32],
     ) -> Result<Request> {
-        check_v_args(sendcounts, sdispls, self.size, send.len())?;
-        check_v_args(recvcounts, rdispls, self.size, recv.len())?;
+        check_v_args(
+            "sendcounts",
+            "sdispls",
+            "send",
+            sendcounts,
+            sdispls,
+            self.size,
+            send.len(),
+        )?;
+        check_v_args(
+            "recvcounts",
+            "rdispls",
+            "recv",
+            recvcounts,
+            rdispls,
+            self.size,
+            recv.len(),
+        )?;
         let mut request_handle: i64 = 0;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -631,9 +763,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
-    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
-    ///   positive count starts at a negative displacement or ends past the end of `recv`.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `recvcounts` or `displs`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `recv`.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -661,7 +795,15 @@ impl Communicator {
         root: i32,
     ) -> Result<PersistentRequest> {
         if self.rank == root {
-            check_v_args(recvcounts, displs, self.size, recv.len())?;
+            check_v_args(
+                "recvcounts",
+                "displs",
+                "recv",
+                recvcounts,
+                displs,
+                self.size,
+                recv.len(),
+            )?;
         }
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -705,9 +847,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts` or
-    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
-    ///   positive count starts at a negative displacement or ends past the end of `send`.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `sendcounts` or `displs`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `send`.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -735,7 +879,15 @@ impl Communicator {
         root: i32,
     ) -> Result<PersistentRequest> {
         if self.rank == root {
-            check_v_args(sendcounts, displs, self.size, send.len())?;
+            check_v_args(
+                "sendcounts",
+                "displs",
+                "send",
+                sendcounts,
+                displs,
+                self.size,
+                send.len(),
+            )?;
         }
         let mut request_handle: i64 = 0;
         let (sp, _, _) = buf(send);
@@ -778,9 +930,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `recvcounts` or
-    ///   `displs` does not have `size()` entries, a count is negative, or a block with a
-    ///   positive count starts at a negative displacement or ends past the end of `recv`.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `recvcounts` or `displs`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `recv`.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -806,7 +960,15 @@ impl Communicator {
         recvcounts: &[i32],
         displs: &[i32],
     ) -> Result<PersistentRequest> {
-        check_v_args(recvcounts, displs, self.size, recv.len())?;
+        check_v_args(
+            "recvcounts",
+            "displs",
+            "recv",
+            recvcounts,
+            displs,
+            self.size,
+            recv.len(),
+        )?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -848,10 +1010,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if, on a rank where MPI reads them, `sendcounts`/`sdispls`
-    ///   or `recvcounts`/`rdispls` does not have `size()` entries, a count is negative, or a
-    ///   block with a positive count starts at a negative displacement or ends past the end
-    ///   of `send`/`recv` respectively.
+    /// - [`Error::BufferSize`] if, on a rank where MPI reads them, `sendcounts`/`sdispls` or `recvcounts`/`rdispls`
+    ///   does not have `size()` entries, or a block with a positive count ends past
+    ///   the end of `send`/`recv` respectively.
+    /// - [`Error::InvalidArgument`] if, on a rank where MPI reads them, a count is
+    ///   negative or a block with a positive count starts at a negative displacement.
     /// - [`Error::Mpi`] if the underlying MPI call fails.
     ///
     /// # Example
@@ -884,8 +1047,24 @@ impl Communicator {
         recvcounts: &[i32],
         rdispls: &[i32],
     ) -> Result<PersistentRequest> {
-        check_v_args(sendcounts, sdispls, self.size, send.len())?;
-        check_v_args(recvcounts, rdispls, self.size, recv.len())?;
+        check_v_args(
+            "sendcounts",
+            "sdispls",
+            "send",
+            sendcounts,
+            sdispls,
+            self.size,
+            send.len(),
+        )?;
+        check_v_args(
+            "recvcounts",
+            "rdispls",
+            "recv",
+            recvcounts,
+            rdispls,
+            self.size,
+            recv.len(),
+        )?;
         let mut request_handle: i64 = 0;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -918,82 +1097,154 @@ impl Communicator {
 mod tests {
     use super::check_v_args;
     use crate::comm::test_comm;
-    use crate::error::Error;
+    use crate::error::{Error, Result};
+
+    fn check(counts: &[i32], displs: &[i32], size: i32, buf_len: usize) -> Result<()> {
+        check_v_args(
+            "recvcounts",
+            "displs",
+            "recv",
+            counts,
+            displs,
+            size,
+            buf_len,
+        )
+    }
 
     #[test]
     fn check_v_args_boundaries() {
         // exact fit
-        assert!(check_v_args(&[2, 2], &[0, 2], 2, 4).is_ok());
+        assert!(check(&[2, 2], &[0, 2], 2, 4).is_ok());
         // one element past the end
         assert!(matches!(
-            check_v_args(&[2, 2], &[0, 2], 2, 3),
-            Err(Error::InvalidBuffer)
+            check(&[2, 2], &[0, 2], 2, 3),
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 4,
+                actual: 3
+            })
         ));
         // counts.len() != size
         assert!(matches!(
-            check_v_args(&[2, 2, 2], &[0, 2, 4], 2, 6),
-            Err(Error::InvalidBuffer)
+            check(&[2, 2, 2], &[0, 2, 4], 2, 6),
+            Err(Error::BufferSize {
+                arg: "recvcounts",
+                required: 2,
+                actual: 3
+            })
         ));
         // displs.len() != size
         assert!(matches!(
-            check_v_args(&[2, 2], &[0, 2, 4], 2, 6),
-            Err(Error::InvalidBuffer)
+            check(&[2, 2], &[0, 2, 4], 2, 6),
+            Err(Error::BufferSize {
+                arg: "displs",
+                required: 2,
+                actual: 3
+            })
         ));
         // negative count
         assert!(matches!(
-            check_v_args(&[-1, 2], &[0, 2], 2, 4),
-            Err(Error::InvalidBuffer)
+            check(&[-1, 2], &[0, 2], 2, 4),
+            Err(Error::InvalidArgument {
+                arg: "recvcounts",
+                reason: "negative count"
+            })
         ));
         // negative displacement with count > 0
         assert!(matches!(
-            check_v_args(&[2, 2], &[-1, 2], 2, 4),
-            Err(Error::InvalidBuffer)
+            check(&[2, 2], &[-1, 2], 2, 4),
+            Err(Error::InvalidArgument {
+                arg: "displs",
+                reason: "negative displacement"
+            })
         ));
         // negative displacement with count 0
-        assert!(check_v_args(&[0, 2], &[-1, 0], 2, 2).is_ok());
+        assert!(check(&[0, 2], &[-1, 0], 2, 2).is_ok());
         // i32 arithmetic would wrap: i32::MAX + 1 overflows i32 but not i64
         assert!(matches!(
-            check_v_args(&[1], &[i32::MAX], 1, i32::MAX as usize),
-            Err(Error::InvalidBuffer)
+            check(&[1], &[i32::MAX], 1, i32::MAX as usize),
+            Err(Error::BufferSize {
+                arg: "recv",
+                required: 0x8000_0000,
+                actual: 0x7fff_ffff
+            })
+        ));
+    }
+
+    #[test]
+    fn check_v_args_reports_the_first_fault() {
+        // both arrays too long: the counts length is reported
+        assert!(matches!(
+            check(&[2, 2, 2], &[0, 2, 4, 6], 2, 6),
+            Err(Error::BufferSize {
+                arg: "recvcounts",
+                ..
+            })
+        ));
+        // negative displacement and a block past the buffer: the displacement is reported
+        assert!(matches!(
+            check(&[1], &[-1], 1, 0),
+            Err(Error::InvalidArgument { arg: "displs", .. })
         ));
     }
 
     #[test]
     fn gatherv_init_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
         let result = comm.gatherv_init(&send, &mut recv, &recvcounts, &displs, 0);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "displs",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn scatterv_init_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
         let mut recv = vec![0.0f64; 10];
         let result = comm.scatterv_init(&send, &sendcounts, &displs, &mut recv, 0);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "displs",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn allgatherv_init_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
         let result = comm.allgatherv_init(&send, &mut recv, &recvcounts, &displs);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "displs",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn alltoallv_init_mismatched_send_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20]; // 3 elements != 4
@@ -1008,12 +1259,19 @@ mod tests {
             &recvcounts,
             &rdispls,
         );
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "sdispls",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn alltoallv_init_mismatched_recv_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20, 30];
@@ -1028,47 +1286,75 @@ mod tests {
             &recvcounts,
             &rdispls,
         );
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "rdispls",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     // ── blocking / nonblocking v-collective length-mismatch guards ────────
 
     #[test]
     fn gatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
         let result = comm.gatherv(&send, &mut recv, &recvcounts, &displs, 0);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "displs",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn scatterv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
         let mut recv = vec![0.0f64; 10];
         let result = comm.scatterv(&send, &sendcounts, &displs, &mut recv, 0);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "displs",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn allgatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
         let result = comm.allgatherv(&send, &mut recv, &recvcounts, &displs);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "displs",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn alltoallv_mismatched_send_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20]; // 3 elements != 4
@@ -1083,12 +1369,19 @@ mod tests {
             &recvcounts,
             &rdispls,
         );
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "sdispls",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn alltoallv_mismatched_recv_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20, 30];
@@ -1103,45 +1396,73 @@ mod tests {
             &recvcounts,
             &rdispls,
         );
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "rdispls",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn igatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
         let result = comm.igatherv(&send, &mut recv, &recvcounts, &displs, 0);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "displs",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn iscatterv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
         let mut recv = vec![0.0f64; 10];
         let result = comm.iscatterv(&send, &mut recv, &sendcounts, &displs, 0);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "displs",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn iallgatherv_mismatched_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
         let result = comm.iallgatherv(&send, &mut recv, &recvcounts, &displs);
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "displs",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn ialltoallv_mismatched_send_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20]; // 3 elements != 4
@@ -1156,12 +1477,19 @@ mod tests {
             &recvcounts,
             &rdispls,
         );
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "sdispls",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 
     #[test]
     fn ialltoallv_mismatched_recv_counts_displs_returns_invalid_buffer() {
-        let comm = test_comm(0, 1);
+        let comm = test_comm(0, 4);
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20, 30];
@@ -1176,6 +1504,13 @@ mod tests {
             &recvcounts,
             &rdispls,
         );
-        assert!(matches!(result, Err(Error::InvalidBuffer)));
+        assert!(matches!(
+            result,
+            Err(Error::BufferSize {
+                arg: "rdispls",
+                required: 4,
+                actual: 3
+            })
+        ));
     }
 }

@@ -213,8 +213,8 @@ fn main() {
             result,
             rank,
             "gatherv",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "BufferSize",
+            |e| matches!(e, Error::BufferSize { .. }),
             &mut local_ok,
         );
 
@@ -224,8 +224,8 @@ fn main() {
             result,
             rank,
             "igatherv",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "BufferSize",
+            |e| matches!(e, Error::BufferSize { .. }),
             &mut local_ok,
         );
 
@@ -236,8 +236,8 @@ fn main() {
             result,
             rank,
             "gatherv_init",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "BufferSize",
+            |e| matches!(e, Error::BufferSize { .. }),
             &mut local_ok,
         );
     }
@@ -261,8 +261,8 @@ fn main() {
             result,
             rank,
             "scatterv",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "BufferSize",
+            |e| matches!(e, Error::BufferSize { .. }),
             &mut local_ok,
         );
 
@@ -277,8 +277,8 @@ fn main() {
             result,
             rank,
             "iscatterv",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "BufferSize",
+            |e| matches!(e, Error::BufferSize { .. }),
             &mut local_ok,
         );
 
@@ -293,8 +293,8 @@ fn main() {
             result,
             rank,
             "scatterv_init",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "BufferSize",
+            |e| matches!(e, Error::BufferSize { .. }),
             &mut local_ok,
         );
     }
@@ -313,8 +313,8 @@ fn main() {
             result,
             rank,
             "allgatherv",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "InvalidArgument",
+            |e| matches!(e, Error::InvalidArgument { .. }),
             &mut local_ok,
         );
 
@@ -324,8 +324,8 @@ fn main() {
             result,
             rank,
             "iallgatherv",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "InvalidArgument",
+            |e| matches!(e, Error::InvalidArgument { .. }),
             &mut local_ok,
         );
 
@@ -335,8 +335,8 @@ fn main() {
             result,
             rank,
             "allgatherv_init",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "InvalidArgument",
+            |e| matches!(e, Error::InvalidArgument { .. }),
             &mut local_ok,
         );
     }
@@ -363,8 +363,8 @@ fn main() {
             result,
             rank,
             "alltoallv",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "InvalidArgument",
+            |e| matches!(e, Error::InvalidArgument { .. }),
             &mut local_ok,
         );
 
@@ -380,8 +380,8 @@ fn main() {
             result,
             rank,
             "ialltoallv",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "InvalidArgument",
+            |e| matches!(e, Error::InvalidArgument { .. }),
             &mut local_ok,
         );
 
@@ -397,8 +397,8 @@ fn main() {
             result,
             rank,
             "alltoallv_init",
-            "InvalidBuffer",
-            |e| matches!(e, Error::InvalidBuffer),
+            "InvalidArgument",
+            |e| matches!(e, Error::InvalidArgument { .. }),
             &mut local_ok,
         );
     }
