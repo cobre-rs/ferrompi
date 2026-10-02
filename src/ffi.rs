@@ -92,21 +92,16 @@ extern "C" {
 /// holding the returned in-flight token until the call returns. The raw
 /// declarations live in `raw` so call sites (`ffi::ferrompi_x`) keep
 /// resolving to the guarded wrapper without any change.
+///
+/// The externs after the trailing marker complete or test a request that is
+/// already pending. Their wrappers take the completion entry instead, which
+/// admits them while finalizing; both lists share one `raw` module and one
+/// wrapper body.
 macro_rules! guarded_extern {
-    ($(
+    (@wrappers $enter:path; $(
         $(#[$meta:meta])*
         pub fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> c_int;
     )*) => {
-        pub(crate) mod raw {
-            use super::*;
-            extern "C" {
-                $(
-                    $(#[$meta])*
-                    pub fn $name($($arg: $ty),*) -> c_int;
-                )*
-            }
-        }
-
         $(
             $(#[$meta])*
             // Every MPI call goes through a wrapper; forcing it inline keeps the
@@ -114,7 +109,7 @@ macro_rules! guarded_extern {
             #[inline(always)]
             #[allow(clippy::too_many_arguments)] // signature mirrors the C function
             pub unsafe fn $name($($arg: $ty),*) -> c_int {
-                let _call = match crate::rt::enter() {
+                let _call = match $enter() {
                     Ok(token) => token,
                     Err(code) => return code,
                 };
@@ -131,6 +126,44 @@ macro_rules! guarded_extern {
                 result
             }
         )*
+    };
+    ($(
+        $(#[$meta:meta])*
+        pub fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> c_int;
+    )*
+    @completion
+    $(
+        $(#[$cmeta:meta])*
+        pub fn $cname:ident($($carg:ident: $cty:ty),* $(,)?) -> c_int;
+    )*) => {
+        pub(crate) mod raw {
+            use super::*;
+            extern "C" {
+                $(
+                    $(#[$meta])*
+                    pub fn $name($($arg: $ty),*) -> c_int;
+                )*
+                $(
+                    $(#[$cmeta])*
+                    pub fn $cname($($carg: $cty),*) -> c_int;
+                )*
+            }
+        }
+
+        guarded_extern! {
+            @wrappers crate::rt::enter;
+            $(
+                $(#[$meta])*
+                pub fn $name($($arg: $ty),*) -> c_int;
+            )*
+        }
+        guarded_extern! {
+            @wrappers crate::rt::enter_completion;
+            $(
+                $(#[$cmeta])*
+                pub fn $cname($($carg: $cty),*) -> c_int;
+            )*
+        }
     };
 }
 
@@ -847,53 +880,7 @@ guarded_extern! {
     // ============================================================
     // Request Management
     // ============================================================
-    pub fn ferrompi_wait(request: int64_t) -> c_int;
-
-    pub fn ferrompi_test(request: int64_t, flag: *mut int32_t) -> c_int;
-
-    pub fn ferrompi_waitall(
-        count: int64_t,
-        requests: *const int64_t,
-        done: *mut u8,
-        failed_index: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_request_get_status(request: int64_t, flag: *mut int32_t) -> c_int;
-
     pub fn ferrompi_cancel(request: int64_t) -> c_int;
-
-    pub fn ferrompi_waitany(
-        count: int64_t,
-        requests: *const int64_t,
-        index: *mut int32_t,
-        done: *mut u8,
-    ) -> c_int;
-
-    pub fn ferrompi_waitsome(
-        count: int64_t,
-        requests: *const int64_t,
-        outcount: *mut int64_t,
-        indices: *mut int32_t,
-        done: *mut u8,
-        failed_index: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_testany(
-        count: int64_t,
-        requests: *const int64_t,
-        index: *mut int32_t,
-        flag: *mut int32_t,
-        done: *mut u8,
-    ) -> c_int;
-
-    pub fn ferrompi_testsome(
-        count: int64_t,
-        requests: *const int64_t,
-        outcount: *mut int64_t,
-        indices: *mut int32_t,
-        done: *mut u8,
-        failed_index: *mut int64_t,
-    ) -> c_int;
 
     // ============================================================
     // Persistent Request Management
@@ -1204,5 +1191,57 @@ guarded_extern! {
         target_rank: int32_t,
         target_disp: int64_t,
         win_handle: int32_t,
+    ) -> c_int;
+
+    // ============================================================
+    // Request Completion
+    // Complete or test a request that is already pending: admitted while
+    // finalizing, unlike every call above.
+    // ============================================================
+    @completion
+    pub fn ferrompi_wait(request: int64_t) -> c_int;
+
+    pub fn ferrompi_test(request: int64_t, flag: *mut int32_t) -> c_int;
+
+    pub fn ferrompi_waitall(
+        count: int64_t,
+        requests: *const int64_t,
+        done: *mut u8,
+        failed_index: *mut int64_t,
+    ) -> c_int;
+
+    pub fn ferrompi_request_get_status(request: int64_t, flag: *mut int32_t) -> c_int;
+
+    pub fn ferrompi_waitany(
+        count: int64_t,
+        requests: *const int64_t,
+        index: *mut int32_t,
+        done: *mut u8,
+    ) -> c_int;
+
+    pub fn ferrompi_waitsome(
+        count: int64_t,
+        requests: *const int64_t,
+        outcount: *mut int64_t,
+        indices: *mut int32_t,
+        done: *mut u8,
+        failed_index: *mut int64_t,
+    ) -> c_int;
+
+    pub fn ferrompi_testany(
+        count: int64_t,
+        requests: *const int64_t,
+        index: *mut int32_t,
+        flag: *mut int32_t,
+        done: *mut u8,
+    ) -> c_int;
+
+    pub fn ferrompi_testsome(
+        count: int64_t,
+        requests: *const int64_t,
+        outcount: *mut int64_t,
+        indices: *mut int32_t,
+        done: *mut u8,
+        failed_index: *mut int64_t,
     ) -> c_int;
 }

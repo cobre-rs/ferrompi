@@ -122,7 +122,7 @@ impl PersistentRequest {
         if !self.active {
             return Ok(());
         }
-        Error::check_with_op(rt::check(), "wait")?;
+        Error::check_with_op(rt::check_completion(), "wait")?;
         // SAFETY: self.handle is a valid persistent MPI request handle
         // registered in the C-side request table; self.active was true on
         // entry (checked above), so start() was called and MPI holds an

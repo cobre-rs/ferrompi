@@ -37,6 +37,10 @@ name = "test_window_after_finalize"
 required-features = ["rma"]
 
 [[example]]
+name = "test_finalize_admits_completion"
+required-features = ["rma"]
+
+[[example]]
 name = "test_rma_win_fence"
 required-features = ["rma"]
 

@@ -281,7 +281,8 @@ pub enum Error {
     ///
     /// Returned by any MPI-calling method invoked after the [`Mpi`](crate::Mpi)
     /// handle was dropped, and by `Mpi::init`/`Mpi::init_thread` once MPI has
-    /// been finalized. No MPI call is made.
+    /// been finalized. No MPI call is made. After a skipped `MPI_Finalize`,
+    /// `wait` and `test` on a request still pending complete it instead.
     #[error("MPI has been finalized")]
     Finalized,
 

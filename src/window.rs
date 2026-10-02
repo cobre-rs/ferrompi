@@ -405,19 +405,28 @@ static LIVE_WINDOWS: AtomicUsize = AtomicUsize::new(0);
 /// Number of windows of any kind currently alive.
 pub(crate) fn live_windows() -> usize {
     // Acquire: pairs with the Release decrement in `Drop for Win`/`Drop for
-    // SharedWindow`, so a zero read here cannot precede a window's in-flight
-    // teardown.
+    // SharedWindow` and in `mark_window_gone`, so a zero read here cannot
+    // precede a window's in-flight teardown.
     LIVE_WINDOWS.load(Ordering::Acquire)
 }
 
-/// Marks a newly constructed window (`SharedWindow::allocate`, `Win::create`,
-/// or `Win::allocate`) as live in [`LIVE_WINDOWS`].
+/// Counts a window being constructed (`SharedWindow::allocate`, `Win::create`
+/// or `Win::allocate`) in [`LIVE_WINDOWS`]. A constructor calls this before its
+/// guarded `MPI_Win_*` call and [`mark_window_gone`] on each error return that
+/// leaves no window behind. So an `Mpi::drop` racing the constructor either
+/// refuses the call, or waits for it and then reads the count.
 fn mark_window_alive() {
-    // Relaxed: a constructor that has returned is ordered before any
-    // `Mpi::drop` that follows it by the caller's own synchronization (join,
-    // channel, mutex); the increment itself needs no ordering beyond the
-    // counter's own modification order.
+    // Relaxed: the increment precedes the constructor's guarded call in
+    // program order, and that call's in-flight token is released after it.
+    // `Mpi::drop`'s drain acquires that release before `live_windows` reads
+    // the count, so the increment needs no ordering of its own.
     LIVE_WINDOWS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Undoes [`mark_window_alive`] for a constructor whose call created no window.
+fn mark_window_gone() {
+    // Release: pairs with `live_windows`'s Acquire load, as in `Drop for Win`.
+    LIVE_WINDOWS.fetch_sub(1, Ordering::Release);
 }
 
 /// Bit position of the displacement-unit field in a window word (see
@@ -574,6 +583,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut win_handle: i32 = -1;
 
+        mark_window_alive();
         // SAFETY: We pass valid pointers for out-parameters. The C layer
         // allocates shared memory and returns a window handle + base pointer.
         let ret = unsafe {
@@ -586,13 +596,12 @@ impl<T: MpiDatatype> SharedWindow<T> {
                 &mut win_handle,
             )
         };
-        if ret != 0 && win_handle == FERROMPI_WIN_LEAKED {
-            // MPI created the window but could not zero or register it; it is never freed.
-            mark_window_alive();
+        // A window MPI created but could not zero or register is never freed,
+        // so it keeps its count.
+        if ret != 0 && win_handle != FERROMPI_WIN_LEAKED {
+            mark_window_gone();
         }
         Error::check_with_op(ret, "win_allocate_shared")?;
-
-        mark_window_alive();
 
         let local_ptr = if local_count == 0 {
             // Zero-count: MPI may return a null base pointer for an empty
@@ -1121,6 +1130,7 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
         let (size, disp_unit) = win_size_and_disp_unit::<T>(buf.len())?;
         let mut win_handle: i32 = 0;
 
+        mark_window_alive();
         // SAFETY: `buf` is a valid, aligned mutable slice borrowed for `'a`.
         // We pass its raw pointer and byte length to MPI_Win_create. The C
         // shim validates the comm handle before calling MPI. The pointer
@@ -1136,6 +1146,9 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
                 &mut win_handle,
             )
         };
+        if ret != 0 {
+            mark_window_gone();
+        }
         Error::check_with_op(ret, "win_create")?;
 
         let local_ptr = if buf.is_empty() {
@@ -1144,8 +1157,6 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
             // SAFETY: buf.as_mut_ptr() is non-null when buf is non-empty.
             unsafe { NonNull::new_unchecked(buf.as_mut_ptr()) }
         };
-
-        mark_window_alive();
 
         Ok(Win {
             win_handle,
@@ -1215,6 +1226,7 @@ impl<T: MpiDatatype> Win<'static, T> {
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut win_handle: i32 = -1;
 
+        mark_window_alive();
         // SAFETY: We pass valid out-parameter pointers to the C shim, which
         // calls MPI_Win_allocate. The C shim validates the comm handle. The
         // returned baseptr is either a valid MPI-allocated pointer or null
@@ -1229,13 +1241,12 @@ impl<T: MpiDatatype> Win<'static, T> {
                 &mut win_handle,
             )
         };
-        if ret != 0 && win_handle == FERROMPI_WIN_LEAKED {
-            // MPI created the window but could not zero or register it; it is never freed.
-            mark_window_alive();
+        // A window MPI created but could not zero or register is never freed,
+        // so it keeps its count.
+        if ret != 0 && win_handle != FERROMPI_WIN_LEAKED {
+            mark_window_gone();
         }
         Error::check_with_op(ret, "win_allocate")?;
-
-        mark_window_alive();
 
         let local_ptr = if local_count == 0 {
             // Zero-count: use a dangling aligned pointer (same trick as

@@ -208,7 +208,10 @@ impl Request {
     ///
     /// On a thread the active thread level does not allow, the wait is
     /// rejected and this call drops the still-in-flight `self` before
-    /// returning, which aborts the process (see the `Drop` impl below).
+    /// returning, which aborts the process (see the `Drop` impl below), except
+    /// while `Mpi` is dropping or after it skipped `MPI_Finalize`: the wait then
+    /// returns `Err(`[`Error::ThreadLevelViolation`]`)` and the request is
+    /// leaked.
     ///
     /// In a debug build at `Serialized`, a wait that overlaps another
     /// thread's MPI call can neither run nor hand the request back, so it
@@ -218,7 +221,7 @@ impl Request {
         if self.completed {
             return Ok(());
         }
-        Error::check_with_op(rt::check(), "wait")?;
+        Error::check_with_op(rt::check_completion(), "wait")?;
         // SAFETY: self.handle is a valid MPI request handle registered in the
         // C-side request table by the nonblocking constructor that produced
         // this Request; self.completed was false on entry (checked above), so
@@ -226,12 +229,12 @@ impl Request {
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
         #[cfg(debug_assertions)]
         if ret == FERROMPI_ERR_THREAD_LEVEL {
-            // rt::check() above already returns this same sentinel for a call
-            // from a non-init thread below Serialized, and propagates it via
-            // `?` before reaching here; so this can only be the Serialized
-            // overlap check rejecting the call before MPI saw it. `self`
-            // cannot be handed back, and letting Drop wait would overlap the
-            // other thread's MPI call.
+            // rt::check_completion() above already returns this same sentinel
+            // for a call from a non-init thread below Serialized, and
+            // propagates it via `?` before reaching here; so this can only be
+            // the Serialized overlap check rejecting the call before MPI saw
+            // it. `self` cannot be handed back, and letting Drop wait would
+            // overlap the other thread's MPI call.
             let _ = std::io::stderr().write_all(
                 b"ferrompi: Request::wait overlapped another thread's MPI call at ThreadLevel::Serialized\n",
             );

@@ -280,6 +280,11 @@ pub enum ThreadLevel {
 /// [`doc::mpi_compatibility`]. Debug builds print a note to stderr when
 /// finalize still leaves MPI requests unfreed.
 ///
+/// When `MPI_Finalize` is skipped, MPI stays initialized: a `wait` or `test`
+/// on a request still pending completes it, every other call returns
+/// `Err(`[`Error::Finalized`]`)`, and handles dropped afterwards are leaked
+/// without an MPI call.
+///
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
 /// whose `Drop` calls MPI — an uncompleted [`Request`], a
 /// [`PersistentRequest`], a communicator other than the world, a window or
@@ -662,46 +667,61 @@ impl Mpi {
 impl Drop for Mpi {
     fn drop(&mut self) {
         // rt::begin_finalize() moves the lifecycle state from Active to
-        // Finalizing, which refuses new calls, and at Serialized/Multiple
-        // waits for the calls other threads have in progress. Only then does
-        // rt::end_finalize() store Finalized, before ferrompi_finalize runs,
-        // so a handle whose drop is nested inside the finalize sweep (a
-        // closure captured by a request/op that the sweep drops) observes
-        // Finalized and makes no MPI call. begin_finalize returns false for a
-        // stub Mpi built without init (Uninit) and for a second call on an
-        // already-finalized state, so this branch runs ferrompi_finalize at
-        // most once.
-        if rt::begin_finalize() {
-            rt::end_finalize();
-            #[cfg(feature = "rma")]
-            {
-                let live = window::live_windows();
-                if live > 0 {
-                    // A single write so concurrent ranks' output cannot interleave mid-line.
-                    let msg = format!(
-                        "ferrompi: MPI_Finalize skipped: {live} window(s) still alive; their memory stays valid until the process exits\n"
-                    );
-                    let _ = std::io::stderr().write_all(msg.as_bytes());
-                    return;
-                }
-            }
-            let mut active: i32 = 0;
-            // SAFETY: `active` is a valid local out-parameter that
-            // ferrompi_finalize writes the unfreed-active-request count
-            // into. rt::begin_finalize() just returned true, so state was Active —
-            // MPI_Init(_thread) succeeded and MPI_Finalize has not yet been
-            // called for this process.
-            unsafe {
-                ffi::ferrompi_finalize(&mut active);
-            }
-            if cfg!(debug_assertions) && active > 0 {
-                // A single write so concurrent ranks' output cannot interleave mid-line.
-                let msg =
-                    format!("ferrompi: MPI_Finalize leaves {active} active request(s) unfreed\n");
-                let _ = std::io::stderr().write_all(msg.as_bytes());
-            }
+        // Finalizing, which refuses new calls, frees and extent opens but
+        // still admits the completion calls of requests already pending, and
+        // at Serialized/Multiple waits for the calls other threads have in
+        // progress. If finalize_skip_reason() names a reason, the state stays
+        // Finalizing for the rest of the process and MPI stays initialized.
+        // Otherwise rt::end_finalize() stores Finalized, waits for the
+        // completion calls admitted meanwhile, and only then does
+        // ferrompi_finalize run, so a handle whose drop is nested inside the
+        // finalize sweep (a closure captured by a request/op that the sweep
+        // drops) observes Finalized and makes no MPI call. begin_finalize
+        // returns false for a stub Mpi built without init (Uninit) and for a
+        // second call on an already-finalized state, so this runs
+        // ferrompi_finalize at most once.
+        if !rt::begin_finalize() {
+            return;
+        }
+        if let Some(reason) = finalize_skip_reason() {
+            // A single write so concurrent ranks' output cannot interleave mid-line.
+            let msg = format!("ferrompi: MPI_Finalize skipped: {reason}\n");
+            let _ = std::io::stderr().write_all(msg.as_bytes());
+            return;
+        }
+        rt::end_finalize();
+        let mut active: i32 = 0;
+        // SAFETY: `active` is a valid local out-parameter that
+        // ferrompi_finalize writes the unfreed-active-request count
+        // into. rt::begin_finalize() just returned true, so state was Active —
+        // MPI_Init(_thread) succeeded and MPI_Finalize has not yet been
+        // called for this process.
+        unsafe {
+            ffi::ferrompi_finalize(&mut active);
+        }
+        if cfg!(debug_assertions) && active > 0 {
+            // A single write so concurrent ranks' output cannot interleave mid-line.
+            let msg = format!("ferrompi: MPI_Finalize leaves {active} active request(s) unfreed\n");
+            let _ = std::io::stderr().write_all(msg.as_bytes());
         }
     }
+}
+
+/// Why `Mpi::drop` must not call `MPI_Finalize`, or `None` when it may. This
+/// is the one place the skip is decided. Its input today is a live window
+/// (feature `rma`); a nonblocking scope open on the init thread and a
+/// movable handle holding an extent token join it as those types arrive.
+fn finalize_skip_reason() -> Option<String> {
+    #[cfg(feature = "rma")]
+    {
+        let live = window::live_windows();
+        if live > 0 {
+            return Some(format!(
+                "{live} window(s) still alive; their memory stays valid until the process exits"
+            ));
+        }
+    }
+    None
 }
 
 #[cfg(test)]

@@ -108,6 +108,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there.
 - **`reduce` checks `recv`'s length only at the root**; another rank may pass
   an empty buffer, as for `gather` and `scatter`.
+- **After a skipped `MPI_Finalize` (a window still alive when `Mpi` is
+  dropped), `wait`/`test` on a pending request still complete it** instead of
+  returning `Error::Finalized` and leaving it pending; every other call still
+  returns `Error::Finalized`.
 
 ### Removed
 

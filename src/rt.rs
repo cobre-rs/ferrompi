@@ -19,7 +19,14 @@
 //! Finalizing is two steps. [`begin_finalize`] stores `Finalizing`, which
 //! refuses new calls, and at `Serialized`/`Multiple` waits ([`drain_shards`])
 //! until every counted call has returned; [`end_finalize`] then stores
-//! `Finalized`, just before `MPI_Finalize` runs.
+//! `Finalized`, just before `MPI_Finalize` runs, and waits again for the
+//! completion calls admitted in between. A skipped `MPI_Finalize` leaves the
+//! state `Finalizing` for the rest of the process.
+//!
+//! [`enter_completion`] and [`check_completion`] are the entry for the calls
+//! that complete or test a request that is already pending. They differ from
+//! [`enter`] and [`check`] only in admitting `Finalizing`, under the thread
+//! rule of the granted level.
 
 use std::cell::Cell;
 use std::io::Write;
@@ -41,6 +48,10 @@ const INITIALIZING: u8 = 6;
 const FINALIZING: u8 = 7;
 
 static STATE: AtomicU8 = AtomicU8::new(UNINIT);
+
+/// The granted [`ThreadLevel`] as a `u8`, stored by [`activate`] before
+/// `STATE`. Read only once `STATE` is `FINALIZING`, which no longer records it.
+static LEVEL: AtomicU8 = AtomicU8::new(ThreadLevel::Single as u8);
 
 thread_local! {
     /// Set by `activate` on the thread that calls it. `Mpi` is `!Send`, so
@@ -145,6 +156,7 @@ pub(crate) fn activate(level: ThreadLevel) {
     // synchronizing operation (thread spawn, channel, mutex, `Arc`) that
     // thread used to obtain that handle; this store needs no ordering of
     // its own to be visible through that chain.
+    LEVEL.store(level as u8, Ordering::Relaxed);
     STATE.store(1 + level as u8, Ordering::Relaxed);
     ON_INIT_THREAD.with(|c| c.set(true));
 }
@@ -189,18 +201,29 @@ pub(crate) fn begin_finalize() -> bool {
     true
 }
 
-/// Move `Finalizing` to `Finalized`. Called by `Mpi::drop` after
-/// [`begin_finalize`] returned `true`.
+/// Move `Finalizing` to `Finalized`, then at `Serialized`/`Multiple` wait for
+/// the completion calls [`enter_completion`] admitted while `Finalizing`. Called
+/// by `Mpi::drop` after [`begin_finalize`] returned `true`, only on the path
+/// that goes on to call `MPI_Finalize`; a skipped `MPI_Finalize` never reaches
+/// it.
 pub(crate) fn end_finalize() {
-    // SeqCst: totally ordered after the `Finalizing` store and the drain.
+    // SeqCst: totally ordered after the `Finalizing` store and the first
+    // drain, and the store of the pair with `enter_counted`'s increment: a
+    // completion call whose increment precedes this store is seen by the
+    // drain below; one whose increment follows it reads `Finalized` and is
+    // refused.
     STATE.store(FINALIZED, Ordering::SeqCst);
+    // Relaxed: this thread stored `LEVEL` in `activate`.
+    if LEVEL.load(Ordering::Relaxed) >= ThreadLevel::Serialized as u8 {
+        drain_shards();
+    }
 }
 
 /// Returns `true` once state is `Finalizing` or `Finalized`.
 /// `Mpi::is_finalized()` uses this so it reports `true` from the start of
 /// `Mpi::drop`, and still does after a skipped `MPI_Finalize` (a live window
-/// kept `Mpi::drop` from calling it): `begin_finalize()` and `end_finalize()`
-/// already moved `STATE` before that skip decision runs.
+/// kept `Mpi::drop` from calling it): `begin_finalize()` already moved
+/// `STATE` to `Finalizing` before that skip decision runs, and it stays there.
 pub(crate) fn is_finalized() -> bool {
     // Relaxed: see `enter`'s comment — visibility of the `Finalizing` or
     // `Finalized` state set on another thread is carried by that thread's own
@@ -235,7 +258,7 @@ pub(crate) fn enter() -> std::result::Result<InFlight, c_int> {
 #[inline(never)]
 fn enter_other(state: u8) -> std::result::Result<InFlight, c_int> {
     if state == ACTIVE_SERIALIZED || state == ACTIVE_MULTIPLE {
-        return enter_counted();
+        return enter_counted(false);
     }
     if state == FINALIZING || state == FINALIZED {
         return Err(FERROMPI_ERR_FINALIZED);
@@ -243,9 +266,45 @@ fn enter_other(state: u8) -> std::result::Result<InFlight, c_int> {
     Ok(InFlight(None))
 }
 
+/// [`enter`] for the calls that complete or test a request that is already
+/// pending. It differs only in `Finalizing`, which it admits under the thread
+/// rule of the granted level: the init-thread check at `Single`/`Funneled`, the
+/// counted path at `Serialized`/`Multiple`. `Finalized` is still refused.
+#[inline(always)]
+pub(crate) fn enter_completion() -> std::result::Result<InFlight, c_int> {
+    // Relaxed: see `enter`'s comment.
+    let state = STATE.load(Ordering::Relaxed);
+    if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
+        if ON_INIT_THREAD.with(Cell::get) {
+            return Ok(InFlight(None));
+        }
+        return Err(FERROMPI_ERR_THREAD_LEVEL);
+    }
+    enter_other_completion(state)
+}
+
+/// [`enter_completion`] for every state but `Active(Single)`/`Active(Funneled)`,
+/// out of line for the same reason as [`enter_other`], which it defers to
+/// outside `Finalizing`.
+#[inline(never)]
+fn enter_other_completion(state: u8) -> std::result::Result<InFlight, c_int> {
+    if state != FINALIZING {
+        return enter_other(state);
+    }
+    // Relaxed: see `activate`'s comment; `LEVEL` is written once, before the
+    // handle that reaches this call exists.
+    if LEVEL.load(Ordering::Relaxed) >= ThreadLevel::Serialized as u8 {
+        return enter_counted(true);
+    }
+    if ON_INIT_THREAD.with(Cell::get) {
+        return Ok(InFlight(None));
+    }
+    Err(FERROMPI_ERR_THREAD_LEVEL)
+}
+
 /// The state check of [`enter`] without a token: counts nothing, and refuses
-/// the same states. For the two `wait` pre-checks, whose guarded `ffi` call
-/// takes the token.
+/// the same states. [`check_completion`], for the two `wait` pre-checks, builds
+/// on it; their guarded `ffi` call takes the token.
 #[inline(always)]
 pub(crate) fn check() -> c_int {
     // Relaxed: see `enter`'s comment.
@@ -259,20 +318,53 @@ pub(crate) fn check() -> c_int {
     0
 }
 
+/// [`check`] for the calls that [`enter_completion`] admits: the same result
+/// in every state but `Finalizing`, which it admits under the thread rule of
+/// the granted level.
+#[inline(always)]
+pub(crate) fn check_completion() -> c_int {
+    let code = check();
+    if code == FERROMPI_ERR_FINALIZED {
+        return check_finalized(code);
+    }
+    code
+}
+
+/// [`check_completion`] after [`check`] refused the state as finalized: still
+/// refused at `Finalized`, admitted at `Finalizing`.
+#[cold]
+#[inline(never)]
+fn check_finalized(code: c_int) -> c_int {
+    // Relaxed: see `check`'s comment. `Finalizing` is left only for
+    // `Finalized`, so a second load never admits what `check` refused.
+    if STATE.load(Ordering::Relaxed) != FINALIZING {
+        return code;
+    }
+    // Relaxed: see `enter_other_completion`'s comment.
+    if LEVEL.load(Ordering::Relaxed) < ThreadLevel::Serialized as u8
+        && !ON_INIT_THREAD.with(Cell::get)
+    {
+        return FERROMPI_ERR_THREAD_LEVEL;
+    }
+    0
+}
+
 /// The counted path, for `Active(Serialized)` and `Active(Multiple)`: take
-/// this thread's shard, increment it, then re-check `STATE`.
+/// this thread's shard, increment it, then re-check `STATE`. With `completion`
+/// the re-check refuses only `Finalized`; otherwise `Finalizing` too.
 #[inline]
-fn enter_counted() -> std::result::Result<InFlight, c_int> {
+fn enter_counted(completion: bool) -> std::result::Result<InFlight, c_int> {
     let shard = shard();
     // SeqCst: the increment of the pair with `begin_finalize`'s `Finalizing`
-    // store. It is ordered before the re-check below, so either the drain sees
-    // this count or the re-check sees `Finalizing`.
+    // store and `end_finalize`'s `Finalized` store. It is ordered before the
+    // re-check below, so either the drain sees this count or the re-check
+    // sees that store.
     shard.0.fetch_add(1, Ordering::SeqCst);
     let token = InFlight(Some(shard));
     // SeqCst: reads `Finalizing` or `Finalized` if that store precedes the
     // increment in the SeqCst order.
     let state = STATE.load(Ordering::SeqCst);
-    if state == FINALIZING || state == FINALIZED {
+    if state == FINALIZED || (state == FINALIZING && !completion) {
         return Err(FERROMPI_ERR_FINALIZED);
     }
     Ok(token)
@@ -352,7 +444,7 @@ pub(crate) fn drop_guard(type_name: &'static str) -> Option<InFlight> {
             drop_abort(type_name);
         }
     } else if state == ACTIVE_SERIALIZED || state == ACTIVE_MULTIPLE {
-        return enter_counted().ok();
+        return enter_counted(false).ok();
     }
     Some(InFlight(None))
 }
@@ -382,7 +474,10 @@ mod tests {
     use std::ptr;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::{drain_shards, enter, shard, InFlight, Shard, IN_FLIGHT, SHARDS};
+    use super::{
+        check, check_completion, drain_shards, enter, enter_completion, shard, InFlight, Shard,
+        IN_FLIGHT, SHARDS,
+    };
     #[cfg(debug_assertions)]
     use super::{release_in_call_flag, take_in_call_flag};
 
@@ -449,6 +544,16 @@ mod tests {
         let token = enter().expect("an uninitialized process passes through");
         assert!(token.0.is_none());
         assert!(IN_FLIGHT.iter().all(|s| s.0.load(Ordering::SeqCst) == 0));
+    }
+
+    #[test]
+    fn completion_entry_matches_enter_outside_finalizing() {
+        let plain = enter().expect("an uninitialized process passes through");
+        let completion = enter_completion().expect("an uninitialized process passes through");
+        assert!(plain.0.is_none());
+        assert!(completion.0.is_none());
+        assert_eq!(check_completion(), check());
+        assert_eq!(check_completion(), 0);
     }
 
     #[test]
