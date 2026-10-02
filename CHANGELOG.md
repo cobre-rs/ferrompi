@@ -121,6 +121,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Operation` instead of `Error::Mpi` with class `Other`; an
   `MPI_Init_thread` failure reports class `Unknown` instead of its return
   code.**
+- **At `Serialized`/`Multiple`, dropping `Mpi` waits for MPI calls in
+  progress on other threads** before `MPI_Finalize`; a call that starts after
+  the drop began returns `Error::Finalized` without calling MPI (it could
+  previously reach MPI after `MPI_Finalize`). `Mpi::is_finalized()` is `true`
+  from the start of the drop.
 
 ## [0.6.0] - 2026-10-01
 

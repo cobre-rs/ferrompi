@@ -1,5 +1,8 @@
 #![allow(dead_code)] // each example binary uses a subset of these helpers
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+
 use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, ReduceOp, Result};
 
 /// Aggregates this rank's verdict across `world` via `allreduce(Min)`. If any
@@ -93,4 +96,54 @@ pub fn displs_from_counts(counts: &[i32]) -> Vec<i32> {
             Some(d)
         })
         .collect()
+}
+
+/// Drops `mpi` while `workers` threads call `Group::size` in a loop, each
+/// until the call returns `Err`. Prints `{name}: PASS` only if every worker
+/// stopped on `Error::Finalized`; otherwise prints `FAIL: {name}` and exits
+/// with status 1. MPI itself is the oracle for the other failure: a call that
+/// reaches MPI after `MPI_Finalize` aborts the process.
+pub fn finalize_under_load(mpi: Mpi, workers: usize, name: &str) {
+    let started = Instant::now();
+    let group = mpi
+        .world()
+        .group()
+        .expect("finalize_under_load: group failed");
+    let calls: Vec<AtomicUsize> = (0..workers).map(|_| AtomicUsize::new(0)).collect();
+
+    let all_finalized = std::thread::scope(|s| {
+        let group = &group;
+        let handles: Vec<_> = calls
+            .iter()
+            .map(|count| {
+                s.spawn(move || loop {
+                    match group.size() {
+                        Ok(_) => {
+                            count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(e) => return matches!(e, Error::Finalized),
+                    }
+                })
+            })
+            .collect();
+
+        while calls.iter().any(|c| c.load(Ordering::Relaxed) < 1000) {
+            std::thread::yield_now();
+        }
+        std::thread::sleep(Duration::from_nanos(u64::from(
+            started.elapsed().subsec_nanos() % 2_000_000,
+        )));
+        drop(mpi);
+
+        handles
+            .into_iter()
+            .all(|h| h.join().expect("finalize_under_load: worker panicked"))
+    });
+
+    if all_finalized {
+        println!("{name}: PASS");
+    } else {
+        eprintln!("FAIL: {name}");
+        std::process::exit(1);
+    }
 }

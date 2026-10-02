@@ -218,7 +218,7 @@ impl Request {
         if self.completed {
             return Ok(());
         }
-        Error::check_with_op(rt::enter(), "wait")?;
+        Error::check_with_op(rt::check(), "wait")?;
         // SAFETY: self.handle is a valid MPI request handle registered in the
         // C-side request table by the nonblocking constructor that produced
         // this Request; self.completed was false on entry (checked above), so
@@ -226,7 +226,7 @@ impl Request {
         let ret = unsafe { ffi::ferrompi_wait(self.handle) };
         #[cfg(debug_assertions)]
         if ret == FERROMPI_ERR_THREAD_LEVEL {
-            // rt::enter() above already returns this same sentinel for a call
+            // rt::check() above already returns this same sentinel for a call
             // from a non-init thread below Serialized, and propagates it via
             // `?` before reaching here; so this can only be the Serialized
             // overlap check rejecting the call before MPI saw it. `self`
@@ -617,9 +617,9 @@ impl Drop for Request {
     /// non-init thread it aborts the process.
     fn drop(&mut self) {
         if !self.completed {
-            if !rt::drop_guard("Request") {
+            let Some(_call) = rt::drop_guard("Request") else {
                 return;
-            }
+            };
             // SAFETY: self.handle is a valid MPI request handle registered in the
             // C-side request table by the nonblocking constructor (e.g., iallreduce).
             // The handle has not been freed because self.completed is false, meaning

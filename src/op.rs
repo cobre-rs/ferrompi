@@ -699,9 +699,9 @@ where
 
 impl Drop for OpRegistration {
     fn drop(&mut self) {
-        if !rt::drop_guard("UserOp") {
+        let Some(_call) = rt::drop_guard("UserOp") else {
             return;
-        }
+        };
         // Drop ordering (ADR-0005 Decision 3):
         //   1. ferrompi_op_free → MPI_Op_free (MPI will not invoke the
         //      trampoline after this returns, because no pending operation

@@ -230,9 +230,9 @@ impl Drop for Communicator {
     fn drop(&mut self) {
         // Don't free COMM_WORLD
         if self.handle != WORLD_HANDLE {
-            if !rt::drop_guard("Communicator") {
+            let Some(_call) = rt::drop_guard("Communicator") else {
                 return;
-            }
+            };
             // SAFETY: self.handle is a valid, non-zero communicator handle
             // registered in the C-side comm table (checked above); Drop takes
             // &mut self and runs at most once per value, so this cannot

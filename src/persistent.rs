@@ -122,7 +122,7 @@ impl PersistentRequest {
         if !self.active {
             return Ok(());
         }
-        Error::check_with_op(rt::enter(), "wait")?;
+        Error::check_with_op(rt::check(), "wait")?;
         // SAFETY: self.handle is a valid persistent MPI request handle
         // registered in the C-side request table; self.active was true on
         // entry (checked above), so start() was called and MPI holds an
@@ -246,9 +246,9 @@ impl Drop for PersistentRequest {
     ///
     /// See ADR-0004 §"Drop behavior: wait before free" for the full rationale.
     fn drop(&mut self) {
-        if !rt::drop_guard("PersistentRequest") {
+        let Some(_call) = rt::drop_guard("PersistentRequest") else {
             return;
-        }
+        };
         if self.active {
             // SAFETY: self.handle is a valid MPI request handle registered in the
             // C-side request table by the *_init constructor. self.active is true,

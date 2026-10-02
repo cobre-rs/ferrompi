@@ -88,8 +88,9 @@ extern "C" {
 }
 
 /// Wraps every other extern declaration in [`crate::rt::enter`]'s lifecycle
-/// check, forwarding to the same-named function in [`raw`] on success. The
-/// raw declarations live in `raw` so call sites (`ffi::ferrompi_x`) keep
+/// check, forwarding to the same-named function in [`raw`] on success and
+/// holding the returned in-flight token until the call returns. The raw
+/// declarations live in `raw` so call sites (`ffi::ferrompi_x`) keep
 /// resolving to the guarded wrapper without any change.
 macro_rules! guarded_extern {
     ($(
@@ -113,10 +114,10 @@ macro_rules! guarded_extern {
             #[inline(always)]
             #[allow(clippy::too_many_arguments)] // signature mirrors the C function
             pub unsafe fn $name($($arg: $ty),*) -> c_int {
-                let guard = crate::rt::enter();
-                if guard != 0 {
-                    return guard;
-                }
+                let _call = match crate::rt::enter() {
+                    Ok(token) => token,
+                    Err(code) => return code,
+                };
                 #[cfg(debug_assertions)]
                 let held = match crate::rt::begin_call() {
                     Ok(held) => held,

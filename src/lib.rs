@@ -290,8 +290,12 @@ pub enum ThreadLevel {
 /// the process.
 ///
 /// At [`ThreadLevel::Serialized`]/[`ThreadLevel::Multiple`], dropping this
-/// handle while another thread is still inside an MPI call through this
-/// crate is a program error that `ferrompi` does not detect.
+/// handle waits for every MPI call that other threads have in progress
+/// through this crate to return; a call that starts after the drop began
+/// returns `Err(`[`Error::Finalized`]`)` without calling MPI. A thread blocked
+/// forever inside an MPI call, for example in a collective its peers never
+/// enter, blocks the drop; MPI requires every thread's MPI calls to complete
+/// before `MPI_Finalize`.
 ///
 /// A call that would fail one of the checks above (finalized, wrong
 /// thread) and is also given invalid arguments may return the argument
@@ -472,8 +476,9 @@ impl Mpi {
 
     /// Check if MPI has been finalized.
     ///
-    /// Returns `true` once the `Mpi` handle has been dropped, including when
-    /// `MPI_Finalize` itself was skipped because a window was still alive.
+    /// Returns `true` from the start of the `Mpi` handle's drop, including
+    /// when `MPI_Finalize` itself was skipped because a window was still
+    /// alive.
     pub fn is_finalized() -> bool {
         if rt::is_finalized() {
             return true;
@@ -656,14 +661,18 @@ impl Mpi {
 
 impl Drop for Mpi {
     fn drop(&mut self) {
-        // rt::finalize() moves the lifecycle state from Active to Finalized
-        // before ferrompi_finalize runs, so a handle whose drop is nested
-        // inside the finalize sweep (a closure captured by a request/op that
-        // the sweep drops) observes Finalized and makes no MPI call. It also
-        // returns false for a stub Mpi built without init (Uninit) and for a
-        // second call on an already-finalized state, so this branch runs
-        // ferrompi_finalize at most once.
-        if rt::finalize() {
+        // rt::begin_finalize() moves the lifecycle state from Active to
+        // Finalizing, which refuses new calls, and at Serialized/Multiple
+        // waits for the calls other threads have in progress. Only then does
+        // rt::end_finalize() store Finalized, before ferrompi_finalize runs,
+        // so a handle whose drop is nested inside the finalize sweep (a
+        // closure captured by a request/op that the sweep drops) observes
+        // Finalized and makes no MPI call. begin_finalize returns false for a
+        // stub Mpi built without init (Uninit) and for a second call on an
+        // already-finalized state, so this branch runs ferrompi_finalize at
+        // most once.
+        if rt::begin_finalize() {
+            rt::end_finalize();
             #[cfg(feature = "rma")]
             {
                 let live = window::live_windows();
@@ -679,7 +688,7 @@ impl Drop for Mpi {
             let mut active: i32 = 0;
             // SAFETY: `active` is a valid local out-parameter that
             // ferrompi_finalize writes the unfreed-active-request count
-            // into. rt::finalize() just returned true, so state was Active —
+            // into. rt::begin_finalize() just returned true, so state was Active —
             // MPI_Init(_thread) succeeded and MPI_Finalize has not yet been
             // called for this process.
             unsafe {

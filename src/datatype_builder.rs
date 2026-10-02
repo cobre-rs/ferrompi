@@ -421,9 +421,9 @@ impl CustomDatatype {
 impl Drop for CustomDatatype {
     fn drop(&mut self) {
         if self.handle >= 0 {
-            if !rt::drop_guard("CustomDatatype") {
+            let Some(_call) = rt::drop_guard("CustomDatatype") else {
                 return;
-            }
+            };
             // SAFETY: handle is a valid index allocated by one of the
             // CustomDatatype constructors. We only free non-negative handles and do
             // not use the handle after this point. The return value is intentionally

@@ -406,18 +406,17 @@ static LIVE_WINDOWS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) fn live_windows() -> usize {
     // Acquire: pairs with the Release decrement in `Drop for Win`/`Drop for
     // SharedWindow`, so a zero read here cannot precede a window's in-flight
-    // teardown; the existing caller contract on `Mpi::drop` (no thread may be
-    // mid-MPI-call through this crate when `Mpi` is dropped) covers the rest.
+    // teardown.
     LIVE_WINDOWS.load(Ordering::Acquire)
 }
 
 /// Marks a newly constructed window (`SharedWindow::allocate`, `Win::create`,
 /// or `Win::allocate`) as live in [`LIVE_WINDOWS`].
 fn mark_window_alive() {
-    // Relaxed: the caller contract that `Mpi` is not dropped while another
-    // thread is inside an MPI call through this crate already orders this
-    // construction before any `Mpi::drop` that reads the counter; the store
-    // itself needs no ordering beyond the counter's own modification order.
+    // Relaxed: a constructor that has returned is ordered before any
+    // `Mpi::drop` that follows it by the caller's own synchronization (join,
+    // channel, mutex); the increment itself needs no ordering beyond the
+    // counter's own modification order.
     LIVE_WINDOWS.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -883,9 +882,9 @@ impl<T: MpiDatatype> SharedWindow<T> {
 
 impl<T: MpiDatatype> Drop for SharedWindow<T> {
     fn drop(&mut self) {
-        if !rt::drop_guard("SharedWindow") {
+        let Some(_call) = rt::drop_guard("SharedWindow") else {
             return;
-        }
+        };
         // Release: pairs with `live_windows`'s Acquire load, so `Mpi::drop`
         // cannot observe this window as gone before its teardown here has
         // actually run.
@@ -2904,9 +2903,9 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
 
 impl<T: MpiDatatype> Drop for Win<'_, T> {
     fn drop(&mut self) {
-        if !rt::drop_guard("Win") {
+        let Some(_call) = rt::drop_guard("Win") else {
             return;
-        }
+        };
         // Release: see `Drop for SharedWindow`'s identical comment.
         LIVE_WINDOWS.fetch_sub(1, Ordering::Release);
         // SAFETY: `win_handle` is a valid MPI window handle allocated by
@@ -2966,9 +2965,9 @@ impl<T: MpiDatatype> LockGuard<'_, T> {
 
 impl<T: MpiDatatype> Drop for LockGuard<'_, T> {
     fn drop(&mut self) {
-        if !rt::drop_guard("LockGuard") {
+        let Some(_call) = rt::drop_guard("LockGuard") else {
             return;
-        }
+        };
         // SAFETY: The window handle is valid (borrowed from SharedWindow)
         // and the rank was locked in the constructor. This unlock matches
         // the lock call that created this guard.
@@ -3036,9 +3035,9 @@ impl<T: MpiDatatype> LockAllGuard<'_, T> {
 
 impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
     fn drop(&mut self) {
-        if !rt::drop_guard("LockAllGuard") {
+        let Some(_call) = rt::drop_guard("LockAllGuard") else {
             return;
-        }
+        };
         // SAFETY: The window handle is valid (borrowed from SharedWindow)
         // and all ranks were locked in the constructor. This unlock_all
         // matches the lock_all call that created this guard.
@@ -3100,9 +3099,9 @@ impl<T: MpiDatatype> WinLockGuard<'_, '_, T> {
 
 impl<T: MpiDatatype> Drop for WinLockGuard<'_, '_, T> {
     fn drop(&mut self) {
-        if !rt::drop_guard("WinLockGuard") {
+        let Some(_call) = rt::drop_guard("WinLockGuard") else {
             return;
-        }
+        };
         // SAFETY: `window.win_handle` is valid — it is borrowed from a live
         // `Win`. The rank was locked in `Win::lock`; this unlock matches that
         // lock call. Drop is only called once.
@@ -3183,9 +3182,9 @@ impl<T: MpiDatatype> WinLockAllGuard<'_, '_, T> {
 
 impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, '_, T> {
     fn drop(&mut self) {
-        if !rt::drop_guard("WinLockAllGuard") {
+        let Some(_call) = rt::drop_guard("WinLockAllGuard") else {
             return;
-        }
+        };
         // SAFETY: `window.win_handle` is valid — it is borrowed from a live
         // `Win`. All ranks were locked in `Win::lock_all`; this unlock_all
         // matches that call. Drop is only called once.

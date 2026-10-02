@@ -541,9 +541,9 @@ impl Drop for Group {
         if self.handle <= 0 {
             return;
         }
-        if !rt::drop_guard("Group") {
+        let Some(_call) = rt::drop_guard("Group") else {
             return;
-        }
+        };
         // SAFETY: self.handle is owned and valid; Drop runs exactly once, so no double-free.
         unsafe { ffi::ferrompi_group_free(self.handle) };
     }
