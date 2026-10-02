@@ -487,20 +487,24 @@ impl Communicator {
         Ok(Request::new(request_handle, RequestKind::Collective))
     }
 
-    /// Nonblocking in-place gather at root. Non-root ranks must use
-    /// `igather` — this method returns `Error::InvalidOp` on non-root.
+    /// Nonblocking in-place gather. At root, `data` is both the send contribution
+    /// and the receive buffer. At non-root, `data` is that rank's own block (here its
+    /// send block), as for [`iscatter_inplace`](Self::iscatter_inplace).
     ///
-    /// # Buffer Layout (root)
+    /// # Buffer Layout
     ///
-    /// `data` must have length `recvcount * size()` where `recvcount` is
+    /// At root, `data` must have length `recvcount * size()` where `recvcount` is
     /// the per-rank count. Rank `r`'s contribution lives at offset
     /// `r * recvcount`. Root's own contribution must be pre-written into
     /// `data[rank() * recvcount .. (rank()+1) * recvcount]` before the call.
     ///
+    /// At non-root, `data` is the rank's block of `recvcount` elements. Only root
+    /// knows `recvcount`, so a block of another length is not checked locally; MPI
+    /// reports the mismatch.
+    ///
     /// # Errors
     ///
-    /// - `Error::InvalidOp` if this rank is not `root`.
-    /// - `Error::InvalidArgument` if `data.len()` is not divisible by `size()`.
+    /// `Error::InvalidArgument` at root if `data.len()` is not divisible by `size()`.
     ///
     /// # Example
     ///
@@ -508,38 +512,47 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// if world.rank() == 0 {
-    ///     let mut data = vec![0i32; 4 * world.size() as usize];
-    ///     let req = world.igather_inplace(&mut data, 0).unwrap();
-    ///     req.wait().unwrap();
-    /// }
+    /// let mut data = if world.rank() == 0 {
+    ///     vec![0i32; 4 * world.size() as usize]
+    /// } else {
+    ///     vec![world.rank(); 4]
+    /// };
+    /// let req = world.igather_inplace(&mut data, 0).unwrap();
+    /// req.wait().unwrap();
     /// ```
     pub fn igather_inplace<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<Request> {
-        if self.rank() != root {
-            return Err(Error::InvalidOp);
-        }
-        let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
-        let (p, _, dt) = buf_mut(data);
-        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
-        // this NULL is unambiguous); ferrompi_igather maps it to MPI_IN_PLACE, so data
-        // serves as both root's send contribution and the receive buffer. recvcount is
-        // checked to evenly divide data.len() above, and the guard above guarantees
-        // self.rank() == root, the only rank MPI_IN_PLACE is valid for in MPI_Igather. The
-        // returned Request does not borrow data; keeping it alive and untouched until the
-        // request completes is the caller's documented obligation, which this signature does
-        // not enforce.
-        let ret = unsafe {
-            ffi::ferrompi_igather(
-                std::ptr::null(),
-                0,
-                p,
-                recvcount,
-                dt,
-                root,
-                self.handle,
-                &mut request_handle,
-            )
+        let ret = if self.rank() == root {
+            let recvcount = rank_block("data", data.len(), self.size)? as i64;
+            let (p, _, dt) = buf_mut(data);
+            // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
+            // this NULL is unambiguous); ferrompi_igather maps it to MPI_IN_PLACE, so data
+            // serves as both root's send contribution and the receive buffer. recvcount is
+            // checked to evenly divide data.len() above, and this branch runs only at root,
+            // the only rank MPI_IN_PLACE is valid for in MPI_Igather. The returned Request does
+            // not borrow data; keeping it alive and untouched until the request completes is
+            // the caller's documented obligation, which this signature does not enforce.
+            unsafe {
+                ffi::ferrompi_igather(
+                    std::ptr::null(),
+                    0,
+                    p,
+                    recvcount,
+                    dt,
+                    root,
+                    self.handle,
+                    &mut request_handle,
+                )
+            }
+        } else {
+            let (p, n, dt) = buf_mut(data);
+            // SAFETY: p is non-null, so ferrompi_igather does not map it to MPI_IN_PLACE; data is
+            // this rank's send block. It is also passed as recvbuf because strict MPI builds
+            // reject a NULL recvbuf at non-root; MPI ignores recvbuf and recvcount there. The
+            // returned Request does not borrow data; keeping it alive and untouched until the
+            // request completes is the caller's documented obligation, which this signature
+            // does not enforce.
+            unsafe { ffi::ferrompi_igather(p, n, p, n, dt, root, self.handle, &mut request_handle) }
         };
         Error::check_with_op(ret, "igather_inplace")?;
         Ok(Request::new(request_handle, RequestKind::Collective))
@@ -775,14 +788,6 @@ mod tests {
                 actual: 5
             })
         ));
-    }
-
-    #[test]
-    fn igather_inplace_nonroot_returns_invalid_op() {
-        let comm = test_comm(1, 4);
-        let mut data = vec![0u32; 4];
-        let result = comm.igather_inplace(&mut data, 0);
-        assert!(matches!(result, Err(Error::InvalidOp)));
     }
 
     #[test]

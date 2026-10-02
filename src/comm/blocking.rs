@@ -657,20 +657,24 @@ impl Communicator {
     }
 
     /// Gather values in place. At root, `data` is both the send contribution and the
-    /// receive buffer; non-root ranks must call `gather` (not `gather_inplace`) — this
-    /// method returns `Error::InvalidOp` on non-root.
+    /// receive buffer. At non-root, `data` is that rank's own block (here its send
+    /// block), as for [`scatter_inplace`](Self::scatter_inplace) and
+    /// [`reduce_inplace`](Self::reduce_inplace).
     ///
-    /// # Buffer Layout (root)
+    /// # Buffer Layout
     ///
-    /// `data` must have length `recvcount * size()` where `recvcount` is the per-rank
-    /// count. Rank `r`'s contribution lives at offset `r * recvcount`. Root's own
+    /// At root, `data` must have length `recvcount * size()` where `recvcount` is the
+    /// per-rank count. Rank `r`'s contribution lives at offset `r * recvcount`. Root's own
     /// contribution must be pre-written into `data[rank() * recvcount .. (rank()+1) *
     /// recvcount]`.
     ///
+    /// At non-root, `data` is the rank's block of `recvcount` elements. Only root knows
+    /// `recvcount`, so a block of another length is not checked locally; MPI reports the
+    /// mismatch.
+    ///
     /// # Errors
     ///
-    /// - `Error::InvalidOp` if this rank is not `root`.
-    /// - `Error::InvalidArgument` if `data.len()` is not divisible by `size()`.
+    /// `Error::InvalidArgument` at root if `data.len()` is not divisible by `size()`.
     ///
     /// # Example
     ///
@@ -681,27 +685,36 @@ impl Communicator {
     /// let rank = world.rank() as usize;
     /// let size = world.size() as usize;
     /// // Root allocates the full buffer; each rank's slot is at offset rank * recvcount.
-    /// // recvcount = 1 in this example.
+    /// // recvcount = 1 in this example; every other rank passes its own block.
     /// if world.rank() == 0 {
     ///     let mut data = vec![0i32; size]; // slot 0..size
     ///     data[rank] = rank as i32 * 10;   // root pre-writes its own slot
     ///     world.gather_inplace(&mut data, 0).unwrap();
     ///     // data[r] == r * 10 for all r
+    /// } else {
+    ///     let mut data = vec![rank as i32 * 10];
+    ///     world.gather_inplace(&mut data, 0).unwrap();
     /// }
     /// ```
     pub fn gather_inplace<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<()> {
-        if self.rank() != root {
-            return Err(Error::InvalidOp);
-        }
-        let recvcount = rank_block("data", data.len(), self.size)? as i64;
-        let (p, _, dt) = buf_mut(data);
-        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
-        // NULL is unambiguous); ferrompi_gather maps it to MPI_IN_PLACE, so data serves as both
-        // root's send contribution (at offset rank*recvcount) and the receive buffer.
-        // recvcount is checked to evenly divide data.len() above, and the guard above guarantees
-        // self.rank() == root, the only rank MPI_IN_PLACE is valid for in MPI_Gather.
-        let ret = unsafe {
-            ffi::ferrompi_gather(std::ptr::null(), 0, p, recvcount, dt, root, self.handle)
+        let ret = if self.rank() == root {
+            let recvcount = rank_block("data", data.len(), self.size)? as i64;
+            let (p, _, dt) = buf_mut(data);
+            // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
+            // this NULL is unambiguous); ferrompi_gather maps it to MPI_IN_PLACE, so data serves
+            // as both root's send contribution (at offset rank*recvcount) and the receive
+            // buffer. recvcount is checked to evenly divide data.len() above, and this branch
+            // runs only at root, the only rank MPI_IN_PLACE is valid for in MPI_Gather.
+            unsafe {
+                ffi::ferrompi_gather(std::ptr::null(), 0, p, recvcount, dt, root, self.handle)
+            }
+        } else {
+            let (p, n, dt) = buf_mut(data);
+            // SAFETY: p is non-null, so ferrompi_gather does not map it to MPI_IN_PLACE; data is
+            // this rank's send block. It is also passed as recvbuf because strict MPI builds
+            // reject a NULL recvbuf at non-root; MPI ignores recvbuf and recvcount there, so the
+            // gather is unaffected.
+            unsafe { ffi::ferrompi_gather(p, n, p, n, dt, root, self.handle) }
         };
         Error::check_with_op(ret, "gather_inplace")
     }
@@ -1057,14 +1070,6 @@ mod tests {
                 actual: 5
             })
         ));
-    }
-
-    #[test]
-    fn gather_inplace_nonroot_returns_invalid_op() {
-        let comm = test_comm(1, 4);
-        let mut data = vec![0u32; 4];
-        let result = comm.gather_inplace(&mut data, 0);
-        assert!(matches!(result, Err(Error::InvalidOp)));
     }
 
     #[test]

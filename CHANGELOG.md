@@ -35,6 +35,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Error::InvalidBuffer`. Migration: match the new variants; `arg` names the
   argument.
 
+### Changed
+
+- **`gather_inplace`, `igather_inplace` and `gather_init_inplace`
+  accept non-root ranks**, where `data` is the rank's own block, like
+  `scatter_inplace` and `reduce_inplace`; they no longer return an error
+  there.
+
 ### Fixed
 
 - **A full user-op table returns `Error::ResourceExhausted` with resource
