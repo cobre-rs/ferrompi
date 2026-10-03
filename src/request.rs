@@ -192,6 +192,45 @@ pub(crate) enum RequestKind {
 /// constructors still return requests that are not tied to a scope, and those
 /// keep the behavior described above.
 ///
+/// A request is not `Send`, so it cannot be moved to another thread:
+///
+/// ```compile_fail,E0277
+/// # use ferrompi::{Mpi, ThreadLevel};
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init_thread(ThreadLevel::Multiple)?;
+/// # let world = mpi.world();
+/// ferrompi::scope(|s| {
+///     let req = world.ibarrier(s)?;
+///     std::thread::scope(|t| {
+///         t.spawn(move || req.wait());
+///     });
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A thread that needs a request opens its own scope and creates and waits it
+/// there:
+///
+/// ```no_run
+/// # use ferrompi::{Mpi, ThreadLevel};
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init_thread(ThreadLevel::Multiple)?;
+/// # let world = mpi.world();
+/// std::thread::scope(|t| {
+///     t.spawn(|| {
+///         ferrompi::scope(|s| {
+///             let req = world.ibarrier(s)?;
+///             req.wait()?;
+///             Ok(())
+///         })
+///     });
+/// });
+/// # Ok(())
+/// # }
+/// ```
+///
 /// # Example
 ///
 /// ```no_run

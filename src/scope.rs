@@ -56,6 +56,262 @@ pub struct Scope<'s, 'env: 's> {
 /// # }
 /// ```
 ///
+/// # Compile-time guarantees
+///
+/// A request borrows its buffers, and a user op, for the scope's lifetime `'s`.
+/// `'s` is invariant, so the compiler can neither shorten it to end before the
+/// scope completes the request nor stretch it past the scope. Each program
+/// below does not compile, and is followed by the same program made correct.
+///
+/// A buffer declared inside the closure would be freed before the scope's final
+/// wait, so the first program is rejected; the second declares the buffer
+/// outside. The rejection also shows that `'s` is invariant: were `'s`
+/// covariant, the compiler could shorten it to the buffer's lifetime and accept
+/// the first program.
+///
+/// ```compile_fail,E0597
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// ferrompi::scope(|s| {
+///     let mut buf = vec![0u8; 4];
+///     world.irecv(s, &mut buf, 1, 0)?;
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let mut buf = vec![0u8; 4];
+/// ferrompi::scope(|s| {
+///     world.irecv(s, &mut buf, 1, 0)?;
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A buffer cannot be dropped while a request borrows it:
+///
+/// ```compile_fail,E0505
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let mut buf = vec![0u8; 4];
+/// ferrompi::scope(|s| {
+///     world.irecv(s, &mut buf, 1, 0)?;
+///     drop(buf);
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let mut buf = vec![0u8; 4];
+/// ferrompi::scope(|s| {
+///     world.irecv(s, &mut buf, 1, 0)?;
+///     Ok(())
+/// })?;
+/// drop(buf);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Nor can a receive buffer be written while a request borrows it:
+///
+/// ```compile_fail,E0499
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let mut buf = vec![0u8; 4];
+/// ferrompi::scope(|s| {
+///     world.irecv(s, &mut buf, 1, 0)?;
+///     buf[0] = 1;
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let mut buf = vec![0u8; 4];
+/// ferrompi::scope(|s| {
+///     world.irecv(s, &mut buf, 1, 0)?;
+///     Ok(())
+/// })?;
+/// buf[0] = 1;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Or read, even after the request was waited, because the borrow lasts until
+/// the scope returns:
+///
+/// ```compile_fail,E0502
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let mut buf = vec![0u8; 4];
+/// ferrompi::scope(|s| {
+///     let req = world.irecv(s, &mut buf, 1, 0)?;
+///     req.wait()?;
+///     let x = buf[0];
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let mut buf = vec![0u8; 4];
+/// ferrompi::scope(|s| {
+///     let req = world.irecv(s, &mut buf, 1, 0)?;
+///     req.wait()?;
+///     Ok(())
+/// })?;
+/// let x = buf[0];
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A request cannot leave the closure, because it borrows the scope:
+///
+/// ```compile_fail,E0521
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let mut buf = vec![0u8; 4];
+/// let mut keep = None;
+/// ferrompi::scope(|s| {
+///     keep = Some(world.irecv(s, &mut buf, 1, 0)?);
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let mut buf = vec![0u8; 4];
+/// ferrompi::scope(|s| {
+///     let mut keep = None;
+///     keep = Some(world.irecv(s, &mut buf, 1, 0)?);
+///     if let Some(req) = keep {
+///         req.wait()?;
+///     }
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Neither can the scope itself:
+///
+/// ```compile_fail,E0521
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let mut keep = None;
+/// ferrompi::scope(|s| {
+///     keep = Some(s);
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Mpi;
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// ferrompi::scope(|s| {
+///     let mut keep = None;
+///     keep = Some(s);
+///     if let Some(s) = keep {
+///         world.ibarrier(s)?;
+///     }
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A [`UserOp`](crate::UserOp) is borrowed by a nonblocking reduction in the
+/// same way, so the op cannot be dropped while the reduction is pending:
+///
+/// ```compile_fail,E0505
+/// # use ferrompi::{Mpi, UserOp};
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let op: UserOp<f64> = UserOp::new(|a: &[f64], b: &mut [f64]| {
+///     for (x, y) in a.iter().zip(b.iter_mut()) {
+///         *y += x;
+///     }
+/// })?;
+/// let send = [1.0f64; 4];
+/// let mut recv = [0.0f64; 4];
+/// ferrompi::scope(|s| {
+///     world.iallreduce(s, &send, &mut recv, &op)?;
+///     drop(op);
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Mpi, UserOp};
+/// # fn main() -> ferrompi::Result<()> {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let op: UserOp<f64> = UserOp::new(|a: &[f64], b: &mut [f64]| {
+///     for (x, y) in a.iter().zip(b.iter_mut()) {
+///         *y += x;
+///     }
+/// })?;
+/// let send = [1.0f64; 4];
+/// let mut recv = [0.0f64; 4];
+/// ferrompi::scope(|s| {
+///     world.iallreduce(s, &send, &mut recv, &op)?;
+///     Ok(())
+/// })?;
+/// drop(op);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A [`Request`](crate::Request) cannot be sent to another thread; the
+/// documentation of `Request` has that fence.
+///
 /// # Panics and errors
 ///
 /// - If `f` panics, the scope waits for every request, then resumes the panic.
