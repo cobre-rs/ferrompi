@@ -148,6 +148,17 @@ fn main() {
         "isend to ProcNull waits to the empty status",
     );
 
+    let r = ferrompi::scope(|s| {
+        world.isend(s, &send, Source::ProcNull, 1)?;
+        world.isend(s, &send, Source::ProcNull, 2)?;
+        Ok(())
+    });
+    common::check(
+        &world,
+        r.is_ok(),
+        "two isends to ProcNull left to scope end both complete",
+    );
+
     mpi.buffer_attach(vec![0u8; 64 * 1024].into_boxed_slice())
         .expect("buffer_attach failed");
     let requests = [
