@@ -669,7 +669,7 @@ impl Mpi {
 impl Drop for Mpi {
     fn drop(&mut self) {
         // rt::begin_finalize() moves the lifecycle state from Active to
-        // Finalizing, which refuses new calls, frees and extent opens but
+        // Finalizing, which refuses new calls, frees and scope opens but
         // still admits the completion calls of requests already pending, and
         // at Serialized/Multiple waits for the calls other threads have in
         // progress. If finalize_skip_reason() names a reason, the state stays
@@ -709,10 +709,9 @@ impl Drop for Mpi {
     }
 }
 
-/// Why `Mpi::drop` must not call `MPI_Finalize`, or `None` when it may. This
-/// is the one place the skip is decided. Its inputs today are a nonblocking
-/// scope open on the dropping thread and a live window (feature `rma`); a
-/// movable handle holding an extent token joins them as those types arrive.
+/// Why `Mpi::drop` must not call `MPI_Finalize`, or `None` when it may: a
+/// nonblocking scope open on the dropping thread, or a live window (feature
+/// `rma`). This is the one place the skip is decided.
 fn finalize_skip_reason() -> Option<String> {
     if rt::scopes_on_this_thread() > 0 {
         return Some(

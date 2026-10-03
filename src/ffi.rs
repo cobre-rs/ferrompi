@@ -12,7 +12,7 @@ pub type int64_t = i64;
 
 /// Mirror of the C `ferrompi_status`.
 #[repr(C)]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct FerrompiStatus {
     pub source: int32_t,
     pub tag: int32_t,

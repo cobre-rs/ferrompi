@@ -1636,6 +1636,20 @@ int ferrompi_alltoall(
                         recvbuf, (int)recvcount, dt, comm);
 }
 
+// The user-op count checks of the three reduce-scatter-block calls:
+// MPI_ERR_COUNT when op is a user op and recvcount, or the reduced span
+// recvcount * size, exceeds INT_MAX; otherwise MPI_SUCCESS, or the error of
+// MPI_Comm_size.
+static int check_user_op_span(int32_t op, int64_t recvcount, MPI_Comm comm) {
+    if (!is_user_op(op)) return MPI_SUCCESS;
+    if (recvcount > INT_MAX) return MPI_ERR_COUNT;          /* no MPI call: unit-tested */
+    int size;
+    int r = MPI_Comm_size(comm, &size);
+    if (r != MPI_SUCCESS) return r;
+    if (recvcount > INT_MAX / size) return MPI_ERR_COUNT;    /* reduced span recvcount * size */
+    return MPI_SUCCESS;
+}
+
 int ferrompi_reduce_scatter_block(
     const void* sendbuf,
     void* recvbuf,
@@ -1648,13 +1662,8 @@ int ferrompi_reduce_scatter_block(
     MPI_Datatype dt = get_datatype(datatype_tag);
     MPI_Op mpi_op = get_op(op);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    if (is_user_op(op)) {
-        if (recvcount > INT_MAX) return MPI_ERR_COUNT;          /* no MPI call: unit-tested */
-        int size;
-        int r = MPI_Comm_size(comm, &size);
-        if (r != MPI_SUCCESS) return r;
-        if (recvcount > INT_MAX / size) return MPI_ERR_COUNT;    /* reduced span recvcount * size */
-    }
+    int r = check_user_op_span(op, recvcount, comm);
+    if (r != MPI_SUCCESS) return r;
     if (recvcount > INT_MAX) {
 #if MPI_VERSION >= 4
         return MPI_Reduce_scatter_block_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op, comm);
@@ -2228,15 +2237,9 @@ int ferrompi_ireduce_scatter_block(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
     MPI_Request req;
-    int ret;
+    int ret = check_user_op_span(op, recvcount, comm);
+    if (ret != MPI_SUCCESS) return ret;
 
-    if (is_user_op(op)) {
-        if (recvcount > INT_MAX) return MPI_ERR_COUNT;          /* no MPI call: unit-tested */
-        int size;
-        int r = MPI_Comm_size(comm, &size);
-        if (r != MPI_SUCCESS) return r;
-        if (recvcount > INT_MAX / size) return MPI_ERR_COUNT;    /* reduced span recvcount * size */
-    }
     if (recvcount > INT_MAX) {
 #if MPI_VERSION >= 4
         ret = MPI_Ireduce_scatter_block_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op, comm, &req);
@@ -2982,15 +2985,9 @@ int ferrompi_reduce_scatter_block_init(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
     MPI_Request req;
-    int ret;
+    int ret = check_user_op_span(op, recvcount, comm);
+    if (ret != MPI_SUCCESS) return ret;
 
-    if (is_user_op(op)) {
-        if (recvcount > INT_MAX) return MPI_ERR_COUNT;          /* no MPI call: unit-tested */
-        int size;
-        int r = MPI_Comm_size(comm, &size);
-        if (r != MPI_SUCCESS) return r;
-        if (recvcount > INT_MAX / size) return MPI_ERR_COUNT;    /* reduced span recvcount * size */
-    }
     if (recvcount > INT_MAX) {
 #if MPI_VERSION >= 4
         ret = MPI_Reduce_scatter_block_init_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op,

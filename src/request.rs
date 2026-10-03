@@ -7,7 +7,6 @@ use crate::scope::Registry;
 use crate::status::Status;
 #[cfg(debug_assertions)]
 use std::io::Write;
-use std::mem::MaybeUninit;
 
 /// Element count at or below which request-handle scratch buffers live on the
 /// stack. Draining a handful-to-few-dozen in-flight requests on the completion
@@ -73,23 +72,19 @@ fn mark_completed(r: &mut Request<'_>) {
     r.release();
 }
 
-/// Run `f` with a zeroed `i32` index scratch buffer and an uninitialized
-/// status scratch buffer, both of length `len` and stack-allocated when small.
-/// Used for the `*some` outputs: the shim writes `statuses[k]` for each
-/// reported index, and nothing else.
+/// Run `f` with zeroed `i32` index and status scratch buffers, both of length
+/// `len` and stack-allocated when small. Used for the `*some` outputs: the
+/// shim writes `statuses[k]` for each reported index.
 #[inline]
-fn with_index_buf<R>(
-    len: usize,
-    f: impl FnOnce(&mut [i32], &mut [MaybeUninit<ffi::FerrompiStatus>]) -> R,
-) -> R {
+fn with_index_buf<R>(len: usize, f: impl FnOnce(&mut [i32], &mut [ffi::FerrompiStatus]) -> R) -> R {
     if len <= HANDLE_STACK_CAP {
         let mut buf = [0i32; HANDLE_STACK_CAP];
-        let mut statuses = [const { MaybeUninit::uninit() }; HANDLE_STACK_CAP];
+        let mut statuses = [ffi::FerrompiStatus::default(); HANDLE_STACK_CAP];
         f(&mut buf[..len], &mut statuses[..len])
     } else {
         let mut buf = vec![0i32; len];
-        let mut statuses = Vec::with_capacity(len);
-        f(&mut buf, &mut statuses.spare_capacity_mut()[..len])
+        let mut statuses = vec![ffi::FerrompiStatus::default(); len];
+        f(&mut buf, &mut statuses)
     }
 }
 
@@ -99,7 +94,7 @@ fn some_results(
     ret: i32,
     outcount: i64,
     indices: &[i32],
-    statuses: &[MaybeUninit<ffi::FerrompiStatus>],
+    statuses: &[ffi::FerrompiStatus],
 ) -> Vec<(usize, Status)> {
     if ret != 0 || outcount <= 0 {
         return Vec::new();
@@ -108,16 +103,7 @@ fn some_results(
     indices[..n]
         .iter()
         .zip(&statuses[..n])
-        .map(|(&index, status)| {
-            // SAFETY: the shim returned success with `outcount` positive, and then
-            // writes every field of statuses[k] for each k < outcount (it
-            // fills a status for each reported index on success and on
-            // MPI_ERR_IN_STATUS, which it turns into success only when a
-            // reported request failed). `n` is that outcount, and slicing to
-            // it bounds-checks it against the buffer.
-            let raw = unsafe { status.assume_init_read() };
-            (index as usize, Status::from_ffi(raw))
-        })
+        .map(|(&index, &raw)| (index as usize, Status::from_ffi(raw)))
         .collect()
 }
 
@@ -508,8 +494,7 @@ impl Request<'_> {
                     // SAFETY: with_handles / with_index_buf supply valid,
                     // appropriately-sized [i64] handle, [u8] done, [i32] index
                     // and status buffers whose lengths match `count`; outcount
-                    // is a valid stack-allocated output parameter. MaybeUninit
-                    // has the layout of FerrompiStatus.
+                    // is a valid stack-allocated output parameter.
                     let ret = unsafe {
                         ffi::ferrompi_waitsome(
                             handles.len() as i64,
@@ -517,7 +502,7 @@ impl Request<'_> {
                             &mut outcount,
                             indices.as_mut_ptr(),
                             done.as_mut_ptr(),
-                            statuses.as_mut_ptr().cast(),
+                            statuses.as_mut_ptr(),
                         )
                     };
                     // outcount == -1 means all null or a rejected result.
@@ -618,8 +603,7 @@ impl Request<'_> {
                     // SAFETY: with_handles / with_index_buf supply valid,
                     // appropriately-sized [i64] handle, [u8] done, [i32] index
                     // and status buffers whose lengths match `count`; outcount
-                    // is a valid stack-allocated output parameter. MaybeUninit
-                    // has the layout of FerrompiStatus.
+                    // is a valid stack-allocated output parameter.
                     let ret = unsafe {
                         ffi::ferrompi_testsome(
                             handles.len() as i64,
@@ -627,7 +611,7 @@ impl Request<'_> {
                             &mut outcount,
                             indices.as_mut_ptr(),
                             done.as_mut_ptr(),
-                            statuses.as_mut_ptr().cast(),
+                            statuses.as_mut_ptr(),
                         )
                     };
                     // outcount == -1 means all null; 0 means none completed yet.
@@ -798,7 +782,6 @@ mod tests {
     use crate::ffi::FerrompiStatus;
     use crate::scope::Registry;
     use crate::status::{Source, Status, Tag};
-    use std::mem::MaybeUninit;
 
     fn test_request(completed: bool, kind: RequestKind) -> Request<'static> {
         Request {
@@ -884,15 +867,13 @@ mod tests {
 
     #[test]
     fn some_results_reports_only_the_filled_entries_on_success() {
-        let raw = |source, tag, error| {
-            MaybeUninit::new(FerrompiStatus {
-                source,
-                tag,
-                count: 2,
-                error,
-            })
+        let raw = |source, tag, error| FerrompiStatus {
+            source,
+            tag,
+            count: 2,
+            error,
         };
-        let statuses = [raw(1, 21, 0), raw(4, 9, 0), MaybeUninit::uninit()];
+        let statuses = [raw(1, 21, 0), raw(4, 9, 0), FerrompiStatus::default()];
         let indices = [2, 0, 0];
         let got = some_results(0, 2, &indices, &statuses);
         assert_eq!(got.len(), 2);

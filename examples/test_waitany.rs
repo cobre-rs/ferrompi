@@ -281,13 +281,12 @@ fn main() {
                 match Request::test_some(&mut requests) {
                     Ok(batch) if !batch.is_empty() => {
                         statuses_ok &= batch.iter().all(|(_, s)| is_ring_status(s, prev, 4));
-                        let batch: Vec<usize> = batch.iter().map(|&(i, _)| i).collect();
-                        let mut sorted = batch.clone();
+                        let mut sorted: Vec<usize> = batch.iter().map(|&(i, _)| i).collect();
                         sorted.sort_unstable_by(|a, b| b.cmp(a));
+                        completions += sorted.len();
                         for idx in sorted {
                             requests.swap_remove(idx);
                         }
-                        completions += batch.len();
                     }
                     Ok(_) => {
                         std::thread::sleep(Duration::from_millis(1));
