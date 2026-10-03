@@ -243,6 +243,12 @@ feature_closure() {
 
 # classify <exit> <output-file> <skip-ok> <expect> <stderr-literal> <impl-id>
 # Prints one outcome line: "PASS", "SKIP <reasons>" or "FAIL <detail>".
+#
+# A run whose output has FAIL as a word fails in every mode, whatever the exit
+# status. Examples report a failed check as `FAIL: <name>`, `rank N: FAIL: ...`
+# or `rank N: FAIL Test N ...`, and exit nonzero, but mpiexec on some MPICH
+# stacks (hydra 4.2.0 with libmpich 4.2.1) returns 0 for a job whose every rank
+# exited nonzero, so the exit status alone cannot be trusted.
 classify() {
   local exit_code="$1" outfile="$2" skip_ok="$3" expect="$4" literal="$5" impl="$6"
 
@@ -256,6 +262,11 @@ classify() {
     return 0
   fi
 
+  if grep -qwF -- "FAIL" "$outfile"; then
+    echo "FAIL output contains a FAIL: line"
+    return 0
+  fi
+
   if [[ "$expect" != "unfinalized" ]] && grep -qF -- "$FINALIZE_SKIPPED_MARKER" "$outfile"; then
     echo "FAIL $FINALIZE_SKIPPED_MARKER without expect=unfinalized"
     return 0
@@ -266,8 +277,6 @@ classify() {
       echo "FAIL exited 0, abort expected"
     elif ! grep -qF -- "$literal" "$outfile"; then
       echo "FAIL abort marker missing"
-    elif grep -q '^FAIL: ' "$outfile"; then
-      echo "FAIL output contains a FAIL: line"
     else
       echo "PASS"
     fi

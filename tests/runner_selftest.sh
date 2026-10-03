@@ -246,6 +246,65 @@ check "finalize-skipped marker matches the crate's warning" \
   "$(grep -qF -- "$FINALIZE_SKIPPED_MARKER" "$SCRIPT_DIR/../src/lib.rs" && echo yes || echo no)" \
   "yes"
 
+# --- classify: a FAIL line fails whatever the exit status ---------------------
+# mpiexec on some MPICH stacks returns 0 although every rank exited nonzero.
+
+fail_line_outcome="FAIL output contains a FAIL: line"
+
+f=$(mk_outfile $'FAIL: some check\n')
+check "classify: normal, anchored FAIL: line, exit 0" \
+  "$(classify 0 "$f" "" "" "" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'rank 1: FAIL: Win::put failed\n')
+check "classify: normal, rank N: FAIL: line, exit 0" \
+  "$(classify 0 "$f" "" "" "" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'rank 1: FAIL Test 2: expected 4, got 3\n')
+check "classify: normal, rank N: FAIL Test N line (no colon), exit 0" \
+  "$(classify 0 "$f" "" "" "" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'PASS: first\nFAIL: second\nPASS: third\n')
+check "classify: normal, PASS lines do not mask a FAIL: line" \
+  "$(classify 0 "$f" "" "" "" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'warn: noted\nFAIL: some check\n')
+check "classify: normal, stderr literal present does not mask a FAIL: line" \
+  "$(classify 0 "$f" "" "" "warn" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'SKIP: x\nFAIL: some check\n')
+check "classify: registered SKIP does not mask a FAIL: line" \
+  "$(classify 0 "$f" "openmpi" "" "" "openmpi-5.0.7")" "$fail_line_outcome"
+
+f=$(mk_outfile $'rank 0: FAIL: some check\nSKIP: x\n')
+check "classify: registered SKIP after a rank N: FAIL: line" \
+  "$(classify 0 "$f" "openmpi" "" "" "openmpi-5.0.7")" "$fail_line_outcome"
+
+f=$(mk_outfile $'shutdown complete\nFAIL: some check\n')
+check "classify: expect=unfinalized, FAIL: line, exit 0" \
+  "$(classify 0 "$f" "" "unfinalized" "shutdown" "unknown")" "$fail_line_outcome"
+check "classify: expect=unfinalized, FAIL: line, exit 1" \
+  "$(classify 1 "$f" "" "unfinalized" "shutdown" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'shutdown complete\nrank 0: FAIL: some check\n')
+check "classify: expect=unfinalized, rank N: FAIL: line, exit 0" \
+  "$(classify 0 "$f" "" "unfinalized" "shutdown" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'boom\nrank 1: FAIL: returned instead of aborting\n')
+check "classify: expect=abort, exit 134, literal present, rank N: FAIL: line" \
+  "$(classify 134 "$f" "" "abort" "boom" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'SKIP: x\nFAIL: some check\n')
+check "classify: expect=abort, exit 0, registered SKIP and a FAIL: line" \
+  "$(classify 0 "$f" "openmpi-4" "abort" "boom" "openmpi-4.1.6")" "$fail_line_outcome"
+
+f=$(mk_outfile $'FAIL: some check\n')
+check "classify: exit 124 with a FAIL: line stays FAIL timeout" \
+  "$(classify 124 "$f" "" "" "" "unknown")" "FAIL timeout"
+
+f=$(mk_outfile $'ferrompi: MPI_ERR_PROC_FAILED_PENDING is not supported\nPASS: FAILURES=0 FAILED=0\n')
+check "classify: FAIL inside a longer word is not a FAIL line" \
+  "$(classify 0 "$f" "" "" "" "unknown")" "PASS"
+
 # --- feature_closure -------------------------------------------------------
 
 check "feature_closure: numa pulls in rma" \
