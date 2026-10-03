@@ -130,7 +130,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 
 | ID | Title | Sev | Verified | Target | Status |
 |---|---|---|---|---|---|
-| SND-01 | Nonblocking `Request` not tied to its buffer | critical | repro | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
+| SND-01 | Nonblocking `Request` not tied to its buffer | critical | repro | 0.7.0 (D-1) | fixed (ec16bde, 40d42ed, aa71f36, 2cd64e8, e221cf2, c34c4ca) |
 | SND-02 | `PersistentRequest` not tied to its buffer | critical | repro | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
 | SND-03 | RMA origin buffers not tied to the epoch; 4 rustdoc examples are UB | critical | reading | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
 | SND-04 | `PendingFetchResult` dropped before epoch close → write into freed heap | critical | repro | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
