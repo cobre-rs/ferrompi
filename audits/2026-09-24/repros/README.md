@@ -31,7 +31,7 @@ mpiexec -n <N> target/release/<program>
 ```
 
 - `soundness`, `c-shim` and `perf` enable `ferrompi/rma`.
-- Some fixes will make a repro stop compiling on purpose. The SND-02, SND-05 and SND-08 (case B) repros rely on APIs that the fix removes. A compile error is then the expected "after fix" result, and the repro should be replaced by a `compile_fail` doctest.
+- Some fixes will make a repro stop compiling on purpose. The SND-05 and SND-08 (case B) repros rely on APIs that the fix removes. A compile error is then the expected "after fix" result, and the repro should be replaced by a `compile_fail` doctest.
 
 Building the C programs:
 
@@ -63,7 +63,6 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 | `soundness/src/bin/r6b_fetch_drop_create.rs` | SND-04 | Same as r6, over a `Win::create` window (MPICH defers the operation to the fence) | np=2 | `unrelated Vec after get() completes = 0x1111111111111112 (expected 0x3333333333333333)`: the fetched value lands in freed and reused memory | Does not compile, or the result is kept alive until the epoch closes |
 | `soundness/src/bin/r8_forget_win.rs` | SND-05 | `mem::forget(Win::create(&mut buf))`, `drop(buf)`, victim `Vec` reuses the memory, then rank 1 does a locked `put` | np=2 | `victim[0..4] = 0x5555555555555555…`: the remote `put` writes into the freed and reused allocation | Does not compile, or `Win::create` owns the buffer so forgetting it leaks the buffer instead of freeing it |
 | `soundness/src/bin/r11_shm_race.rs` | SND-13 | Rank 1 spins on `remote_slice(0)[0]` (a `&[u64]`) while rank 0 sets the flag through its own slice | np=2 (same node) | `evidence/r11.out`: rank 0 printed `flag set`/`exiting` 3 s apart; rank 1 never printed `observed flag`. The release build hoisted the load out of the loop: the disassembly is a single `cmpq $0x0,(%rcx)` followed by a jump to itself, so the loop never ends. The miscompilation is observed, not just theoretical | No plain `&[T]` over memory another process writes; the access API forces an atomic or volatile read, and the loop sees the flag |
-| `soundness/src/bin/r13_persistent_realloc.rs` | SND-02 | `recv_init(&mut data)`, then `data.reserve(4096)` reallocates the buffer, then `start`/`send`/`wait` | np=2 | Heap corruption: SIGSEGV inside `MPI_Finalize` (gdb: `unlink_chunk`/`_int_malloc` under `Mpi::drop`) | Does not compile: the persistent request owns its buffer |
 
 ### c-shim/: C-layer correctness (`src/bin/t*.rs`) and C baselines (`c/`)
 
