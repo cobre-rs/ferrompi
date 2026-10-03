@@ -7,6 +7,8 @@ use std::mem::MaybeUninit;
 use std::os::raw::c_int;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
+#[cfg(debug_assertions)]
+use crate::error::FERROMPI_ERR_THREAD_LEVEL;
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::request::{Request, RequestKind};
@@ -503,6 +505,15 @@ impl Registry {
                 self.wait_pass(&mut vec![0; live], &mut vec![0; live], &mut vec![0; live])
             };
             if !progress {
+                #[cfg(debug_assertions)]
+                if ret == FERROMPI_ERR_THREAD_LEVEL {
+                    // Only the Serialized overlap check returns this sentinel
+                    // for a request this thread created.
+                    let _ = std::io::stderr().write_all(
+                        b"ferrompi: a nonblocking scope's final wait overlapped another thread's MPI call at ThreadLevel::Serialized; aborting\n",
+                    );
+                    std::process::abort();
+                }
                 scope_abort(ret);
             }
             if ret != 0 && first.is_ok() {
