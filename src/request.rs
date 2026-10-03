@@ -154,43 +154,19 @@ pub(crate) enum RequestKind {
 
 /// A handle to a nonblocking MPI operation.
 ///
-/// This type represents an in-flight MPI operation. You must call `wait()` or
-/// `test()` to complete the operation before the associated buffers can be
-/// safely accessed.
+/// A request is created inside a [`scope`](crate::scope) and borrows its
+/// buffers until the scope returns, even after the request has completed. It is
+/// completed by [`wait`](Request::wait), [`test`](Request::test) or a batch call
+/// such as [`wait_all`](Request::wait_all) or, at the latest, by the scope,
+/// which waits for every request still pending before it returns or unwinds.
+/// Dropping or forgetting a request does not complete it early, and the scope
+/// still waits.
 ///
-/// # Safety — Buffer Lifetime
-///
-/// **The caller must ensure that all buffers passed to the nonblocking operation
-/// (e.g., `isend`, `irecv`, `iallreduce`) remain valid and are not moved,
-/// reallocated, or dropped until the `Request` is completed (via `wait()` or
-/// `test()` returning `Some`) or dropped.** MPI holds raw pointers to these
-/// buffers; violating this invariant is undefined behavior.
-///
-/// For a request that is not created through a [`scope`](crate::scope) this
-/// cannot currently be enforced by the Rust type system, because such a request
-/// does not borrow its buffers.
-///
-/// # Drop Behavior
-///
-/// **Dropping a `Request` before calling `wait()` will call `MPI_Wait` inside
-/// `Drop`, which blocks until the peer operation completes.** If the peer never
-/// posts a matching send or receive, the drop call deadlocks permanently.
-///
-/// This is intentional: blocking in `Drop` is preferred over leaking the MPI
-/// request handle or silently cancelling the operation (see
-/// [`doc::adr_0004_persistent_collective_approach`](crate::doc::adr_0004_persistent_collective_approach)
-/// for the rationale).
-///
-/// **On any code path that may bypass `wait()` — including early returns via `?`,
-/// `break`, or a panic unwind — prefer calling `wait()` or `test()` explicitly
-/// so that failure modes remain observable.** See also the migration guide note
-/// in [`doc::migrating_from_rsmpi`](crate::doc::migrating_from_rsmpi).
-///
-/// A request created through a [`scope`](crate::scope) is completed by the
-/// scope, which waits for it before returning or unwinding, so dropping it
-/// early is harmless; it belongs to the thread that created it. The other
-/// constructors still return requests that are not tied to a scope, and those
-/// keep the behavior described above.
+/// With the `rma` feature, `Win::rput`, `Win::rget` and `Win::raccumulate`
+/// return a request that no scope owns: it does not borrow its origin buffer,
+/// which must stay valid and untouched until the request completes (through
+/// `wait`, `test` or a batch call), and dropping it before completion waits for
+/// it (`MPI_Wait`).
 ///
 /// A request is not `Send`, so it cannot be moved to another thread:
 ///
@@ -265,7 +241,8 @@ pub struct Request<'s> {
 }
 
 /// Who completes a request that was not waited for: the scope whose registry
-/// holds its slot, or the request itself when it is dropped.
+/// holds its slot or, with the `rma` feature, the request itself when it is
+/// dropped (the RMA request calls).
 #[derive(Clone, Copy)]
 enum Owner<'s> {
     Scoped(&'s Registry, u32),
@@ -275,7 +252,8 @@ enum Owner<'s> {
 
 #[cfg(feature = "rma")]
 impl Request<'static> {
-    /// Create a request that no scope owns, from a raw handle.
+    /// Create a request that no scope owns, from a raw handle, for the RMA
+    /// request calls.
     pub(crate) fn new(handle: i64, kind: RequestKind) -> Self {
         Request {
             handle,
@@ -330,7 +308,8 @@ impl Request<'_> {
     /// Wait for this operation to complete.
     ///
     /// Blocks until the operation is finished. After this returns successfully,
-    /// the associated buffers can be safely accessed.
+    /// MPI no longer uses the request's buffers; a scoped request keeps them
+    /// borrowed until its scope returns.
     ///
     /// For a receive the returned [`Status`] holds the matched source, tag and
     /// element count. For a send, collective or RMA request the `Status` is the
@@ -340,11 +319,12 @@ impl Request<'_> {
     /// call leaves it `None`.
     ///
     /// On a thread the active thread level does not allow, the wait is
-    /// rejected and this call drops the still-in-flight `self` before
-    /// returning, which aborts the process for a request that no scope owns (see
-    /// the `Drop` impl below), except while `Mpi` is dropping or after it
-    /// skipped `MPI_Finalize`: the wait then returns
-    /// `Err(`[`Error::ThreadLevelViolation`]`)` and the request is leaked.
+    /// rejected: a scoped request is left to its scope and the call returns
+    /// `Err(`[`Error::ThreadLevelViolation`]`)`. A request from the RMA request
+    /// calls (feature `rma`), which no scope owns, is dropped before the call
+    /// returns, and that drop aborts the process, except while `Mpi` is
+    /// dropping or after it skipped `MPI_Finalize`: the call then returns the
+    /// error and the request is leaked.
     ///
     /// In a debug build at `Serialized`, a wait that overlaps another
     /// thread's MPI call can neither run nor hand the request back, so it
@@ -408,8 +388,8 @@ impl Request<'_> {
     /// If this returns `Some`, the request is consumed and you should not call
     /// `wait()` or `test()` again. A test that fails with an error still marks
     /// the request completed when MPI completed it (e.g. a truncated
-    /// receive), so a later `Drop` does not attempt a second `MPI_Wait` on the
-    /// same slot.
+    /// receive), so a later `wait` or the scope does not complete it a second
+    /// time.
     #[inline]
     pub fn test(&mut self) -> Result<Option<Status>> {
         if self.completed {
@@ -780,12 +760,9 @@ impl Request<'_> {
 
 #[cfg(feature = "rma")]
 impl Drop for Request<'_> {
-    /// Block until the in-flight operation completes, then release the handle.
-    ///
-    /// Calls `MPI_Wait` on the underlying request handle when `self.completed`
-    /// is `false` and no scope owns the request. **This call blocks** until the
-    /// peer posts the matching operation; if the peer never does, this
-    /// deadlocks. A scoped request does nothing here: its scope completes it.
+    /// Completes a request from the RMA request calls that was dropped before
+    /// it completed, with `MPI_Wait` on its handle. A scoped request does
+    /// nothing here: its scope completes it.
     ///
     /// Maintainers: the `self.completed = true` assignment in
     /// `Request::wait_raw` is the only guard that prevents a double-wait here.

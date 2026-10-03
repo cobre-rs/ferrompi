@@ -155,6 +155,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MPI error code N`. An error converted on a worker thread could previously
   overlap `MPI_Finalize`, which MPI 3.1 libraries need not allow (Open MPI 4.1
   crashes).
+- **Dropping a request from a `scope` does not wait for it; the scope completes
+  it.** Only the RMA request calls (`rput`, `rget`, `raccumulate`) still return
+  a request that waits when dropped.
 
 ### Removed
 

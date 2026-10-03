@@ -9,7 +9,7 @@
 //! - **Generic API**: All operations work with any [`MpiDatatype`] (`f32`, `f64`, `i32`, `i64`, `u8`, `u32`, `u64`)
 //! - **Blocking collectives**: barrier, broadcast, reduce, allreduce, gather, scatter, allgather,
 //!   alltoall, scan, exscan, reduce\_scatter\_block, plus V-variants (gatherv, scatterv, allgatherv, alltoallv)
-//! - **Nonblocking collectives**: All 15 `i`-prefixed variants with [`Request`] handles
+//! - **Nonblocking collectives**: all 15 `i`-prefixed variants, created inside a [`scope`]
 //! - **Persistent collectives** (MPI 4.0, or Open MPI 5): `*_init` forms of every blocking collective except
 //!   `barrier`, plus five in-place forms, with [`PersistentRequest`] handles
 //! - **Large counts**: with an MPI 4.0 library, a count above `i32::MAX` uses MPI's `_c` call
@@ -288,11 +288,11 @@ pub enum ThreadLevel {
 /// without an MPI call.
 ///
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
-/// whose `Drop` calls MPI — an uncompleted [`Request`], a
-/// [`PersistentRequest`], a communicator other than the world, a window or
-/// window lock guard, a datatype, group, info object or user op — on a
-/// thread other than the one that called [`Mpi::init`]/[`Mpi::init_thread`]
-/// prints
+/// whose `Drop` calls MPI — an uncompleted request from the RMA request calls
+/// (feature `rma`), a [`PersistentRequest`], a communicator other than the
+/// world, a window or window lock guard, a datatype, group, info object or user
+/// op — on a thread other than the one that called
+/// [`Mpi::init`]/[`Mpi::init_thread`] prints
 /// `ferrompi: <Type> dropped on thread <name or id>` to stderr and aborts
 /// the process.
 ///
