@@ -98,26 +98,24 @@ fn main() -> Result<()> {
             println!("-----------------------------");
         }
 
-        let mut allreduce_send = vec![0.0f64; 500];
-        let mut allreduce_recv = vec![0.0f64; 500];
-
+        // The request owns the send and receive buffers reused for all all-reduces
         let mut persistent_allreduce =
-            world.allreduce_init(&allreduce_send, &mut allreduce_recv, ReduceOp::Sum)?;
+            world.allreduce_init(vec![0.0f64; 500], vec![0.0f64; 500], ReduceOp::Sum)?;
         let num_iterations = 100;
         let start_time = mpi.wtime();
 
         for iter in 0..num_iterations {
             // Each rank contributes its rank value
-            for x in allreduce_send.iter_mut() {
-                *x = rank as f64 + iter as f64;
-            }
+            persistent_allreduce
+                .send_buffer_mut()?
+                .fill(rank as f64 + iter as f64);
 
             persistent_allreduce.start()?;
             persistent_allreduce.wait()?;
 
             // Verify: sum should be (0 + 1 + ... + (size-1)) + iter*size
             let expected: f64 = (0..size).map(|r| r as f64 + iter as f64).sum();
-            for &x in &allreduce_recv {
+            for &x in persistent_allreduce.buffer()? {
                 assert!(
                     (x - expected).abs() < 1e-10,
                     "Allreduce mismatch at iter {}",

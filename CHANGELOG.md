@@ -143,6 +143,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass the `Vec`s by value and read results through `buffer()`.
 - **`bcast_init` is renamed `broadcast_init`**, following `broadcast` and
   `ibroadcast`. Migration: rename the call.
+- **The persistent reductions own their buffers and take
+  `op: impl Into<CollectiveOp<T>>`:** `allreduce_init`, `allreduce_init_inplace`,
+  `reduce_init`, `scan_init`, `exscan_init` and `reduce_scatter_block_init`
+  take `Vec<T>` buffers by value and accept a `ReduceOp` or a `&UserOp<T>`,
+  which the request keeps alive until it is freed. A bitwise or logical op on
+  `f32`/`f64` returns `Error::InvalidArgument` before MPI. Migration: pass the
+  `Vec`s by value; a `ReduceOp` argument still compiles.
 
 ### Added
 
@@ -163,6 +170,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an empty buffer, as for `gather` and `scatter`.
 - **`ireduce` checks `recv`'s length only at the root**; another rank may pass
   an empty buffer.
+- **`reduce_init` checks `recv`'s length only at the root**; another rank may
+  pass an empty `Vec`.
 - **After a skipped `MPI_Finalize` (a window still alive when `Mpi` is
   dropped), `wait`/`test` on a pending request still complete it, and
   `cancel` still reaches it,** instead of returning `Error::Finalized` and

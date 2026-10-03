@@ -3,8 +3,10 @@
 use crate::datatype::MpiDatatype;
 use crate::error::{Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL};
 use crate::ffi;
+use crate::op::OpRegistration;
 use crate::rt;
 use std::ffi::c_void;
+use std::sync::Arc;
 
 /// Describes the heap allocation of `v` for MPI FFI as `(pointer, count, tag)`,
 /// like `datatype::buf` but with the pointer taken from the `Vec` itself
@@ -108,12 +110,17 @@ pub(crate) fn vec_buf_mut<T: MpiDatatype>(v: &mut Vec<T>) -> (*mut c_void, i64, 
 /// - A drop on another thread while `Mpi` is being dropped either completes
 ///   before `MPI_Finalize`, because it holds a per-call count the finalizer
 ///   waits for, or makes no MPI call and leaks as above.
+/// - The drop does not assume that a failed wait completed the request
+///   (MPI-4.1 §9.4). If completing an active request fails, it makes no
+///   further MPI call and leaks the request handle, the buffers and the user
+///   op, which the request keeps alive (see [`UserOp`](crate::UserOp)).
 pub struct PersistentRequest<T> {
     handle: i64,
     active: bool,
     send: Vec<T>,
     buffer: Vec<T>,
     counts: Vec<i32>,
+    pub(crate) op: Option<Arc<OpRegistration>>,
 }
 
 impl<T> PersistentRequest<T> {
@@ -133,7 +140,17 @@ impl<T> PersistentRequest<T> {
             send,
             buffer,
             counts,
+            op: None,
         }
+    }
+
+    /// Leaks what MPI may still use: the buffers, the count and displacement
+    /// copy, and the user op the request keeps alive.
+    fn leak(&mut self) {
+        std::mem::forget(std::mem::take(&mut self.send));
+        std::mem::forget(std::mem::take(&mut self.buffer));
+        std::mem::forget(std::mem::take(&mut self.counts));
+        std::mem::forget(self.op.take());
     }
 
     /// Get the raw request handle (for advanced use).
@@ -410,27 +427,33 @@ impl<T> PersistentRequest<T> {
 
 impl<T> Drop for PersistentRequest<T> {
     /// Complete any in-flight operation, free the persistent request handle,
-    /// then free the buffers.
+    /// then free the buffers and release the user op.
     ///
     /// When `self.active` is `true` (i.e., `start()` was called but `wait()` has
     /// not yet returned), this calls `MPI_Wait` before freeing the handle.
     /// **`MPI_Wait` blocks** until the peer operation completes; if the peer is
     /// unreachable, this deadlocks. This two-step sequence upholds the MPI
     /// standard requirement that `MPI_Request_free` must not be called on an
-    /// active request. The buffers are freed last, once MPI is done with them.
+    /// active request. The buffers are freed last, once MPI is done with them,
+    /// and the user op after them: MPI may invoke it at every start.
     ///
     /// Once [`Mpi`](crate::Mpi) is being dropped, or after it was dropped, the
     /// drop makes no MPI call and leaks the request handle. An active
     /// request's buffers are leaked too, send and receive buffers and the copy
-    /// of a v-collective's count and displacement arrays, because MPI may still
-    /// use them; an inactive request's are freed, because MPI uses them only
-    /// after a new start, and no start can be issued any more.
+    /// of a v-collective's count and displacement arrays, and so is its user
+    /// op, because MPI may still use them; an inactive request's are freed,
+    /// because MPI uses them only after a new start, and no start can be issued
+    /// any more.
+    ///
+    /// The drop does not assume that a failed wait completed the request
+    /// (MPI-4.1 §9.4), unlike `wait`, `test` and `wait_all`, which trust the
+    /// completion MPI reports. It then leaks the same things and skips
+    /// `MPI_Request_free`: freeing an active collective request is erroneous,
+    /// and a point-to-point request's buffer must outlive MPI's use of it.
     fn drop(&mut self) {
         let Some(_call) = rt::drop_guard("PersistentRequest") else {
             if self.active {
-                std::mem::forget(std::mem::take(&mut self.send));
-                std::mem::forget(std::mem::take(&mut self.buffer));
-                std::mem::forget(std::mem::take(&mut self.counts));
+                self.leak();
             }
             return;
         };
@@ -443,7 +466,11 @@ impl<T> Drop for PersistentRequest<T> {
             // Calls the unguarded raw wrapper (not the lifecycle-guarded one):
             // rt::drop_guard above already handles the FFI lifecycle check, so
             // this call must still attempt the wait once reached.
-            unsafe { ffi::raw::ferrompi_wait(self.handle, std::ptr::null_mut()) };
+            let ret = unsafe { ffi::raw::ferrompi_wait(self.handle, std::ptr::null_mut()) };
+            if ret != 0 {
+                self.leak();
+                return;
+            }
         }
         // SAFETY: self.handle is a valid persistent MPI request handle. If it was
         // active, ferrompi_wait above has already completed the operation, so
@@ -458,7 +485,9 @@ mod tests {
     use super::{vec_buf, vec_buf_mut, PersistentRequest};
     use crate::datatype::MpiDatatype;
     use crate::error::Error;
+    use crate::op::OpRegistration;
     use std::mem::forget;
+    use std::sync::Arc;
 
     #[test]
     fn start_when_already_active_returns_error() {
@@ -468,6 +497,7 @@ mod tests {
             send: Vec::new(),
             buffer: Vec::new(),
             counts: Vec::new(),
+            op: None,
         };
         let result = req.start();
         assert!(
@@ -507,6 +537,7 @@ mod tests {
             send: Vec::new(),
             buffer: Vec::new(),
             counts: Vec::new(),
+            op: None,
         };
         let result = PersistentRequest::start_all(std::slice::from_mut(&mut req));
         assert!(
@@ -535,6 +566,7 @@ mod tests {
             send: Vec::new(),
             buffer: vec![0u8],
             counts: Vec::new(),
+            op: None,
         };
         let shared = req.buffer();
         assert!(
@@ -568,6 +600,7 @@ mod tests {
             send: vec![0u8],
             buffer: Vec::new(),
             counts: Vec::new(),
+            op: None,
         };
         let result = req.send_buffer_mut();
         assert!(
@@ -712,5 +745,48 @@ mod tests {
         drop(std::mem::take(&mut req.buffer));
         drop(std::mem::take(&mut req.counts));
         forget(req);
+    }
+
+    /// A drop does not assume that a failed raw wait completed the request, so
+    /// it must neither free the request nor release what MPI may still use.
+    /// Handle -1 names no request: the C layer refuses the wait without
+    /// calling MPI, which stands in for an `MPI_Wait` that returned an error.
+    #[test]
+    #[cfg_attr(miri, ignore = "calls the C layer")]
+    fn drop_after_a_failed_wait_leaks_the_buffers_and_the_op() {
+        let registration = Arc::new(OpRegistration { slot: 9 });
+        let mut send = vec![0u64; 4];
+        let mut recv = vec![0u64; 4];
+        let mut counts = vec![0i32; 4];
+        let (sp, rp, cp) = (send.as_mut_ptr(), recv.as_mut_ptr(), counts.as_mut_ptr());
+        let mut req = PersistentRequest::new_pair(-1, send, recv, counts);
+        req.op = Some(Arc::clone(&registration));
+        req.active = true;
+        drop(req);
+        assert_eq!(Arc::strong_count(&registration), 2);
+        // SAFETY: the failed wait made the drop forget the three `Vec`s (each
+        // of length and capacity four, as built above) and the op clone, so
+        // each allocation is live and has no other owner, and the leaked strong
+        // count is the one released here.
+        unsafe {
+            drop(Vec::from_raw_parts(sp, 4, 4));
+            drop(Vec::from_raw_parts(rp, 4, 4));
+            drop(Vec::from_raw_parts(cp, 4, 4));
+            Arc::decrement_strong_count(Arc::as_ptr(&registration));
+        }
+        assert_eq!(Arc::strong_count(&registration), 1);
+    }
+
+    /// An inactive request releases its op clone with the request, after the
+    /// free. Handle -1 makes the free a no-op in the C layer.
+    #[test]
+    #[cfg_attr(miri, ignore = "calls the C layer")]
+    fn drop_of_an_inactive_request_releases_the_op() {
+        let registration = Arc::new(OpRegistration { slot: 9 });
+        let mut req = PersistentRequest::new(-1, vec![0u8; 4]);
+        req.op = Some(Arc::clone(&registration));
+        assert_eq!(Arc::strong_count(&registration), 2);
+        drop(req);
+        assert_eq!(Arc::strong_count(&registration), 1);
     }
 }

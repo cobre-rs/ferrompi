@@ -3,11 +3,11 @@
 use crate::comm::{
     check_rank_slots, check_same_len, rank_block, scatter_inplace_args, Communicator,
 };
-use crate::datatype::{buf, buf_mut, MpiDatatype};
+use crate::datatype::MpiDatatype;
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::op::CollectiveOp;
 use crate::persistent::{vec_buf, vec_buf_mut, PersistentRequest};
-use crate::ReduceOp;
 
 impl Communicator {
     /// Initialize a persistent broadcast operation.
@@ -62,7 +62,25 @@ impl Communicator {
 
     /// Initialize a persistent all-reduce operation.
     ///
+    /// The returned handle can be started multiple times with `start()`.
     /// Requires MPI 4.0, or Open MPI 5.
+    ///
+    /// # Arguments
+    ///
+    /// * `send` - Data to send from this process, owned by the request; write the next
+    ///   iteration's values through `send_buffer_mut` while the request is inactive
+    /// * `recv` - Buffer for the result, owned by the request, with `send.len()` elements;
+    ///   read it through `buffer` while the request is inactive
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (the
+    ///   request keeps the op alive until it is freed), or a [`CollectiveOp`]
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`
     ///
     /// # Example
     ///
@@ -70,65 +88,103 @@ impl Communicator {
     /// # use ferrompi::{Mpi, ReduceOp};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1.0f64; 10];
-    /// let mut recv = vec![0.0f64; 10];
-    /// let mut persistent = world.allreduce_init(&send, &mut recv, ReduceOp::Sum).unwrap();
-    /// for _ in 0..100 {
+    /// let mut persistent = world
+    ///     .allreduce_init(vec![0.0f64; 10], vec![0.0f64; 10], ReduceOp::Sum)
+    ///     .unwrap();
+    /// for iter in 0..100 {
+    ///     persistent.send_buffer_mut().unwrap().fill(iter as f64);
     ///     persistent.start().unwrap();
     ///     persistent.wait().unwrap();
+    ///     assert_eq!(persistent.buffer().unwrap()[0], (iter * world.size()) as f64);
     /// }
     /// ```
-    pub fn allreduce_init<T: MpiDatatype>(
+    pub fn allreduce_init<'a, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        op: ReduceOp,
+        send: Vec<T>,
+        mut recv: Vec<T>,
+        op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<PersistentRequest<T>> {
+        let op = op.into();
+        let code = op.code(T::TAG)?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
-        let (sp, n, dt) = buf(send);
-        let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]). The returned PersistentRequest records both pointers until the
-        // request is freed and does not borrow either slice; keeping both alive and
-        // untouched between start() and completion is the caller's documented obligation,
-        // which this signature does not enforce.
+        let (sp, n, dt) = vec_buf(&send);
+        let (rp, _, _) = vec_buf_mut(&mut recv);
+        // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
+        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
+        // sits between it and its allocation and the accessors' slices are its children.
+        // The two Vecs are distinct allocations, or both empty. send.len() == recv.len()
+        // is verified above. The returned request owns both Vecs until it is freed, and
+        // moving a `Vec` leaves its allocation in place. The allocations are never
+        // resized, because the accessors hand out slices only. From start() to
+        // completion MPI is their only user, because the accessors refuse while the
+        // request is active, and Drop leaks them when MPI may still use them. A user op
+        // is cloned into the request below, so its closure outlives every start. If the
+        // call fails, MPI recorded nothing (or the shim freed the inactive request), and
+        // both Vecs are dropped here.
         let ret = unsafe {
-            ffi::ferrompi_allreduce_init(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
+            ffi::ferrompi_allreduce_init(sp, rp, n, dt, code, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "allreduce_init")?;
-        Ok(PersistentRequest::new(request_handle, Vec::new()))
+        let mut request = PersistentRequest::new_pair(request_handle, send, recv, Vec::new());
+        request.op = op.registration();
+        Ok(request)
     }
 
     /// Initialize a persistent in-place all-reduce operation.
     ///
     /// Requires MPI 4.0, or Open MPI 5.
-    pub fn allreduce_init_inplace<T: MpiDatatype>(
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Buffer, owned by the request; it is both the send contribution and the
+    ///   receive buffer. Reach it with `buffer` and `buffer_mut` while the request is
+    ///   inactive, or take it back with `into_buffer`
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (the
+    ///   request keeps the op alive until it is freed), or a [`CollectiveOp`]
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `data.len()` exceeds `i32::MAX`
+    pub fn allreduce_init_inplace<'a, T: MpiDatatype>(
         &self,
-        data: &mut [T],
-        op: ReduceOp,
+        mut data: Vec<T>,
+        op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<PersistentRequest<T>> {
+        let op = op.into();
+        let code = op.code(T::TAG)?;
         let mut request_handle: i64 = 0;
-        let (p, n, dt) = buf_mut(data);
-        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
-        // this NULL is unambiguous); ferrompi_allreduce_init maps it to MPI_IN_PLACE, so data
-        // serves as both send and receive buffer. The returned PersistentRequest records
-        // `data`'s pointer until the request is freed and does not borrow it; keeping it
-        // alive and untouched between start() and completion is the caller's documented
-        // obligation, which this signature does not enforce.
+        let (p, n, dt) = vec_buf_mut(&mut data);
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, and `p` comes from
+        // `Vec::as_mut_ptr`, so no slice reference sits between it and the allocation and
+        // the accessors' slices are its children. NULL sendbuf is the in-place marker (a
+        // Vec's pointer is never null, so this NULL is unambiguous);
+        // ferrompi_allreduce_init maps it to MPI_IN_PLACE, so data serves as both send and
+        // receive buffer. The returned request owns `data` until it is freed, and moving a
+        // `Vec` leaves its allocation in place. The allocation is never resized, because
+        // the accessors hand out slices only. From start() to completion MPI is its only
+        // user, because the accessors refuse while the request is active, and Drop leaks
+        // it when MPI may still use it. A user op is cloned into the request below, so its
+        // closure outlives every start. If the call fails, MPI recorded nothing (or the
+        // shim freed the inactive request), and `data` is dropped here.
         let ret = unsafe {
             ffi::ferrompi_allreduce_init(
                 std::ptr::null(),
                 p,
                 n,
                 dt,
-                op as i32,
+                code,
                 self.handle,
                 &mut request_handle,
             )
         };
         Error::check_with_op(ret, "allreduce_init_inplace")?;
-        Ok(PersistentRequest::new(request_handle, Vec::new()))
+        let mut request = PersistentRequest::new(request_handle, data);
+        request.op = op.registration();
+        Ok(request)
     }
 
     /// Initialize a persistent reduce operation.
@@ -138,16 +194,22 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `send` - Send buffer
-    /// * `recv` - Receive buffer; must have `send.len()` elements on every
-    ///   rank (its contents matter only at the root)
-    /// * `op` - Reduction operation
+    /// * `send` - Send buffer, owned by the request; write the next iteration's values
+    ///   through `send_buffer_mut` while the request is inactive
+    /// * `recv` - Buffer for the result at the root, owned by the request, which must have
+    ///   `send.len()` elements there; ignored at other ranks, where it may be empty. Read it
+    ///   through `buffer` while the request is inactive
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (the
+    ///   request keeps the op alive until it is freed), or a [`CollectiveOp`]
     /// * `root` - Rank of the root process
     ///
     /// # Errors
     ///
-    /// Returns [`Error::BufferSize`] if `recv.len() != send.len()`, on
-    /// any rank.
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::BufferSize`] if this rank is `root` and `recv.len() != send.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`
     ///
     /// # Example
     ///
@@ -155,45 +217,50 @@ impl Communicator {
     /// # use ferrompi::{Mpi, ReduceOp};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1.0f64; 10];
-    /// let mut recv = vec![0.0f64; 10];
-    /// let mut persistent = world.reduce_init(&send, &mut recv, ReduceOp::Sum, 0).unwrap();
+    /// let recv = if world.rank() == 0 { vec![0.0f64; 10] } else { Vec::new() };
+    /// let mut persistent = world
+    ///     .reduce_init(vec![1.0f64; 10], recv, ReduceOp::Sum, 0)
+    ///     .unwrap();
     /// for _ in 0..100 {
     ///     persistent.start().unwrap();
     ///     persistent.wait().unwrap();
     /// }
     /// ```
-    pub fn reduce_init<T: MpiDatatype>(
+    pub fn reduce_init<'a, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        op: ReduceOp,
+        send: Vec<T>,
+        mut recv: Vec<T>,
+        op: impl Into<CollectiveOp<'a, T>>,
         root: i32,
     ) -> Result<PersistentRequest<T>> {
-        check_same_len("recv", send.len(), recv.len())?;
+        let op = op.into();
+        let code = op.code(T::TAG)?;
+        if self.rank == root {
+            check_same_len("recv", send.len(), recv.len())?;
+        }
         let mut request_handle: i64 = 0;
-        let (sp, n, dt) = buf(send);
-        let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]); recv is ignored by MPI at non-root. The returned
-        // PersistentRequest records both pointers until the request is freed and does not
-        // borrow either slice; keeping both alive and untouched between start() and
-        // completion is the caller's documented obligation, which this signature does not
-        // enforce.
+        let (sp, n, dt) = vec_buf(&send);
+        let (rp, _, _) = vec_buf_mut(&mut recv);
+        // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
+        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
+        // sits between it and its allocation and the accessors' slices are its children.
+        // The two Vecs are distinct allocations, or `recv` is empty. send.len() ==
+        // recv.len() is verified above at the root; MPI ignores recvbuf at every other
+        // rank (MPI-4.1 section 6.9.1), where `recv` may be empty. The returned request
+        // owns both Vecs until it is freed, and moving a `Vec` leaves its allocation in
+        // place. The allocations are never resized, because the accessors hand out slices
+        // only. From start() to completion MPI is their only user, because the accessors
+        // refuse while the request is active, and Drop leaks them when MPI may still use
+        // them. A user op is cloned into the request below, so its closure outlives every
+        // start. If the call fails, MPI recorded nothing (or the shim freed the inactive
+        // request), and both Vecs are dropped here.
         let ret = unsafe {
-            ffi::ferrompi_reduce_init(
-                sp,
-                rp,
-                n,
-                dt,
-                op as i32,
-                root,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_reduce_init(sp, rp, n, dt, code, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "reduce_init")?;
-        Ok(PersistentRequest::new(request_handle, Vec::new()))
+        let mut request = PersistentRequest::new_pair(request_handle, send, recv, Vec::new());
+        request.op = op.registration();
+        Ok(request)
     }
 
     /// Initialize a persistent gather operation.
@@ -412,9 +479,20 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `send` - Send buffer
-    /// * `recv` - Receive buffer
-    /// * `op` - Reduction operation
+    /// * `send` - Send buffer, owned by the request; write the next iteration's values
+    ///   through `send_buffer_mut` while the request is inactive
+    /// * `recv` - Receive buffer, owned by the request, with `send.len()` elements; read it
+    ///   through `buffer` while the request is inactive
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (the
+    ///   request keeps the op alive until it is freed), or a [`CollectiveOp`]
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`
     ///
     /// # Example
     ///
@@ -422,34 +500,45 @@ impl Communicator {
     /// # use ferrompi::{Mpi, ReduceOp};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1.0f64; 10];
-    /// let mut recv = vec![0.0f64; 10];
-    /// let mut persistent = world.scan_init(&send, &mut recv, ReduceOp::Sum).unwrap();
+    /// let mut persistent = world
+    ///     .scan_init(vec![1.0f64; 10], vec![0.0f64; 10], ReduceOp::Sum)
+    ///     .unwrap();
     /// for _ in 0..100 {
     ///     persistent.start().unwrap();
     ///     persistent.wait().unwrap();
     /// }
     /// ```
-    pub fn scan_init<T: MpiDatatype>(
+    pub fn scan_init<'a, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        op: ReduceOp,
+        send: Vec<T>,
+        mut recv: Vec<T>,
+        op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<PersistentRequest<T>> {
+        let op = op.into();
+        let code = op.code(T::TAG)?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
-        let (sp, n, dt) = buf(send);
-        let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]). The returned PersistentRequest records both pointers until the
-        // request is freed and does not borrow either slice; keeping both alive and
-        // untouched between start() and completion is the caller's documented obligation,
-        // which this signature does not enforce.
+        let (sp, n, dt) = vec_buf(&send);
+        let (rp, _, _) = vec_buf_mut(&mut recv);
+        // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
+        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
+        // sits between it and its allocation and the accessors' slices are its children.
+        // The two Vecs are distinct allocations, or both empty. send.len() == recv.len()
+        // is verified above. The returned request owns both Vecs until it is freed, and
+        // moving a `Vec` leaves its allocation in place. The allocations are never
+        // resized, because the accessors hand out slices only. From start() to
+        // completion MPI is their only user, because the accessors refuse while the
+        // request is active, and Drop leaks them when MPI may still use them. A user op
+        // is cloned into the request below, so its closure outlives every start. If the
+        // call fails, MPI recorded nothing (or the shim freed the inactive request), and
+        // both Vecs are dropped here.
         let ret = unsafe {
-            ffi::ferrompi_scan_init(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
+            ffi::ferrompi_scan_init(sp, rp, n, dt, code, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "scan_init")?;
-        Ok(PersistentRequest::new(request_handle, Vec::new()))
+        let mut request = PersistentRequest::new_pair(request_handle, send, recv, Vec::new());
+        request.op = op.registration();
+        Ok(request)
     }
 
     /// Initialize a persistent exclusive scan (exclusive prefix reduction) operation.
@@ -459,9 +548,21 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `send` - Send buffer
-    /// * `recv` - Receive buffer (undefined on rank 0 after operation)
-    /// * `op` - Reduction operation
+    /// * `send` - Send buffer, owned by the request; write the next iteration's values
+    ///   through `send_buffer_mut` while the request is inactive
+    /// * `recv` - Receive buffer, owned by the request, with `send.len()` elements
+    ///   (undefined on rank 0 after operation); read it through `buffer` while the request
+    ///   is inactive
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (the
+    ///   request keeps the op alive until it is freed), or a [`CollectiveOp`]
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`
     ///
     /// # Example
     ///
@@ -469,35 +570,45 @@ impl Communicator {
     /// # use ferrompi::{Mpi, ReduceOp};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1.0f64; 10];
-    /// let mut recv = vec![0.0f64; 10];
-    /// let mut persistent = world.exscan_init(&send, &mut recv, ReduceOp::Sum).unwrap();
+    /// let mut persistent = world
+    ///     .exscan_init(vec![1.0f64; 10], vec![0.0f64; 10], ReduceOp::Sum)
+    ///     .unwrap();
     /// for _ in 0..100 {
     ///     persistent.start().unwrap();
     ///     persistent.wait().unwrap();
     /// }
     /// ```
-    pub fn exscan_init<T: MpiDatatype>(
+    pub fn exscan_init<'a, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        op: ReduceOp,
+        send: Vec<T>,
+        mut recv: Vec<T>,
+        op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<PersistentRequest<T>> {
+        let op = op.into();
+        let code = op.code(T::TAG)?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
-        let (sp, n, dt) = buf(send);
-        let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]). MPI leaves recv undefined on rank 0, documented above. The
-        // returned PersistentRequest records both pointers until the request is freed and
-        // does not borrow either slice; keeping both alive and untouched between start() and
-        // completion is the caller's documented obligation, which this signature does not
-        // enforce.
+        let (sp, n, dt) = vec_buf(&send);
+        let (rp, _, _) = vec_buf_mut(&mut recv);
+        // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
+        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
+        // sits between it and its allocation and the accessors' slices are its children.
+        // The two Vecs are distinct allocations, or both empty. send.len() == recv.len()
+        // is verified above. MPI leaves recv undefined on rank 0, documented above. The
+        // returned request owns both Vecs until it is freed, and moving a `Vec` leaves
+        // its allocation in place. The allocations are never resized, because the
+        // accessors hand out slices only. From start() to completion MPI is their only
+        // user, because the accessors refuse while the request is active, and Drop leaks
+        // them when MPI may still use them. A user op is cloned into the request below,
+        // so its closure outlives every start. If the call fails, MPI recorded nothing
+        // (or the shim freed the inactive request), and both Vecs are dropped here.
         let ret = unsafe {
-            ffi::ferrompi_exscan_init(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
+            ffi::ferrompi_exscan_init(sp, rp, n, dt, code, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "exscan_init")?;
-        Ok(PersistentRequest::new(request_handle, Vec::new()))
+        let mut request = PersistentRequest::new_pair(request_handle, send, recv, Vec::new());
+        request.op = op.registration();
+        Ok(request)
     }
 
     /// Initialize a persistent all-to-all operation.
@@ -577,9 +688,23 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `send` - Send buffer (must contain `recvcount * size` elements)
-    /// * `recv` - Receive buffer
-    /// * `op` - Reduction operation
+    /// * `send` - Send buffer (must contain `recvcount * size` elements), owned by the
+    ///   request; write the next iteration's values through `send_buffer_mut` while the
+    ///   request is inactive
+    /// * `recv` - Receive buffer, owned by the request; read it through `buffer` while the
+    ///   request is inactive
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (the
+    ///   request keeps the op alive until it is freed), or a [`CollectiveOp`]
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::InvalidArgument`] if `send.len()` is not evenly divisible by the
+    ///   communicator size
+    /// - [`Error::BufferSize`] if `send.len() != recv.len() * size`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`
     ///
     /// # Example
     ///
@@ -588,46 +713,57 @@ impl Communicator {
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// let size = world.size() as usize;
-    /// let send = vec![1.0f64; 10 * size];
-    /// let mut recv = vec![0.0f64; 10];
-    /// let mut persistent = world.reduce_scatter_block_init(&send, &mut recv, ReduceOp::Sum).unwrap();
+    /// let mut persistent = world
+    ///     .reduce_scatter_block_init(vec![1.0f64; 10 * size], vec![0.0f64; 10], ReduceOp::Sum)
+    ///     .unwrap();
     /// for _ in 0..100 {
     ///     persistent.start().unwrap();
     ///     persistent.wait().unwrap();
     /// }
     /// ```
-    pub fn reduce_scatter_block_init<T: MpiDatatype>(
+    pub fn reduce_scatter_block_init<'a, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        op: ReduceOp,
+        send: Vec<T>,
+        mut recv: Vec<T>,
+        op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<PersistentRequest<T>> {
+        let op = op.into();
+        let code = op.code(T::TAG)?;
         check_same_len(
             "recv",
             rank_block("send", send.len(), self.size)?,
             recv.len(),
         )?;
         let mut request_handle: i64 = 0;
-        let (sp, _, _) = buf(send);
-        let (rp, n, dt) = buf_mut(recv);
-        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len() *
-        // size is verified above. The returned PersistentRequest records both pointers until
-        // the request is freed and does not borrow either slice; keeping both alive and
-        // untouched between start() and completion is the caller's documented obligation,
-        // which this signature does not enforce.
+        let (sp, _, _) = vec_buf(&send);
+        let (rp, n, dt) = vec_buf_mut(&mut recv);
+        // SAFETY: `sp`, `rp` and `n` describe the heap allocations of `send` and `recv`,
+        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
+        // sits between it and its allocation and the accessors' slices are its children.
+        // The two Vecs are distinct allocations, or both empty. send.len() == recv.len() *
+        // size is verified above. The returned request owns both Vecs until it is freed,
+        // and moving a `Vec` leaves its allocation in place. The allocations are never
+        // resized, because the accessors hand out slices only. From start() to
+        // completion MPI is their only user, because the accessors refuse while the
+        // request is active, and Drop leaks them when MPI may still use them. A user op
+        // is cloned into the request below, so its closure outlives every start. If the
+        // call fails, MPI recorded nothing (or the shim freed the inactive request), and
+        // both Vecs are dropped here.
         let ret = unsafe {
             ffi::ferrompi_reduce_scatter_block_init(
                 sp,
                 rp,
                 n,
                 dt,
-                op as i32,
+                code,
                 self.handle,
                 &mut request_handle,
             )
         };
         Error::check_with_op(ret, "reduce_scatter_block_init")?;
-        Ok(PersistentRequest::new(request_handle, Vec::new()))
+        let mut request = PersistentRequest::new_pair(request_handle, send, recv, Vec::new());
+        request.op = op.registration();
+        Ok(request)
     }
 
     /// Initialize a persistent in-place gather operation. At root, `data` is both
@@ -978,8 +1114,8 @@ mod tests {
     fn allreduce_init_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
-        let mut recv = vec![0.0f64; 5];
-        let result = comm.allreduce_init(&send, &mut recv, ReduceOp::Sum);
+        let recv = vec![0.0f64; 5];
+        let result = comm.allreduce_init(send, recv, ReduceOp::Sum);
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -994,8 +1130,8 @@ mod tests {
     fn reduce_init_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
-        let mut recv = vec![0.0f64; 5];
-        let result = comm.reduce_init(&send, &mut recv, ReduceOp::Sum, 0);
+        let recv = vec![0.0f64; 5];
+        let result = comm.reduce_init(send, recv, ReduceOp::Sum, 0);
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1010,8 +1146,8 @@ mod tests {
     fn scan_init_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
-        let mut recv = vec![0.0f64; 5];
-        let result = comm.scan_init(&send, &mut recv, ReduceOp::Sum);
+        let recv = vec![0.0f64; 5];
+        let result = comm.scan_init(send, recv, ReduceOp::Sum);
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1026,8 +1162,8 @@ mod tests {
     fn exscan_init_mismatched_buffers_returns_buffer_size() {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
-        let mut recv = vec![0.0f64; 5];
-        let result = comm.exscan_init(&send, &mut recv, ReduceOp::Sum);
+        let recv = vec![0.0f64; 5];
+        let result = comm.exscan_init(send, recv, ReduceOp::Sum);
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1035,6 +1171,29 @@ mod tests {
                 required: 10,
                 actual: 5
             })
+        ));
+    }
+
+    #[test]
+    fn allreduce_init_float_bitwise_op_returns_invalid_argument() {
+        let comm = test_comm(0, 1);
+        let result = comm.allreduce_init(vec![1.0f64; 4], vec![0.0f64; 4], ReduceOp::BitwiseOr);
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument {
+                arg: "op",
+                reason: "bitwise and logical ops do not apply to floating-point types"
+            })
+        ));
+    }
+
+    #[test]
+    fn allreduce_init_bad_op_with_short_recv_returns_invalid_argument_for_op() {
+        let comm = test_comm(0, 1);
+        let result = comm.allreduce_init(vec![1.0f64; 4], vec![0.0f64; 3], ReduceOp::LogicalAnd);
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument { arg: "op", .. })
         ));
     }
 

@@ -116,10 +116,8 @@ fn main() {
     // Test 2: allreduce_init (Sum)
     // ========================================================================
     {
-        let send = vec![rank as f64; 5];
-        let mut recv = vec![0.0f64; 5];
         let mut req = world
-            .allreduce_init(&send, &mut recv, ReduceOp::Sum)
+            .allreduce_init(vec![rank as f64; 5], vec![0.0f64; 5], ReduceOp::Sum)
             .expect("allreduce_init failed");
 
         req.start().expect("allreduce_init start failed");
@@ -127,7 +125,7 @@ fn main() {
 
         // Sum of ranks: 0 + 1 + ... + (size-1) = size*(size-1)/2
         let expected = (size * (size - 1) / 2) as f64;
-        for (i, &v) in recv.iter().enumerate() {
+        for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
             assert!(
                 (v - expected).abs() < 1e-10,
                 "rank {rank}: allreduce_init recv[{i}] = {v}, expected {expected}"
@@ -145,16 +143,15 @@ fn main() {
     // Test 3: allreduce_init_inplace (Sum)
     // ========================================================================
     {
-        let mut data = vec![rank as f64; 5];
         let mut req = world
-            .allreduce_init_inplace(&mut data, ReduceOp::Sum)
+            .allreduce_init_inplace(vec![rank as f64; 5], ReduceOp::Sum)
             .expect("allreduce_init_inplace failed");
 
         req.start().expect("allreduce_init_inplace start failed");
         req.wait().expect("allreduce_init_inplace wait failed");
 
         let expected = (size * (size - 1) / 2) as f64;
-        for (i, &v) in data.iter().enumerate() {
+        for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
             assert!(
                 (v - expected).abs() < 1e-10,
                 "rank {rank}: allreduce_init_inplace data[{i}] = {v}, expected {expected}"
@@ -212,11 +209,19 @@ fn main() {
     // Test 5: reduce_init (Sum, to root=0)
     // ========================================================================
     {
-        let send = vec![(rank + 1) as f64; 4];
-        let mut recv = vec![0.0f64; 4];
-        let mut req = world
-            .reduce_init(&send, &mut recv, ReduceOp::Sum, 0)
-            .expect("reduce_init failed");
+        // recv is significant only at the root; every other rank passes an empty Vec.
+        let recv = if rank == 0 {
+            vec![0.0f64; 4]
+        } else {
+            Vec::new()
+        };
+        let init = world.reduce_init(vec![(rank + 1) as f64; 4], recv, ReduceOp::Sum, 0);
+        common::check(
+            &world,
+            init.is_ok(),
+            "reduce_init accepts an empty recv off the root",
+        );
+        let mut req = init.expect("reduce_init failed");
 
         req.start().expect("reduce_init start failed");
         req.wait().expect("reduce_init wait failed");
@@ -224,7 +229,7 @@ fn main() {
         if rank == 0 {
             // Sum of 1 + 2 + ... + size = size*(size+1)/2
             let expected = (size * (size + 1) / 2) as f64;
-            for (i, &v) in recv.iter().enumerate() {
+            for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
                 assert!(
                     (v - expected).abs() < 1e-10,
                     "reduce_init recv[{i}] = {v}, expected {expected}"
@@ -318,10 +323,8 @@ fn main() {
     // Test 8: scan_init (inclusive prefix sum)
     // ========================================================================
     {
-        let send = vec![1.0f64; 3];
-        let mut recv = vec![0.0f64; 3];
         let mut req = world
-            .scan_init(&send, &mut recv, ReduceOp::Sum)
+            .scan_init(vec![1.0f64; 3], vec![0.0f64; 3], ReduceOp::Sum)
             .expect("scan_init failed");
 
         req.start().expect("scan_init start failed");
@@ -329,7 +332,7 @@ fn main() {
 
         // On rank i, inclusive scan of 1.0 from all ranks 0..=i => (i+1)
         let expected = (rank + 1) as f64;
-        for (i, &v) in recv.iter().enumerate() {
+        for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
             assert!(
                 (v - expected).abs() < 1e-10,
                 "rank {rank}: scan_init recv[{i}] = {v}, expected {expected}"
@@ -347,10 +350,8 @@ fn main() {
     // Test 9: exscan_init (exclusive prefix sum)
     // ========================================================================
     {
-        let send = vec![1.0f64; 3];
-        let mut recv = vec![0.0f64; 3];
         let mut req = world
-            .exscan_init(&send, &mut recv, ReduceOp::Sum)
+            .exscan_init(vec![1.0f64; 3], vec![0.0f64; 3], ReduceOp::Sum)
             .expect("exscan_init failed");
 
         req.start().expect("exscan_init start failed");
@@ -360,7 +361,7 @@ fn main() {
         // On rank 0, result is undefined per MPI standard — skip assertion
         if rank > 0 {
             let expected = rank as f64;
-            for (i, &v) in recv.iter().enumerate() {
+            for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
                 assert!(
                     (v - expected).abs() < 1e-10,
                     "rank {rank}: exscan_init recv[{i}] = {v}, expected {expected}"
@@ -641,11 +642,12 @@ fn main() {
         let block_size = 3usize;
         let sz = size as usize;
         // Each rank contributes [1.0; block_size * size]
-        let send = vec![1.0f64; block_size * sz];
-        let mut recv = vec![0.0f64; block_size];
-
         let mut req = world
-            .reduce_scatter_block_init(&send, &mut recv, ReduceOp::Sum)
+            .reduce_scatter_block_init(
+                vec![1.0f64; block_size * sz],
+                vec![0.0f64; block_size],
+                ReduceOp::Sum,
+            )
             .expect("reduce_scatter_block_init failed");
 
         req.start().expect("reduce_scatter_block_init start failed");
@@ -653,7 +655,7 @@ fn main() {
 
         // Each element is the sum across all ranks of 1.0 => size
         let expected = size as f64;
-        for (i, &v) in recv.iter().enumerate() {
+        for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
             assert!(
                 (v - expected).abs() < 1e-10,
                 "rank {rank}: reduce_scatter_block_init recv[{i}] = {v}, expected {expected}"
@@ -671,10 +673,8 @@ fn main() {
     // Test 16: PersistentRequest::test() polling
     // ========================================================================
     {
-        let send = vec![rank as f64; 5];
-        let mut recv = vec![0.0f64; 5];
         let mut req = world
-            .allreduce_init(&send, &mut recv, ReduceOp::Sum)
+            .allreduce_init(vec![rank as f64; 5], vec![0.0f64; 5], ReduceOp::Sum)
             .expect("allreduce_init for test() polling failed");
 
         // test() on inactive request should return true immediately
@@ -706,7 +706,7 @@ fn main() {
 
         // Verify result
         let expected = (size * (size - 1) / 2) as f64;
-        for (i, &v) in recv.iter().enumerate() {
+        for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
             assert!(
                 (v - expected).abs() < 1e-10,
                 "rank {rank}: test() polling recv[{i}] = {v}, expected {expected}"
@@ -738,11 +738,8 @@ fn main() {
                 *x = (i + 1) as f64 * 10.0;
             }
         }
-        let allreduce_send = vec![rank as f64; 3];
-        let mut allreduce_recv = vec![0.0f64; 3];
-
         let req_allreduce = world
-            .allreduce_init(&allreduce_send, &mut allreduce_recv, ReduceOp::Sum)
+            .allreduce_init(vec![rank as f64; 3], vec![0.0f64; 3], ReduceOp::Sum)
             .expect("allreduce_init for start_all failed");
 
         // Use start_all and wait_all
@@ -766,8 +763,6 @@ fn main() {
         }
 
         // We moved the requests into the array, so verify via the array.
-        // The broadcast request owns its buffer; the allreduce still borrows
-        // allreduce_recv.
         // Verification of the broadcast result:
         for (i, &x) in requests[0].buffer().expect("buffer").iter().enumerate() {
             assert!(
@@ -779,7 +774,7 @@ fn main() {
 
         // Verification of the allreduce result:
         let expected = (size * (size - 1) / 2) as f64;
-        for (i, &v) in allreduce_recv.iter().enumerate() {
+        for (i, &v) in requests[1].buffer().expect("buffer").iter().enumerate() {
             assert!(
                 (v - expected).abs() < 1e-10,
                 "rank {rank}: start_all allreduce_recv[{i}] = {v}, expected {expected}"

@@ -189,7 +189,8 @@ enum CollectiveRepr<'a> {
 /// The operation of a reducing collective on elements of type `T`.
 ///
 /// For a primitive `T` ([`MpiDatatype`]) it is built from a [`ReduceOp`], or
-/// from a `&`[`UserOp<T>`], which the call borrows. For a pair `T`
+/// from a `&`[`UserOp<T>`], which a blocking or nonblocking call borrows and a
+/// persistent reduction keeps alive until its request is freed. For a pair `T`
 /// ([`MpiIndexedDatatype`]) the only operations are
 /// [`MAX_LOC`](Self::MAX_LOC) and [`MIN_LOC`](Self::MIN_LOC), so `MAX_LOC` or
 /// `MIN_LOC` on a primitive type, or any other predefined op on a pair type,
@@ -273,6 +274,13 @@ impl<T> CollectiveOp<'_, T> {
         match self.op {
             CollectiveRepr::Builtin(op) => check_op(op, tag).map(|()| op.code()),
             CollectiveRepr::User(registration) => Ok(registration.code()),
+        }
+    }
+
+    pub(crate) fn registration(&self) -> Option<Arc<OpRegistration>> {
+        match self.op {
+            CollectiveRepr::Builtin(_) => None,
+            CollectiveRepr::User(registration) => Some(Arc::clone(registration)),
         }
     }
 }
@@ -528,22 +536,26 @@ pub unsafe extern "C" fn ferrompi_op_drop_closure(slot: i32) {
 ///
 /// # Dropping
 ///
-/// Dropping the last `UserOp` handle frees the op (`MPI_Op_free`).
+/// The op is freed (`MPI_Op_free`) when its last holder is dropped: the last
+/// `UserOp` handle, or the last persistent request using the op.
 ///
 /// - At `Single`/`Funneled`, drop it on the thread that initialized MPI;
 ///   another thread aborts the process.
 /// - At `Serialized`, the drop is an MPI call, which the program serializes
 ///   like any other.
-/// - Once [`Mpi`](crate::Mpi) is being dropped, or after it was dropped, the
-///   drop makes no MPI call.
+/// - A drop that starts once [`Mpi`](crate::Mpi) is being dropped, or after,
+///   makes no MPI call and does not abort.
 /// - A nonblocking reduction borrows the op until its scope returns, so it
 ///   cannot be dropped while the reduction is pending.
+/// - A persistent reduction initialized with the op keeps it alive until the
+///   request is freed, so dropping every `UserOp` handle earlier frees
+///   nothing; the op is freed with the last request that uses it.
 ///
 /// # Slot-table limit
 ///
 /// At most 16 `UserOp` instances may be live concurrently per process, and a
-/// slot is held until the `UserOp` is dropped. Attempting to create a
-/// seventeenth returns [`Error::ResourceExhausted`] with resource
+/// slot is held until the op is freed, as described under Dropping. Attempting
+/// to create a seventeenth returns [`Error::ResourceExhausted`] with resource
 /// [`ResourceKind::Operation`](crate::ResourceKind::Operation).
 ///
 /// If a `UserOp` outlives the `Mpi` handle, finalizing MPI frees its op and

@@ -1,7 +1,7 @@
 //! Regression test for the `count > INT_MAX` guard across the 30 scalar-count
-//! shims (blocking/nonblocking p2p and collectives, plus every blocking and
-//! nonblocking reduction with a user op), the 6 v-collective shims, and the 7
-//! RMA shims.
+//! shims (blocking/nonblocking p2p and collectives, plus every blocking,
+//! nonblocking and persistent reduction with a user op), the 6 v-collective
+//! shims, and the 7 RMA shims.
 //!
 //! On MPI < 4, a scalar count above `INT_MAX` must return
 //! `Err(Error::Mpi { class: MpiErrorClass::Count, .. })` before any MPI
@@ -11,11 +11,12 @@
 //! before allocating the two 4 GiB buffers a full run would otherwise need.
 //!
 //! V-collectives have no `_c` path on any MPI version, and a user op's classic
-//! function takes an `int` length, so both are checked before that skip. RMA
-//! is exercised through a raw `extern "C"` call to `ferrompi_put`, not the
-//! safe `Win::put` API: the window's bounds check rejects a mismatched
-//! `target_count` in Rust before the C guard is ever reached, so only a
-//! direct C call can observe it — and only on MPI < 4,
+//! function takes an `int` length, so both are checked before that skip. A
+//! persistent reduction without persistent collectives is refused with
+//! `Error::NotSupported` instead. RMA is exercised through a raw `extern "C"`
+//! call to `ferrompi_put`, not the safe `Win::put` API: the window's bounds
+//! check rejects a mismatched `target_count` in Rust before the C guard is ever
+//! reached, so only a direct C call can observe it — and only on MPI < 4,
 //! since on MPI >= 4 the fixed shim would hand the oversized count to
 //! `MPI_Put_c` over a four-element window.
 //!
@@ -26,9 +27,9 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_count_overflow
 // mpi-test: np=2.. skip-ok=mpich
 
-use ferrompi::{Communicator, Mpi, ReduceOp, UserOp};
+use ferrompi::{Communicator, Error, Mpi, ReduceOp, UserOp};
 #[cfg(feature = "rma")]
-use ferrompi::{Error, MpiDatatype, MpiErrorClass, Win, WinFenceAssert};
+use ferrompi::{MpiDatatype, MpiErrorClass, Win, WinFenceAssert};
 
 mod common;
 
@@ -137,9 +138,20 @@ fn rma_put(world: &Communicator) {
     );
 }
 
-/// A user op's classic function takes an `int` length: every blocking and
-/// nonblocking reduction with a user op must reject a count above `INT_MAX` on
-/// every MPI version, and `reduce_scatter_block` a reduced span above it.
+/// True iff `r` is what a persistent reduction with a user op above `INT_MAX`
+/// returns: `Count` on a library with persistent collectives, `NotSupported`
+/// without them.
+fn persistent_refused<T>(r: &ferrompi::Result<T>) -> bool {
+    if common::has_mpi4_collectives() {
+        common::is_count(r)
+    } else {
+        matches!(r, Err(Error::NotSupported(_)))
+    }
+}
+
+/// A user op's classic function takes an `int` length: every blocking,
+/// nonblocking and persistent reduction with a user op must reject a count
+/// above `INT_MAX`, and `reduce_scatter_block` a reduced span above it.
 fn user_op_reduction(world: &Communicator) {
     // Zeroed allocations whose pages the fixed shim never touches: the guard
     // must fire before any MPI call reads or writes them.
@@ -255,6 +267,47 @@ fn user_op_reduction(world: &Communicator) {
         world,
         ireduce_scatter_block_ok,
         "ireduce_scatter_block with a user op and a span above INT_MAX returns Count",
+    );
+
+    // A persistent reduction owns its buffers, so each call below moves in
+    // fresh zeroed ones (a refusal never touches their pages and drops them).
+    let reduce_scatter_block_init_ok =
+        persistent_refused(&world.reduce_scatter_block_init(span_send, span_recv, &max_op));
+    common::check(
+        world,
+        reduce_scatter_block_init_ok,
+        "reduce_scatter_block_init with a user op and a span above INT_MAX returns Count",
+    );
+
+    let allreduce_init_ok =
+        persistent_refused(&world.allreduce_init(vec![0u8; N], vec![0u8; N], &max_op));
+    common::check(
+        world,
+        allreduce_init_ok,
+        "allreduce_init of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let reduce_init_ok =
+        persistent_refused(&world.reduce_init(vec![0u8; N], vec![0u8; N], &max_op, 0));
+    common::check(
+        world,
+        reduce_init_ok,
+        "reduce_init of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let scan_init_ok = persistent_refused(&world.scan_init(vec![0u8; N], vec![0u8; N], &max_op));
+    common::check(
+        world,
+        scan_init_ok,
+        "scan_init of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let exscan_init_ok =
+        persistent_refused(&world.exscan_init(vec![0u8; N], vec![0u8; N], &max_op));
+    common::check(
+        world,
+        exscan_init_ok,
+        "exscan_init of 2^32+16 bytes with a user op returns Count",
     );
 }
 
