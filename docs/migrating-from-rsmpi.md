@@ -376,19 +376,18 @@ fn main() -> ferrompi::Result<()> {
     let mpi = Mpi::init()?;
     let world = mpi.world();
     let rank = world.rank();
-    let mut data = vec![0.0f64; 1000];
 
     // Initialise ONCE — MPI_Bcast_init called here
-    let mut bcast = world.bcast_init(&mut data, 0)?;
+    let mut bcast = world.broadcast_init(vec![0.0f64; 1000], 0)?;
 
     for iter in 0..10_000 {
         if rank == 0 {
-            data.fill(iter as f64);
+            bcast.buffer_mut()?.fill(iter as f64);
         }
         // start/wait reuse the initialised request
         bcast.start()?;
         bcast.wait()?;
-        // use data ...
+        // use bcast.buffer()? ...
     }
     // bcast dropped → MPI_Request_free
     Ok(())

@@ -133,6 +133,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `into_buffer()` returns it. `start_all` and `wait_all` take requests of one
   element type. Migration: pass the `Vec` by value and read results through
   `buffer()`; a mixed-type batch is split by type.
+- **The non-reducing persistent collectives own their buffers:**
+  `broadcast_init`, `gather_init`, `scatter_init`, `allgather_init`,
+  `alltoall_init`, their in-place forms and `gatherv_init`, `scatterv_init`,
+  `allgatherv_init`, `alltoallv_init` take `Vec<T>` buffers by value.
+  `send_buffer_mut()` reaches a two-buffer request's send buffer while it is
+  inactive, and `into_buffers()` returns both. The v-forms copy their count and
+  displacement arrays, which the caller may reuse after the call. Migration:
+  pass the `Vec`s by value and read results through `buffer()`.
+- **`bcast_init` is renamed `broadcast_init`**, following `broadcast` and
+  `ibroadcast`. Migration: rename the call.
 
 ### Added
 

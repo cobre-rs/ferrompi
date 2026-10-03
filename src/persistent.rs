@@ -28,28 +28,36 @@ pub(crate) fn vec_buf_mut<T: MpiDatatype>(v: &mut Vec<T>) -> (*mut c_void, i64, 
     (v.as_mut_ptr().cast(), v.len() as i64, T::TAG as i32)
 }
 
-/// A persistent MPI request that owns its buffer.
+/// A persistent MPI request that owns its buffers.
 ///
 /// A persistent request is initialized once and then started and completed
 /// many times, so one setup serves a whole loop of iterations. The `*_init`
-/// constructors take the buffer by value and the request keeps it until it is
-/// freed: MPI holds a pointer into that allocation, so no safe call can
-/// resize or free it behind MPI's back. Reach the buffer with
+/// constructors take the buffers by value and the request keeps them until it
+/// is freed: MPI holds a pointer into each allocation, so no safe call can
+/// resize or free one behind MPI's back. Reach the buffer with
 /// [`buffer`](Self::buffer) and [`buffer_mut`](Self::buffer_mut) while the
 /// request is inactive, or take it back with
 /// [`into_buffer`](Self::into_buffer).
 ///
+/// A collective with separate send and receive buffers owns both. `buffer` and
+/// `buffer_mut` reach the receive buffer, [`send_buffer_mut`](Self::send_buffer_mut)
+/// reaches the send buffer, and [`into_buffers`](Self::into_buffers) returns
+/// both. A request that owns one buffer (a point-to-point request, a
+/// broadcast or an in-place collective) has an empty send buffer.
+///
 /// # Lifecycle
 ///
 /// 1. Create with `comm.send_init(vec, ..)`, `comm.recv_init(vec, ..)` or
-///    another `*_init`, which takes the buffer by value.
-/// 2. Update the buffer through `buffer_mut()`. The accessors work only while
-///    the request is inactive and return [`Error::InvalidState`] otherwise.
+///    another `*_init`, which takes the buffers by value.
+/// 2. Update the buffer through `buffer_mut()` (or `send_buffer_mut()`). The
+///    accessors work only while the request is inactive and return
+///    [`Error::InvalidState`] otherwise.
 /// 3. Start with `start()` or `start_all()`.
 /// 4. Wait for completion with `wait()`, then read the result through
 ///    `buffer()`.
 /// 5. Repeat steps 2-4 as needed.
-/// 6. Free on drop, or take the buffer back with `into_buffer()`.
+/// 6. Free on drop, or take the buffer back with `into_buffer()` or
+///    `into_buffers()`.
 ///
 /// # Example
 ///
@@ -87,32 +95,44 @@ pub(crate) fn vec_buf_mut<T: MpiDatatype>(v: &mut Vec<T>) -> (*mut c_void, i64, 
 ///
 /// Dropping an active request completes it (`MPI_Wait`, which blocks until the
 /// peer operation completes), then frees it (`MPI_Request_free`), and only
-/// then frees the buffer.
+/// then frees the buffers.
 ///
 /// - At `Single`/`Funneled`, drop it on the thread that initialized MPI;
 ///   another thread aborts the process.
 /// - At `Serialized` and `Multiple`, the drop is an MPI call, which the
 ///   program serializes like any other.
 /// - Once [`Mpi`](crate::Mpi) is being dropped, or after it was dropped, the
-///   drop makes no MPI call. It leaks the request handle, and also the buffer
-///   when the request is active, because MPI may still write into it. The
-///   buffer of an inactive request is freed normally.
+///   drop makes no MPI call. It leaks the request handle, and also the buffers
+///   when the request is active, because MPI may still write into them. The
+///   buffers of an inactive request are freed normally.
 /// - A drop on another thread while `Mpi` is being dropped either completes
 ///   before `MPI_Finalize`, because it holds a per-call count the finalizer
 ///   waits for, or makes no MPI call and leaks as above.
 pub struct PersistentRequest<T> {
     handle: i64,
     active: bool,
+    send: Vec<T>,
     buffer: Vec<T>,
+    counts: Vec<i32>,
 }
 
 impl<T> PersistentRequest<T> {
-    /// Create a new persistent request from a raw handle and the buffer it owns.
+    /// Create a new persistent request from a raw handle and the one buffer it
+    /// owns.
     pub(crate) fn new(handle: i64, buffer: Vec<T>) -> Self {
+        Self::new_pair(handle, Vec::new(), buffer, Vec::new())
+    }
+
+    /// Create a persistent request that owns a send buffer, a receive buffer
+    /// and the copy of the count and displacement arrays a v-collective was
+    /// given (empty for the other collectives).
+    pub(crate) fn new_pair(handle: i64, send: Vec<T>, buffer: Vec<T>, counts: Vec<i32>) -> Self {
         PersistentRequest {
             handle,
             active: false,
+            send,
             buffer,
+            counts,
         }
     }
 
@@ -214,7 +234,9 @@ impl<T> PersistentRequest<T> {
     /// The request's buffer, while the request is inactive.
     ///
     /// This is the send data of a send request, and the received data of a
-    /// receive request after its `wait()`. The slice cannot be resized,
+    /// receive request after its `wait()`. For a collective with separate send
+    /// and receive buffers it is the receive buffer; reach the send buffer with
+    /// [`send_buffer_mut`](Self::send_buffer_mut). The slice cannot be resized,
     /// because MPI holds a pointer into the allocation.
     ///
     /// # Errors
@@ -235,8 +257,10 @@ impl<T> PersistentRequest<T> {
     /// The request's buffer for writing, while the request is inactive.
     ///
     /// Write the next iteration's input here between `wait()` and the next
-    /// `start()`. The slice cannot be resized, because MPI holds a pointer into
-    /// the allocation.
+    /// `start()`. For a collective with separate send and receive buffers it is
+    /// the receive buffer; reach the send buffer with
+    /// [`send_buffer_mut`](Self::send_buffer_mut). The slice cannot be resized,
+    /// because MPI holds a pointer into the allocation.
     ///
     /// # Errors
     ///
@@ -251,11 +275,36 @@ impl<T> PersistentRequest<T> {
         Ok(&mut self.buffer)
     }
 
+    /// The send buffer of a collective with separate send and receive buffers,
+    /// for writing, while the request is inactive.
+    ///
+    /// Write the next iteration's input here between `wait()` and the next
+    /// `start()`. The slice is empty for a request that owns one buffer: a
+    /// point-to-point request, a broadcast or an in-place collective. The slice
+    /// cannot be resized, because MPI holds a pointer into the allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidState`] while the request is active.
+    #[inline]
+    pub fn send_buffer_mut(&mut self) -> Result<&mut [T]> {
+        if self.active {
+            return Err(Error::InvalidState {
+                reason: "request is active",
+            });
+        }
+        Ok(&mut self.send)
+    }
+
     /// Complete the request if it is active, free it, and return its buffer.
     ///
     /// The request is freed before this returns. Freeing a request is an MPI
     /// call, so `Drop`'s thread rule applies: at `Single`/`Funneled`, on a
     /// thread other than the one that initialized MPI, the process aborts.
+    ///
+    /// For a collective with separate send and receive buffers this returns the
+    /// receive buffer and drops the send buffer after the free; use
+    /// [`into_buffers`](Self::into_buffers) to keep both.
     ///
     /// # Errors
     ///
@@ -265,6 +314,25 @@ impl<T> PersistentRequest<T> {
     pub fn into_buffer(mut self) -> Result<Vec<T>> {
         self.wait()?;
         Ok(std::mem::take(&mut self.buffer))
+    }
+
+    /// Complete the request if it is active, free it, and return its send and
+    /// receive buffers as `(send, buffer)`.
+    ///
+    /// The send buffer is empty for a request that owns one buffer. Otherwise
+    /// this behaves as [`into_buffer`](Self::into_buffer).
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of [`wait`](Self::wait) if completing an active
+    /// request fails. The request is then dropped as `Drop` does, and the
+    /// buffers are not returned.
+    pub fn into_buffers(mut self) -> Result<(Vec<T>, Vec<T>)> {
+        self.wait()?;
+        Ok((
+            std::mem::take(&mut self.send),
+            std::mem::take(&mut self.buffer),
+        ))
     }
 
     /// Start multiple persistent operations.
@@ -342,24 +410,27 @@ impl<T> PersistentRequest<T> {
 
 impl<T> Drop for PersistentRequest<T> {
     /// Complete any in-flight operation, free the persistent request handle,
-    /// then free the buffer.
+    /// then free the buffers.
     ///
     /// When `self.active` is `true` (i.e., `start()` was called but `wait()` has
     /// not yet returned), this calls `MPI_Wait` before freeing the handle.
     /// **`MPI_Wait` blocks** until the peer operation completes; if the peer is
     /// unreachable, this deadlocks. This two-step sequence upholds the MPI
     /// standard requirement that `MPI_Request_free` must not be called on an
-    /// active request. The buffer is freed last, once MPI is done with it.
+    /// active request. The buffers are freed last, once MPI is done with them.
     ///
     /// Once [`Mpi`](crate::Mpi) is being dropped, or after it was dropped, the
     /// drop makes no MPI call and leaks the request handle. An active
-    /// request's buffer is leaked too, because MPI may still write into it; an
-    /// inactive request's buffer is freed, because MPI uses it only after a
-    /// new start, and no start can be issued any more.
+    /// request's buffers are leaked too, send and receive buffers and the copy
+    /// of a v-collective's count and displacement arrays, because MPI may still
+    /// use them; an inactive request's are freed, because MPI uses them only
+    /// after a new start, and no start can be issued any more.
     fn drop(&mut self) {
         let Some(_call) = rt::drop_guard("PersistentRequest") else {
             if self.active {
+                std::mem::forget(std::mem::take(&mut self.send));
                 std::mem::forget(std::mem::take(&mut self.buffer));
+                std::mem::forget(std::mem::take(&mut self.counts));
             }
             return;
         };
@@ -394,7 +465,9 @@ mod tests {
         let mut req = PersistentRequest::<u8> {
             handle: 0,
             active: true,
+            send: Vec::new(),
             buffer: Vec::new(),
+            counts: Vec::new(),
         };
         let result = req.start();
         assert!(
@@ -431,7 +504,9 @@ mod tests {
         let mut req = PersistentRequest::<u8> {
             handle: 0,
             active: true,
+            send: Vec::new(),
             buffer: Vec::new(),
+            counts: Vec::new(),
         };
         let result = PersistentRequest::start_all(std::slice::from_mut(&mut req));
         assert!(
@@ -457,7 +532,9 @@ mod tests {
         let mut req = PersistentRequest {
             handle: 0,
             active: true,
+            send: Vec::new(),
             buffer: vec![0u8],
+            counts: Vec::new(),
         };
         let shared = req.buffer();
         assert!(
@@ -479,6 +556,38 @@ mod tests {
             ),
             "expected Err(InvalidState), got: {exclusive:?}"
         );
+        drop(std::mem::take(&mut req.buffer));
+        forget(req);
+    }
+
+    #[test]
+    fn send_buffer_when_active_returns_invalid_state() {
+        let mut req = PersistentRequest {
+            handle: 0,
+            active: true,
+            send: vec![0u8],
+            buffer: Vec::new(),
+            counts: Vec::new(),
+        };
+        let result = req.send_buffer_mut();
+        assert!(
+            matches!(
+                result,
+                Err(Error::InvalidState {
+                    reason: "request is active"
+                })
+            ),
+            "expected Err(InvalidState), got: {result:?}"
+        );
+        drop(std::mem::take(&mut req.send));
+        forget(req);
+    }
+
+    #[test]
+    fn send_buffer_of_one_buffer_request_is_empty() {
+        let mut req = PersistentRequest::new(0, vec![0u8; 3]);
+        assert!(req.send_buffer_mut().expect("inactive").is_empty());
+        assert_eq!(req.buffer().expect("inactive").len(), 3);
         drop(std::mem::take(&mut req.buffer));
         forget(req);
     }
@@ -544,6 +653,64 @@ mod tests {
             req.active = false;
         }
         drop(std::mem::take(&mut req.buffer));
+        forget(req);
+    }
+
+    /// The two-buffer counterpart: MPI reads the send buffer and writes the
+    /// receive buffer through the pointers `vec_buf` and `vec_buf_mut`
+    /// returned, while the accessors rewrite the send buffer and read the
+    /// receive buffer.
+    #[test]
+    fn recorded_send_and_receive_pointers_survive_accessors() {
+        let send = vec![0u64; 4];
+        let mut recv = vec![0u64; 4];
+        let (sp, _, _) = vec_buf(&send);
+        let (rp, _, _) = vec_buf_mut(&mut recv);
+        let (sp, rp) = (sp.cast::<u64>(), rp.cast::<u64>());
+        let mut req = PersistentRequest::new_pair(0, send, recv, Vec::new());
+        for round in 1..=3u64 {
+            req.send_buffer_mut().expect("inactive").fill(round);
+            req.active = true;
+            for i in 0..4 {
+                // SAFETY: `sp` and `rp` address the live allocations of four
+                // `u64`s that `vec_buf` and `vec_buf_mut` derived them from, and
+                // no accessor slice is live while the flag is set.
+                unsafe { rp.add(i).write(sp.add(i).read() * 10 + i as u64) };
+            }
+            req.active = false;
+            let expected = [round * 10, round * 10 + 1, round * 10 + 2, round * 10 + 3];
+            assert_eq!(req.buffer().expect("inactive"), expected);
+            assert_eq!(req.send_buffer_mut().expect("inactive"), [round; 4]);
+        }
+        drop(std::mem::take(&mut req.send));
+        drop(std::mem::take(&mut req.buffer));
+        forget(req);
+    }
+
+    /// MPI keeps the pointers into a v-collective's count and displacement
+    /// copy until the request is freed. The pointer is taken from the `Vec`
+    /// before it moves into the request, as the constructors do, and must stay
+    /// readable across the move and the accessors.
+    #[test]
+    fn recorded_counts_pointer_survives_accessors() {
+        let counts = vec![3i32, 1, 4, 1];
+        let cp = counts.as_ptr();
+        let mut req = PersistentRequest::new_pair(0, vec![0u8; 2], vec![0u8; 2], counts);
+        for round in 1..=3u8 {
+            req.send_buffer_mut().expect("inactive").fill(round);
+            req.buffer_mut().expect("inactive").fill(round);
+            req.active = true;
+            for (i, want) in [3, 1, 4, 1].into_iter().enumerate() {
+                // SAFETY: `cp` addresses the live allocation of four `i32`s that
+                // `Vec::as_ptr` derived it from, and the request only ever moves
+                // that `Vec`.
+                assert_eq!(unsafe { cp.add(i).read() }, want);
+            }
+            req.active = false;
+        }
+        drop(std::mem::take(&mut req.send));
+        drop(std::mem::take(&mut req.buffer));
+        drop(std::mem::take(&mut req.counts));
         forget(req);
     }
 }

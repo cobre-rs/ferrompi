@@ -1,13 +1,13 @@
 //! Integration test for large-count dispatch in the persistent `*_init` shims.
 //!
-//! From MPI 4.0 on, `send_init` (point-to-point) and `bcast_init` (collective)
+//! From MPI 4.0 on, `send_init` (point-to-point) and `broadcast_init` (collective)
 //! both dispatch the `_c` large-count variant for a count above `INT_MAX` and
 //! return `Ok`. Below MPI 4.0, `send_init` returns
-//! `Err(Error::Mpi { class: MpiErrorClass::Count, .. })`, while `bcast_init`
+//! `Err(Error::Mpi { class: MpiErrorClass::Count, .. })`, while `broadcast_init`
 //! (stubbed out where the library lacks persistent collectives) returns
 //! `Err(Error::NotSupported(_))`. On Open MPI 5, which provides persistent
 //! collectives but keeps the `_c` large-count call gated on reporting MPI
-//! 4.0, `bcast_init` also returns `Err(Count)` for the same reason
+//! 4.0, `broadcast_init` also returns `Err(Count)` for the same reason
 //! `send_init` does. Neither request is ever started, so dropping both
 //! without a matching operation is legal.
 //!
@@ -34,10 +34,10 @@ fn main() {
     // Zeroed allocations whose pages the shim under test never touches:
     // *_init only registers the operation, it never starts it.
     let send = vec![0u8; N];
-    let mut data = vec![0u8; N];
+    let data = vec![0u8; N];
 
     let p2p = world.send_init(send, 1 - rank, 3);
-    let coll = world.bcast_init(&mut data, 0);
+    let coll = world.broadcast_init(data, 0);
 
     let ok = if common::mpi_major() >= 4 {
         p2p.is_ok() && coll.is_ok()

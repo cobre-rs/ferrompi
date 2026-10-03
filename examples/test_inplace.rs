@@ -245,12 +245,12 @@ fn gather_init(world: &Communicator) -> Result<()> {
     let expected: Vec<i32> = (0..size).map(|r| r * 10).collect();
 
     if rank == 0 {
-        let mut data = vec![0i32; size as usize];
-        let mut req = world.gather_init_inplace(&mut data, 0)?;
+        let mut req = world.gather_init_inplace(vec![0i32; size as usize], 0)?;
         for iter in 0..ITERATIONS {
-            data[0] = 0; // re-seed: a persistent request borrows nothing.
+            req.buffer_mut()?[0] = 0; // re-seed before each start.
             req.start()?;
             req.wait()?;
+            let data = req.buffer()?;
             assert_eq!(
                 data, expected,
                 "gather_init iter {iter}: rank 0 expected {expected:?} but got {data:?}"
@@ -258,8 +258,7 @@ fn gather_init(world: &Communicator) -> Result<()> {
         }
     } else {
         let send = vec![rank * 10];
-        let mut recv: Vec<i32> = vec![];
-        let mut req = world.gather_init(&send, &mut recv, 0)?;
+        let mut req = world.gather_init(send, Vec::new(), 0)?;
         for _ in 0..ITERATIONS {
             req.start()?;
             req.wait()?;
@@ -275,19 +274,20 @@ fn gather_init_all_inplace(world: &Communicator) -> Result<()> {
     let rank = world.rank();
     let size = world.size();
     let expected: Vec<i32> = (0..size).map(|r| r * 10).collect();
-    let mut data = if rank == 0 {
+    let data = if rank == 0 {
         vec![0i32; size as usize]
     } else {
         vec![rank * 10]
     };
-    let mut req = world.gather_init_inplace(&mut data, 0)?;
+    let mut req = world.gather_init_inplace(data, 0)?;
     for iter in 0..ITERATIONS {
         if rank == 0 {
-            data.fill(0); // re-seed: a slot left by the previous start must not pass.
+            req.buffer_mut()?.fill(0); // re-seed: a slot left by the previous start must not pass.
         }
         req.start()?;
         req.wait()?;
         if rank == 0 {
+            let data = req.buffer()?;
             assert_eq!(
                 data, expected,
                 "gather_init_all_inplace iter {iter}: rank 0 expected {expected:?} but got {data:?}"
@@ -304,11 +304,12 @@ fn allgather_init(world: &Communicator) -> Result<()> {
     let expected: Vec<i32> = (0..size).map(|r| r * 10).collect();
     let mut data = vec![0i32; size as usize];
     data[rank as usize] = rank * 10;
-    let mut req = world.allgather_init_inplace(&mut data)?;
+    let mut req = world.allgather_init_inplace(data)?;
     for iter in 0..ITERATIONS {
-        data[rank as usize] = rank * 10; // re-seed before each start.
+        req.buffer_mut()?[rank as usize] = rank * 10; // re-seed before each start.
         req.start()?;
         req.wait()?;
+        let data = req.buffer()?;
         assert_eq!(
             data, expected,
             "allgather_init iter {iter}: rank {rank} expected {expected:?} but got {data:?}"
@@ -321,14 +322,15 @@ fn allgather_init(world: &Communicator) -> Result<()> {
 fn alltoall_init(world: &Communicator) -> Result<()> {
     let rank = world.rank();
     let size = world.size();
-    let mut data: Vec<i32> = (0..size).map(|s| rank * 10 + s).collect();
-    let mut req = world.alltoall_init_inplace(&mut data)?;
+    let data: Vec<i32> = (0..size).map(|s| rank * 10 + s).collect();
+    let mut req = world.alltoall_init_inplace(data)?;
     for iter in 0..ITERATIONS {
         for s in 0..size {
-            data[s as usize] = rank * 10 + s; // re-seed before each start.
+            req.buffer_mut()?[s as usize] = rank * 10 + s; // re-seed before each start.
         }
         req.start()?;
         req.wait()?;
+        let data = req.buffer()?;
         for s in 0..size {
             let expected = s * 10 + rank;
             assert_eq!(
@@ -366,12 +368,12 @@ fn scatter_init(world: &Communicator) -> Result<()> {
     let seed: Vec<i32> = (0..size).map(|r| r * 10).collect();
 
     if rank == 0 {
-        let mut data = seed.clone();
-        let mut req = world.scatter_init_inplace(&mut data, 0)?;
+        let mut req = world.scatter_init_inplace(seed.clone(), 0)?;
         for iter in 0..ITERATIONS {
-            data.copy_from_slice(&seed); // re-seed the full buffer.
+            req.buffer_mut()?.copy_from_slice(&seed); // re-seed the full buffer.
             req.start()?;
             req.wait()?;
+            let data = req.buffer()?;
             assert_eq!(
                 data[0], 0,
                 "scatter_init iter {iter}: rank 0 expected data[0]==0 but got {}",
@@ -379,11 +381,11 @@ fn scatter_init(world: &Communicator) -> Result<()> {
             );
         }
     } else {
-        let mut data = vec![0i32; 1];
-        let mut req = world.scatter_init_inplace(&mut data, 0)?;
+        let mut req = world.scatter_init_inplace(vec![0i32; 1], 0)?;
         for iter in 0..ITERATIONS {
             req.start()?;
             req.wait()?;
+            let data = req.buffer()?;
             let expected = rank * 10;
             assert_eq!(
                 data[0], expected,
@@ -404,9 +406,9 @@ fn assert_persistent_inplace_not_supported(world: &Communicator) -> Result<()> {
     let rank = world.rank();
     let size = world.size() as usize;
 
-    let mut data = vec![0i32; if rank == 0 { size } else { 1 }];
+    let data = vec![0i32; if rank == 0 { size } else { 1 }];
     let gather_ok = matches!(
-        world.gather_init_inplace(&mut data, 0),
+        world.gather_init_inplace(data.clone(), 0),
         Err(Error::NotSupported(op)) if op == "gather_init_inplace"
     );
     common::check(
@@ -416,7 +418,7 @@ fn assert_persistent_inplace_not_supported(world: &Communicator) -> Result<()> {
     );
 
     let scatter_ok = matches!(
-        world.scatter_init_inplace(&mut data, 0),
+        world.scatter_init_inplace(data, 0),
         Err(Error::NotSupported(op)) if op == "scatter_init_inplace"
     );
     common::check(
@@ -425,9 +427,9 @@ fn assert_persistent_inplace_not_supported(world: &Communicator) -> Result<()> {
         "scatter_init_inplace refuses without persistent collectives",
     );
 
-    let mut data = vec![0i32; size];
+    let data = vec![0i32; size];
     let ok = matches!(
-        world.allgather_init_inplace(&mut data),
+        world.allgather_init_inplace(data),
         Err(Error::NotSupported(op)) if op == "allgather_init_inplace"
     );
     common::check(
@@ -436,9 +438,9 @@ fn assert_persistent_inplace_not_supported(world: &Communicator) -> Result<()> {
         "allgather_init_inplace refuses without persistent collectives",
     );
 
-    let mut data = vec![0i32; size];
+    let data = vec![0i32; size];
     let ok = matches!(
-        world.alltoall_init_inplace(&mut data),
+        world.alltoall_init_inplace(data),
         Err(Error::NotSupported(op)) if op == "alltoall_init_inplace"
     );
     common::check(

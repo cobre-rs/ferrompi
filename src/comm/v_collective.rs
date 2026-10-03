@@ -5,7 +5,7 @@ use crate::comm::Communicator;
 use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::persistent::PersistentRequest;
+use crate::persistent::{vec_buf, vec_buf_mut, PersistentRequest};
 use crate::request::{Request, RequestKind};
 use crate::scope::Scope;
 
@@ -107,6 +107,23 @@ fn check_v_args(
             buf_len,
         )),
     }
+}
+
+/// Copies `arrays` end to end into one `Vec<i32>` and returns it with a pointer
+/// to the start of each array inside it. A persistent request keeps these
+/// pointers until it is freed (MPI-4.1 §6.13, p.274: the arrays must stay
+/// unmodified until then), so the pointers come from the `Vec` itself and the
+/// request owns it.
+fn copy_arrays<const N: usize>(arrays: [&[i32]; N]) -> (Vec<i32>, [*const i32; N]) {
+    let copy = arrays.concat();
+    let base = copy.as_ptr();
+    let mut offset = 0;
+    let starts = arrays.map(|a| {
+        let start = base.wrapping_add(offset);
+        offset += a.len();
+        start
+    });
+    (copy, starts)
 }
 
 impl Communicator {
@@ -860,11 +877,16 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `send` - Send buffer
-    /// * `recv` - Receive buffer (significant only at root)
+    /// * `send` - Send buffer, owned by the request; write it through `send_buffer_mut`
+    ///   while the request is inactive
+    /// * `recv` - Receive buffer (significant only at root), owned by the request; read it
+    ///   through `buffer` while the request is inactive
     /// * `recvcounts` - Number of elements to receive from each rank
     /// * `displs` - Displacement for each rank in the receive buffer
     /// * `root` - Rank of the root process
+    ///
+    /// The request copies `recvcounts` and `displs`, which MPI reads until the request is
+    /// freed; the caller may reuse its arrays as soon as the call returns.
     ///
     /// # Errors
     ///
@@ -881,20 +903,24 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1.0f64; 10];
-    /// let mut recv = vec![0.0f64; 40];
     /// let recvcounts = vec![10i32; 4];
     /// let displs = vec![0i32, 10, 20, 30];
-    /// let mut persistent = world.gatherv_init(&send, &mut recv, &recvcounts, &displs, 0).unwrap();
-    /// for _ in 0..100 {
+    /// let mut persistent = world
+    ///     .gatherv_init(vec![1.0f64; 10], vec![0.0f64; 40], &recvcounts, &displs, 0)
+    ///     .unwrap();
+    /// for iter in 0..100 {
+    ///     persistent.send_buffer_mut().unwrap().fill(iter as f64);
     ///     persistent.start().unwrap();
     ///     persistent.wait().unwrap();
+    ///     if world.rank() == 0 {
+    ///         assert_eq!(persistent.buffer().unwrap()[0], iter as f64);
+    ///     }
     /// }
     /// ```
     pub fn gatherv_init<T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
+        send: Vec<T>,
+        mut recv: Vec<T>,
         recvcounts: &[i32],
         displs: &[i32],
         root: i32,
@@ -911,22 +937,31 @@ impl Communicator {
             )?;
         }
         let mut request_handle: i64 = 0;
-        let (sp, n, dt) = buf(send);
-        let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). At root, recvcounts and
-        // displs are checked above to have size() entries, non-negative counts, and each
-        // positive-count block inside recv; at non-root MPI does not read recvcounts or
-        // displs, so they are unchecked here. The returned PersistentRequest does not
-        // borrow send, recv, recvcounts or displs; keeping all four alive and untouched
-        // until the request is freed is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (sp, n, dt) = vec_buf(&send);
+        let (rp, _, _) = vec_buf_mut(&mut recv);
+        let (counts, [cp, dp]) = copy_arrays([recvcounts, displs]);
+        // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
+        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
+        // sits between it and its allocation and the accessors' slices are its children.
+        // The two Vecs are distinct allocations. At root, recvcounts and displs are checked
+        // above to have size() entries, non-negative counts, and each positive-count block
+        // inside recv; at non-root MPI does not read recvcounts or displs, so they are
+        // unchecked here. `cp` and `dp` point into `counts`, the request's own copy of both
+        // arrays, taken after the check and from the Vec itself. The returned request owns
+        // `send`, `recv` and `counts` until it is freed, and moving a `Vec` leaves its
+        // allocation in place. The allocations are never resized, because the accessors
+        // hand out slices only and nothing reaches `counts`. From start() to completion MPI
+        // is the only user of the buffers, because the accessors refuse while the request is
+        // active, and Drop leaks all three when MPI may still use them. If the call fails,
+        // MPI recorded nothing (or the shim freed the inactive request), and all three are
+        // dropped here.
         let ret = unsafe {
             ffi::ferrompi_gatherv_init(
                 sp,
                 n,
                 rp,
-                recvcounts.as_ptr(),
-                displs.as_ptr(),
+                cp,
+                dp,
                 dt,
                 root,
                 self.handle,
@@ -934,7 +969,12 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "gatherv_init")?;
-        Ok(PersistentRequest::new(request_handle, Vec::new()))
+        Ok(PersistentRequest::new_pair(
+            request_handle,
+            send,
+            recv,
+            counts,
+        ))
     }
 
     /// Initialize a persistent scatterv operation (variable-count scatter).
@@ -944,11 +984,16 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `send` - Send buffer (significant only at root)
+    /// * `send` - Send buffer (significant only at root), owned by the request; write it
+    ///   through `send_buffer_mut` while the request is inactive
     /// * `sendcounts` - Number of elements to send to each rank
     /// * `displs` - Displacement for each rank in the send buffer
-    /// * `recv` - Receive buffer
+    /// * `recv` - Receive buffer, owned by the request; read it through `buffer` while the
+    ///   request is inactive
     /// * `root` - Rank of the root process
+    ///
+    /// The request copies `sendcounts` and `displs`, which MPI reads until the request is
+    /// freed; the caller may reuse its arrays as soon as the call returns.
     ///
     /// # Errors
     ///
@@ -965,22 +1010,26 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1.0f64; 40];
     /// let sendcounts = vec![10i32; 4];
     /// let displs = vec![0i32, 10, 20, 30];
-    /// let mut recv = vec![0.0f64; 10];
-    /// let mut persistent = world.scatterv_init(&send, &sendcounts, &displs, &mut recv, 0).unwrap();
-    /// for _ in 0..100 {
+    /// let mut persistent = world
+    ///     .scatterv_init(vec![1.0f64; 40], &sendcounts, &displs, vec![0.0f64; 10], 0)
+    ///     .unwrap();
+    /// for iter in 0..100 {
+    ///     if world.rank() == 0 {
+    ///         persistent.send_buffer_mut().unwrap().fill(iter as f64);
+    ///     }
     ///     persistent.start().unwrap();
     ///     persistent.wait().unwrap();
+    ///     assert_eq!(persistent.buffer().unwrap()[0], iter as f64);
     /// }
     /// ```
     pub fn scatterv_init<T: MpiDatatype>(
         &self,
-        send: &[T],
+        send: Vec<T>,
         sendcounts: &[i32],
         displs: &[i32],
-        recv: &mut [T],
+        mut recv: Vec<T>,
         root: i32,
     ) -> Result<PersistentRequest<T>> {
         if self.rank == root {
@@ -995,20 +1044,29 @@ impl Communicator {
             )?;
         }
         let mut request_handle: i64 = 0;
-        let (sp, _, _) = buf(send);
-        let (rp, n, dt) = buf_mut(recv);
-        // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
-        // &mut [T]). At root, sendcounts and displs are checked above to have size()
-        // entries, non-negative counts, and each positive-count block inside send; at
-        // non-root MPI does not read sendcounts or displs, so they are unchecked here. The
-        // returned PersistentRequest does not borrow send, recv, sendcounts or displs;
-        // keeping all four alive and untouched until the request is freed is the caller's
-        // documented obligation, which this signature does not enforce.
+        let (sp, _, _) = vec_buf(&send);
+        let (rp, n, dt) = vec_buf_mut(&mut recv);
+        let (counts, [cp, dp]) = copy_arrays([sendcounts, displs]);
+        // SAFETY: `sp`, `rp` and `n` describe the heap allocations of `send` and `recv`,
+        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
+        // sits between it and its allocation and the accessors' slices are its children.
+        // The two Vecs are distinct allocations, and `send` is ignored by MPI at non-root.
+        // At root, sendcounts and displs are checked above to have size() entries,
+        // non-negative counts, and each positive-count block inside send; at non-root MPI
+        // does not read sendcounts or displs, so they are unchecked here. `cp` and `dp`
+        // point into `counts`, the request's own copy of both arrays, taken after the check
+        // and from the Vec itself. The returned request owns `send`, `recv` and `counts`
+        // until it is freed, and moving a `Vec` leaves its allocation in place. The
+        // allocations are never resized, because the accessors hand out slices only and
+        // nothing reaches `counts`. From start() to completion MPI is the only user of the
+        // buffers, because the accessors refuse while the request is active, and Drop leaks
+        // all three when MPI may still use them. If the call fails, MPI recorded nothing (or
+        // the shim freed the inactive request), and all three are dropped here.
         let ret = unsafe {
             ffi::ferrompi_scatterv_init(
                 sp,
-                sendcounts.as_ptr(),
-                displs.as_ptr(),
+                cp,
+                dp,
                 rp,
                 n,
                 dt,
@@ -1018,7 +1076,12 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "scatterv_init")?;
-        Ok(PersistentRequest::new(request_handle, Vec::new()))
+        Ok(PersistentRequest::new_pair(
+            request_handle,
+            send,
+            recv,
+            counts,
+        ))
     }
 
     /// Initialize a persistent all-gatherv operation (variable-count all-gather).
@@ -1028,10 +1091,15 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `send` - Send buffer
-    /// * `recv` - Receive buffer
+    /// * `send` - Send buffer, owned by the request; write it through `send_buffer_mut`
+    ///   while the request is inactive
+    /// * `recv` - Receive buffer, owned by the request; read it through `buffer` while the
+    ///   request is inactive
     /// * `recvcounts` - Number of elements to receive from each rank
     /// * `displs` - Displacement for each rank in the receive buffer
+    ///
+    /// The request copies `recvcounts` and `displs`, which MPI reads until the request is
+    /// freed; the caller may reuse its arrays as soon as the call returns.
     ///
     /// # Errors
     ///
@@ -1048,20 +1116,22 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1.0f64; 10];
-    /// let mut recv = vec![0.0f64; 40];
     /// let recvcounts = vec![10i32; 4];
     /// let displs = vec![0i32, 10, 20, 30];
-    /// let mut persistent = world.allgatherv_init(&send, &mut recv, &recvcounts, &displs).unwrap();
-    /// for _ in 0..100 {
+    /// let mut persistent = world
+    ///     .allgatherv_init(vec![1.0f64; 10], vec![0.0f64; 40], &recvcounts, &displs)
+    ///     .unwrap();
+    /// for iter in 0..100 {
+    ///     persistent.send_buffer_mut().unwrap().fill(iter as f64);
     ///     persistent.start().unwrap();
     ///     persistent.wait().unwrap();
+    ///     assert_eq!(persistent.buffer().unwrap()[0], iter as f64);
     /// }
     /// ```
     pub fn allgatherv_init<T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
+        send: Vec<T>,
+        mut recv: Vec<T>,
         recvcounts: &[i32],
         displs: &[i32],
     ) -> Result<PersistentRequest<T>> {
@@ -1075,28 +1145,33 @@ impl Communicator {
             recv.len(),
         )?;
         let mut request_handle: i64 = 0;
-        let (sp, n, dt) = buf(send);
-        let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
-        // checked above, on every rank, to have size() entries, non-negative counts, and
-        // each positive-count block inside recv. The returned PersistentRequest does not
-        // borrow send, recv, recvcounts or displs; keeping all four alive and untouched
-        // until the request is freed is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (sp, n, dt) = vec_buf(&send);
+        let (rp, _, _) = vec_buf_mut(&mut recv);
+        let (counts, [cp, dp]) = copy_arrays([recvcounts, displs]);
+        // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
+        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
+        // sits between it and its allocation and the accessors' slices are its children.
+        // The two Vecs are distinct allocations. recvcounts and displs are checked above,
+        // on every rank, to have size() entries, non-negative counts, and each
+        // positive-count block inside recv. `cp` and `dp` point into `counts`, the
+        // request's own copy of both arrays, taken after the check and from the Vec itself.
+        // The returned request owns `send`, `recv` and `counts` until it is freed, and
+        // moving a `Vec` leaves its allocation in place. The allocations are never resized,
+        // because the accessors hand out slices only and nothing reaches `counts`. From
+        // start() to completion MPI is the only user of the buffers, because the accessors
+        // refuse while the request is active, and Drop leaks all three when MPI may still
+        // use them. If the call fails, MPI recorded nothing (or the shim freed the inactive
+        // request), and all three are dropped here.
         let ret = unsafe {
-            ffi::ferrompi_allgatherv_init(
-                sp,
-                n,
-                rp,
-                recvcounts.as_ptr(),
-                displs.as_ptr(),
-                dt,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_allgatherv_init(sp, n, rp, cp, dp, dt, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "allgatherv_init")?;
-        Ok(PersistentRequest::new(request_handle, Vec::new()))
+        Ok(PersistentRequest::new_pair(
+            request_handle,
+            send,
+            recv,
+            counts,
+        ))
     }
 
     /// Initialize a persistent all-to-allv operation (variable-count all-to-all).
@@ -1106,12 +1181,18 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `send` - Send buffer
+    /// * `send` - Send buffer, owned by the request; write it through `send_buffer_mut`
+    ///   while the request is inactive
     /// * `sendcounts` - Number of elements to send to each rank
     /// * `sdispls` - Send displacement for each rank
-    /// * `recv` - Receive buffer
+    /// * `recv` - Receive buffer, owned by the request; read it through `buffer` while the
+    ///   request is inactive
     /// * `recvcounts` - Number of elements to receive from each rank
     /// * `rdispls` - Receive displacement for each rank
+    ///
+    /// The request copies `sendcounts`, `sdispls`, `recvcounts` and `rdispls`, which MPI
+    /// reads until the request is freed; the caller may reuse its arrays as soon as the
+    /// call returns.
     ///
     /// # Errors
     ///
@@ -1128,27 +1209,27 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1.0f64; 40];
     /// let sendcounts = vec![10i32; 4];
     /// let sdispls = vec![0i32, 10, 20, 30];
-    /// let mut recv = vec![0.0f64; 40];
     /// let recvcounts = vec![10i32; 4];
     /// let rdispls = vec![0i32, 10, 20, 30];
     /// let mut persistent = world.alltoallv_init(
-    ///     &send, &sendcounts, &sdispls,
-    ///     &mut recv, &recvcounts, &rdispls,
+    ///     vec![1.0f64; 40], &sendcounts, &sdispls,
+    ///     vec![0.0f64; 40], &recvcounts, &rdispls,
     /// ).unwrap();
-    /// for _ in 0..100 {
+    /// for iter in 0..100 {
+    ///     persistent.send_buffer_mut().unwrap().fill(iter as f64);
     ///     persistent.start().unwrap();
     ///     persistent.wait().unwrap();
+    ///     assert_eq!(persistent.buffer().unwrap()[0], iter as f64);
     /// }
     /// ```
     pub fn alltoallv_init<T: MpiDatatype>(
         &self,
-        send: &[T],
+        send: Vec<T>,
         sendcounts: &[i32],
         sdispls: &[i32],
-        recv: &mut [T],
+        mut recv: Vec<T>,
         recvcounts: &[i32],
         rdispls: &[i32],
     ) -> Result<PersistentRequest<T>> {
@@ -1171,36 +1252,50 @@ impl Communicator {
             recv.len(),
         )?;
         let mut request_handle: i64 = 0;
-        let (sp, _, dt) = buf(send);
-        let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). sendcounts/sdispls and
-        // recvcounts/rdispls are each checked above, on every rank, to have size() entries,
-        // non-negative counts, and each positive-count block inside send/recv respectively.
-        // The returned PersistentRequest does not borrow send, recv, or any of the four
-        // count/displacement arrays; keeping all of them alive and untouched until the
-        // request is freed is the caller's documented obligation, which this signature
-        // does not enforce.
+        let (sp, _, dt) = vec_buf(&send);
+        let (rp, _, _) = vec_buf_mut(&mut recv);
+        let (counts, [scp, sdp, rcp, rdp]) =
+            copy_arrays([sendcounts, sdispls, recvcounts, rdispls]);
+        // SAFETY: `sp` and `rp` describe the heap allocations of `send` and `recv`, and each
+        // pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference sits between
+        // it and its allocation and the accessors' slices are its children. The two Vecs are
+        // distinct allocations. sendcounts/sdispls and recvcounts/rdispls are each checked
+        // above, on every rank, to have size() entries, non-negative counts, and each
+        // positive-count block inside send/recv respectively. `scp`, `sdp`, `rcp` and `rdp`
+        // point into `counts`, the request's own copy of the four arrays, taken after the
+        // checks and from the Vec itself. The returned request owns `send`, `recv` and
+        // `counts` until it is freed, and moving a `Vec` leaves its allocation in place. The
+        // allocations are never resized, because the accessors hand out slices only and
+        // nothing reaches `counts`. From start() to completion MPI is the only user of the
+        // buffers, because the accessors refuse while the request is active, and Drop leaks
+        // all three when MPI may still use them. If the call fails, MPI recorded nothing (or
+        // the shim freed the inactive request), and all three are dropped here.
         let ret = unsafe {
             ffi::ferrompi_alltoallv_init(
                 sp,
-                sendcounts.as_ptr(),
-                sdispls.as_ptr(),
+                scp,
+                sdp,
                 rp,
-                recvcounts.as_ptr(),
-                rdispls.as_ptr(),
+                rcp,
+                rdp,
                 dt,
                 self.handle,
                 &mut request_handle,
             )
         };
         Error::check_with_op(ret, "alltoallv_init")?;
-        Ok(PersistentRequest::new(request_handle, Vec::new()))
+        Ok(PersistentRequest::new_pair(
+            request_handle,
+            send,
+            recv,
+            counts,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::check_v_args;
+    use super::{check_v_args, copy_arrays};
     use crate::comm::test_comm;
     use crate::error::{Error, Result};
 
@@ -1293,14 +1388,33 @@ mod tests {
         ));
     }
 
+    /// Each pointer addresses the start of its array in the copy and stays
+    /// readable after the `Vec` moves, as a request's owner moves it while MPI
+    /// holds the pointers. Run under Miri, with and without
+    /// `-Zmiri-tree-borrows`, to check the pointers' provenance.
+    #[test]
+    fn copy_arrays_pointers_address_each_array_after_a_move() {
+        let (counts, [a, b, c, d]) = copy_arrays([&[1, 2, 3], &[], &[4], &[5, 6]]);
+        let moved = counts;
+        assert_eq!(moved, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(b, c, "an empty array starts where the next one does");
+        // SAFETY: each pointer addresses its array inside the copy's live
+        // allocation of six `i32`s, which `moved` owns and does not resize.
+        unsafe {
+            assert_eq!([a.read(), a.add(2).read()], [1, 3]);
+            assert_eq!(c.read(), 4);
+            assert_eq!([d.read(), d.add(1).read()], [5, 6]);
+        }
+    }
+
     #[test]
     fn gatherv_init_mismatched_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
-        let mut recv = vec![0.0f64; 40];
+        let recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
-        let result = comm.gatherv_init(&send, &mut recv, &recvcounts, &displs, 0);
+        let result = comm.gatherv_init(send, recv, &recvcounts, &displs, 0);
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1317,8 +1431,8 @@ mod tests {
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
-        let mut recv = vec![0.0f64; 10];
-        let result = comm.scatterv_init(&send, &sendcounts, &displs, &mut recv, 0);
+        let recv = vec![0.0f64; 10];
+        let result = comm.scatterv_init(send, &sendcounts, &displs, recv, 0);
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1333,10 +1447,10 @@ mod tests {
     fn allgatherv_init_mismatched_counts_displs_returns_buffer_size() {
         let comm = test_comm(0, 4);
         let send = vec![1.0f64; 10];
-        let mut recv = vec![0.0f64; 40];
+        let recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
-        let result = comm.allgatherv_init(&send, &mut recv, &recvcounts, &displs);
+        let result = comm.allgatherv_init(send, recv, &recvcounts, &displs);
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1353,17 +1467,10 @@ mod tests {
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20]; // 3 elements != 4
-        let mut recv = vec![0.0f64; 40];
+        let recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let rdispls = vec![0i32, 10, 20, 30];
-        let result = comm.alltoallv_init(
-            &send,
-            &sendcounts,
-            &sdispls,
-            &mut recv,
-            &recvcounts,
-            &rdispls,
-        );
+        let result = comm.alltoallv_init(send, &sendcounts, &sdispls, recv, &recvcounts, &rdispls);
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1380,17 +1487,10 @@ mod tests {
         let send = vec![1.0f64; 40];
         let sendcounts = vec![10i32; 4];
         let sdispls = vec![0i32, 10, 20, 30];
-        let mut recv = vec![0.0f64; 40];
+        let recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let rdispls = vec![0i32, 10, 20]; // 3 elements != 4
-        let result = comm.alltoallv_init(
-            &send,
-            &sendcounts,
-            &sdispls,
-            &mut recv,
-            &recvcounts,
-            &rdispls,
-        );
+        let result = comm.alltoallv_init(send, &sendcounts, &sdispls, recv, &recvcounts, &rdispls);
         assert!(matches!(
             result,
             Err(Error::BufferSize {

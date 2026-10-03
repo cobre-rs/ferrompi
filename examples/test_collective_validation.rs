@@ -123,8 +123,7 @@ fn main() {
         })
         .expect("scope for igather");
 
-        let mut backing = vec![0i32; 2 * size];
-        let result = world.gather_init(&send, &mut backing[..2 * size - 1], 0);
+        let result = world.gather_init(send, vec![0i32; 2 * size - 1], 0);
         check_persistent(result, rank, "gather_init", &BUFFER_SIZE, &mut local_ok);
     }
 
@@ -144,8 +143,7 @@ fn main() {
         })
         .expect("scope for iallgather");
 
-        let mut backing = vec![0i32; 2 * size];
-        let result = world.allgather_init(&send, &mut backing[..2 * size - 1]);
+        let result = world.allgather_init(send, vec![0i32; 2 * size - 1]);
         check_persistent(result, rank, "allgather_init", &BUFFER_SIZE, &mut local_ok);
     }
 
@@ -165,8 +163,7 @@ fn main() {
         })
         .expect("scope for iscatter");
 
-        let send_backing = vec![1i32; 2 * size];
-        let result = world.scatter_init(&send_backing[..2 * size - 1], &mut recv, 0);
+        let result = world.scatter_init(vec![1i32; 2 * size - 1], recv, 0);
         check_persistent(result, rank, "scatter_init", &BUFFER_SIZE, &mut local_ok);
     }
 
@@ -196,9 +193,7 @@ fn main() {
         })
         .expect("scope for igatherv");
 
-        let mut backing = vec![0i32; 2 * size];
-        let result =
-            world.gatherv_init(&send, &mut backing[..2 * size - 1], &recvcounts, &displs, 0);
+        let result = world.gatherv_init(send, vec![0i32; 2 * size - 1], &recvcounts, &displs, 0);
         check_persistent(result, rank, "gatherv_init", &BUFFER_SIZE, &mut local_ok);
     }
 
@@ -234,10 +229,10 @@ fn main() {
         .expect("scope for iscatterv");
 
         let result = world.scatterv_init(
-            &send,
+            send,
             &sendcounts_full[..size - 1],
             &displs_full[..size - 1],
-            &mut recv,
+            recv,
             0,
         );
         check_persistent(result, rank, "scatterv_init", &BUFFER_SIZE, &mut local_ok);
@@ -269,8 +264,7 @@ fn main() {
         })
         .expect("scope for iallgatherv");
 
-        let mut backing = vec![0i32; size + 1];
-        let result = world.allgatherv_init(&send, &mut backing[1..], &recvcounts, &displs);
+        let result = world.allgatherv_init(send, vec![0i32; size], &recvcounts, &displs);
         check_persistent(
             result,
             rank,
@@ -315,14 +309,7 @@ fn main() {
         })
         .expect("scope for ialltoallv");
 
-        let result = world.alltoallv_init(
-            &send,
-            &sendcounts,
-            &sdispls,
-            &mut recv,
-            &recvcounts,
-            &rdispls,
-        );
+        let result = world.alltoallv_init(send, &sendcounts, &sdispls, recv, &recvcounts, &rdispls);
         check_persistent(
             result,
             rank,

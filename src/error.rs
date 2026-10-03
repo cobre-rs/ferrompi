@@ -708,8 +708,8 @@ mod tests {
             Error::NotSupported(_) => {}
             other => panic!("expected Error::NotSupported, got {other:?}"),
         }
-        match Error::from_code_with_op(FERROMPI_ERR_NOT_SUPPORTED, "bcast_init") {
-            Error::NotSupported(op) => assert_eq!(op, "bcast_init"),
+        match Error::from_code_with_op(FERROMPI_ERR_NOT_SUPPORTED, "broadcast_init") {
+            Error::NotSupported(op) => assert_eq!(op, "broadcast_init"),
             other => panic!("expected Error::NotSupported, got {other:?}"),
         }
     }

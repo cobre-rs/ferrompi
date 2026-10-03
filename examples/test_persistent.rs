@@ -2,11 +2,11 @@
 //!
 //! Tests the full PersistentRequest lifecycle: init, start, wait, test,
 //! start_all, wait_all, and drop. Where the library lacks persistent
-//! collectives (below MPI 4.0, except Open MPI 5), asserts that bcast_init
+//! collectives (below MPI 4.0, except Open MPI 5), asserts that broadcast_init
 //! refuses with Error::NotSupported instead of running the suite.
 //!
 //! Exercises all 15 persistent collective `_init` methods in `Comm`:
-//! bcast_init, allreduce_init, allreduce_init_inplace, gather_init,
+//! broadcast_init, allreduce_init, allreduce_init_inplace, gather_init,
 //! reduce_init, scatter_init, allgather_init, scan_init, exscan_init,
 //! alltoall_init, gatherv_init, scatterv_init, allgatherv_init,
 //! alltoallv_init, and reduce_scatter_block_init.
@@ -22,6 +22,17 @@ use ferrompi::{Error, Mpi, PersistentRequest, ReduceOp};
 
 mod common;
 
+/// Overwrites the caller's count or displacement array with -1 and frees it,
+/// then allocates a same-size block of zeros through the same allocator path.
+/// A request that still read the freed array would see -1 or zeros, not the
+/// counts it was given.
+fn clobber(mut array: Vec<i32>) -> Vec<i32> {
+    array.fill(-1);
+    let n = array.len();
+    drop(array);
+    (0..n).map(|_| 0).collect()
+}
+
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -34,13 +45,12 @@ fn main() {
     );
 
     if !common::has_mpi4_collectives() {
-        let mut data = vec![0.0f64; 10];
-        let result = world.bcast_init(&mut data, 0);
-        let ok = matches!(&result, Err(Error::NotSupported(op)) if op == "bcast_init");
+        let result = world.broadcast_init(vec![0.0f64; 10], 0);
+        let ok = matches!(&result, Err(Error::NotSupported(op)) if op == "broadcast_init");
         common::check(
             &world,
             ok,
-            "bcast_init refuses without persistent collectives",
+            "broadcast_init refuses without persistent collectives",
         );
         return;
     }
@@ -48,54 +58,55 @@ fn main() {
     let mut test_count = 0u32;
 
     // ========================================================================
-    // Test 1: bcast_init (with start/wait lifecycle + reuse)
+    // Test 1: broadcast_init (with start/wait lifecycle + reuse)
     // ========================================================================
     {
-        let mut data = vec![0.0f64; 10];
+        let mut req = world
+            .broadcast_init(vec![0.0f64; 10], 0)
+            .expect("broadcast_init failed");
         if rank == 0 {
-            for (i, x) in data.iter_mut().enumerate() {
+            for (i, x) in req.buffer_mut().expect("buffer_mut").iter_mut().enumerate() {
                 *x = (i + 1) as f64;
             }
         }
-        let mut req = world.bcast_init(&mut data, 0).expect("bcast_init failed");
 
         // Verify initial state
         assert!(!req.is_active(), "request should be inactive after init");
 
         // First start/wait cycle
-        req.start().expect("bcast_init start failed");
+        req.start().expect("broadcast_init start failed");
         assert!(req.is_active(), "request should be active after start");
-        req.wait().expect("bcast_init wait failed");
+        req.wait().expect("broadcast_init wait failed");
         assert!(!req.is_active(), "request should be inactive after wait");
 
-        for (i, &x) in data.iter().enumerate() {
+        for (i, &x) in req.buffer().expect("buffer").iter().enumerate() {
             assert!(
                 (x - (i + 1) as f64).abs() < f64::EPSILON,
-                "rank {rank}: bcast_init data[{i}] = {x}, expected {}",
+                "rank {rank}: broadcast_init data[{i}] = {x}, expected {}",
                 (i + 1) as f64
             );
         }
 
         // Reuse: second start/wait cycle with new data
         if rank == 0 {
-            for (i, x) in data.iter_mut().enumerate() {
+            for (i, x) in req.buffer_mut().expect("buffer_mut").iter_mut().enumerate() {
                 *x = (i + 1) as f64 * 100.0;
             }
         }
-        req.start().expect("bcast_init reuse start failed");
-        req.wait().expect("bcast_init reuse wait failed");
+        req.start().expect("broadcast_init reuse start failed");
+        req.wait().expect("broadcast_init reuse wait failed");
 
-        for (i, &x) in data.iter().enumerate() {
+        for (i, &x) in req.buffer().expect("buffer").iter().enumerate() {
             assert!(
                 (x - (i + 1) as f64 * 100.0).abs() < f64::EPSILON,
-                "rank {rank}: bcast_init reuse data[{i}] = {x}, expected {}",
+                "rank {rank}: broadcast_init reuse data[{i}] = {x}, expected {}",
                 (i + 1) as f64 * 100.0
             );
         }
 
         test_count += 1;
         if rank == 0 {
-            println!("PASS: bcast_init (with reuse)");
+            println!("PASS: broadcast_init (with reuse)");
         }
     }
 
@@ -162,15 +173,16 @@ fn main() {
     // ========================================================================
     {
         let send = vec![rank as f64 * 10.0, rank as f64 * 10.0 + 1.0];
-        let mut recv = vec![0.0f64; 2 * size as usize];
+        let recv = vec![0.0f64; 2 * size as usize];
         let mut req = world
-            .gather_init(&send, &mut recv, 0)
+            .gather_init(send, recv, 0)
             .expect("gather_init failed");
 
         req.start().expect("gather_init start failed");
         req.wait().expect("gather_init wait failed");
 
         if rank == 0 {
+            let recv = req.buffer().expect("buffer");
             for r in 0..size {
                 let idx = r as usize * 2;
                 assert!(
@@ -231,21 +243,25 @@ fn main() {
     // Test 6: scatter_init
     // ========================================================================
     {
-        let send_data = if rank == 0 {
-            (0..size * 3).map(|x| x as f64).collect::<Vec<f64>>()
-        } else {
-            vec![0.0f64; (size * 3) as usize]
-        };
-        let mut recv = vec![0.0f64; 3];
         let mut req = world
-            .scatter_init(&send_data, &mut recv, 0)
+            .scatter_init(vec![0.0f64; (size * 3) as usize], vec![0.0f64; 3], 0)
             .expect("scatter_init failed");
+        if rank == 0 {
+            for (x, v) in req
+                .send_buffer_mut()
+                .expect("send_buffer_mut")
+                .iter_mut()
+                .enumerate()
+            {
+                *v = x as f64;
+            }
+        }
 
         req.start().expect("scatter_init start failed");
         req.wait().expect("scatter_init wait failed");
 
         let base = rank * 3;
-        for (i, &v) in recv.iter().enumerate() {
+        for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
             let expected = (base + i as i32) as f64;
             assert!(
                 (v - expected).abs() < f64::EPSILON,
@@ -265,14 +281,15 @@ fn main() {
     // ========================================================================
     {
         let send = vec![rank as f64; 2];
-        let mut recv = vec![0.0f64; 2 * size as usize];
+        let recv = vec![0.0f64; 2 * size as usize];
         let mut req = world
-            .allgather_init(&send, &mut recv)
+            .allgather_init(send, recv)
             .expect("allgather_init failed");
 
         req.start().expect("allgather_init start failed");
         req.wait().expect("allgather_init wait failed");
 
+        let recv = req.buffer().expect("buffer");
         for r in 0..size {
             let idx = r as usize * 2;
             assert!(
@@ -365,21 +382,51 @@ fn main() {
         // Each rank sends its rank value to every other rank.
         // send = [rank, rank, ..., rank] (one per destination rank)
         let send = vec![rank as f64; size as usize];
-        let mut recv = vec![0.0f64; size as usize];
+        let recv = vec![0.0f64; size as usize];
         let mut req = world
-            .alltoall_init(&send, &mut recv)
+            .alltoall_init(send, recv)
             .expect("alltoall_init failed");
 
         req.start().expect("alltoall_init start failed");
+        assert!(
+            matches!(req.send_buffer_mut(), Err(Error::InvalidState { .. })),
+            "send_buffer_mut must refuse while the request is active"
+        );
         req.wait().expect("alltoall_init wait failed");
 
         // recv[i] should be i (the value that rank i sent)
-        for (i, &v) in recv.iter().enumerate() {
+        for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
             assert!(
                 (v - i as f64).abs() < f64::EPSILON,
                 "rank {rank}: alltoall_init recv[{i}] = {v}, expected {i}"
             );
         }
+
+        // Second round: rewrite the send buffer between starts, through the
+        // inactive accessor, then take both buffers back.
+        req.send_buffer_mut()
+            .expect("send_buffer_mut")
+            .fill(rank as f64 + 100.0);
+        req.start().expect("alltoall_init restart failed");
+        req.wait().expect("alltoall_init rewait failed");
+        for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
+            assert!(
+                (v - (i as f64 + 100.0)).abs() < f64::EPSILON,
+                "rank {rank}: alltoall_init second recv[{i}] = {v}, expected {}",
+                i as f64 + 100.0
+            );
+        }
+        let (send, recv) = req.into_buffers().expect("into_buffers failed");
+        assert_eq!(
+            send,
+            vec![rank as f64 + 100.0; size as usize],
+            "rank {rank}: into_buffers send"
+        );
+        assert_eq!(
+            recv,
+            (0..size).map(|i| i as f64 + 100.0).collect::<Vec<_>>(),
+            "rank {rank}: into_buffers recv"
+        );
         test_count += 1;
         if rank == 0 {
             println!("PASS: alltoall_init");
@@ -400,16 +447,17 @@ fn main() {
         let displs = common::displs_from_counts(&recvcounts);
         let total: usize = recvcounts.iter().map(|&c| c as usize).sum();
 
-        let mut recv = vec![0.0f64; total];
+        let recv = vec![0.0f64; total];
 
         let mut req = world
-            .gatherv_init(&send, &mut recv, &recvcounts, &displs, 0)
+            .gatherv_init(send, recv, &recvcounts, &displs, 0)
             .expect("gatherv_init failed");
 
         req.start().expect("gatherv_init start failed");
         req.wait().expect("gatherv_init wait failed");
 
         if rank == 0 {
+            let recv = req.buffer().expect("buffer");
             for r in 0..size {
                 let offset = displs[r as usize] as usize;
                 let count = recvcounts[r as usize] as usize;
@@ -456,16 +504,15 @@ fn main() {
             vec![0.0f64; total]
         };
 
-        let mut recv = vec![0.0f64; recv_count];
         let mut req = world
-            .scatterv_init(&send, &sendcounts, &displs, &mut recv, 0)
+            .scatterv_init(send, &sendcounts, &displs, vec![0.0f64; recv_count], 0)
             .expect("scatterv_init failed");
 
         req.start().expect("scatterv_init start failed");
         req.wait().expect("scatterv_init wait failed");
 
         let expected = rank as f64 * 100.0;
-        for (i, &v) in recv.iter().enumerate() {
+        for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
             assert!(
                 (v - expected).abs() < f64::EPSILON,
                 "rank {rank}: scatterv_init recv[{i}] = {v}, expected {expected}"
@@ -486,21 +533,36 @@ fn main() {
         let send_count = (rank + 1) as usize;
         let send = vec![rank as f64; send_count];
 
-        let recvcounts: Vec<i32> = (0..size).map(|r| r + 1).collect();
-        let displs = common::displs_from_counts(&recvcounts);
-        let total: usize = recvcounts.iter().map(|&c| c as usize).sum();
-        let mut recv = vec![0.0f64; total];
+        let want_counts: Vec<i32> = (0..size).map(|r| r + 1).collect();
+        let want_displs = common::displs_from_counts(&want_counts);
+        let total: usize = want_counts.iter().map(|&c| c as usize).sum();
+        let recv = vec![0.0f64; total];
+        let recvcounts = want_counts.clone();
+        let displs = want_displs.clone();
 
         let mut req = world
-            .allgatherv_init(&send, &mut recv, &recvcounts, &displs)
+            .allgatherv_init(send, recv, &recvcounts, &displs)
             .expect("allgatherv_init failed");
+
+        // The request copied the arrays: clobbering and freeing the caller's own
+        // must not change what MPI reads at start.
+        let _victims = (clobber(recvcounts), clobber(displs));
 
         req.start().expect("allgatherv_init start failed");
         req.wait().expect("allgatherv_init wait failed");
 
+        let want: Vec<f64> = (0..size)
+            .flat_map(|r| std::iter::repeat_n(r as f64, (r + 1) as usize))
+            .collect();
+        common::check(
+            &world,
+            req.buffer().expect("buffer") == want,
+            "allgatherv_init reads its own copy of the count arrays",
+        );
+        let recv = req.buffer().expect("buffer");
         for r in 0..size {
-            let offset = displs[r as usize] as usize;
-            let count = recvcounts[r as usize] as usize;
+            let offset = want_displs[r as usize] as usize;
+            let count = want_counts[r as usize] as usize;
             for j in 0..count {
                 assert!(
                     (recv[offset + j] - r as f64).abs() < f64::EPSILON,
@@ -532,24 +594,32 @@ fn main() {
         let rdispls: Vec<i32> = (0..sz as i32).collect();
 
         let send: Vec<f64> = (0..size).map(|d| (rank * 1000 + d) as f64).collect();
-        let mut recv = vec![0.0f64; sz];
+        let recv = vec![0.0f64; sz];
 
         let mut req = world
-            .alltoallv_init(
-                &send,
-                &sendcounts,
-                &sdispls,
-                &mut recv,
-                &recvcounts,
-                &rdispls,
-            )
+            .alltoallv_init(send, &sendcounts, &sdispls, recv, &recvcounts, &rdispls)
             .expect("alltoallv_init failed");
+
+        // The request copied the four arrays: clobbering and freeing the caller's
+        // own must not change what MPI reads at start.
+        let _victims = (
+            clobber(sendcounts),
+            clobber(sdispls),
+            clobber(recvcounts),
+            clobber(rdispls),
+        );
 
         req.start().expect("alltoallv_init start failed");
         req.wait().expect("alltoallv_init wait failed");
 
         // recv[i] should be the value that rank i sent to us = i * 1000 + rank
-        for (i, &v) in recv.iter().enumerate() {
+        let want: Vec<f64> = (0..size).map(|i| (i * 1000 + rank) as f64).collect();
+        common::check(
+            &world,
+            req.buffer().expect("buffer") == want,
+            "alltoallv_init reads its own copy of the count arrays",
+        );
+        for (i, &v) in req.buffer().expect("buffer").iter().enumerate() {
             let expected = (i as i32 * 1000 + rank) as f64;
             assert!(
                 (v - expected).abs() < f64::EPSILON,
@@ -654,19 +724,23 @@ fn main() {
     // Test 17: start_all + wait_all
     // ========================================================================
     {
-        // Create two persistent requests: a bcast and an allreduce
-        let mut bcast_data = vec![0.0f64; 5];
+        // Create two persistent requests: a broadcast and an allreduce
+        let mut req_bcast = world
+            .broadcast_init(vec![0.0f64; 5], 0)
+            .expect("broadcast_init for start_all failed");
         if rank == 0 {
-            for (i, x) in bcast_data.iter_mut().enumerate() {
+            for (i, x) in req_bcast
+                .buffer_mut()
+                .expect("buffer_mut")
+                .iter_mut()
+                .enumerate()
+            {
                 *x = (i + 1) as f64 * 10.0;
             }
         }
         let allreduce_send = vec![rank as f64; 3];
         let mut allreduce_recv = vec![0.0f64; 3];
 
-        let req_bcast = world
-            .bcast_init(&mut bcast_data, 0)
-            .expect("bcast_init for start_all failed");
         let req_allreduce = world
             .allreduce_init(&allreduce_send, &mut allreduce_recv, ReduceOp::Sum)
             .expect("allreduce_init for start_all failed");
@@ -692,12 +766,10 @@ fn main() {
         }
 
         // We moved the requests into the array, so verify via the array.
-        // The bcast_data and allreduce_recv buffers should still be valid
-        // because the persistent requests hold references to the original buffers.
-        // However, since we moved the PersistentRequests into the array,
-        // the original bindings (req_bcast, req_allreduce) are consumed.
-        // Verification of the bcast result:
-        for (i, &x) in bcast_data.iter().enumerate() {
+        // The broadcast request owns its buffer; the allreduce still borrows
+        // allreduce_recv.
+        // Verification of the broadcast result:
+        for (i, &x) in requests[0].buffer().expect("buffer").iter().enumerate() {
             assert!(
                 (x - (i + 1) as f64 * 10.0).abs() < f64::EPSILON,
                 "rank {rank}: start_all bcast_data[{i}] = {x}, expected {}",
@@ -729,10 +801,9 @@ fn main() {
     // This exercises the `!self.active` path in Drop (just calls request_free).
     // ========================================================================
     {
-        let mut data = vec![0.0f64; 5];
         let req = world
-            .bcast_init(&mut data, 0)
-            .expect("bcast_init for drop-without-start failed");
+            .broadcast_init(vec![0.0f64; 5], 0)
+            .expect("broadcast_init for drop-without-start failed");
 
         assert!(!req.is_active(), "request should be inactive before start");
 
@@ -755,15 +826,14 @@ fn main() {
     // The Drop impl will wait for completion, so this won't corrupt MPI state.
     // ========================================================================
     {
-        let mut data = vec![0.0f64; 5];
+        let mut req = world
+            .broadcast_init(vec![0.0f64; 5], 0)
+            .expect("broadcast_init for drop-while-active failed");
         if rank == 0 {
-            for (i, x) in data.iter_mut().enumerate() {
+            for (i, x) in req.buffer_mut().expect("buffer_mut").iter_mut().enumerate() {
                 *x = (i + 1) as f64;
             }
         }
-        let mut req = world
-            .bcast_init(&mut data, 0)
-            .expect("bcast_init for drop-while-active failed");
 
         req.start().expect("start for drop-while-active failed");
         assert!(req.is_active(), "request should be active after start");

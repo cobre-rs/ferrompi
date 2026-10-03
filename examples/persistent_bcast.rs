@@ -6,7 +6,7 @@
 //! Run with: mpiexec -n 4 cargo run --example persistent_bcast
 //!
 //! Note: where the library lacks persistent collectives (below MPI 4.0,
-//! except Open MPI 5), `bcast_init` refuses with `Error::NotSupported`
+//! except Open MPI 5), `broadcast_init` refuses with `Error::NotSupported`
 //! instead of running the persistent-collectives demo.
 // mpi-test: np=2..
 
@@ -38,17 +38,15 @@ fn main() -> Result<()> {
             println!("----------------------------");
         }
 
-        // Buffer that will be reused for all broadcasts
-        let mut bcast_buffer = vec![0.0f64; 1000];
-
-        let mut persistent_bcast = world.bcast_init(&mut bcast_buffer, 0)?;
+        // The request owns the buffer that is reused for all broadcasts
+        let mut persistent_bcast = world.broadcast_init(vec![0.0f64; 1000], 0)?;
         let num_iterations = 100;
         let start_time = mpi.wtime();
 
         for iter in 0..num_iterations {
             // Root updates the buffer
             if rank == 0 {
-                for (i, x) in bcast_buffer.iter_mut().enumerate() {
+                for (i, x) in persistent_bcast.buffer_mut()?.iter_mut().enumerate() {
                     *x = (iter * 1000 + i) as f64;
                 }
             }
@@ -63,7 +61,7 @@ fn main() -> Result<()> {
 
             // Verify on non-root processes
             if rank != 0 {
-                for (i, &x) in bcast_buffer.iter().enumerate() {
+                for (i, &x) in persistent_bcast.buffer()?.iter().enumerate() {
                     let expected = (iter * 1000 + i) as f64;
                     assert!(
                         (x - expected).abs() < 1e-10,
@@ -141,15 +139,14 @@ fn main() -> Result<()> {
             println!("  ✓ Throughput: {:.1} all-reduces/second", throughput);
         }
     } else {
-        let mut buf = vec![0.0f64; 1];
         let ok = matches!(
-            world.bcast_init(&mut buf, 0),
-            Err(Error::NotSupported(op)) if op == "bcast_init"
+            world.broadcast_init(vec![0.0f64; 1], 0),
+            Err(Error::NotSupported(op)) if op == "broadcast_init"
         );
         common::check(
             &world,
             ok,
-            "bcast_init refuses without persistent collectives",
+            "broadcast_init refuses without persistent collectives",
         );
     }
 
@@ -194,16 +191,14 @@ fn main() -> Result<()> {
 
     // Persistent broadcast timing
     {
-        let mut buffer = vec![0.0f64; buffer_size];
-
         if common::has_mpi4_collectives() {
-            let mut persistent = world.bcast_init(&mut buffer, 0)?;
+            let mut persistent = world.broadcast_init(vec![0.0f64; buffer_size], 0)?;
             world.barrier()?;
 
             let start = mpi.wtime();
             for iter in 0..compare_iterations {
                 if rank == 0 {
-                    for (i, x) in buffer.iter_mut().enumerate() {
+                    for (i, x) in persistent.buffer_mut()?.iter_mut().enumerate() {
                         *x = (iter + i) as f64;
                     }
                 }
