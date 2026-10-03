@@ -94,6 +94,84 @@ pub(crate) fn vec_buf_mut<T: MpiDatatype>(v: &mut Vec<T>) -> (*mut c_void, i64, 
 /// # }
 /// ```
 ///
+/// # Ownership
+///
+/// MPI keeps a pointer into each buffer from the `*_init` call until the
+/// request is freed, so safe code must have no way to resize or free a buffer
+/// while the request exists, or to touch it while the request is active. The
+/// constructors take each buffer by value, the accessors hand out slices that
+/// cannot be resized, and while the request is active they return
+/// [`Error::InvalidState`] instead of a slice. Each program below does not
+/// compile, and is followed by the same program made correct.
+///
+/// The `Vec` a constructor consumed cannot be resized afterwards, so its
+/// allocation cannot move while MPI holds a pointer into it:
+///
+/// ```compile_fail,E0382
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let mut data = vec![0u64; 4];
+/// let _p = world.recv_init(data, 1, 9)?;
+/// data.reserve(4096);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let mut data = world.recv_init(vec![0u64; 4], 1, 9)?.into_buffer()?;
+/// data.reserve(4096);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Nor can the buffer be resized through an accessor, which returns a slice:
+///
+/// ```compile_fail,E0599
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let mut p = world.recv_init(vec![0u64; 4], 1, 9)?;
+/// p.buffer_mut()?.reserve(4096);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let mut p = world.recv_init(vec![0u64; 4], 1, 9)?;
+/// p.buffer_mut()?.copy_from_slice(&[1, 2, 3, 4]);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A slice an accessor returned cannot be held across `start`, because the
+/// slice borrows the request and `start` borrows it mutably:
+///
+/// ```compile_fail,E0499
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let mut p = world.send_init(vec![0u64; 4], 1, 9)?;
+/// let b = p.buffer_mut()?;
+/// p.start()?;
+/// b[0] = 1;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let mut p = world.send_init(vec![0u64; 4], 1, 9)?;
+/// p.buffer_mut()?[0] = 1;
+/// p.start()?;
+/// p.wait()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// The `test_persistent_ownership` example checks the rest at run time: the
+/// accessors fail with [`Error::InvalidState`] while the request is active,
+/// `into_buffer` on an active request waits for it, a request dropped while
+/// active completes before its buffer is freed, a request forgotten while
+/// active leaks its buffer instead of freeing it, and a loop that rewrites the
+/// buffers between iterations allocates nothing per iteration.
+///
 /// # Dropping
 ///
 /// Dropping an active request completes it (`MPI_Wait`, which blocks until the
