@@ -5,8 +5,17 @@
 //! every guarded call from a non-init thread must instead return
 //! `Err(Error::ThreadLevelViolation)` without calling MPI.
 //!
+//! It ends with `Mpi::drop` while a worker thread is inside a nonblocking scope
+//! that holds no request: the drop must wait for that scope, then really
+//! finalize MPI, which the runner checks by the absence of the
+//! `MPI_Finalize skipped` warning.
+//!
 //! Run with: mpiexec -n 1 ./target/debug/examples/test_thread_funneled
 // mpi-test: np=1
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use ferrompi::{CustomDatatype, DatatypeTag, Error, Info, Mpi, ReduceOp, ThreadLevel, UserOp};
 
@@ -107,6 +116,30 @@ fn main() {
         !recv_req.is_active() && !send_req.is_active(),
         "requests inactive after init-thread wait",
     );
+
+    // No check after the drop can use `common::check`: its allreduce is refused
+    // once `Mpi` began to drop.
+    let (opened, opened_rx) = mpsc::channel();
+    let worker_scope_ended = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            ferrompi::scope(|_| {
+                opened.send(()).expect("init thread hung up");
+                std::thread::sleep(Duration::from_millis(50));
+                worker_scope_ended.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .expect("the worker's scope must return Ok");
+        });
+        opened_rx
+            .recv()
+            .expect("worker hung up before opening its scope");
+        drop(mpi);
+        assert!(
+            worker_scope_ended.load(Ordering::SeqCst),
+            "Mpi::drop returned before the worker's scope ended"
+        );
+    });
 
     println!("test_thread_funneled: PASS");
 }

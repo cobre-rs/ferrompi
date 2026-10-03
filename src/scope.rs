@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::io::Write;
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::os::raw::c_int;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
@@ -363,7 +364,8 @@ impl<'s> Scope<'s, '_> {
 /// behind two handles can be equal (a send to `MPI_PROC_NULL` returns the same
 /// builtin request every time), which needs no special case.
 pub(crate) struct Registry {
-    inline: [Cell<i64>; INLINE],
+    /// Written by `register` and read only for a set bit of `used`.
+    inline: [Cell<MaybeUninit<i64>>; INLINE],
     /// Bit `i` set: `inline[i]` is live.
     used: Cell<u64>,
     /// `-1` marks a free entry.
@@ -371,9 +373,10 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
+    #[inline]
     pub(crate) fn new() -> Self {
         Registry {
-            inline: [const { Cell::new(0) }; INLINE],
+            inline: [const { Cell::new(MaybeUninit::uninit()) }; INLINE],
             used: Cell::new(0),
             spill: RefCell::new(Vec::new()),
         }
@@ -383,7 +386,7 @@ impl Registry {
         let used = self.used.get();
         if used != u64::MAX {
             let slot = (!used).trailing_zeros();
-            self.inline[slot as usize].set(handle);
+            self.inline[slot as usize].set(MaybeUninit::new(handle));
             self.used.set(used | (1 << slot));
             return slot;
         }
@@ -423,7 +426,10 @@ impl Registry {
             let slot = bits.trailing_zeros();
             bits &= bits - 1;
             slots[n] = slot;
-            handles[n] = self.inline[slot as usize].get();
+            // SAFETY: bit `slot` of `used` is set. `register` writes a slot
+            // before it sets that slot's bit and nothing else sets one, so a
+            // set bit means the slot holds an initialized handle.
+            handles[n] = unsafe { self.inline[slot as usize].get().assume_init() };
             n += 1;
         }
         for (index, &entry) in self.spill.borrow().iter().enumerate() {
@@ -465,11 +471,19 @@ impl Registry {
     ///
     /// A failed pass that completed some slots is repeated for the rest, which
     /// MPI reports as `MPI_ERR_PENDING` (Open MPI returns at the first failure
-    /// with them still incomplete; MPICH returns once every receive arrived,
+    /// with them still incomplete; MPICH returns once every request completed,
     /// with them complete but unprocessed). A pass that completed no slot was
     /// refused or left the state of every request unknown, so the process
     /// aborts.
     pub(crate) fn complete_all(&self) -> Result<()> {
+        if self.used.get() == 0 && self.spill.borrow().is_empty() {
+            return Ok(());
+        }
+        self.complete_pending()
+    }
+
+    #[cold]
+    fn complete_pending(&self) -> Result<()> {
         let mut first = Ok(());
         loop {
             let live = self.live();

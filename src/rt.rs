@@ -35,7 +35,10 @@
 //! A nonblocking scope holds a [`ScopeToken`] for its whole extent, at every
 //! thread level: [`open_scope`] refuses once `Finalizing` is stored, and
 //! [`scopes_on_this_thread`] lets `Mpi::drop` skip `MPI_Finalize` for a scope
-//! open on its own thread, whose requests the scope still completes.
+//! open on its own thread, whose requests the scope still completes. A scope
+//! opened on the init thread at `Single`/`Funneled` is tracked only by that
+//! thread's own count, which costs no atomic operation; every other scope is
+//! also counted in `LIVE_SCOPES`, which [`begin_finalize`] waits on.
 
 use std::cell::Cell;
 use std::io::Write;
@@ -74,6 +77,9 @@ thread_local! {
 
     /// How many nonblocking scopes are open on this thread.
     static SCOPES_HERE: Cell<usize> = const { Cell::new(0) };
+
+    /// How many of those are also counted in `LIVE_SCOPES`.
+    static COUNTED_HERE: Cell<usize> = const { Cell::new(0) };
 }
 
 const SHARDS: usize = 64;
@@ -88,7 +94,8 @@ static IN_FLIGHT: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARD
 
 static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 
-/// How many nonblocking scopes are open on any thread.
+/// How many nonblocking scopes are open on any thread, except those opened on
+/// the init thread at `Single`/`Funneled`, which only `SCOPES_HERE` counts.
 static LIVE_SCOPES: AtomicUsize = AtomicUsize::new(0);
 
 /// Held by a guarded call or `Drop` path for as long as it may call MPI. At
@@ -110,18 +117,26 @@ impl Drop for InFlight {
 }
 
 /// Held by a nonblocking scope for its whole extent, at every thread level.
-/// [`begin_finalize`] waits for the tokens of scopes on other threads, and
-/// [`scopes_on_this_thread`] feeds the skip decision for the finalizing thread.
+/// [`begin_finalize`] waits for the counted tokens of scopes on other threads,
+/// and [`scopes_on_this_thread`] feeds the skip decision for the finalizing
+/// thread. A token is counted unless it was opened on the init thread at
+/// `Single`/`Funneled`; a scope opened before `Mpi::init` stays counted.
 #[must_use]
-pub(crate) struct ScopeToken(());
+pub(crate) struct ScopeToken {
+    counted: bool,
+}
 
 impl Drop for ScopeToken {
+    #[inline]
     fn drop(&mut self) {
         SCOPES_HERE.with(|here| here.set(here.get() - 1));
-        // Release: pairs with the SeqCst (hence acquiring) load in
-        // `wait_for_other_scopes`, so every MPI call the scope made
-        // happens-before the `MPI_Finalize` that follows the wait.
-        LIVE_SCOPES.fetch_sub(1, Ordering::Release);
+        if self.counted {
+            COUNTED_HERE.with(|here| here.set(here.get() - 1));
+            // Release: pairs with the SeqCst (hence acquiring) load in
+            // `wait_for_other_scopes`, so every MPI call the scope made
+            // happens-before the `MPI_Finalize` that follows the wait.
+            LIVE_SCOPES.fetch_sub(1, Ordering::Release);
+        }
     }
 }
 
@@ -194,9 +209,11 @@ pub(crate) fn activate(level: ThreadLevel) {
 }
 
 /// Opens a nonblocking scope: returns its [`ScopeToken`], or
-/// `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or `Finalized`. The
-/// count rises before the scope's first request-creating call, so that call's
-/// per-call release cannot precede it.
+/// `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or `Finalized`. A
+/// counted scope's count rises before its first request-creating call, so that
+/// call's per-call release cannot precede it; an uncounted scope relies on the
+/// skip path instead.
+#[inline]
 pub(crate) fn open_scope() -> std::result::Result<ScopeToken, c_int> {
     // Relaxed: see `enter`'s comment.
     let state = STATE.load(Ordering::Relaxed);
@@ -204,9 +221,16 @@ pub(crate) fn open_scope() -> std::result::Result<ScopeToken, c_int> {
         return Err(FERROMPI_ERR_FINALIZED);
     }
     if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
-        // Relaxed: at `Single`/`Funneled` only the init thread can create a
-        // request, and it is the thread that drops `Mpi`; a scope on another
-        // thread holds none, so only its count matters, not its order.
+        if ON_INIT_THREAD.with(Cell::get) {
+            // Uncounted: at `Single`/`Funneled` only the init thread can create
+            // a request, and `Mpi` is `!Send`, so `Mpi::drop` runs on this very
+            // thread and skips `MPI_Finalize` while `scopes_on_this_thread()`
+            // is positive. No other thread's wait needs to see this scope.
+            SCOPES_HERE.with(|here| here.set(here.get() + 1));
+            return Ok(ScopeToken { counted: false });
+        }
+        // Relaxed: a scope on another thread holds no request at this level, so
+        // only its count matters, not its order.
         LIVE_SCOPES.fetch_add(1, Ordering::Relaxed);
     } else {
         // SeqCst: the increment of the pair with `begin_finalize`'s
@@ -225,7 +249,8 @@ pub(crate) fn open_scope() -> std::result::Result<ScopeToken, c_int> {
         }
     }
     SCOPES_HERE.with(|here| here.set(here.get() + 1));
-    Ok(ScopeToken(()))
+    COUNTED_HERE.with(|here| here.set(here.get() + 1));
+    Ok(ScopeToken { counted: true })
 }
 
 /// How many nonblocking scopes are open on the calling thread.
@@ -233,12 +258,12 @@ pub(crate) fn scopes_on_this_thread() -> usize {
     SCOPES_HERE.with(Cell::get)
 }
 
-/// Waits until every scope open on another thread has closed. No timeout: a
-/// scope that never ends blocks this wait, as a blocked MPI call blocks
-/// [`drain_shards`].
+/// Waits until every counted scope open on another thread has closed. No
+/// timeout: a scope that never ends blocks this wait, as a blocked MPI call
+/// blocks [`drain_shards`].
 #[cold]
 fn wait_for_other_scopes() {
-    let here = scopes_on_this_thread();
+    let here = COUNTED_HERE.with(Cell::get);
     // SeqCst: the load of the pair with `open_scope`'s increment, and an
     // acquire of the Release decrement it observes.
     while LIVE_SCOPES.load(Ordering::SeqCst) != here {
@@ -571,12 +596,14 @@ fn drop_abort(type_name: &'static str) -> ! {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::ptr;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        check, check_completion, drain_shards, enter, enter_completion, shard, InFlight, Shard,
-        IN_FLIGHT, SHARDS,
+        check, check_completion, drain_shards, enter, enter_completion, open_scope,
+        scopes_on_this_thread, shard, InFlight, Shard, COUNTED_HERE, IN_FLIGHT, LIVE_SCOPES,
+        SHARDS,
     };
     #[cfg(debug_assertions)]
     use super::{release_in_call_flag, take_in_call_flag};
@@ -659,5 +686,32 @@ mod tests {
     #[test]
     fn drain_returns_when_shards_are_zero() {
         drain_shards();
+    }
+
+    fn counted_here() -> usize {
+        COUNTED_HERE.with(Cell::get)
+    }
+
+    #[test]
+    fn scope_opened_before_init_is_counted() {
+        assert_eq!((scopes_on_this_thread(), counted_here()), (0, 0));
+        let token = open_scope().expect("an uninitialized process opens a scope");
+        assert_eq!((scopes_on_this_thread(), counted_here()), (1, 1));
+        // Other tests open scopes concurrently, so the global count is only
+        // bounded below by this thread's own.
+        assert!(LIVE_SCOPES.load(Ordering::SeqCst) >= counted_here());
+        drop(token);
+        assert_eq!((scopes_on_this_thread(), counted_here()), (0, 0));
+    }
+
+    #[test]
+    fn nested_scopes_balance_both_thread_counts() {
+        let outer = open_scope().expect("an uninitialized process opens a scope");
+        let inner = open_scope().expect("an uninitialized process opens a scope");
+        assert_eq!((scopes_on_this_thread(), counted_here()), (2, 2));
+        drop(inner);
+        assert_eq!((scopes_on_this_thread(), counted_here()), (1, 1));
+        drop(outer);
+        assert_eq!((scopes_on_this_thread(), counted_here()), (0, 0));
     }
 }
