@@ -7,7 +7,8 @@ use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, ReduceOp, Result};
 
 /// Aggregates this rank's verdict across `world` via `allreduce(Min)`. If any
 /// rank reports failure, rank 0 prints `FAIL: {name}` and every rank exits
-/// with status 1.
+/// with status 2. Status 1 is not a failure under `expect=unfinalized`, where
+/// Open MPI turns a clean exit without `MPI_Finalize` into 1.
 pub fn check(world: &Communicator, ok: bool, name: &str) {
     let global_ok = world
         .allreduce_scalar(i32::from(ok), ReduceOp::Min)
@@ -17,7 +18,7 @@ pub fn check(world: &Communicator, ok: bool, name: &str) {
         if world.rank() == 0 {
             eprintln!("FAIL: {name}");
         }
-        std::process::exit(1);
+        std::process::exit(2);
     }
 }
 

@@ -28,7 +28,8 @@ MPIEXEC="${MPIEXEC:-mpiexec}"
 MPI_TEST_TIMEOUT="${MPI_TEST_TIMEOUT:-90}"
 
 # The warning Mpi's Drop prints when it skips MPI_Finalize because a window is
-# still alive. Only expect=unfinalized examples may print it.
+# still alive or a nonblocking scope is open on the dropping thread. Only
+# expect=unfinalized examples may print it.
 FINALIZE_SKIPPED_MARKER="MPI_Finalize skipped"
 
 # valgrind flags for --valgrind mode. classify reports exit 99 as
@@ -274,6 +275,8 @@ classify() {
   fi
 
   if [[ "$expect" == "unfinalized" ]]; then
+    # Open MPI turns an exit 0 without MPI_Finalize into 1, so a failing
+    # example must exit with another status (examples use 2).
     if [[ "$exit_code" != "0" && "$exit_code" != "1" ]]; then
       echo "FAIL exit $exit_code"
       return 0
