@@ -40,26 +40,24 @@ fn main() {
     {
         const N: usize = 4;
         let mut win = Win::<i32>::allocate(&world, N).expect("Win::allocate failed");
+        let origin = [1i32, 2, 3, 4];
         let mut result = [0i32; N];
 
         if rank == 1 {
             win.local_slice_mut().copy_from_slice(&[10i32, 20, 30, 40]);
         }
 
-        win.fence(WinFenceAssert::default())
-            .expect("test 1 opening fence failed");
-
-        if rank == 0 {
-            let origin = [1i32, 2, 3, 4];
-            if let Err(e) = win.get_accumulate(&origin, &mut result, 1, 0, N as i64, ReduceOp::Sum)
-            {
-                eprintln!("FAIL: rank 0 Win::get_accumulate Sum returned error: {e}");
-                local_ok = false;
+        let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 {
+                e.get_accumulate(&origin, &mut result, 1, 0, N as i64, ReduceOp::Sum)
+            } else {
+                Ok(())
             }
+        });
+        if let Err(e) = epoch {
+            eprintln!("FAIL: rank {rank} Win::get_accumulate Sum epoch returned error: {e}");
+            local_ok = false;
         }
-
-        win.fence(WinFenceAssert::default())
-            .expect("test 1 closing fence failed");
 
         if rank == 0 {
             let expected_result = [10i32, 20, 30, 40];
@@ -98,26 +96,24 @@ fn main() {
     {
         const N: usize = 1;
         let mut win = Win::<i32>::allocate(&world, N).expect("Win::allocate (test 2) failed");
+        let origin = [0i32];
         let mut result = [0i32; N];
 
         if rank == 1 {
             win.local_slice_mut().copy_from_slice(&[99i32]);
         }
 
-        win.fence(WinFenceAssert::default())
-            .expect("test 2 opening fence failed");
-
-        if rank == 0 {
-            let origin = [0i32];
-            if let Err(e) = win.get_accumulate(&origin, &mut result, 1, 0, N as i64, FetchOp::NO_OP)
-            {
-                eprintln!("FAIL: rank 0 Win::get_accumulate NoOp returned error: {e}");
-                local_ok = false;
+        let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 {
+                e.get_accumulate(&origin, &mut result, 1, 0, N as i64, FetchOp::NO_OP)
+            } else {
+                Ok(())
             }
+        });
+        if let Err(e) = epoch {
+            eprintln!("FAIL: rank {rank} Win::get_accumulate NoOp epoch returned error: {e}");
+            local_ok = false;
         }
-
-        win.fence(WinFenceAssert::default())
-            .expect("test 2 closing fence failed");
 
         if rank == 0 {
             let expected_result = [99i32];

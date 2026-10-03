@@ -14,7 +14,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_compare_and_swap
 // mpi-test: np=2
 
-use ferrompi::{Mpi, PendingFetchResult, Win, WinFenceAssert};
+use ferrompi::{Mpi, Win, WinFenceAssert};
 
 mod common;
 
@@ -44,25 +44,21 @@ fn main() {
             win.local_slice_mut()[0] = 100;
         }
 
-        win.fence(WinFenceAssert::default())
-            .expect("test 1 opening fence failed");
-
         // compare_and_swap returns a PendingFetchResult — result is not yet
-        // populated; must call .resolve() only after the epoch closes.
-        let mut pending: Option<PendingFetchResult<i32>> = None;
-        if rank == 0 {
-            match win.compare_and_swap(200, 100, 1, 0) {
-                Ok(p) => pending = Some(p),
-                Err(e) => {
-                    eprintln!("FAIL: rank 0 Win::compare_and_swap (match) returned error: {e}");
-                    local_ok = false;
-                }
+        // populated; must call .resolve() only after the epoch closes, which
+        // is when `fence` returns it.
+        let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 {
+                Ok(Some(e.compare_and_swap(200, 100, 1, 0)?))
+            } else {
+                Ok(None)
             }
-        }
-
-        // Close the epoch — MPI_Compare_and_swap completes here.
-        win.fence(WinFenceAssert::default())
-            .expect("test 1 closing fence failed");
+        });
+        let pending = epoch.unwrap_or_else(|e| {
+            eprintln!("FAIL: rank {rank} Win::compare_and_swap (match) epoch returned error: {e}");
+            local_ok = false;
+            None
+        });
 
         let mut old = 0i32;
         if let Some(p) = pending {
@@ -104,25 +100,23 @@ fn main() {
             win.local_slice_mut()[0] = 100;
         }
 
-        win.fence(WinFenceAssert::default())
-            .expect("test 2 opening fence failed");
-
         // compare_and_swap returns a PendingFetchResult — result is not yet
-        // populated; must call .resolve() only after the epoch closes.
-        let mut pending: Option<PendingFetchResult<i32>> = None;
-        if rank == 0 {
-            match win.compare_and_swap(200, 99, 1, 0) {
-                Ok(p) => pending = Some(p),
-                Err(e) => {
-                    eprintln!("FAIL: rank 0 Win::compare_and_swap (no match) returned error: {e}");
-                    local_ok = false;
-                }
+        // populated; must call .resolve() only after the epoch closes, which
+        // is when `fence` returns it.
+        let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 {
+                Ok(Some(e.compare_and_swap(200, 99, 1, 0)?))
+            } else {
+                Ok(None)
             }
-        }
-
-        // Close the epoch — MPI_Compare_and_swap completes here.
-        win.fence(WinFenceAssert::default())
-            .expect("test 2 closing fence failed");
+        });
+        let pending = epoch.unwrap_or_else(|e| {
+            eprintln!(
+                "FAIL: rank {rank} Win::compare_and_swap (no match) epoch returned error: {e}"
+            );
+            local_ok = false;
+            None
+        });
 
         let mut old = 0i32;
         if let Some(p) = pending {

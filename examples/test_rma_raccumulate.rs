@@ -60,8 +60,10 @@ fn main() {
 
     // Make rank 1's stores visible in its window; `no_succeed` says no fence
     // epoch follows. The barrier orders the stores before rank 0's lock.
-    win.fence(WinFenceAssert::no_succeed())
-        .expect("fence failed");
+    win.fence(WinFenceAssert::none(), WinFenceAssert::no_succeed(), |_| {
+        Ok(())
+    })
+    .expect("fence failed");
     world.barrier().expect("barrier before lock failed");
 
     if rank == 0 {

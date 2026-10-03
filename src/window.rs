@@ -52,14 +52,17 @@
 //! println!("Rank 0's first value: {}", remote[0]);
 //! ```
 
-use std::ops::{BitOr, BitOrAssign};
+use std::io::Write;
+use std::marker::PhantomData;
+use std::ops::{BitOr, BitOrAssign, Deref};
 use std::os::raw::c_int;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use crate::datatype::{buf, buf_mut};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL};
 use crate::ffi;
 use crate::group::Group;
 use crate::persistent::vec_buf_mut;
@@ -140,6 +143,8 @@ impl WinFenceAssert {
     ///
     /// This hints to the implementation that no RMA access epoch was open
     /// before this fence, so no preceding operations need to be completed.
+    /// [`Win::fence`] accepts it on the opening fence and rejects it on the
+    /// closing one, which must complete the closure's operations.
     #[inline]
     pub fn no_precede() -> Self {
         WinFenceAssert(fence_mode_values()[2])
@@ -150,6 +155,8 @@ impl WinFenceAssert {
     ///
     /// This hints that the fence closes the last access epoch, so the
     /// implementation need not prepare for subsequent RMA operations.
+    /// [`Win::fence`] accepts it on the closing fence and rejects it on the
+    /// opening one, whose epoch holds the closure's operations.
     #[inline]
     pub fn no_succeed() -> Self {
         WinFenceAssert(fence_mode_values()[3])
@@ -185,6 +192,26 @@ impl BitOrAssign for WinFenceAssert {
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
     }
+}
+
+/// Rejects the two assertions that would let MPI keep using an origin buffer
+/// after the closing fence returned: `no_succeed` on the opening fence and
+/// `no_precede` on the closing one (MPI-4.1 §12.5.5). A mode value of 0 sets no
+/// bit, so it is never rejected.
+fn check_fence_asserts(open: WinFenceAssert, close: WinFenceAssert) -> Result<()> {
+    if open.0 & WinFenceAssert::no_succeed().0 != 0 {
+        return Err(Error::InvalidArgument {
+            arg: "open",
+            reason: "no_succeed on an opening fence leaves the epoch's RMA calls outside it",
+        });
+    }
+    if close.0 & WinFenceAssert::no_precede().0 != 0 {
+        return Err(Error::InvalidArgument {
+            arg: "close",
+            reason: "no_precede on a closing fence leaves the epoch's RMA calls uncompleted",
+        });
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -973,12 +1000,12 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 /// let world = mpi.world();
 /// let mut win = Win::<i32>::allocate(&world, 1).unwrap();
 ///
-/// win.fence(WinFenceAssert::default()).unwrap();
-///
-/// let pending = win.fetch_and_op(1, 1, 0, ReduceOp::Sum).unwrap();
-///
-/// // Close epoch — MPI_Fetch_and_op completes here
-/// win.fence(WinFenceAssert::default()).unwrap();
+/// // Close epoch — MPI_Fetch_and_op completes when the fence closes
+/// let pending = win
+///     .fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+///         e.fetch_and_op(1, 1, 0, ReduceOp::Sum)
+///     })
+///     .unwrap();
 ///
 /// // SAFETY: epoch is closed; result is now populated.
 /// let old = unsafe { pending.resolve() };
@@ -1125,6 +1152,53 @@ pub struct Win<T: MpiDatatype> {
     /// borrowed while the window lives, so every slice stays a child of
     /// `local_ptr`; only `into_buffer` and `Drop` touch it, after the free.
     buffer: Option<Vec<T>>,
+}
+
+/// The handle an active-target access epoch gives its closure.
+///
+/// [`Win::fence`] and [`Win::start`] open an epoch, run a closure with this
+/// handle, and close the epoch when the closure returns, whether it returned
+/// `Ok` or `Err`. The epoch is open exactly while the closure runs, and the
+/// window is mutably borrowed for that time.
+///
+/// # Lifetimes
+///
+/// The handle carries the invariant lifetimes of [`Scope`](crate::Scope): `'s`
+/// is the epoch, and `'env` outlives it. An origin borrowed for `'s` outlives
+/// the closing call, which is when MPI stops reading it, and a buffer declared
+/// inside the closure is rejected because it is freed before then. Declare
+/// buffers before the call to `fence` or `start`.
+///
+/// # Thread safety
+///
+/// `ActiveEpoch` is neither `Send` nor `Sync`: it borrows a [`Win`], which is
+/// neither.
+pub struct ActiveEpoch<'s, 'env: 's, T: MpiDatatype> {
+    win: &'s Win<T>,
+    scope: PhantomData<&'s mut &'s ()>,
+    env: PhantomData<&'env mut &'env ()>,
+}
+
+// Transitional: the RMA operations still live on `Win`, so the handle reaches
+// them by dereferencing. The impl goes away when the operations move onto the
+// handle.
+impl<T: MpiDatatype> Deref for ActiveEpoch<'_, '_, T> {
+    type Target = Win<T>;
+
+    fn deref(&self) -> &Win<T> {
+        self.win
+    }
+}
+
+/// Reports why an epoch could not be closed cleanly and aborts the process:
+/// its origin buffers are still in MPI's hands, so there is no way to hand
+/// them back.
+#[cold]
+#[inline(never)]
+fn epoch_abort(reason: &str) -> ! {
+    let msg = format!("ferrompi: {reason}; aborting\n");
+    let _ = std::io::stderr().write_all(msg.as_bytes());
+    std::process::abort();
 }
 
 impl<T: MpiDatatype> Win<T> {
@@ -1421,31 +1495,50 @@ impl<T: MpiDatatype> Win<T> {
         self.words.len() as i32
     }
 
-    /// Fence synchronization (active-target epoch boundary).
+    /// Run a closure in a fence epoch (active-target synchronization).
     ///
-    /// A collective operation over all processes in this window's communicator.
-    /// Every rank must call `fence` at the same logical program point. A pair of
-    /// `fence` calls delimits an access/exposure epoch:
-    ///
-    /// ```text
-    /// win.fence(WinFenceAssert::none())   // open epoch
-    /// // ... RMA operations (put / get / accumulate) ...
-    /// win.fence(WinFenceAssert::none())   // close epoch
-    /// ```
-    ///
-    /// After the closing `fence` returns, all preceding RMA operations are
-    /// complete and their effects are visible to all processes.
+    /// Wraps `MPI_Win_fence`, which is collective over this window's
+    /// communicator: every rank calls `fence` at the same logical program
+    /// point. The call opens the epoch with a fence carrying `open`, runs `f`
+    /// with the epoch's [`ActiveEpoch`], and closes it with a fence carrying
+    /// `close`, whether `f` returned `Ok` or `Err`, so every rank makes the
+    /// closing collective call. When it returns, the RMA operations `f` issued
+    /// are complete at this rank, and visible at each target once that target's
+    /// closing fence returns.
     ///
     /// # Arguments
     ///
-    /// * `assert` — Assertion hint bitmask. Use [`WinFenceAssert::default()`]
-    ///   (or [`WinFenceAssert::none()`]) when no optimization hints are needed.
-    ///   Compose multiple hints with `|`.
+    /// * `open`  — Assertion hint bitmask of the opening fence. Use
+    ///   [`WinFenceAssert::none()`] when no hints are needed. Compose multiple
+    ///   hints with `|`. [`WinFenceAssert::no_succeed()`] is rejected.
+    /// * `close` — Assertion hint bitmask of the closing fence.
+    ///   [`WinFenceAssert::no_precede()`] is rejected.
+    /// * `f`     — The closure that issues the epoch's RMA operations.
     ///
     /// # Errors
     ///
-    /// Returns `Error::Mpi { operation: Some("win_fence"), .. }` if MPI
-    /// reports an error.
+    /// - `Error::InvalidArgument` with `arg: "open"` if `open` carries
+    ///   `no_succeed`, and with `arg: "close"` if `close` carries
+    ///   `no_precede`; no MPI call is made. Either would let MPI keep using an
+    ///   origin buffer after the closing fence returned (MPI-4.1 §12.5.5).
+    /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped: the
+    ///   opening fence is refused and `f` does not run.
+    /// - `Error::Mpi` with `operation: Some("win_fence")` if the opening fence
+    ///   fails (`f` does not run) or the closing fence fails.
+    ///
+    /// When `f` returns an error, that error is returned in place of a closing
+    /// fence's. MPI ran the closing fence, and the crate trusts that it
+    /// completed or failed the epoch's operations, as MPICH and Open MPI do;
+    /// MPI-4.1 §9.4 (p.460) does not promise it.
+    ///
+    /// # Aborts
+    ///
+    /// A panic in `f` aborts the process: the closing fence is collective, and
+    /// one rank closing it alone can hang or mismatch the job. A closing fence
+    /// refused before MPI ran it also aborts, since the epoch's origin buffers
+    /// are still in MPI's hands; in a debug build at
+    /// [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized), an overlap
+    /// with another thread's MPI call is the one way to reach that.
     ///
     /// # Example
     ///
@@ -1454,29 +1547,70 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let win = Win::<f64>::allocate(&world, 16).unwrap();
+    /// let mut win = Win::<f64>::allocate(&world, 16).unwrap();
     ///
-    /// // Open epoch
-    /// win.fence(WinFenceAssert::default()).unwrap();
-    /// // ... RMA operations would go here ...
-    /// // Close epoch
-    /// win.fence(WinFenceAssert::default()).unwrap();
+    /// win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |_epoch| {
+    ///     // ... RMA operations would go here ...
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn fence(&self, assert: WinFenceAssert) -> Result<()> {
+    pub fn fence<'env, R>(
+        &mut self,
+        open: WinFenceAssert,
+        close: WinFenceAssert,
+        f: impl for<'s> FnOnce(&'s ActiveEpoch<'s, 'env, T>) -> Result<R>,
+    ) -> Result<R> {
+        check_fence_asserts(open, close)?;
         // SAFETY: `win_handle` is a valid MPI window handle allocated by
         // `ferrompi_win_create` or `ferrompi_win_allocate`. The assert value
         // is a valid bitmask obtained from `WinFenceAssert`, which is either
         // 0 (none) or a combination of values returned by the MPI implementation.
-        let ret = unsafe { ffi::ferrompi_win_fence(assert.bits(), self.win_handle) };
-        Error::check_with_op(ret, "win_fence")
+        let ret = unsafe { ffi::ferrompi_win_fence(open.bits(), self.win_handle) };
+        Error::check_with_op(ret, "win_fence")?;
+        self.run_epoch(
+            "win_fence",
+            // SAFETY: as for the opening fence; the closing fence takes the
+            // same arguments.
+            |win_handle| unsafe { ffi::ferrompi_win_fence_close(close.bits(), win_handle) },
+            f,
+        )
+    }
+
+    /// Runs `f` in the epoch the caller just opened, then makes the closing
+    /// call `close`, whatever `f` returned. A panic in `f` aborts before the
+    /// closing call, and so does a closing call refused before MPI ran it.
+    /// Otherwise `f`'s error is returned first, then the closing call's.
+    fn run_epoch<'env, R>(
+        &mut self,
+        close_op: &'static str,
+        close: impl FnOnce(i32) -> c_int,
+        f: impl for<'s> FnOnce(&'s ActiveEpoch<'s, 'env, T>) -> Result<R>,
+    ) -> Result<R> {
+        let epoch = ActiveEpoch {
+            win: &*self,
+            scope: PhantomData,
+            env: PhantomData,
+        };
+        let result = match catch_unwind(AssertUnwindSafe(|| f(&epoch))) {
+            Ok(result) => result,
+            Err(_) => epoch_abort("a fence or PSCW epoch was still open during unwind"),
+        };
+        let ret = close(self.win_handle);
+        if ret == FERROMPI_ERR_FINALIZED || ret == FERROMPI_ERR_THREAD_LEVEL {
+            epoch_abort("an RMA epoch's closing call was refused");
+        }
+        let value = result?;
+        Error::check_with_op(ret, close_op).map(|()| value)
     }
 
     /// Start an exposure epoch (active-target PSCW synchronization).
     ///
     /// Wraps `MPI_Win_post`. This rank exposes its window memory to the
-    /// ranks in `group`, which are expected to call [`Win::start`] and then
-    /// [`Win::complete`]. Close the exposure epoch with [`Win::wait_exposure`]
-    /// or [`Win::test_exposure`].
+    /// ranks in `group`, which are expected to run [`Win::start`]. Close the
+    /// exposure epoch with [`Win::wait_exposure`] or [`Win::test_exposure`].
+    ///
+    /// The exposure epoch has no handle: this rank issues no RMA call in it.
     ///
     /// # Arguments
     ///
@@ -1513,11 +1647,15 @@ impl<T: MpiDatatype> Win<T> {
         Error::check_with_op(ret, "win_post")
     }
 
-    /// Start an access epoch (active-target PSCW synchronization).
+    /// Run a closure in a PSCW access epoch (active-target synchronization).
     ///
-    /// Wraps `MPI_Win_start`. This rank will issue RMA operations against the
-    /// ranks in `group`, which must have called (or will call) [`Win::post`].
-    /// Close the access epoch with [`Win::complete`].
+    /// Wraps `MPI_Win_start` and `MPI_Win_complete`. This rank will issue RMA
+    /// operations against the ranks in `group`, which must have called (or will
+    /// call) [`Win::post`]. The call opens the epoch, runs `f` with the epoch's
+    /// [`ActiveEpoch`], and closes it with `MPI_Win_complete`, whether `f`
+    /// returned `Ok` or `Err`, so the target ranks' [`Win::wait_exposure`]
+    /// never waits on an epoch left open. When it returns, the RMA operations
+    /// `f` issued are complete at the origin.
     ///
     /// # Arguments
     ///
@@ -1525,11 +1663,30 @@ impl<T: MpiDatatype> Win<T> {
     ///   [`Win::post`].
     /// * `assert` — Assertion hint bitmask. Use [`WinPscwAssert::default()`]
     ///   when no optimization hints are needed.
+    /// * `f`      — The closure that issues the epoch's RMA operations.
     ///
     /// # Errors
     ///
-    /// Returns `Error::Mpi { operation: Some("win_start"), .. }` if MPI reports
-    /// an error.
+    /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped: the
+    ///   epoch is not opened and `f` does not run.
+    /// - `Error::Mpi` with `operation: Some("win_start")` if opening the epoch
+    ///   fails (`f` does not run).
+    /// - `Error::Mpi` with `operation: Some("win_complete")` if closing it
+    ///   fails.
+    ///
+    /// When `f` returns an error, that error is returned in place of
+    /// `MPI_Win_complete`'s. MPI ran the call, and the crate trusts that it
+    /// completed or failed the epoch's operations, as MPICH and Open MPI do;
+    /// MPI-4.1 §9.4 (p.460) does not promise it.
+    ///
+    /// # Aborts
+    ///
+    /// A panic in `f` aborts the process: closing the epoch synchronizes with
+    /// the target ranks, and one rank closing it alone can hang or mismatch the
+    /// job. An `MPI_Win_complete` refused before MPI ran it also aborts, since
+    /// the epoch's origin buffers are still in MPI's hands; in a debug build at
+    /// [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized), an overlap
+    /// with another thread's MPI call is the one way to reach that.
     ///
     /// # Example
     ///
@@ -1538,57 +1695,42 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let win = Win::<f64>::allocate(&world, 8).unwrap();
+    /// let mut win = Win::<f64>::allocate(&world, 8).unwrap();
     /// let exposure_group = world.group().unwrap().include(&[0]).unwrap();
     ///
     /// // Rank 1 opens an access epoch to rank 0's window
-    /// win.start(&exposure_group, WinPscwAssert::default()).unwrap();
-    /// win.complete().unwrap();
+    /// win.start(&exposure_group, WinPscwAssert::default(), |_epoch| {
+    ///     // ... RMA operations would go here ...
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn start(&self, group: &Group, assert: WinPscwAssert) -> Result<()> {
+    pub fn start<'env, R>(
+        &mut self,
+        group: &Group,
+        assert: WinPscwAssert,
+        f: impl for<'s> FnOnce(&'s ActiveEpoch<'s, 'env, T>) -> Result<R>,
+    ) -> Result<R> {
         // SAFETY: `win_handle` is a valid MPI window handle. `group.handle`
         // returns a valid group handle from the C-layer group table.
         // `assert.bits()` is either 0 or a combination of MPI_MODE_* constants.
         let ret = unsafe { ffi::ferrompi_win_start(group.handle, assert.bits(), self.win_handle) };
-        Error::check_with_op(ret, "win_start")
-    }
-
-    /// Complete an access epoch (active-target PSCW synchronization).
-    ///
-    /// Wraps `MPI_Win_complete`. Closes the access epoch opened by
-    /// [`Win::start`]. All RMA operations issued since the matching
-    /// `Win::start` are guaranteed to be complete after this returns.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::Mpi { operation: Some("win_complete"), .. }` if MPI
-    /// reports an error.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use ferrompi::{Mpi, Win, WinPscwAssert};
-    /// # let mpi = Mpi::init().unwrap();
-    /// # let world = mpi.world();
-    /// # let win = Win::<f64>::allocate(&world, 8).unwrap();
-    /// # let g = world.group().unwrap().include(&[0]).unwrap();
-    /// win.start(&g, WinPscwAssert::default()).unwrap();
-    /// // ... RMA operations ...
-    /// win.complete().unwrap();
-    /// ```
-    pub fn complete(&self) -> Result<()> {
-        // SAFETY: `win_handle` is a valid MPI window handle. An active access
-        // epoch was opened by a prior call to `ferrompi_win_start`.
-        let ret = unsafe { ffi::ferrompi_win_complete(self.win_handle) };
-        Error::check_with_op(ret, "win_complete")
+        Error::check_with_op(ret, "win_start")?;
+        self.run_epoch(
+            "win_complete",
+            // SAFETY: `win_handle` is a valid MPI window handle, and the
+            // `MPI_Win_start` above opened the access epoch this call closes.
+            |win_handle| unsafe { ffi::ferrompi_win_complete(win_handle) },
+            f,
+        )
     }
 
     /// Wait for the exposure epoch to close (active-target PSCW synchronization).
     ///
     /// Wraps `MPI_Win_wait`. Blocks until all RMA operations issued by the
-    /// access group (those that called [`Win::start`] / [`Win::complete`])
-    /// against this rank's window are complete. Closes the exposure epoch
-    /// opened by [`Win::post`].
+    /// access group (those that ran [`Win::start`]) against this rank's window
+    /// are complete. Closes the exposure epoch opened by [`Win::post`], which
+    /// has no handle: this rank issues no RMA call in it.
     ///
     /// # Errors
     ///
@@ -1617,8 +1759,9 @@ impl<T: MpiDatatype> Win<T> {
     /// Nonblocking test for exposure epoch completion (active-target PSCW).
     ///
     /// Wraps `MPI_Win_test`. Returns `true` if the exposure epoch started by
-    /// [`Win::post`] has completed (i.e., all access-side ranks have called
-    /// [`Win::complete`]), `false` otherwise. Does not block.
+    /// [`Win::post`] has completed (i.e., all access-side ranks have closed
+    /// their [`Win::start`] epochs), `false` otherwise. Does not block. That
+    /// exposure epoch has no handle: this rank issues no RMA call in it.
     ///
     /// # Errors
     ///
@@ -1933,19 +2076,19 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let win = Win::<f64>::allocate(&world, 4).unwrap();
+    /// let mut win = Win::<f64>::allocate(&world, 4).unwrap();
     /// let buf = [1.0f64, 2.0, 3.0, 4.0];
     ///
-    /// // Open fence epoch on all ranks
-    /// win.fence(WinFenceAssert::default()).unwrap();
-    ///
-    /// // Rank 0 puts four elements into rank 1's window at displacement 0
-    /// if world.rank() == 0 {
-    ///     win.put(&buf, 1, 0, buf.len() as i64).unwrap();
-    /// }
-    ///
-    /// // Close epoch — put completes here; `buf` must stay alive until now
-    /// win.fence(WinFenceAssert::default()).unwrap();
+    /// // Open a fence epoch on all ranks; the put completes when it closes,
+    /// // and `buf` stays alive until then
+    /// win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+    ///     // Rank 0 puts four elements into rank 1's window at displacement 0
+    ///     if world.rank() == 0 {
+    ///         e.put(&buf, 1, 0, buf.len() as i64)?;
+    ///     }
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
     pub fn put(
         &self,
@@ -2146,21 +2289,21 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let win = Win::<f64>::allocate(&world, 4).unwrap();
+    /// let mut win = Win::<f64>::allocate(&world, 4).unwrap();
     /// let mut buf = [0.0f64; 4];
     ///
-    /// // Open fence epoch on all ranks
-    /// win.fence(WinFenceAssert::default()).unwrap();
+    /// // Open a fence epoch on all ranks; the get completes when it closes
+    /// win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+    ///     // Rank 0 reads four elements from rank 1's window at displacement 0
+    ///     if world.rank() == 0 {
+    ///         e.get(&mut buf, 1, 0, 4)?;
+    ///         // buf is NOT yet valid here — read after the closing fence
+    ///     }
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     ///
-    /// // Rank 0 reads four elements from rank 1's window at displacement 0
-    /// if world.rank() == 0 {
-    ///     win.get(&mut buf, 1, 0, 4).unwrap();
-    ///     // buf is NOT yet valid here — read after the closing fence
-    /// }
-    ///
-    /// // Close epoch — get completes here, buf is now valid
-    /// win.fence(WinFenceAssert::default()).unwrap();
-    ///
+    /// // The epoch is closed: buf is now valid
     /// if world.rank() == 0 {
     ///     println!("{:?}", buf);
     /// }
@@ -2375,16 +2518,16 @@ impl<T: MpiDatatype> Win<T> {
     ///     win.local_slice_mut().copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
     /// }
     ///
-    /// // Open fence epoch on all ranks
-    /// win.fence(WinFenceAssert::default()).unwrap();
-    ///
-    /// // Rank 0 adds [10, 20, 30, 40] to rank 1's window
-    /// if world.rank() == 0 {
-    ///     win.accumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum).unwrap();
-    /// }
-    ///
-    /// // Close epoch — accumulate completes here; `buf` must stay alive until now
-    /// win.fence(WinFenceAssert::default()).unwrap();
+    /// // Open a fence epoch on all ranks; the accumulate completes when it
+    /// // closes, and `buf` stays alive until then
+    /// win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+    ///     // Rank 0 adds [10, 20, 30, 40] to rank 1's window
+    ///     if world.rank() == 0 {
+    ///         e.accumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum)?;
+    ///     }
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// // Rank 1's window is now [11.0, 22.0, 33.0, 44.0]
     /// ```
     pub fn accumulate(
@@ -2496,7 +2639,8 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// // Make rank 1's store visible in its window; `no_succeed` says no fence
     /// // epoch follows. The barrier orders the store before rank 0's lock.
-    /// win.fence(WinFenceAssert::no_succeed()).unwrap();
+    /// win.fence(WinFenceAssert::none(), WinFenceAssert::no_succeed(), |_| Ok(()))
+    ///     .unwrap();
     /// world.barrier().unwrap();
     ///
     /// // Request-based RMA is valid only in a passive-target epoch
@@ -2634,17 +2778,16 @@ impl<T: MpiDatatype> Win<T> {
     ///     win.local_slice_mut().copy_from_slice(&[10, 20, 30, 40]);
     /// }
     ///
-    /// // Open fence epoch on all ranks
-    /// win.fence(WinFenceAssert::default()).unwrap();
-    ///
-    /// // Rank 0 atomically fetches rank 1's values and adds [1, 2, 3, 4]
-    /// if world.rank() == 0 {
-    ///     win.get_accumulate(&origin, &mut result, 1, 0, 4, ReduceOp::Sum).unwrap();
-    /// }
-    ///
-    /// // Close epoch — get_accumulate completes here; `origin`/`result` must
-    /// // stay alive until now
-    /// win.fence(WinFenceAssert::default()).unwrap();
+    /// // Open a fence epoch on all ranks; the get_accumulate completes when it
+    /// // closes, and `origin`/`result` stay alive until then
+    /// win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+    ///     // Rank 0 atomically fetches rank 1's values and adds [1, 2, 3, 4]
+    ///     if world.rank() == 0 {
+    ///         e.get_accumulate(&origin, &mut result, 1, 0, 4, ReduceOp::Sum)?;
+    ///     }
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     ///
     /// if world.rank() == 0 {
     ///     println!("{:?}", result);
@@ -2761,18 +2904,18 @@ impl<T: MpiDatatype> Win<T> {
     ///     win.local_slice_mut()[0] = 100;
     /// }
     ///
-    /// // Open fence epoch on all ranks
-    /// win.fence(WinFenceAssert::default()).unwrap();
-    ///
-    /// // Rank 0 atomically adds 1 and fetches the old value (operation initiated)
-    /// let pending = if world.rank() == 0 {
-    ///     Some(win.fetch_and_op(1, 1, 0, ReduceOp::Sum).unwrap())
-    /// } else {
-    ///     None
-    /// };
-    ///
-    /// // Close epoch — fetch_and_op completes here
-    /// win.fence(WinFenceAssert::default()).unwrap();
+    /// // Open a fence epoch on all ranks; the fetch_and_op completes when it
+    /// // closes, and the closure hands the pending result out
+    /// let pending = win
+    ///     .fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+    ///         // Rank 0 atomically adds 1 and fetches the old value (operation initiated)
+    ///         if world.rank() == 0 {
+    ///             Ok(Some(e.fetch_and_op(1, 1, 0, ReduceOp::Sum)?))
+    ///         } else {
+    ///             Ok(None)
+    ///         }
+    ///     })
+    ///     .unwrap();
     ///
     /// // SAFETY: epoch is closed; result buffer is now populated.
     /// if let Some(p) = pending {
@@ -2890,13 +3033,15 @@ impl<T: crate::AtomicMpiDatatype + MpiDatatype> Win<T> {
     /// # use ferrompi::{Mpi, Win, WinFenceAssert};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// # let win = Win::<i32>::allocate(&world, 1).unwrap();
-    /// # win.fence(WinFenceAssert::default()).unwrap();
+    /// # let mut win = Win::<i32>::allocate(&world, 1).unwrap();
     /// let expected = 100i32;
     /// let new_val  = 200i32;
-    /// let pending = win.compare_and_swap(new_val, expected, 1, 0).unwrap();
-    /// // close epoch first
-    /// # win.fence(WinFenceAssert::default()).unwrap();
+    /// // the epoch closes when `fence` returns
+    /// let pending = win
+    ///     .fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+    ///         e.compare_and_swap(new_val, expected, 1, 0)
+    ///     })
+    ///     .unwrap();
     /// // SAFETY: epoch is closed.
     /// let old = unsafe { pending.resolve() };
     /// let swapped = old == expected;
@@ -2935,17 +3080,18 @@ impl<T: crate::AtomicMpiDatatype + MpiDatatype> Win<T> {
     ///     win.local_slice_mut()[0] = 100;
     /// }
     ///
-    /// win.fence(WinFenceAssert::default()).unwrap();
-    ///
-    /// // Rank 0: swap in 200 only if the current value is 100 (initiated here)
-    /// let pending = if world.rank() == 0 {
-    ///     Some(win.compare_and_swap(200, 100, 1, 0).unwrap())
-    /// } else {
-    ///     None
-    /// };
-    ///
-    /// // Close epoch — compare_and_swap completes here
-    /// win.fence(WinFenceAssert::default()).unwrap();
+    /// // Open a fence epoch on all ranks; the compare_and_swap completes when
+    /// // it closes, and the closure hands the pending result out
+    /// let pending = win
+    ///     .fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+    ///         // Rank 0: swap in 200 only if the current value is 100 (initiated here)
+    ///         if world.rank() == 0 {
+    ///             Ok(Some(e.compare_and_swap(200, 100, 1, 0)?))
+    ///         } else {
+    ///             Ok(None)
+    ///         }
+    ///     })
+    ///     .unwrap();
     ///
     /// // SAFETY: epoch is closed; result buffer is now populated.
     /// if let Some(p) = pending {
@@ -3326,8 +3472,8 @@ impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_rma_target, window_word, Error, PendingFetchResult, Win, WinFenceAssert,
-        WinPscwAssert, WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT, WIN_FREED,
+        check_fence_asserts, check_rma_target, window_word, Error, PendingFetchResult, Win,
+        WinFenceAssert, WinPscwAssert, WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT, WIN_FREED,
     };
     use crate::persistent::vec_buf_mut;
     use std::ptr::NonNull;
@@ -3513,6 +3659,52 @@ mod tests {
         let mut a = WinFenceAssert::from_bits_for_test(1);
         a |= WinFenceAssert::from_bits_for_test(4);
         assert_eq!(a.bits(), 5);
+    }
+
+    #[test]
+    fn check_fence_asserts_rejects_no_succeed_open_and_no_precede_close() {
+        let none = WinFenceAssert::none();
+        let no_succeed = WinFenceAssert::no_succeed();
+        let no_precede = WinFenceAssert::no_precede();
+        let fault = |open, close| match check_fence_asserts(open, close) {
+            Err(Error::InvalidArgument { arg, reason }) => Some((arg, reason)),
+            result => {
+                assert!(result.is_ok(), "unexpected {result:?}");
+                None
+            }
+        };
+
+        assert_eq!(
+            fault(no_succeed, none),
+            Some((
+                "open",
+                "no_succeed on an opening fence leaves the epoch's RMA calls outside it"
+            ))
+        );
+        assert_eq!(
+            fault(none, no_precede),
+            Some((
+                "close",
+                "no_precede on a closing fence leaves the epoch's RMA calls uncompleted"
+            ))
+        );
+        // The bit is found among others, and two faults report the opening fence's.
+        assert_eq!(
+            fault(no_succeed | WinFenceAssert::no_store(), none).map(|f| f.0),
+            Some("open")
+        );
+        assert_eq!(
+            fault(none, no_precede | WinFenceAssert::no_put()).map(|f| f.0),
+            Some("close")
+        );
+        assert_eq!(fault(no_succeed, no_precede).map(|f| f.0), Some("open"));
+
+        assert_eq!(fault(no_precede, no_succeed), None);
+        assert_eq!(fault(none, none), None);
+        assert_eq!(
+            fault(WinFenceAssert::no_store(), WinFenceAssert::no_put()),
+            None
+        );
     }
 
     // -------------------------------------------------------------------------

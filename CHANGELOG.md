@@ -163,6 +163,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still use: the buffer is released only after a successful `MPI_Win_free`, and
   is leaked otherwise. Migration: pass the `Vec` by value and take it back with
   `into_buffer()`.
+- **Fence and PSCW access epochs are closures:** `Win::fence(open, close,
+  |e| ..)` and `Win::start(group, assert, |e| ..)` run the closure with an
+  `ActiveEpoch` and always issue the closing fence or `MPI_Win_complete`;
+  `Win::complete` is removed. A panic inside either closure aborts the
+  process. `fence` rejects `no_succeed()` on the opening fence and
+  `no_precede()` on the closing one with `Error::InvalidArgument`. Migration:
+  put the operations of each epoch in one closure and declare their buffers
+  before it.
 
 ### Added
 

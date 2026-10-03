@@ -98,37 +98,38 @@ extern "C" {
 /// fixed shim on MPI >= 4 would pass the oversized count to `MPI_Put_c`.
 #[cfg(feature = "rma")]
 fn rma_put(world: &Communicator) {
-    let win = Win::<u64>::allocate(world, 4).expect("Win::allocate failed");
-    win.fence(WinFenceAssert::default())
-        .expect("opening fence failed");
+    let mut win = Win::<u64>::allocate(world, 4).expect("Win::allocate failed");
+    let handle = win.raw_handle();
+    let origin = [0u64; 4];
+    let dt_tag = <u64 as MpiDatatype>::TAG as i32;
 
     let mut rma_put_ok = true;
-    if world.rank() == 0 {
-        let origin = [0u64; 4];
-        let dt_tag = <u64 as MpiDatatype>::TAG as i32;
-        let raw_ret = unsafe {
-            // SAFETY: see the invariant comment on the extern "C" block above.
-            ferrompi_put(
-                origin.as_ptr().cast(),
-                4,
-                dt_tag,
-                1,
-                0,
-                (1i64 << 32) + 4,
-                dt_tag,
-                win.raw_handle(),
-            )
-        };
-        rma_put_ok = matches!(
-            Error::from_code(raw_ret),
-            Error::Mpi {
-                class: MpiErrorClass::Count,
-                ..
-            }
-        );
-    }
-    win.fence(WinFenceAssert::default())
-        .expect("closing fence failed");
+    win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |_| {
+        if world.rank() == 0 {
+            let raw_ret = unsafe {
+                // SAFETY: see the invariant comment on the extern "C" block above.
+                ferrompi_put(
+                    origin.as_ptr().cast(),
+                    4,
+                    dt_tag,
+                    1,
+                    0,
+                    (1i64 << 32) + 4,
+                    dt_tag,
+                    handle,
+                )
+            };
+            rma_put_ok = matches!(
+                Error::from_code(raw_ret),
+                Error::Mpi {
+                    class: MpiErrorClass::Count,
+                    ..
+                }
+            );
+        }
+        Ok(())
+    })
+    .expect("fence epoch failed");
     drop(win);
 
     common::check(

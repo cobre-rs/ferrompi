@@ -147,6 +147,35 @@ pub unsafe fn ferrompi_error_info(
     unsafe { error_info(code, error_class, message, msg_len) }
 }
 
+/// The same C call as [`ferrompi_win_fence`], for the fence that closes an
+/// epoch. `MPI_Win_fence` both closes and opens, so the ordinary wrapper refuses
+/// it while finalizing; this one takes the completion entry, which admits it,
+/// because an epoch left open would leave its origin buffers in MPI's hands.
+/// Like the other wrappers it makes the debug overlap check.
+///
+/// # Safety
+///
+/// `win` must be a live window handle, and `assert_val` a mode value of the
+/// linked MPI implementation, as for `ferrompi_win_fence`.
+#[cfg(feature = "rma")]
+pub(crate) unsafe fn ferrompi_win_fence_close(assert_val: int32_t, win: int32_t) -> c_int {
+    let _call = match crate::rt::enter_completion() {
+        Ok(token) => token,
+        Err(code) => return code,
+    };
+    #[cfg(debug_assertions)]
+    let held = match crate::rt::begin_call() {
+        Ok(held) => held,
+        Err(code) => return code,
+    };
+    // SAFETY: the caller upholds the C function's contract, and the token keeps
+    // `MPI_Finalize` from starting until this call returns.
+    let result = unsafe { raw::ferrompi_win_fence(assert_val, win) };
+    #[cfg(debug_assertions)]
+    crate::rt::end_call(held);
+    result
+}
+
 /// Wraps every other extern declaration in [`crate::rt::enter`]'s lifecycle
 /// check, forwarding to the same-named function in [`raw`] on success and
 /// holding the returned in-flight token until the call returns. The raw
@@ -154,9 +183,9 @@ pub unsafe fn ferrompi_error_info(
 /// resolving to the guarded wrapper without any change.
 ///
 /// The externs after the trailing marker complete, test or cancel a request that
-/// is already pending. Their wrappers take the completion entry instead, which
-/// admits them while finalizing; both lists share one `raw` module and one
-/// wrapper body.
+/// is already pending, or close an epoch that is already open. Their wrappers
+/// take the completion entry instead, which admits them while finalizing; both
+/// lists share one `raw` module and one wrapper body.
 macro_rules! guarded_extern {
     (@wrappers $enter:path; $(
         $(#[$meta:meta])*
@@ -1095,15 +1124,6 @@ guarded_extern! {
     pub fn ferrompi_win_start(group: int32_t, assert_val: int32_t, win: int32_t) -> c_int;
 
     #[cfg(feature = "rma")]
-    pub fn ferrompi_win_complete(win: int32_t) -> c_int;
-
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_wait(win: int32_t) -> c_int;
-
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_test(win: int32_t, flag: *mut int32_t) -> c_int;
-
-    #[cfg(feature = "rma")]
     pub fn ferrompi_put(
         origin: *const c_void,
         origin_count: int64_t,
@@ -1277,4 +1297,18 @@ guarded_extern! {
     ) -> c_int;
 
     pub fn ferrompi_cancel(request: int64_t) -> c_int;
+
+    // ============================================================
+    // RMA / Epoch Closing
+    // Close an access or exposure epoch that is already open: admitted while
+    // finalizing, unlike the calls that open one.
+    // ============================================================
+    #[cfg(feature = "rma")]
+    pub fn ferrompi_win_complete(win: int32_t) -> c_int;
+
+    #[cfg(feature = "rma")]
+    pub fn ferrompi_win_wait(win: int32_t) -> c_int;
+
+    #[cfg(feature = "rma")]
+    pub fn ferrompi_win_test(win: int32_t, flag: *mut int32_t) -> c_int;
 }

@@ -39,21 +39,21 @@ fn main() {
             local.copy_from_slice(&[100.0f64, 200.0, 300.0, 400.0]);
         }
 
-        // Open the fence epoch on all ranks
-        win.fence(WinFenceAssert::default())
-            .expect("opening fence failed");
-
         let mut local_buf = [0.0f64; N];
-        if rank == 0 {
-            if let Err(e) = win.get(&mut local_buf, 1, 0, N as i64) {
-                eprintln!("FAIL: rank 0 Win::get returned error: {e}");
-                local_ok = false;
-            }
-        }
 
-        // Close the epoch — get completes here, local_buf is now valid
-        win.fence(WinFenceAssert::default())
-            .expect("closing fence failed");
+        // Open the fence epoch on all ranks; the get completes when it closes,
+        // and local_buf is valid after it
+        let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 {
+                e.get(&mut local_buf, 1, 0, N as i64)
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(e) = epoch {
+            eprintln!("FAIL: rank {rank} fence epoch with get returned error: {e}");
+            local_ok = false;
+        }
 
         if rank == 0 {
             let expected = [100.0f64, 200.0, 300.0, 400.0];
@@ -79,24 +79,19 @@ fn main() {
     // the epoch on the other rank before checking the result.
     // ========================================================================
     {
-        let win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 2) failed");
+        let mut win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 2) failed");
+        let mut buf = [0.0f64; 4];
 
-        win.fence(WinFenceAssert::default())
-            .expect("test 2 opening fence failed");
-
-        if rank == 0 {
-            let mut buf = [0.0f64; 4];
-            let result = win.get(&mut buf, 5, 0, 4);
-            if result.is_ok() {
+        win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 && e.get(&mut buf, 5, 0, 4).is_ok() {
                 eprintln!("FAIL: expected Err for invalid rank 5, got Ok");
                 local_ok = false;
             }
             // The get to a non-existent rank failed immediately; we did not
             // actually post an operation, so closing the fence is safe.
-        }
-
-        win.fence(WinFenceAssert::default())
-            .expect("test 2 closing fence failed");
+            Ok(())
+        })
+        .expect("test 2 fence epoch failed");
     }
 
     world.barrier().expect("barrier after test 2 failed");

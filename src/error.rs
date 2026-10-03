@@ -249,6 +249,8 @@ fn fmt_mpi(
 ///   returning `Err`;
 /// - a panic inside a [`UserOp`](crate::UserOp) reduction closure aborts
 ///   the process;
+/// - a fence or PSCW epoch still open while its closure unwinds aborts the
+///   process, since closing it is collective or synchronizing;
 /// - dropping a handle on the wrong thread aborts the process; see the
 ///   [`Mpi`](crate::Mpi) lifecycle section;
 /// - under a fault-tolerant MPI, a receive from any source that a process

@@ -46,21 +46,21 @@ fn main() {
                 .copy_from_slice(&[1.0f64, 2.0, 3.0, 4.0]);
         }
 
-        // Open the fence epoch on all ranks
-        win.fence(WinFenceAssert::default())
-            .expect("opening fence failed");
+        let buf = [10.0f64, 20.0, 30.0, 40.0];
 
-        if rank == 0 {
-            let buf = [10.0f64, 20.0, 30.0, 40.0];
-            if let Err(e) = win.accumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum) {
-                eprintln!("FAIL: rank 0 Win::accumulate Sum returned error: {e}");
-                local_ok = false;
+        // Open the fence epoch on all ranks; the accumulate completes when it
+        // closes
+        let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 {
+                e.accumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum)
+            } else {
+                Ok(())
             }
+        });
+        if let Err(e) = epoch {
+            eprintln!("FAIL: rank {rank} Win::accumulate Sum epoch returned error: {e}");
+            local_ok = false;
         }
-
-        // Close the epoch — accumulate completes here
-        win.fence(WinFenceAssert::default())
-            .expect("closing fence failed");
 
         if rank == 1 {
             let expected = [11.0f64, 22.0, 33.0, 44.0];
@@ -92,21 +92,21 @@ fn main() {
                 .copy_from_slice(&[1.0f64, 2.0, 3.0, 4.0]);
         }
 
-        // Open the fence epoch on all ranks
-        win.fence(WinFenceAssert::default())
-            .expect("test 2 opening fence failed");
+        let buf = [100.0f64, 200.0, 300.0, 400.0];
 
-        if rank == 0 {
-            let buf = [100.0f64, 200.0, 300.0, 400.0];
-            if let Err(e) = win.accumulate(&buf, 1, 0, buf.len() as i64, AccumulateOp::REPLACE) {
-                eprintln!("FAIL: rank 0 Win::accumulate Replace returned error: {e}");
-                local_ok = false;
+        // Open the fence epoch on all ranks; the accumulate completes when it
+        // closes
+        let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 {
+                e.accumulate(&buf, 1, 0, buf.len() as i64, AccumulateOp::REPLACE)
+            } else {
+                Ok(())
             }
+        });
+        if let Err(e) = epoch {
+            eprintln!("FAIL: rank {rank} Win::accumulate Replace epoch returned error: {e}");
+            local_ok = false;
         }
-
-        // Close the epoch — accumulate completes here
-        win.fence(WinFenceAssert::default())
-            .expect("test 2 closing fence failed");
 
         if rank == 1 {
             let expected = [100.0f64, 200.0, 300.0, 400.0];
@@ -137,28 +137,27 @@ fn main() {
         let mut win = Win::<f64>::allocate(&world, N).expect("Win::allocate (test 3) failed");
         win.local_slice_mut().copy_from_slice(&initial);
 
-        win.fence(WinFenceAssert::default())
-            .expect("test 3 opening fence failed");
-
         let buf = [10.0f64, 20.0, 30.0, 40.0];
         let mut out = [0.0f64; N];
-        let accumulate = win.accumulate(&buf, 1, 0, N as i64, ReduceOp::BitwiseOr);
-        if !matches!(accumulate, Err(Error::InvalidArgument { arg: "op", .. })) {
-            eprintln!("FAIL: rank {rank} accumulate BitwiseOr on f64: expected InvalidArgument for op, got {accumulate:?}");
-            local_ok = false;
-        }
-        let get_accumulate =
-            win.get_accumulate(&buf, &mut out, 1, 0, N as i64, ReduceOp::LogicalAnd);
-        if !matches!(
-            get_accumulate,
-            Err(Error::InvalidArgument { arg: "op", .. })
-        ) {
-            eprintln!("FAIL: rank {rank} get_accumulate LogicalAnd on f64: expected InvalidArgument for op, got {get_accumulate:?}");
-            local_ok = false;
-        }
 
-        win.fence(WinFenceAssert::default())
-            .expect("test 3 closing fence failed");
+        win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            let accumulate = e.accumulate(&buf, 1, 0, N as i64, ReduceOp::BitwiseOr);
+            if !matches!(accumulate, Err(Error::InvalidArgument { arg: "op", .. })) {
+                eprintln!("FAIL: rank {rank} accumulate BitwiseOr on f64: expected InvalidArgument for op, got {accumulate:?}");
+                local_ok = false;
+            }
+            let get_accumulate =
+                e.get_accumulate(&buf, &mut out, 1, 0, N as i64, ReduceOp::LogicalAnd);
+            if !matches!(
+                get_accumulate,
+                Err(Error::InvalidArgument { arg: "op", .. })
+            ) {
+                eprintln!("FAIL: rank {rank} get_accumulate LogicalAnd on f64: expected InvalidArgument for op, got {get_accumulate:?}");
+                local_ok = false;
+            }
+            Ok(())
+        })
+        .expect("test 3 fence epoch failed");
 
         let local = win.local_slice();
         if local != initial {

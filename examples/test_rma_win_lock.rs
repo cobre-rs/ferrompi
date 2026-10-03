@@ -36,7 +36,7 @@ fn main() {
     // ========================================================================
     // Allocate an 8-element f64 window on every rank.
     // ========================================================================
-    let win = match Win::<f64>::allocate(&world, 8) {
+    let mut win = match Win::<f64>::allocate(&world, 8) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("rank {rank}: FAIL: Win::allocate failed: {e}");
@@ -47,7 +47,9 @@ fn main() {
 
     // `no_succeed` says no fence epoch follows; the barrier puts every rank's
     // fence before any rank's lock.
-    if let Err(e) = win.fence(WinFenceAssert::no_succeed()) {
+    if let Err(e) = win.fence(WinFenceAssert::none(), WinFenceAssert::no_succeed(), |_| {
+        Ok(())
+    }) {
         eprintln!("rank {rank}: FAIL: initial fence failed: {e}");
         local_ok = false;
     }

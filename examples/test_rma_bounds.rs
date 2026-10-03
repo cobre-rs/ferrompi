@@ -103,64 +103,100 @@ fn check_rejected_pending(
 /// `get_accumulate`, `rput`, `rget`, `raccumulate`) with a 4-element
 /// buffer and `target_count` 4, and the two single-element methods
 /// (`fetch_and_op`, `compare_and_swap`), against every out-of-bounds
-/// `(target_rank, target_disp)` case in one fence epoch. Only rank 0
-/// issues calls; every one must return `Err(InvalidArgument)` naming the
-/// rejected argument. `len` is
+/// `(target_rank, target_disp)` case: the six that complete with a fence in one
+/// fence epoch, the three request-returning ones outside it (MPI allows
+/// request-based RMA only in a passive-target epoch, and a rejected call
+/// makes no MPI call). Only rank 0 issues calls; every one must return
+/// `Err(InvalidArgument)` naming the rejected argument. `len` is
 /// `win`'s exposed length in elements. Returns the aggregate local
 /// verdict (`true` on every rank but 0, which has no cases to fail).
-fn run_bounds_cases(world: &Communicator, win: &Win<u64>, name: &str, len: i64) -> bool {
+fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i64) -> bool {
     let size = world.size();
     let mut ok = true;
     let mut stray_requests: Vec<Request> = Vec::new();
     let mut stray_pending: Vec<PendingFetchResult<u64>> = Vec::new();
+    let origin = [1u64, 2, 3, 4];
+    let mut get_buf = [0u64; 4];
+    let mut result = [0u64; 4];
+    let bulk_cases = [
+        (1, (len - 2).max(0), PAST_WINDOW),
+        (1, -1, NEGATIVE_DISP),
+        (size, 0, BAD_RANK),
+        (-1, 0, BAD_RANK),
+    ];
 
-    win.fence(WinFenceAssert::default())
-        .unwrap_or_else(|e| panic!("{name}: opening fence failed: {e}"));
+    win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+        if world.rank() == 0 {
+            for &(rank, disp, want) in &bulk_cases {
+                let label = |op: &str| format!("{name}/{op}");
+                check_rejected(
+                    &mut ok,
+                    &label("put"),
+                    rank,
+                    disp,
+                    want,
+                    e.put(&origin, rank, disp, 4),
+                );
+                check_rejected(
+                    &mut ok,
+                    &label("accumulate"),
+                    rank,
+                    disp,
+                    want,
+                    e.accumulate(&origin, rank, disp, 4, ReduceOp::Sum),
+                );
+                check_rejected(
+                    &mut ok,
+                    &label("get"),
+                    rank,
+                    disp,
+                    want,
+                    e.get(&mut get_buf, rank, disp, 4),
+                );
+                check_rejected(
+                    &mut ok,
+                    &label("get_accumulate"),
+                    rank,
+                    disp,
+                    want,
+                    e.get_accumulate(&origin, &mut result, rank, disp, 4, ReduceOp::Sum),
+                );
+            }
+
+            for &(rank, disp, want) in &[
+                (1, len, PAST_WINDOW),
+                (1, -1, NEGATIVE_DISP),
+                (size, 0, BAD_RANK),
+                (-1, 0, BAD_RANK),
+            ] {
+                let label = |op: &str| format!("{name}/{op}");
+                check_rejected_pending(
+                    &mut ok,
+                    &label("fetch_and_op"),
+                    rank,
+                    disp,
+                    want,
+                    e.fetch_and_op(1u64, rank, disp, ReduceOp::Sum),
+                    &mut stray_pending,
+                );
+                check_rejected_pending(
+                    &mut ok,
+                    &label("compare_and_swap"),
+                    rank,
+                    disp,
+                    want,
+                    e.compare_and_swap(2u64, 1u64, rank, disp),
+                    &mut stray_pending,
+                );
+            }
+        }
+        Ok(())
+    })
+    .unwrap_or_else(|e| panic!("{name}: fence epoch failed: {e}"));
 
     if world.rank() == 0 {
-        let origin = [1u64, 2, 3, 4];
-        let mut get_buf = [0u64; 4];
-        let mut result = [0u64; 4];
-
-        for &(rank, disp, want) in &[
-            (1, (len - 2).max(0), PAST_WINDOW),
-            (1, -1, NEGATIVE_DISP),
-            (size, 0, BAD_RANK),
-            (-1, 0, BAD_RANK),
-        ] {
+        for &(rank, disp, want) in &bulk_cases {
             let label = |op: &str| format!("{name}/{op}");
-            check_rejected(
-                &mut ok,
-                &label("put"),
-                rank,
-                disp,
-                want,
-                win.put(&origin, rank, disp, 4),
-            );
-            check_rejected(
-                &mut ok,
-                &label("accumulate"),
-                rank,
-                disp,
-                want,
-                win.accumulate(&origin, rank, disp, 4, ReduceOp::Sum),
-            );
-            check_rejected(
-                &mut ok,
-                &label("get"),
-                rank,
-                disp,
-                want,
-                win.get(&mut get_buf, rank, disp, 4),
-            );
-            check_rejected(
-                &mut ok,
-                &label("get_accumulate"),
-                rank,
-                disp,
-                want,
-                win.get_accumulate(&origin, &mut result, rank, disp, 4, ReduceOp::Sum),
-            );
             check_rejected_req(
                 &mut ok,
                 &label("rput"),
@@ -189,48 +225,23 @@ fn run_bounds_cases(world: &Communicator, win: &Win<u64>, name: &str, len: i64) 
                 &mut stray_requests,
             );
         }
-
-        for &(rank, disp, want) in &[
-            (1, len, PAST_WINDOW),
-            (1, -1, NEGATIVE_DISP),
-            (size, 0, BAD_RANK),
-            (-1, 0, BAD_RANK),
-        ] {
-            let label = |op: &str| format!("{name}/{op}");
-            check_rejected_pending(
-                &mut ok,
-                &label("fetch_and_op"),
-                rank,
-                disp,
-                want,
-                win.fetch_and_op(1u64, rank, disp, ReduceOp::Sum),
-                &mut stray_pending,
-            );
-            check_rejected_pending(
-                &mut ok,
-                &label("compare_and_swap"),
-                rank,
-                disp,
-                want,
-                win.compare_and_swap(2u64, 1u64, rank, disp),
-                &mut stray_pending,
-            );
-        }
     }
 
-    win.fence(WinFenceAssert::default())
-        .unwrap_or_else(|e| panic!("{name}: closing fence failed: {e}"));
-
-    // Red-run only: an unexpected `Ok` request/pending result must not be
-    // waited or dropped before the closing fence above (undefined per the
-    // MPI standard); it is safe now that the epoch is closed.
+    // Red-run only: an unexpected `Ok` request/pending result is completed
+    // here, after the fence epoch has closed.
     for req in stray_requests {
         let _ = req.wait();
     }
     for p in stray_pending {
-        // SAFETY: the closing fence above has closed the epoch.
+        // SAFETY: the fence epoch has closed.
         let _ = unsafe { p.resolve() };
     }
+
+    // The rejected calls left nothing pending: the window still takes an epoch.
+    win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |_| {
+        Ok(())
+    })
+    .unwrap_or_else(|e| panic!("{name}: fence after the rejected calls failed: {e}"));
 
     ok
 }
@@ -253,13 +264,13 @@ fn main() {
     if rank == 1 {
         win_a.local_slice_mut().fill(7);
     }
-    if !run_bounds_cases(&world, &win_a, "alloc4", 4) {
+    if !run_bounds_cases(&world, &mut win_a, "alloc4", 4) {
         local_ok = false;
     }
 
     // Window 2: zero-length MPI-allocated window.
-    let win_b = Win::<u64>::allocate(&world, 0).expect("Win::allocate(0) failed");
-    if !run_bounds_cases(&world, &win_b, "alloc0", 0) {
+    let mut win_b = Win::<u64>::allocate(&world, 0).expect("Win::allocate(0) failed");
+    if !run_bounds_cases(&world, &mut win_b, "alloc0", 0) {
         local_ok = false;
     }
     drop(win_b);
@@ -268,7 +279,7 @@ fn main() {
     // supplying its own. OpenMPI 4.x with `--btl=self,tcp` rejects
     // Win::create over caller-owned memory (MPI_ERR_WIN); skip gracefully
     // (see test_rma_win_create.rs).
-    let win_c = match Win::create(&world, vec![7u64; 4]) {
+    let mut win_c = match Win::create(&world, vec![7u64; 4]) {
         Ok(w) => Some(w),
         Err(Error::Mpi {
             class: ferrompi::MpiErrorClass::Win,
@@ -284,7 +295,7 @@ fn main() {
         }
         Err(e) => panic!("Win::create failed: {e}"),
     };
-    if let Some(win_c) = &win_c {
+    if let Some(win_c) = &mut win_c {
         if !run_bounds_cases(&world, win_c, "create", 4) {
             local_ok = false;
         }
@@ -296,12 +307,10 @@ fn main() {
         buf: [0u64; 1],
         canary: [CANARY; 7],
     });
-    win_a
-        .fence(WinFenceAssert::default())
-        .expect("length-mismatch opening fence failed");
-    if rank == 0 {
-        let four = [1u64, 2, 3, 4];
-        let result = win_a.put(&four, 1, 0, 2);
+    let four = [1u64, 2, 3, 4];
+    win_a.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+        if rank == 0 {
+            let result = e.put(&four, 1, 0, 2);
         if !matches!(
             result,
             Err(Error::BufferSize {
@@ -316,14 +325,14 @@ fn main() {
             );
             local_ok = false;
         }
-        let result = win_a.put(&four, 1, 0, -4);
+        let result = e.put(&four, 1, 0, -4);
         if !matches!(&result, Err(e) if is_rejection(e, NEGATIVE_COUNT)) {
             eprintln!(
                 "FAIL: put with negative target_count did not return Err(InvalidArgument {{ arg: \"target_count\" }}): {result:?}"
             );
             local_ok = false;
         }
-        let result = win_a.get(&mut small.buf, 1, 0, 4);
+        let result = e.get(&mut small.buf, 1, 0, 4);
         if !matches!(
             result,
             Err(Error::BufferSize {
@@ -338,7 +347,7 @@ fn main() {
             );
             local_ok = false;
         }
-        let result = win_a.get_accumulate(&four, &mut small.buf, 1, 0, 4, ReduceOp::Sum);
+        let result = e.get_accumulate(&four, &mut small.buf, 1, 0, 4, ReduceOp::Sum);
         if !matches!(
             result,
             Err(Error::BufferSize {
@@ -353,10 +362,10 @@ fn main() {
             );
             local_ok = false;
         }
-    }
-    win_a
-        .fence(WinFenceAssert::default())
-        .expect("length-mismatch closing fence failed");
+        }
+        Ok(())
+    })
+    .expect("length-mismatch fence epoch failed");
 
     if rank == 0 && small.canary != [CANARY; 7] {
         eprintln!(

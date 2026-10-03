@@ -1,12 +1,14 @@
 //! Integration test for Win::fence active-target epoch synchronization.
 //!
 //! Verifies that `Win::fence` opens and closes an epoch correctly on all
-//! ranks, and that `WinFenceAssert` composition works as expected.
+//! ranks, that `WinFenceAssert` composition works as expected, and that the two
+//! assertions that would leave the epoch's operations uncompleted are rejected
+//! before any MPI call.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_fence
 // mpi-test: np=2
 
-use ferrompi::{Mpi, Win, WinFenceAssert};
+use ferrompi::{Error, Mpi, Win, WinFenceAssert};
 
 mod common;
 
@@ -26,19 +28,16 @@ fn main() {
     // ========================================================================
     // Test 1: Win::fence with WinFenceAssert::default() (no assertion)
     //
-    // Allocate a window, call fence twice (open epoch, close epoch).
-    // This is the minimal valid fence-pair required before and after RMA ops.
+    // Allocate a window and run an empty closure in a fence epoch (opening
+    // and closing fence). This is the minimal valid epoch around RMA ops.
     // ========================================================================
     {
-        let win = Win::<f64>::allocate(&world, 16).expect("Win::allocate failed");
+        let mut win = Win::<f64>::allocate(&world, 16).expect("Win::allocate failed");
 
-        // Open the access/exposure epoch
-        win.fence(WinFenceAssert::default())
-            .expect("first Win::fence(default) failed");
-
-        // Close the epoch
-        win.fence(WinFenceAssert::default())
-            .expect("second Win::fence(default) failed");
+        win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |_| {
+            Ok(())
+        })
+        .expect("Win::fence(default) failed");
     }
 
     world.barrier().expect("barrier after test 1 failed");
@@ -50,12 +49,10 @@ fn main() {
     // Test 2: Win::fence with WinFenceAssert::none() — explicit zero
     // ========================================================================
     {
-        let win = Win::<i32>::allocate(&world, 8).expect("Win::allocate (i32) failed");
+        let mut win = Win::<i32>::allocate(&world, 8).expect("Win::allocate (i32) failed");
 
-        win.fence(WinFenceAssert::none())
-            .expect("Win::fence(none) open failed");
-        win.fence(WinFenceAssert::none())
-            .expect("Win::fence(none) close failed");
+        win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |_| Ok(()))
+            .expect("Win::fence(none) failed");
     }
 
     world.barrier().expect("barrier after test 2 failed");
@@ -118,21 +115,19 @@ fn main() {
             local_ok = false;
         }
 
-        let win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 4) failed");
+        let mut win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 4) failed");
+        let buf = [1.0f64, 2.0, 3.0, 4.0];
 
-        win.fence(no_precede)
-            .expect("Win::fence(no_precede) open failed");
-
-        if rank == 0 {
-            let buf = [1.0f64, 2.0, 3.0, 4.0];
-            if let Err(e) = win.put(&buf, 1, 0, buf.len() as i64) {
-                eprintln!("rank {rank}: FAIL: Win::put failed: {e}");
-                local_ok = false;
+        let epoch = win.fence(no_precede, no_succeed, |e| {
+            if rank == 0 {
+                e.put(&buf, 1, 0, buf.len() as i64)?;
             }
+            Ok(())
+        });
+        if let Err(e) = epoch {
+            eprintln!("rank {rank}: FAIL: Win::fence(no_precede, no_succeed) with put failed: {e}");
+            local_ok = false;
         }
-
-        win.fence(no_succeed)
-            .expect("Win::fence(no_succeed) close failed");
 
         if rank == 1 {
             let expected = [1.0f64, 2.0, 3.0, 4.0];
@@ -151,12 +146,56 @@ fn main() {
         println!("PASS: Win::fence with no_precede/no_succeed and put");
     }
 
+    // ========================================================================
+    // Test 5: fence rejects no_succeed() on the opening fence and no_precede()
+    // on the closing one with InvalidArgument, on every rank, without running
+    // the closure and before any MPI call: no rank enters a collective, so the
+    // window still takes a normal epoch afterwards.
+    // ========================================================================
+    {
+        let mut win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 5) failed");
+        let mut ran = false;
+
+        let open = win.fence(WinFenceAssert::no_succeed(), WinFenceAssert::none(), |_| {
+            ran = true;
+            Ok(())
+        });
+        if !matches!(open, Err(Error::InvalidArgument { arg: "open", .. })) {
+            eprintln!("rank {rank}: FAIL: fence(no_succeed, none) returned {open:?}");
+            local_ok = false;
+        }
+
+        let close = win.fence(WinFenceAssert::none(), WinFenceAssert::no_precede(), |_| {
+            ran = true;
+            Ok(())
+        });
+        if !matches!(close, Err(Error::InvalidArgument { arg: "close", .. })) {
+            eprintln!("rank {rank}: FAIL: fence(none, no_precede) returned {close:?}");
+            local_ok = false;
+        }
+
+        if ran {
+            eprintln!("rank {rank}: FAIL: a rejected fence ran its closure");
+            local_ok = false;
+        }
+
+        if let Err(e) = win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |_| Ok(())) {
+            eprintln!("rank {rank}: FAIL: fence after the rejections failed: {e}");
+            local_ok = false;
+        }
+    }
+
+    world.barrier().expect("barrier after test 5 failed");
+    if rank == 0 && local_ok {
+        println!("PASS: Win::fence rejects no_succeed open and no_precede close");
+    }
+
     common::check(&world, local_ok, "test_rma_win_fence");
 
     world.barrier().expect("final barrier failed");
     if rank == 0 {
         println!("\n========================================");
-        println!("All Win::fence tests passed! (4 tests)");
+        println!("All Win::fence tests passed! (5 tests)");
         println!("========================================");
     }
 }

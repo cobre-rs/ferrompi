@@ -57,6 +57,10 @@ name = "test_rma_win_flush_sync"
 required-features = ["rma"]
 
 [[example]]
+name = "test_rma_epoch_panic"
+required-features = ["rma"]
+
+[[example]]
 name = "test_rma_put"
 required-features = ["rma"]
 

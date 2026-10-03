@@ -31,23 +31,21 @@ fn main() {
     // ========================================================================
     {
         const N: usize = 4;
-        let win = Win::<f64>::allocate(&world, N).expect("Win::allocate failed");
+        let mut win = Win::<f64>::allocate(&world, N).expect("Win::allocate failed");
+        let buf = [10.0f64, 20.0, 30.0, 40.0];
 
-        // Open the fence epoch on all ranks
-        win.fence(WinFenceAssert::default())
-            .expect("opening fence failed");
-
-        if rank == 0 {
-            let buf = [10.0f64, 20.0, 30.0, 40.0];
-            if let Err(e) = win.put(&buf, 1, 0, buf.len() as i64) {
-                eprintln!("FAIL: rank 0 Win::put returned error: {e}");
-                local_ok = false;
+        // Open the fence epoch on all ranks; the put completes when it closes
+        let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 {
+                e.put(&buf, 1, 0, buf.len() as i64)
+            } else {
+                Ok(())
             }
+        });
+        if let Err(e) = epoch {
+            eprintln!("FAIL: rank {rank} fence epoch with put returned error: {e}");
+            local_ok = false;
         }
-
-        // Close the epoch — put completes here
-        win.fence(WinFenceAssert::default())
-            .expect("closing fence failed");
 
         // Rank 1 inspects its local window memory via local_slice.
         // The closing fence guarantees the put from rank 0 is visible.
@@ -76,23 +74,19 @@ fn main() {
     // the epoch on the other rank before checking the result.
     // ========================================================================
     {
-        let win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 2) failed");
+        let mut win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 2) failed");
+        let buf = [1.0f64, 2.0, 3.0, 4.0];
 
-        win.fence(WinFenceAssert::default())
-            .expect("test 2 opening fence failed");
-
-        if rank == 0 {
-            let buf = [1.0f64, 2.0, 3.0, 4.0];
-            if win.put(&buf, 5, 0, buf.len() as i64).is_ok() {
+        win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 && e.put(&buf, 5, 0, buf.len() as i64).is_ok() {
                 eprintln!("FAIL: expected Err for invalid rank 5, got Ok");
                 local_ok = false;
             }
             // The put to a non-existent rank failed immediately; we did not
             // actually post an operation, so closing the fence is safe.
-        }
-
-        win.fence(WinFenceAssert::default())
-            .expect("test 2 closing fence failed");
+            Ok(())
+        })
+        .expect("test 2 fence epoch failed");
     }
 
     world.barrier().expect("barrier after test 2 failed");

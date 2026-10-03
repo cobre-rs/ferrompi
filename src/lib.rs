@@ -201,8 +201,8 @@ pub use topology::SlurmInfo;
 pub use topology::{HostEntry, TopologyInfo};
 #[cfg(feature = "rma")]
 pub use window::{
-    LockAllGuard, LockGuard, LockType, PendingFetchResult, SharedWindow, Win, WinFenceAssert,
-    WinLockAllGuard, WinLockGuard, WinPscwAssert,
+    ActiveEpoch, LockAllGuard, LockGuard, LockType, PendingFetchResult, SharedWindow, Win,
+    WinFenceAssert, WinLockAllGuard, WinLockGuard, WinPscwAssert,
 };
 
 #[cfg(doctest)]
@@ -310,7 +310,10 @@ pub enum ThreadLevel {
 /// completion, test or cancel call on a request that a scope open on another
 /// thread still holds, which the drop waits for. A `wait` or `test` on an
 /// active [`PersistentRequest`] is admitted too, and the drop does not wait for
-/// the request: it skips `MPI_Finalize` instead. A thread blocked forever
+/// the request: it skips `MPI_Finalize` instead. The closing call of a fence or
+/// PSCW access epoch, `Win::wait_exposure` and `Win::test_exposure` (feature
+/// `rma`) are admitted too: their window is alive, so the drop skips
+/// `MPI_Finalize` instead of waiting for the epoch. A thread blocked forever
 /// inside an MPI call, for example in a collective its peers never enter,
 /// blocks the drop; MPI requires every thread's MPI calls to complete before
 /// `MPI_Finalize`.
