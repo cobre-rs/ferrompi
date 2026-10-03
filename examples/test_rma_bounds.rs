@@ -7,7 +7,8 @@
 //! `target_count`, or a buffer length that does not match `target_count` —
 //! with `Err(InvalidArgument)` or `Err(BufferSize)` naming the argument,
 //! before any MPI call. Rank 0 is the origin; rank 1 is the target. Canary
-//! words around every buffer prove no out-of-bounds write reaches memory.
+//! words around the length-mismatch buffer, the `Win::create` window's
+//! unchanged contents and valgrind prove no out-of-bounds write reaches memory.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_bounds
 // mpi-test: np=2 valgrind skip-ok=openmpi-4
@@ -27,12 +28,6 @@ const PAST_WINDOW: (&str, &str) = ("target_disp", "access extends past the targe
 
 fn is_rejection(err: &Error, want: (&str, &str)) -> bool {
     matches!(err, Error::InvalidArgument { arg, reason, .. } if (*arg, *reason) == want)
-}
-
-#[repr(C)]
-struct Frame {
-    win: [u64; 4],
-    canary: [u64; 8],
 }
 
 #[repr(C)]
@@ -113,7 +108,7 @@ fn check_rejected_pending(
 /// rejected argument. `len` is
 /// `win`'s exposed length in elements. Returns the aggregate local
 /// verdict (`true` on every rank but 0, which has no cases to fail).
-fn run_bounds_cases(world: &Communicator, win: &Win<'_, u64>, name: &str, len: i64) -> bool {
+fn run_bounds_cases(world: &Communicator, win: &Win<u64>, name: &str, len: i64) -> bool {
     let size = world.size();
     let mut ok = true;
     let mut stray_requests: Vec<Request> = Vec::new();
@@ -269,15 +264,11 @@ fn main() {
     }
     drop(win_b);
 
-    // Window 3: Win::create over the first four words of a boxed canary
-    // frame, every rank supplying its own frame. OpenMPI 4.x with
-    // `--btl=self,tcp` rejects Win::create over caller-owned memory
-    // (MPI_ERR_WIN); skip gracefully (see test_rma_win_create.rs).
-    let mut frame = Box::new(Frame {
-        win: [7u64; 4],
-        canary: [CANARY; 8],
-    });
-    let win_c = match Win::create(&world, &mut frame.win) {
+    // Window 3: Win::create over an owned four-word vector, every rank
+    // supplying its own. OpenMPI 4.x with `--btl=self,tcp` rejects
+    // Win::create over caller-owned memory (MPI_ERR_WIN); skip gracefully
+    // (see test_rma_win_create.rs).
+    let win_c = match Win::create(&world, vec![7u64; 4]) {
         Ok(w) => Some(w),
         Err(Error::Mpi {
             class: ferrompi::MpiErrorClass::Win,
@@ -375,9 +366,9 @@ fn main() {
         local_ok = false;
     }
 
-    // Afterwards: rank 1 checks that the allocate window still reads 7 and
-    // that the create window and its canary are unchanged. Only rank 1's
-    // window is ever a valid RMA target above, so only its copy matters.
+    // Afterwards: rank 1 checks that the allocate window and the create
+    // window still read 7. Only rank 1's window is ever a valid RMA target
+    // above, so only its copy matters.
     if rank == 1 {
         if win_a.local_slice() != [7u64; 4] {
             eprintln!(
@@ -394,8 +385,18 @@ fn main() {
                 );
                 local_ok = false;
             }
-            if frame.canary != [CANARY; 8] {
-                eprintln!("FAIL: create window canary corrupted: {:x?}", frame.canary);
+        }
+    }
+
+    // Freeing the create window is collective; its buffer must come back
+    // exactly as created.
+    if let Some(win_c) = win_c {
+        match win_c.into_buffer() {
+            Ok(Some(v)) if v == [7u64; 4] => {}
+            other => {
+                eprintln!(
+                    "FAIL: create window into_buffer returned {other:?}, expected Ok(Some([7, 7, 7, 7]))"
+                );
                 local_ok = false;
             }
         }

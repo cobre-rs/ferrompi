@@ -156,6 +156,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   collective reports the empty status, as does an inactive request.
   Migration: `wait()?` still compiles where the value was discarded; replace
   `test()? == true` with `test()?.is_some()`.
+- **`Win::create` takes ownership of its buffer:** `Win<T>` has no lifetime
+  parameter, `Win::create` takes a `Vec<T>`, and `Win::into_buffer`
+  (collective) frees the window and returns the buffer (`None` for
+  `Win::allocate`). A dropped or forgotten window never frees a buffer MPI may
+  still use: the buffer is released only after a successful `MPI_Win_free`, and
+  is leaked otherwise. Migration: pass the `Vec` by value and take it back with
+  `into_buffer()`.
 
 ### Added
 
@@ -197,6 +204,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MPI_Finalize`**, on whatever thread the request is, with a stderr warning,
   instead of finalizing with the request pending. The request can still be
   completed afterwards; dropping it then makes no MPI call.
+- **`Win::create` on a full window table returns `Error::ResourceExhausted`**
+  instead of aborting the process; the window and its buffer are leaked, and
+  `Mpi` then skips `MPI_Finalize`.
 
 ### Removed
 

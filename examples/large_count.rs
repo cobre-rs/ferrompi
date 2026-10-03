@@ -67,15 +67,16 @@ fn main() {
         all_ok &= report("allreduce of 2^31+16 bytes", b == a);
 
         b.fill(0);
-        {
-            let win = Win::create(&world, &mut b).expect("Win::create failed");
-            win.fence(WinFenceAssert::default())
-                .expect("opening fence failed");
-            win.put(&a, 0, 0, N as i64).expect("put failed");
-            win.fence(WinFenceAssert::default())
-                .expect("closing fence failed");
-            drop(win);
-        }
+        let win = Win::create(&world, b).expect("Win::create failed");
+        win.fence(WinFenceAssert::default())
+            .expect("opening fence failed");
+        win.put(&a, 0, 0, N as i64).expect("put failed");
+        win.fence(WinFenceAssert::default())
+            .expect("closing fence failed");
+        let b = win
+            .into_buffer()
+            .expect("into_buffer failed")
+            .expect("Win::create must return its buffer");
         all_ok &= report("put of 2^31+16 bytes", b == a);
     } else {
         all_ok &= report(

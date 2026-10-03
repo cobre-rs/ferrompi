@@ -4035,17 +4035,8 @@ int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t inf
         install_errors_return_win(win);
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
-            /* The window exposes the caller's buffer, which the caller gets
-             * back once this returns an error while peers can still reach
-             * it: it can be neither leaked nor freed on this rank alone
-             * (MPI_Win_free is collective). MPI_Abort is only required to
-             * make a "best attempt"; it can return (measured: MPICH before
-             * the launcher kills the other ranks), so this must not fall
-             * through to a return that hands the buffer back to Rust. */
-            fputs("ferrompi: window table full after MPI_Win_create; aborting "
-                  "because the window exposes the caller's buffer\n", stderr);
-            MPI_Abort(comm, MPI_ERR_OTHER);
-            abort();
+            *win_handle = FERROMPI_WIN_LEAKED;
+            return FERROMPI_ERR_WINDOWS_FULL;
         }
     }
     return ret;

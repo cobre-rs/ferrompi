@@ -72,9 +72,35 @@ extern "C" {
 }
 
 // RMA counterpart of the block above: a non-status return with no MPI call
-// (mode-value constants), or called only from a `Drop` impl.
+// (mode-value constants), or called only from a `Drop` impl or under an
+// in-flight token its caller holds (the window constructors and
+// `Win::into_buffer`).
 #[cfg(feature = "rma")]
 extern "C" {
+    pub fn ferrompi_win_allocate_shared(
+        size: int64_t,
+        disp_unit: int32_t,
+        info: int32_t,
+        comm: int32_t,
+        baseptr: *mut *mut c_void,
+        win: *mut int32_t,
+    ) -> c_int;
+    pub fn ferrompi_win_create(
+        base: *mut c_void,
+        size: int64_t,
+        disp_unit: int32_t,
+        info: int32_t,
+        comm: int32_t,
+        win: *mut int32_t,
+    ) -> c_int;
+    pub fn ferrompi_win_allocate(
+        size: int64_t,
+        disp_unit: int32_t,
+        info: int32_t,
+        comm: int32_t,
+        baseptr: *mut *mut c_void,
+        win: *mut int32_t,
+    ) -> c_int;
     pub fn ferrompi_win_free(win: int32_t) -> c_int;
     pub fn ferrompi_win_fence_mode_values(out: *mut int32_t);
     pub fn ferrompi_win_unlock(rank: int32_t, win: int32_t) -> c_int;
@@ -1021,36 +1047,6 @@ guarded_extern! {
     // ============================================================
     // RMA / Window
     // ============================================================
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_allocate_shared(
-        size: int64_t,
-        disp_unit: int32_t,
-        info: int32_t,
-        comm: int32_t,
-        baseptr: *mut *mut c_void,
-        win: *mut int32_t,
-    ) -> c_int;
-
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_create(
-        base: *mut c_void,
-        size: int64_t,
-        disp_unit: int32_t,
-        info: int32_t,
-        comm: int32_t,
-        win: *mut int32_t,
-    ) -> c_int;
-
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_allocate(
-        size: int64_t,
-        disp_unit: int32_t,
-        info: int32_t,
-        comm: int32_t,
-        baseptr: *mut *mut c_void,
-        win: *mut int32_t,
-    ) -> c_int;
-
     #[cfg(feature = "rma")]
     pub fn ferrompi_win_shared_query(
         win: int32_t,

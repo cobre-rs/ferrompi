@@ -257,9 +257,6 @@ fn fmt_mpi(
 ///   process, since no `ferrompi` call can complete it; so does the
 ///   nonblocking receive call itself when the request table was full,
 ///   since it then waits for the receive before returning;
-/// - `Win::create` on a rank whose window table is full aborts the process
-///   (`MPI_Abort`, falling back to `SIGABRT` if `MPI_Abort` itself returns),
-///   since the new window already exposes the caller's buffer to its peers;
 /// - in a debug build at
 ///   [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized), a
 ///   [`Request::wait`](crate::Request::wait) that overlaps another thread's MPI

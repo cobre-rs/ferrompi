@@ -1,22 +1,19 @@
 //! Regression for `Win::create` when the window table is already full.
 //!
 //! Fills the 256-slot window table with `Win::allocate` calls, then calls
-//! `Win::create` over a caller-owned buffer. The new window already exposes
-//! that buffer to every peer once `MPI_Win_create` returns, so on a full
-//! table the process must abort instead of returning an error the buffer
-//! could outlive.
+//! `Win::create` over an owned buffer. The new window can be neither returned
+//! nor freed on this rank alone, but it no longer exposes memory the caller
+//! can reclaim, so the call returns `Error::ResourceExhausted`, as
+//! `Win::allocate` does, instead of aborting: the window is leaked, never freed
+//! and counted as alive, together with the buffer it exposes. Dropping every
+//! returned window then still leaves two windows, so `Mpi` skips
+//! `MPI_Finalize`.
 //!
-//! Rank 0 prints its own marker, barriers, and sleeps briefly before the
-//! risky `Win::create` call: the launcher can tear the job down before
-//! forwarding the C shim's own stderr write once `MPI_Abort` races it
-//! (mitigation and rationale as in `test_abort.rs`).
-//!
-//! Run with: mpiexec -n 2 ./target/debug/examples/test_win_create_table_full
-// mpi-test: np=1.. expect=abort skip-ok=openmpi-4
+//! Run with: mpiexec -n 1 ./target/debug/examples/test_win_create_table_full
+// mpi-test: np=1 expect=unfinalized skip-ok=openmpi-4
 // mpi-test-stderr: test_win_create_table_full: calling Win::create at a full window table
 
-use ferrompi::{Error, Mpi, MpiErrorClass, Win};
-use std::time::Duration;
+use ferrompi::{Error, Mpi, MpiErrorClass, ResourceKind, Win};
 
 mod common;
 
@@ -26,8 +23,7 @@ fn main() {
 
     // Probe: some Open MPI 4.x BTLs fail MPI_Win_create itself over
     // caller-owned memory, before the table is ever touched.
-    let mut probe_buf = [0f64; 4];
-    match Win::create(&world, &mut probe_buf) {
+    match Win::create(&world, vec![0f64; 4]) {
         Ok(win) => drop(win),
         Err(Error::Mpi {
             class: MpiErrorClass::Win,
@@ -50,11 +46,22 @@ fn main() {
     if world.rank() == 0 {
         eprintln!("test_win_create_table_full: calling Win::create at a full window table");
     }
-    world.barrier().expect("barrier failed");
-    std::thread::sleep(Duration::from_millis(100));
 
-    let mut buf = [0f64; 4];
-    let result = Win::create(&world, &mut buf).map(|_| ());
-    println!("FAIL: Win::create returned at a full window table: {result:?}");
-    std::process::exit(1);
+    let result = Win::create(&world, vec![0f64; 4]);
+    common::check(
+        &world,
+        matches!(
+            result,
+            Err(Error::ResourceExhausted {
+                resource: ResourceKind::Window,
+                ..
+            })
+        ),
+        "Win::create table-full error",
+    );
+
+    drop(windows);
+    drop(mpi);
+
+    println!("test_win_create_table_full: PASS");
 }

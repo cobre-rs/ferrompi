@@ -6,9 +6,9 @@
 //! memory without explicit message passing, enabling high-performance
 //! intra-node communication.
 //!
-//! It also provides [`Win<T>`], the general RMA window created over a caller
-//! buffer (`Win::create`) or MPI-allocated memory (`Win::allocate`), with
-//! fence, PSCW and passive-target synchronization.
+//! It also provides [`Win<T>`], the general RMA window created over a `Vec`
+//! it then owns (`Win::create`) or MPI-allocated memory (`Win::allocate`),
+//! with fence, PSCW and passive-target synchronization.
 //!
 //! # Synchronization
 //!
@@ -53,6 +53,7 @@
 //! ```
 
 use std::ops::{BitOr, BitOrAssign};
+use std::os::raw::c_int;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
@@ -61,6 +62,7 @@ use crate::datatype::{buf, buf_mut};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::group::Group;
+use crate::persistent::vec_buf_mut;
 use crate::request::{Request, RequestKind};
 use crate::rt;
 use crate::Communicator;
@@ -388,10 +390,14 @@ fn win_size_and_disp_unit<T>(count: usize) -> Result<(i64, i32)> {
     Ok((size, disp_unit))
 }
 
-// Sentinel an allocating shim writes to its handle out-parameter when MPI
+// Sentinel a creating shim writes to its handle out-parameter when MPI
 // created the window but zeroing or registering it failed. This MUST stay
 // in sync with `FERROMPI_WIN_LEAKED` in `csrc/ferrompi.h`.
 const FERROMPI_WIN_LEAKED: i32 = -2;
+
+// Handle of a `Win` whose table slot `Win::into_buffer` released. The shim
+// frees the slot whatever `MPI_Win_free` returned, so `Drop` must not free again.
+const WIN_FREED: i32 = -1;
 
 /// Count of live windows of any kind (`Win::create`, `Win::allocate`,
 /// `SharedWindow::allocate`). `Mpi::drop` reads this through
@@ -405,21 +411,20 @@ static LIVE_WINDOWS: AtomicUsize = AtomicUsize::new(0);
 /// Number of windows of any kind currently alive.
 pub(crate) fn live_windows() -> usize {
     // Acquire: pairs with the Release decrement in `Drop for Win`/`Drop for
-    // SharedWindow` and in `mark_window_gone`, so a zero read here cannot
-    // precede a window's in-flight teardown.
+    // SharedWindow`, in `Win::into_buffer` and in `mark_window_gone`, so a zero
+    // read here cannot precede a window's in-flight teardown.
     LIVE_WINDOWS.load(Ordering::Acquire)
 }
 
 /// Counts a window being constructed (`SharedWindow::allocate`, `Win::create`
-/// or `Win::allocate`) in [`LIVE_WINDOWS`]. A constructor calls this before its
-/// guarded `MPI_Win_*` call and [`mark_window_gone`] on each error return that
-/// leaves no window behind. So an `Mpi::drop` racing the constructor either
-/// refuses the call, or waits for it and then reads the count.
+/// or `Win::allocate`) in [`LIVE_WINDOWS`]. Only [`counted_window_call`]
+/// calls it, inside the in-flight span that call opens.
 fn mark_window_alive() {
-    // Relaxed: the increment precedes the constructor's guarded call in
-    // program order, and that call's in-flight token is released after it.
-    // `Mpi::drop`'s drain acquires that release before `live_windows` reads
-    // the count, so the increment needs no ordering of its own.
+    // Relaxed: the increment, and its undo in `mark_window_gone`, happen inside
+    // the constructor's own in-flight span. `Mpi::drop`'s drain waits for that
+    // span and acquires its release before `live_windows` reads the count, so
+    // the increment needs no ordering of its own. A constructor refused before
+    // the span opens touches nothing.
     LIVE_WINDOWS.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -427,6 +432,37 @@ fn mark_window_alive() {
 fn mark_window_gone() {
     // Release: pairs with `live_windows`'s Acquire load, as in `Drop for Win`.
     LIVE_WINDOWS.fetch_sub(1, Ordering::Release);
+}
+
+/// Runs a window constructor's creating shim in one in-flight span that also
+/// covers its change to [`LIVE_WINDOWS`].
+///
+/// The token comes first, so a call refused while `Mpi` drops returns before it
+/// touches the count. Then the window is counted, `call` runs, and the count is
+/// undone if the shim created no window, all before the token is released.
+/// `Mpi::drop` reads the count only after its drain has waited for every token,
+/// so the count it reads never includes a window that does not exist, and never
+/// misses one that does.
+///
+/// `call` receives `win_handle` for the shim's out-parameter. A shim that
+/// created a window it will never free leaves [`FERROMPI_WIN_LEAKED`] there,
+/// and that window keeps its count.
+fn counted_window_call(
+    op: &'static str,
+    win_handle: &mut i32,
+    call: impl FnOnce(*mut i32) -> c_int,
+) -> Result<()> {
+    let _call = rt::enter().map_err(|code| Error::from_code_with_op(code, op))?;
+    #[cfg(debug_assertions)]
+    let held = rt::begin_call().map_err(|code| Error::from_code_with_op(code, op))?;
+    mark_window_alive();
+    let ret = call(win_handle);
+    #[cfg(debug_assertions)]
+    rt::end_call(held);
+    if ret != 0 && *win_handle != FERROMPI_WIN_LEAKED {
+        mark_window_gone();
+    }
+    Error::check_with_op(ret, op)
 }
 
 /// Bit position of the displacement-unit field in a window word (see
@@ -583,25 +619,20 @@ impl<T: MpiDatatype> SharedWindow<T> {
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut win_handle: i32 = -1;
 
-        mark_window_alive();
-        // SAFETY: We pass valid pointers for out-parameters. The C layer
-        // allocates shared memory and returns a window handle + base pointer.
-        let ret = unsafe {
-            ffi::ferrompi_win_allocate_shared(
-                size,
-                disp_unit,
-                -1, // MPI_INFO_NULL
-                comm.handle,
-                &mut baseptr,
-                &mut win_handle,
-            )
-        };
-        // A window MPI created but could not zero or register is never freed,
-        // so it keeps its count.
-        if ret != 0 && win_handle != FERROMPI_WIN_LEAKED {
-            mark_window_gone();
-        }
-        Error::check_with_op(ret, "win_allocate_shared")?;
+        counted_window_call("win_allocate_shared", &mut win_handle, |handle| {
+            // SAFETY: We pass valid pointers for out-parameters. The C layer
+            // allocates shared memory and returns a window handle + base pointer.
+            unsafe {
+                ffi::ferrompi_win_allocate_shared(
+                    size,
+                    disp_unit,
+                    -1, // MPI_INFO_NULL
+                    comm.handle,
+                    &mut baseptr,
+                    handle,
+                )
+            }
+        })?;
 
         let local_ptr = if local_count == 0 {
             // Zero-count: MPI may return a null base pointer for an empty
@@ -910,7 +941,7 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 // rules and should not be shared across threads without careful coordination.
 
 // ============================================================================
-// Win<'a, T> — general-purpose distributed RMA window
+// Win<T> — general-purpose distributed RMA window
 // ============================================================================
 
 /// Opaque holder for the buffers of a pending RMA fetch operation.
@@ -1023,26 +1054,38 @@ impl<T> Drop for PendingFetchResult<T> {
 
 /// A general-purpose distributed RMA window.
 ///
-/// `Win<'a, T>` wraps either:
+/// `Win<T>` wraps either:
 ///
-/// - `MPI_Win_create` (`Win::create`) — the caller supplies the buffer and
-///   retains ownership; the lifetime `'a` ensures the buffer outlives the
-///   window.
-/// - `MPI_Win_allocate` (`Win::allocate`) — MPI allocates the buffer; the
-///   window uses `'static` because there is no caller buffer to track.
+/// - `MPI_Win_create` (`Win::create`) — the caller supplies a `Vec<T>` and
+///   the window owns it; [`into_buffer`](Win::into_buffer) returns it.
+/// - `MPI_Win_allocate` (`Win::allocate`) — MPI allocates the buffer.
 ///
 /// Unlike [`SharedWindow`], which uses `MPI_Win_allocate_shared` and is
 /// restricted to intra-node communicators, `Win` works across nodes and is
 /// the foundation for all distributed RMA operations (Put, Get, Accumulate,
 /// etc.) in this library.
 ///
-/// # RAII Lifecycle
+/// # Ownership
 ///
-/// `MPI_Win_free` is called automatically when the `Win` is dropped. For
-/// `Win::allocate`, this also releases the MPI-managed buffer. If this
-/// window outlives the [`Mpi`](crate::Mpi) handle, `MPI_Finalize` is skipped
-/// instead: its memory stays valid until the process exits and is never
-/// freed.
+/// `Win::create` owns its `Vec` for as long as MPI may use it, and
+/// [`into_buffer`](Win::into_buffer) returns it. Dropping or forgetting the
+/// window never frees a buffer a peer may still access: the buffer is released
+/// only after `MPI_Win_free` has succeeded, and leaked in every other case.
+///
+/// # Dropping
+///
+/// `MPI_Win_free` is collective and is called when the `Win` is dropped. It
+/// ends in one of three ways:
+///
+/// - The free succeeds: the window leaves the live-window count, and the
+///   buffer of a `Win::create` window is dropped after the call. For
+///   `Win::allocate`, the free also releases the MPI-managed buffer.
+/// - [`Mpi`](crate::Mpi) is being dropped, or was dropped and skipped
+///   `MPI_Finalize` because this window was alive: no MPI call is made, the
+///   window stays counted as alive (so `Mpi` skips `MPI_Finalize`), and the
+///   buffer is leaked. Its memory stays valid until the process exits.
+/// - The free fails: the buffer is leaked and the window stays counted as
+///   alive.
 ///
 /// # Thread Safety
 ///
@@ -1057,38 +1100,44 @@ impl<T> Drop for PendingFetchResult<T> {
 /// let mpi = Mpi::init().unwrap();
 /// let world = mpi.world();
 ///
-/// // Create a window backed by a caller-supplied buffer
-/// let mut buf = vec![0i32; 16];
-/// let win = Win::create(&world, &mut buf).unwrap();
+/// // Create a window over a buffer it owns until MPI_Win_free
+/// let win = Win::create(&world, vec![0i32; 16]).unwrap();
 /// assert!(win.raw_handle() >= 0);
 /// assert_eq!(win.comm_size(), world.size());
 /// drop(win); // MPI_Win_free called here
 /// ```
-pub struct Win<'a, T: MpiDatatype> {
-    /// The MPI window handle (index into the C-layer window table).
+pub struct Win<T: MpiDatatype> {
+    /// The MPI window handle (index into the C-layer window table), or
+    /// [`WIN_FREED`] once `into_buffer` has called the free.
     win_handle: i32,
     /// Non-null pointer to this process's local window buffer.
     ///
-    /// For `Win::create` this points into the caller-supplied slice.
-    /// For `Win::allocate` this points into the MPI-managed allocation.
+    /// For `Win::create` this is the pointer `Vec::as_mut_ptr` returned for
+    /// `buffer`, the same one MPI holds. For `Win::allocate` this points into
+    /// the MPI-managed allocation.
     local_ptr: NonNull<T>,
     /// Number of `T` elements in the local buffer.
     local_len: usize,
     /// Every rank's displacement unit and exposed byte length, packed by
     /// [`window_word`] and indexed by rank in the window's communicator.
     words: Box<[u64]>,
-    /// Captures the `'a` lifetime so the borrow checker enforces that a
-    /// caller-supplied buffer outlives the `Win`. For `Win::allocate` (which
-    /// uses `'static`) this is a zero-sized phantom that imposes no constraint.
-    _marker: std::marker::PhantomData<&'a mut [T]>,
+    /// The `Win::create` buffer, `None` for `Win::allocate`. Never read or
+    /// borrowed while the window lives, so every slice stays a child of
+    /// `local_ptr`; only `into_buffer` and `Drop` touch it, after the free.
+    buffer: Option<Vec<T>>,
 }
 
-impl<'a, T: MpiDatatype> Win<'a, T> {
-    /// Create an RMA window backed by a caller-supplied buffer.
+impl<T: MpiDatatype> Win<T> {
+    /// Create an RMA window over a buffer the window then owns.
     ///
-    /// Wraps `MPI_Win_create`. The buffer `buf` is mutably borrowed for the
-    /// lifetime `'a` of the returned `Win`, ensuring it cannot be dropped or
-    /// moved while the window is alive.
+    /// Wraps `MPI_Win_create`. The window takes `buf` and keeps it, neither
+    /// resized nor borrowed, until `MPI_Win_free` has succeeded (see
+    /// [`into_buffer`](Self::into_buffer) and the type's `# Dropping`
+    /// section), so no safe call can free or reuse memory a peer may still
+    /// access. Reach it with [`local_slice`](Self::local_slice) and
+    /// [`local_slice_mut`](Self::local_slice_mut). `buf` is consumed on every
+    /// return: dropped if MPI created no window, leaked if it did and the
+    /// window cannot be returned.
     ///
     /// `disp_unit` is set to `size_of::<T>()` and `size` to
     /// `buf.len() * size_of::<T>()`. Creation first exchanges each rank's
@@ -1097,7 +1146,7 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     /// # Arguments
     ///
     /// * `comm` - Communicator; all processes must call this collectively.
-    /// * `buf`  - Mutable slice that forms this process's local window memory.
+    /// * `buf`  - The vector that forms this process's local window memory.
     ///
     /// # Errors
     ///
@@ -1108,12 +1157,12 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     ///   `operation: Some("allgather")`); this can happen on some ranks only,
     ///   and the other ranks can then block creating the window.
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_create")`).
+    /// - The window table is full (`Error::ResourceExhausted`; the window is
+    ///   then leaked: never freed, and counted as alive so `Mpi` skips
+    ///   `MPI_Finalize`, and the buffer is leaked with it).
     ///
-    /// If this rank's window table is full, the process is aborted instead
-    /// (`MPI_Abort`, falling back to `SIGABRT` if `MPI_Abort` itself returns
-    /// on a non-conforming implementation): the new window already exposes
-    /// `buf` to every peer, so it can be neither returned nor freed on this
-    /// rank alone.
+    /// In the last case, a peer whose own call succeeded blocks in its
+    /// collective free (`MPI_Win_free`) waiting for this rank.
     ///
     /// # Example
     ///
@@ -1122,59 +1171,59 @@ impl<'a, T: MpiDatatype> Win<'a, T> {
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let mut buf = vec![0f64; 64];
-    /// let win = Win::create(&world, &mut buf).unwrap();
+    /// let win = Win::create(&world, vec![0f64; 64]).unwrap();
     /// ```
-    pub fn create(comm: &Communicator, buf: &'a mut [T]) -> Result<Self> {
+    pub fn create(comm: &Communicator, buf: Vec<T>) -> Result<Self> {
         let words = exchange_window_words(comm, window_word::<T>(buf.len()))?;
         let (size, disp_unit) = win_size_and_disp_unit::<T>(buf.len())?;
-        let mut win_handle: i32 = 0;
+        let mut buf = buf;
+        let (base, _, _) = vec_buf_mut(&mut buf);
+        let mut win_handle: i32 = -1;
 
-        mark_window_alive();
-        // SAFETY: `buf` is a valid, aligned mutable slice borrowed for `'a`.
-        // We pass its raw pointer and byte length to MPI_Win_create. The C
-        // shim validates the comm handle before calling MPI. The pointer
-        // remains valid for the lifetime of the window because `'a` ensures
-        // `buf` outlives `Self`.
-        let ret = unsafe {
-            ffi::ferrompi_win_create(
-                buf.as_mut_ptr().cast::<std::ffi::c_void>(),
-                size,
-                disp_unit,
-                -1, // MPI_INFO_NULL
-                comm.handle,
-                &mut win_handle,
-            )
-        };
-        if ret != 0 {
-            mark_window_gone();
+        let created = counted_window_call("win_create", &mut win_handle, |handle| {
+            // SAFETY: `base` is the pointer `Vec::as_mut_ptr` returned for
+            // `buf`, valid for `size` bytes (a dangling pointer with size 0 for
+            // an empty `Vec`), and the window owns `buf` from here: it is moved
+            // into `buffer` only after this call succeeded, never resized or
+            // borrowed while the window lives, and every path that skips
+            // `MPI_Win_free` forgets it. The C shim validates the comm handle
+            // before calling MPI.
+            unsafe {
+                ffi::ferrompi_win_create(
+                    base,
+                    size,
+                    disp_unit,
+                    -1, // MPI_INFO_NULL
+                    comm.handle,
+                    handle,
+                )
+            }
+        });
+        if let Err(err) = created {
+            // A window the shim created but could not register is never
+            // freed, so the buffer it exposes must outlive the process.
+            if win_handle == FERROMPI_WIN_LEAKED {
+                std::mem::forget(buf);
+            }
+            return Err(err);
         }
-        Error::check_with_op(ret, "win_create")?;
 
-        let local_ptr = if buf.is_empty() {
-            NonNull::<T>::dangling()
-        } else {
-            // SAFETY: buf.as_mut_ptr() is non-null when buf is non-empty.
-            unsafe { NonNull::new_unchecked(buf.as_mut_ptr()) }
-        };
-
+        // SAFETY: `Vec::as_mut_ptr` is never null.
+        let local_ptr = unsafe { NonNull::new_unchecked(base.cast::<T>()) };
         Ok(Win {
             win_handle,
             local_ptr,
             local_len: buf.len(),
             words,
-            _marker: std::marker::PhantomData,
+            buffer: Some(buf),
         })
     }
-}
 
-impl<T: MpiDatatype> Win<'static, T> {
     /// Allocate an RMA window with MPI-managed memory.
     ///
     /// Wraps `MPI_Win_allocate`. MPI allocates `local_count` elements of type
     /// `T` for this process. The allocation is freed automatically when the
-    /// window is dropped (via `MPI_Win_free`). The returned `Win` is
-    /// `'static` because there is no caller buffer to track.
+    /// window is dropped (via `MPI_Win_free`).
     ///
     /// `disp_unit` is set to `size_of::<T>()` and `size` to
     /// `local_count * size_of::<T>()`. Creation first exchanges each rank's
@@ -1226,27 +1275,22 @@ impl<T: MpiDatatype> Win<'static, T> {
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut win_handle: i32 = -1;
 
-        mark_window_alive();
-        // SAFETY: We pass valid out-parameter pointers to the C shim, which
-        // calls MPI_Win_allocate. The C shim validates the comm handle. The
-        // returned baseptr is either a valid MPI-allocated pointer or null
-        // (only valid if local_count == 0).
-        let ret = unsafe {
-            ffi::ferrompi_win_allocate(
-                size,
-                disp_unit,
-                -1, // MPI_INFO_NULL
-                comm.handle,
-                &mut baseptr,
-                &mut win_handle,
-            )
-        };
-        // A window MPI created but could not zero or register is never freed,
-        // so it keeps its count.
-        if ret != 0 && win_handle != FERROMPI_WIN_LEAKED {
-            mark_window_gone();
-        }
-        Error::check_with_op(ret, "win_allocate")?;
+        counted_window_call("win_allocate", &mut win_handle, |handle| {
+            // SAFETY: We pass valid out-parameter pointers to the C shim, which
+            // calls MPI_Win_allocate. The C shim validates the comm handle. The
+            // returned baseptr is either a valid MPI-allocated pointer or null
+            // (only valid if local_count == 0).
+            unsafe {
+                ffi::ferrompi_win_allocate(
+                    size,
+                    disp_unit,
+                    -1, // MPI_INFO_NULL
+                    comm.handle,
+                    &mut baseptr,
+                    handle,
+                )
+            }
+        })?;
 
         let local_ptr = if local_count == 0 {
             // Zero-count: use a dangling aligned pointer (same trick as
@@ -1263,25 +1307,79 @@ impl<T: MpiDatatype> Win<'static, T> {
             local_ptr,
             local_len: local_count,
             words,
-            _marker: std::marker::PhantomData,
+            buffer: None,
         })
     }
-}
 
-impl<T: MpiDatatype> Win<'_, T> {
+    /// Free the window and return its buffer.
+    ///
+    /// Calls `MPI_Win_free` and, once it has succeeded, returns the vector
+    /// `Win::create` took, or `None` for a `Win::allocate` window (MPI frees
+    /// its memory with the window). Unlike `Drop`, it reports a failed or
+    /// refused free.
+    ///
+    /// The call is collective: it can block until every peer has called
+    /// `MPI_Win_free`, because MPI-4.1 §12.2.5 requires it to wait until every
+    /// passive-target access to this rank has completed. An error can reach
+    /// some ranks only. A rank whose free failed, or was refused, leaks its
+    /// buffer and keeps the window counted as alive; a peer whose free
+    /// succeeded gets its buffer back; a peer that never calls the free
+    /// blocks in its own.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped: no MPI
+    ///   call is made and the buffer is leaked.
+    /// - `Error::Mpi` with `operation: Some("win_free")` if the free fails:
+    ///   the buffer is leaked and the window stays counted as alive, so `Mpi`
+    ///   skips `MPI_Finalize`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::{Mpi, Win};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let mut win = Win::create(&world, vec![0f64; 64]).unwrap();
+    /// win.local_slice_mut()[0] = 1.5;
+    /// let buf = win.into_buffer().unwrap().expect("Win::create owns its buffer");
+    /// assert_eq!(buf[0], 1.5);
+    /// ```
+    pub fn into_buffer(mut self) -> Result<Option<Vec<T>>> {
+        let _call = rt::enter().map_err(|code| Error::from_code_with_op(code, "win_free"))?;
+        // SAFETY: `win_handle` is the live window's handle. Only this call
+        // frees it: `WIN_FREED`, set right below, keeps `Drop` from freeing it
+        // again.
+        let ret = unsafe { ffi::ferrompi_win_free(self.win_handle) };
+        // The shim releases the table slot whatever MPI returned, so `Drop`
+        // must not free again.
+        self.win_handle = WIN_FREED;
+        if ret == 0 {
+            // Release: pairs with `live_windows`'s Acquire; this decrement
+            // follows the successful free.
+            LIVE_WINDOWS.fetch_sub(1, Ordering::Release);
+            return Ok(self.buffer.take());
+        }
+        std::mem::forget(self.buffer.take());
+        Err(Error::from_code_with_op(ret, "win_free"))
+    }
+
     /// Get a shared slice of this process's local window buffer.
     ///
-    /// For `Win::create`, this returns a view into the caller-supplied buffer.
-    /// For `Win::allocate`, this returns a view into the MPI-managed buffer.
+    /// For `Win::create`, this returns a view into the buffer the window
+    /// owns. For `Win::allocate`, this returns a view into the MPI-managed
+    /// buffer.
     ///
     /// The borrow lifetime is tied to `&self`, so the slice cannot outlive the
     /// window. Proper MPI epoch synchronization (fence, lock, or PSCW) must be
     /// used before reading data written by remote processes.
     pub fn local_slice(&self) -> &[T] {
-        // SAFETY: `local_ptr` was set in the constructor from either a valid
-        // caller slice (`Win::create`) or a valid MPI allocation
-        // (`Win::allocate`). Both are guaranteed valid for `local_len`
-        // elements of type T for the lifetime of the window. The pointer is
+        // SAFETY: `local_ptr` was set in the constructor from either the
+        // pointer `Vec::as_mut_ptr` returned for the owned buffer
+        // (`Win::create`) or a valid MPI allocation (`Win::allocate`). Both
+        // are valid for `local_len` elements of type T until the window is
+        // freed, which needs `self` by value or a drop. The pointer is
         // non-null (zero-length windows use NonNull::dangling()). We hold
         // `&self` so no mutable alias exists.
         unsafe { std::slice::from_raw_parts(self.local_ptr.as_ptr(), self.local_len) }
@@ -1289,19 +1387,20 @@ impl<T: MpiDatatype> Win<'_, T> {
 
     /// Get a mutable slice of this process's local window buffer.
     ///
-    /// For `Win::create`, this returns a mutable view into the caller-supplied
-    /// buffer. For `Win::allocate`, this returns a mutable view into the
+    /// For `Win::create`, this returns a mutable view into the buffer the
+    /// window owns. For `Win::allocate`, this returns a mutable view into the
     /// MPI-managed buffer.
     ///
     /// The borrow lifetime is tied to `&mut self`, ensuring exclusive access.
     /// Proper MPI epoch synchronization must be used before writing data that
     /// remote processes may read.
     pub fn local_slice_mut(&mut self) -> &mut [T] {
-        // SAFETY: `local_ptr` was set in the constructor from either a valid
-        // caller slice (`Win::create`) or a valid MPI allocation
-        // (`Win::allocate`). Both are guaranteed valid for `local_len`
-        // elements of type T. We hold `&mut self`, ensuring exclusive access
-        // and no concurrent shared references to the same memory.
+        // SAFETY: `local_ptr` was set in the constructor from either the
+        // pointer `Vec::as_mut_ptr` returned for the owned buffer
+        // (`Win::create`) or a valid MPI allocation (`Win::allocate`). Both
+        // are valid for `local_len` elements of type T until the window is
+        // freed. We hold `&mut self`, ensuring exclusive access and no
+        // concurrent shared references to the same memory.
         unsafe { std::slice::from_raw_parts_mut(self.local_ptr.as_ptr(), self.local_len) }
     }
 
@@ -1551,7 +1650,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     }
 }
 
-impl<T: MpiDatatype> Win<'_, T> {
+impl<T: MpiDatatype> Win<T> {
     /// Lock a specific rank's window (passive-target synchronization).
     ///
     /// Acquires a lock on the specified rank's window, allowing one-sided
@@ -1587,7 +1686,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///     // Lock released when `guard` is dropped
     /// }
     /// ```
-    pub fn lock(&self, lock_type: LockType, rank: i32) -> Result<WinLockGuard<'_, '_, T>> {
+    pub fn lock(&self, lock_type: LockType, rank: i32) -> Result<WinLockGuard<'_, T>> {
         let lt = match lock_type {
             LockType::Exclusive => ffi::FERROMPI_LOCK_EXCLUSIVE,
             LockType::Shared => ffi::FERROMPI_LOCK_SHARED,
@@ -1632,7 +1731,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     ///     // All locks released when `guard` is dropped
     /// }
     /// ```
-    pub fn lock_all(&self) -> Result<WinLockAllGuard<'_, '_, T>> {
+    pub fn lock_all(&self) -> Result<WinLockAllGuard<'_, T>> {
         // SAFETY: `win_handle` is a valid MPI window handle. Passing `0` for
         // the assert value is always valid (no optimization hints).
         let ret = unsafe { ffi::ferrompi_win_lock_all(0, self.win_handle) };
@@ -1641,7 +1740,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     }
 }
 
-impl<T: MpiDatatype> Win<'_, T> {
+impl<T: MpiDatatype> Win<T> {
     /// Locally complete pending RMA operations to a specific target rank.
     ///
     /// Ensures that all preceding RMA operations issued to `rank` have
@@ -1765,7 +1864,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     }
 }
 
-impl<T: MpiDatatype> Win<'_, T> {
+impl<T: MpiDatatype> Win<T> {
     /// Forwards to [`check_rma_target`] with this window's exchanged words
     /// and `size_of::<T>()`.
     fn check_target(
@@ -2743,7 +2842,7 @@ impl<T: MpiDatatype> Win<'_, T> {
     }
 }
 
-impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
+impl<T: crate::AtomicMpiDatatype + MpiDatatype> Win<T> {
     /// Single-element atomic compare-and-swap: conditionally replace a remote
     /// element if it matches an expected value, returning a
     /// [`PendingFetchResult<T>`] that holds the pre-CAS remote value once the
@@ -2912,24 +3011,47 @@ impl<'a, T: crate::AtomicMpiDatatype + MpiDatatype> Win<'a, T> {
     }
 }
 
-impl<T: MpiDatatype> Drop for Win<'_, T> {
+/// Frees the window with `MPI_Win_free`, which is collective.
+///
+/// # Dropping
+///
+/// - The free succeeds: the window leaves the live-window count, and the
+///   buffer of a `Win::create` window is dropped after the call.
+/// - [`Mpi`](crate::Mpi) is being dropped, or was dropped and skipped
+///   `MPI_Finalize` because this window was alive: no MPI call is made, the
+///   window stays counted as alive (so `Mpi` skips `MPI_Finalize`), and the
+///   buffer is leaked.
+/// - The free fails: the buffer is leaked and the window stays counted as
+///   alive.
+impl<T: MpiDatatype> Drop for Win<T> {
     fn drop(&mut self) {
+        if self.win_handle == WIN_FREED {
+            return;
+        }
         let Some(_call) = rt::drop_guard("Win") else {
+            std::mem::forget(self.buffer.take());
             return;
         };
-        // Release: see `Drop for SharedWindow`'s identical comment.
-        LIVE_WINDOWS.fetch_sub(1, Ordering::Release);
         // SAFETY: `win_handle` is a valid MPI window handle allocated by
         // ferrompi_win_create or ferrompi_win_allocate. It has not been freed
-        // yet because Drop is only called once. MPI_Win_free leaves the user
-        // buffer alone for a caller-supplied buffer (Win::create) and frees
-        // the MPI-allocated buffer for Win::allocate per the MPI standard —
-        // the C layer handles this distinction correctly.
-        unsafe { ffi::ferrompi_win_free(self.win_handle) };
+        // yet because Drop is only called once and `into_buffer` sets
+        // `WIN_FREED` after its free. MPI_Win_free leaves the user buffer
+        // alone for Win::create and frees the MPI-allocated buffer for
+        // Win::allocate per the MPI standard — the C layer handles this
+        // distinction correctly.
+        let ret = unsafe { ffi::ferrompi_win_free(self.win_handle) };
+        if ret == 0 {
+            // Release: pairs with `live_windows`'s Acquire; this decrement
+            // follows the successful free. The buffer drops after this body,
+            // once MPI is done with it.
+            LIVE_WINDOWS.fetch_sub(1, Ordering::Release);
+        } else {
+            std::mem::forget(self.buffer.take());
+        }
     }
 }
 
-// Win<'_, T> is intentionally NOT Send or Sync. MPI windows have specific
+// Win<T> is intentionally NOT Send or Sync. MPI windows have specific
 // thread-safety rules that depend on the MPI thread level, and incorrect
 // cross-thread usage can cause data corruption or MPI errors.
 
@@ -3057,7 +3179,7 @@ impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
 }
 
 // ============================================================================
-// WinLockGuard — RAII single-rank lock guard for Win<'a, T>
+// WinLockGuard — RAII single-rank lock guard for Win<T>
 // ============================================================================
 
 /// RAII guard for a single-rank passive-target lock on a [`Win`].
@@ -3065,9 +3187,8 @@ impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
 /// Created by [`Win::lock()`]. When dropped, the lock on the specified rank
 /// is automatically released via `MPI_Win_unlock`.
 ///
-/// The `'g` lifetime tracks the borrow of the parent `Win<'a, T>`, and `'a`
-/// is the buffer lifetime carried by `Win`. The guard cannot outlive the
-/// window it was created from.
+/// The `'g` lifetime tracks the borrow of the parent `Win<T>`. The guard
+/// cannot outlive the window it was created from.
 ///
 /// # Example
 ///
@@ -3083,12 +3204,12 @@ impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
 ///     guard.flush().unwrap();
 /// } // MPI_Win_unlock called here
 /// ```
-pub struct WinLockGuard<'g, 'a, T: MpiDatatype> {
-    window: &'g Win<'a, T>,
+pub struct WinLockGuard<'g, T: MpiDatatype> {
+    window: &'g Win<T>,
     rank: i32,
 }
 
-impl<T: MpiDatatype> WinLockGuard<'_, '_, T> {
+impl<T: MpiDatatype> WinLockGuard<'_, T> {
     /// Flush pending RMA operations to the locked rank.
     ///
     /// Ensures that all preceding RMA operations (put, get, accumulate)
@@ -3108,7 +3229,7 @@ impl<T: MpiDatatype> WinLockGuard<'_, '_, T> {
     }
 }
 
-impl<T: MpiDatatype> Drop for WinLockGuard<'_, '_, T> {
+impl<T: MpiDatatype> Drop for WinLockGuard<'_, T> {
     fn drop(&mut self) {
         let Some(_call) = rt::drop_guard("WinLockGuard") else {
             return;
@@ -3121,7 +3242,7 @@ impl<T: MpiDatatype> Drop for WinLockGuard<'_, '_, T> {
 }
 
 // ============================================================================
-// WinLockAllGuard — RAII lock-all guard for Win<'a, T>
+// WinLockAllGuard — RAII lock-all guard for Win<T>
 // ============================================================================
 
 /// RAII guard for a lock-all passive-target epoch on a [`Win`].
@@ -3129,9 +3250,8 @@ impl<T: MpiDatatype> Drop for WinLockGuard<'_, '_, T> {
 /// Created by [`Win::lock_all()`]. When dropped, all shared locks are
 /// automatically released via `MPI_Win_unlock_all`.
 ///
-/// The `'g` lifetime tracks the borrow of the parent `Win<'a, T>`, and `'a`
-/// is the buffer lifetime carried by `Win`. The guard cannot outlive the
-/// window it was created from.
+/// The `'g` lifetime tracks the borrow of the parent `Win<T>`. The guard
+/// cannot outlive the window it was created from.
 ///
 /// # Example
 ///
@@ -3147,11 +3267,11 @@ impl<T: MpiDatatype> Drop for WinLockGuard<'_, '_, T> {
 ///     guard.flush_all().unwrap();
 /// } // MPI_Win_unlock_all called here
 /// ```
-pub struct WinLockAllGuard<'g, 'a, T: MpiDatatype> {
-    window: &'g Win<'a, T>,
+pub struct WinLockAllGuard<'g, T: MpiDatatype> {
+    window: &'g Win<T>,
 }
 
-impl<T: MpiDatatype> WinLockAllGuard<'_, '_, T> {
+impl<T: MpiDatatype> WinLockAllGuard<'_, T> {
     /// Flush all pending RMA operations to all ranks.
     ///
     /// Ensures that all preceding RMA operations issued to any rank in the
@@ -3191,7 +3311,7 @@ impl<T: MpiDatatype> WinLockAllGuard<'_, '_, T> {
     }
 }
 
-impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, '_, T> {
+impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, T> {
     fn drop(&mut self) {
         let Some(_call) = rt::drop_guard("WinLockAllGuard") else {
             return;
@@ -3206,9 +3326,10 @@ impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, '_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_rma_target, window_word, Error, PendingFetchResult, WinFenceAssert, WinPscwAssert,
-        WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT,
+        check_rma_target, window_word, Error, PendingFetchResult, Win, WinFenceAssert,
+        WinPscwAssert, WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT, WIN_FREED,
     };
+    use crate::persistent::vec_buf_mut;
     use std::ptr::NonNull;
 
     // -------------------------------------------------------------------------
@@ -3304,7 +3425,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Win<'a, T> unit tests — exercise the type without an MPI runtime
+    // Win<T> unit tests — exercise the type without an MPI runtime
     // -------------------------------------------------------------------------
 
     #[test]
@@ -3338,6 +3459,41 @@ mod tests {
         fn assert_sync<T: Sync>() {}
         assert_send::<PendingFetchResult<i32>>();
         assert_sync::<PendingFetchResult<i32>>();
+    }
+
+    /// Stands in for a peer's RMA write into the window between the slices
+    /// the window hands out: the pointer `vec_buf_mut` returned, which
+    /// `Win::create` hands to MPI and stores as `local_ptr`, must stay usable
+    /// across them. The window carries the sentinel handle, so its drop makes
+    /// no MPI call. Run under Miri, with and without `-Zmiri-tree-borrows`, to
+    /// check its provenance.
+    #[test]
+    fn recorded_window_pointer_survives_local_slices() {
+        let mut v = vec![0u64; 4];
+        let (p, n, _) = vec_buf_mut(&mut v);
+        let p = p.cast::<u64>();
+        assert_eq!(n, 4);
+        let mut win = Win {
+            win_handle: WIN_FREED,
+            // SAFETY: `Vec::as_mut_ptr` is never null.
+            local_ptr: unsafe { NonNull::new_unchecked(p) },
+            local_len: 4,
+            words: Box::new([]),
+            buffer: Some(v),
+        };
+        for round in 1..=3u64 {
+            win.local_slice_mut().fill(round);
+            for i in 0..4 {
+                // SAFETY: `p` addresses the live allocation of four `u64`s that
+                // `vec_buf_mut` derived it from, and no slice is live while the
+                // write stands in for a peer's.
+                unsafe { p.add(i).write(round * 10 + i as u64) };
+            }
+            let expected = [round * 10, round * 10 + 1, round * 10 + 2, round * 10 + 3];
+            assert_eq!(win.local_slice(), expected);
+        }
+        let buffer = win.buffer.take().expect("a create window owns its buffer");
+        assert_eq!(buffer, [30, 31, 32, 33]);
     }
 
     // -------------------------------------------------------------------------

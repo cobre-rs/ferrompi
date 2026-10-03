@@ -1,8 +1,9 @@
 //! Integration test for Win::create and Win::allocate (distributed RMA windows).
 //!
 //! Verifies that `Win<T>` can be constructed via both constructors, that
-//! `raw_handle()` and `comm_size()` return expected values, and that the RAII
-//! `Drop` implementation does not produce MPI errors.
+//! `raw_handle()` and `comm_size()` return expected values, and that
+//! `into_buffer()` frees the window and returns the `Win::create` buffer (and
+//! `None` for a `Win::allocate` window).
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_create
 // mpi-test: np=2 skip-ok=openmpi-4
@@ -23,7 +24,7 @@ fn main() {
     );
 
     // ========================================================================
-    // Test 1: Win::create with a caller-supplied i32 buffer
+    // Test 1: Win::create over an owned i32 buffer
     //
     // OpenMPI 4.x with `--btl=self,tcp` (the configuration used in CI when
     // UCX/rdma is not available) does not provide a one-sided communication
@@ -33,9 +34,8 @@ fn main() {
     // `MPI_Win_allocate` (Test 2 below) uses MPI-managed memory and is
     // supported.  Skip Test 1 gracefully when this OpenMPI-CI quirk fires.
     // ========================================================================
-    let mut buf = vec![0i32; 16];
-    let test1_skipped = match Win::create(&world, &mut buf) {
-        Ok(win) => {
+    let test1_skipped = match Win::create(&world, vec![0i32; 16]) {
+        Ok(mut win) => {
             let handle = win.raw_handle();
             assert!(
                 handle >= 0,
@@ -51,8 +51,17 @@ fn main() {
                 "Win::create local_slice len mismatch"
             );
 
-            // Win dropped at end of arm — frees a window over caller memory.
-            drop(win);
+            // Write through the window, then free it: the owned buffer comes
+            // back holding what was written.
+            for (i, x) in win.local_slice_mut().iter_mut().enumerate() {
+                *x = rank * 100 + i as i32;
+            }
+            let buf = win
+                .into_buffer()
+                .expect("Win::create into_buffer failed")
+                .expect("Win::create must return its buffer");
+            let expected: Vec<i32> = (0..16).map(|i| rank * 100 + i).collect();
+            assert_eq!(buf, expected, "Win::create into_buffer data mismatch");
             false
         }
         Err(ferrompi::Error::Mpi {
@@ -73,7 +82,9 @@ fn main() {
 
     world.barrier().expect("barrier after test 1 failed");
     if rank == 0 && !test1_skipped {
-        println!("PASS: Win::create (i32, 16 elements, raw_handle, comm_size, local_slice)");
+        println!(
+            "PASS: Win::create (i32, 16 elements, raw_handle, comm_size, local_slice, into_buffer)"
+        );
     }
 
     // ========================================================================
@@ -116,12 +127,14 @@ fn main() {
             }
         }
 
-        // Win dropped here — frees a window over MPI-allocated memory.
+        // Freeing a window over MPI-allocated memory returns no buffer.
+        let buf = win.into_buffer().expect("Win::allocate into_buffer failed");
+        assert!(buf.is_none(), "Win::allocate into_buffer must return None");
     }
 
     world.barrier().expect("barrier after test 2 failed");
     if rank == 0 {
-        println!("PASS: Win::allocate (f64, 32 elements, raw_handle, comm_size, local_slice_mut, local_slice)");
+        println!("PASS: Win::allocate (f64, 32 elements, raw_handle, comm_size, local_slice_mut, local_slice, into_buffer)");
     }
 
     world.barrier().expect("final barrier failed");
