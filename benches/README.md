@@ -305,6 +305,26 @@ with a counting global allocator. After 10 warm-up iterations, 1000 scopes of 64
 each (32 self receives and 32 self sends, completed by `Request::wait_all`) allocate
 nothing; one scope of 65 requests does allocate, which marks the 64-slot boundary.
 
+**Persistent requests.** Budget P: each persistent arm costs at most 15 ns per request at
+`funneled` over `E`, the build before persistent requests owned their buffers (`250c7b1`),
+plus the largest |A/A| of the slots. `H` is the build with owned buffers, the extent token
+and the returned `Status`. One session on 2026-10-03, local MPICH 4.2.3 (`ch4:ofi`), a
+singleton, `taskset -c 0-7`: the binaries run as `E` `H` `H` `E` twice, then 30 interleaved
+rounds of both, so 34 slots each at `funneled` and, with 20 rounds, 24 at `multiple`. Values
+are the median ns per call, ferrompi minus direct; the increase is `H` minus `E` divided by
+the arm's requests (2 in `persistent start+wait`, a send and a receive; 16 in the 8x arm).
+
+| Case | Level, pinning | Slots each | E | H | Increase per request |
+|---|---|---|---|---|---|
+| persistent start+wait | funneled, `taskset -c 0-7` | 34 | +9.2 | +30.6 | +10.70 (limit 15 + 1.4 = 16.4, met) |
+| 8x persistent start_all+wait_all | funneled, `taskset -c 0-7` | 34 | +139.7 | +215.6 | +4.74 (limit 15 + 1.4 = 16.4, met) |
+| persistent start+wait | multiple, `taskset -c 0-7` | 24 | +50.75 | +66.75 | +8.00 (no limit) |
+| 8x persistent start_all+wait_all | multiple, `taskset -c 0-7` | 24 | +98.6 | +182.1 | +5.22 (no limit) |
+
+The increase is the extent token, two atomic read-modify-writes per request (one when it is
+taken, one when it is released), plus, for a receive, the status fill. `multiple` has no
+limit: each call is counted (budget Y), and the 8x arm there depends on code placement.
+
 ## Design notes
 
 - `criterion_main!` is intentionally **not** used. That macro defines its own `fn main`

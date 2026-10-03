@@ -1,9 +1,10 @@
 //! Typed point-to-point endpoints: a send, receive, probe or persistent request
 //! with `Source::ProcNull` completes at once with no data on every MPI, and a
-//! receive, probe or `sendrecv` from it reports `Source::ProcNull`, `Tag::Any`
-//! and a count of 0; a negative rank or tag, or `Source::Any` as a destination,
-//! is rejected before any MPI call; a wildcard receive delivers the message of
-//! a ring (a send to self at np 1).
+//! receive (a persistent one on every start), probe or `sendrecv` from it
+//! reports `Source::ProcNull`, `Tag::Any` and a count of 0, while a persistent
+//! send to it waits to the empty status; a negative rank or tag, or
+//! `Source::Any` as a destination, is rejected before any MPI call; a wildcard
+//! receive delivers the message of a ring (a send to self at np 1).
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_proc_null
 // mpi-test: np=1.. valgrind
@@ -108,13 +109,21 @@ fn main() {
         .recv_init(UNTOUCHED.to_vec(), Source::ProcNull, Tag::Any)
         .expect("recv_init failed");
     let mut rounds_ok = true;
+    let mut statuses_ok = true;
     for _ in 0..3 {
-        rounds_ok &= persistent.start().and_then(|()| persistent.wait()).is_ok();
+        let r = persistent.start().and_then(|()| persistent.wait());
+        rounds_ok &= r.is_ok();
+        statuses_ok &= r.as_ref().is_ok_and(is_proc_null_status);
     }
     common::check(
         &world,
         rounds_ok && persistent.buffer().is_ok_and(|b| b == UNTOUCHED),
         "recv_init from ProcNull completes on every start and leaves the buffer untouched",
+    );
+    common::check(
+        &world,
+        statuses_ok,
+        "recv_init from ProcNull reports the ProcNull status on every start",
     );
 
     let one_i32 = CustomDatatype::create_struct(&[StructField {
@@ -168,16 +177,24 @@ fn main() {
         world.ssend_init(send.to_vec(), Source::ProcNull, RING_TAG),
     ];
     let mut sends_ok = true;
+    let mut send_statuses_ok = true;
     for request in requests {
         let mut request = request.expect("persistent send init failed");
         for _ in 0..3 {
-            sends_ok &= request.start().and_then(|()| request.wait()).is_ok();
+            let r = request.start().and_then(|()| request.wait());
+            sends_ok &= r.is_ok();
+            send_statuses_ok &= r.as_ref().is_ok_and(is_empty_status);
         }
     }
     common::check(
         &world,
         sends_ok,
         "persistent sends to ProcNull complete on every start",
+    );
+    common::check(
+        &world,
+        send_statuses_ok,
+        "persistent sends to ProcNull report the empty status on every start",
     );
     mpi.buffer_detach().expect("buffer_detach failed");
 

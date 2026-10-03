@@ -5,6 +5,7 @@ use crate::error::{Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LE
 use crate::ffi;
 use crate::op::OpRegistration;
 use crate::rt;
+use crate::status::Status;
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -211,6 +212,13 @@ impl<T> PersistentRequest<T> {
     /// [`buffer`](Self::buffer) and [`buffer_mut`](Self::buffer_mut), and the
     /// operation can be started again.
     ///
+    /// For a request made by `recv_init` the returned [`Status`] holds the
+    /// matched source, tag and element count of that start
+    /// ([`Source::ProcNull`](crate::Source::ProcNull) for a receive from
+    /// `ProcNull`). For every send-side or collective request the `Status` is
+    /// the empty status, and so is an inactive request, as `MPI_Wait` returns
+    /// for one; only `error` has meaning, and these calls leave it `None`.
+    ///
     /// # Errors
     ///
     /// Returns an error if the wait fails. A wait that MPI ran leaves the
@@ -224,16 +232,27 @@ impl<T> PersistentRequest<T> {
     /// after finalize, or, in a debug build at `Serialized`, overlapping
     /// another thread's call) leaves the request active.
     #[inline]
-    pub fn wait(&mut self) -> Result<()> {
+    pub fn wait(&mut self) -> Result<Status> {
         if !self.is_active() {
-            return Ok(());
+            return Ok(Status::EMPTY);
         }
+        let mut status = ffi::FerrompiStatus::default();
+        self.wait_raw(&mut status)?;
+        Ok(Status::from_ffi(status))
+    }
+
+    /// The body of [`wait`](Self::wait) for an active request, out of line so
+    /// that the inline wrapper decodes `status` only when its caller uses the
+    /// result.
+    #[inline(never)]
+    fn wait_raw(&mut self, status: &mut ffi::FerrompiStatus) -> Result<()> {
         Error::check_with_op(rt::check_completion(), "wait")?;
         // SAFETY: self.handle is a valid persistent MPI request handle
         // registered in the C-side request table; the request was active on
-        // entry (checked above), so start() was called and MPI holds an
+        // entry (checked by wait), so start() was called and MPI holds an
         // in-flight operation on this handle for ferrompi_wait to complete.
-        let ret = unsafe { ffi::ferrompi_wait(self.handle, std::ptr::null_mut()) };
+        // status is a valid out-parameter.
+        let ret = unsafe { ffi::ferrompi_wait(self.handle, status) };
         // A call the guard rejects before MPI sees it leaves the request
         // active, token included: a debug build's Serialized overlap check, or
         // a finalize that stored `Finalized` after the pre-check above.
@@ -247,20 +266,34 @@ impl<T> PersistentRequest<T> {
 
     /// Test if the operation has completed without blocking.
     ///
-    /// Returns `true` if complete, `false` if still in progress. A failed
-    /// `test` that MPI completed also leaves the request inactive, on the
-    /// assumption described under [`wait`](Self::wait).
+    /// Returns `Some(`[`Status`]`)` if complete, `None` if still in progress.
+    /// The `Status` is the one [`wait`](Self::wait) returns: the matched source,
+    /// tag and element count for a `recv_init` request, the empty status for
+    /// every other request, and the empty status for an inactive request. A
+    /// failed `test` that MPI completed also leaves the request inactive, on
+    /// the assumption described under [`wait`](Self::wait).
     #[inline]
-    pub fn test(&mut self) -> Result<bool> {
+    pub fn test(&mut self) -> Result<Option<Status>> {
         if !self.is_active() {
-            return Ok(true);
+            return Ok(Some(Status::EMPTY));
         }
+        let mut status = ffi::FerrompiStatus::default();
+        Ok(self
+            .test_raw(&mut status)?
+            .then(|| Status::from_ffi(status)))
+    }
+
+    /// The body of [`test`](Self::test) for an active request, out of line like
+    /// [`wait_raw`](Self::wait_raw). Returns whether MPI completed it.
+    #[inline(never)]
+    fn test_raw(&mut self, status: &mut ffi::FerrompiStatus) -> Result<bool> {
         let mut flag: i32 = 0;
         // SAFETY: self.handle is a valid persistent MPI request handle
         // registered in the C-side request table; the request was active on
-        // entry (checked above). flag is a local out-parameter written by
-        // ferrompi_test before this function reads it below.
-        let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag, std::ptr::null_mut()) };
+        // entry (checked by test). flag is a local out-parameter written by
+        // ferrompi_test before this function reads it below; status is a valid
+        // out-parameter.
+        let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag, status) };
         // flag is set when MPI completed the request, even with an error.
         if flag != 0 {
             self.token = None;
@@ -424,6 +457,9 @@ impl<T> PersistentRequest<T> {
     /// On a failed request, the returned error carries that request's own
     /// class and code, and its message ends with `(request N)`, `N` being
     /// its index in `requests`.
+    ///
+    /// This fills no status, like [`Request::wait_all`](crate::Request::wait_all);
+    /// use [`wait`](Self::wait) on a request to read its [`Status`].
     pub fn wait_all(requests: &mut [PersistentRequest<T>]) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
@@ -524,6 +560,7 @@ mod tests {
     use crate::error::Error;
     use crate::op::OpRegistration;
     use crate::rt;
+    use crate::status::{Source, Tag};
     use std::mem::forget;
     use std::sync::Arc;
 
@@ -562,13 +599,30 @@ mod tests {
     }
 
     #[test]
-    fn test_when_inactive_returns_true() {
+    fn test_when_inactive_returns_empty_status() {
         let mut req = PersistentRequest::<u8>::new(0, Vec::new());
         let result = req.test();
-        assert!(
-            matches!(result, Ok(true)),
-            "expected Ok(true), got: {result:?}"
-        );
+        let Ok(Some(st)) = result else {
+            panic!("expected Ok(Some(_)), got: {result:?}");
+        };
+        assert_eq!(st.source, Source::Any);
+        assert_eq!(st.tag, Tag::Any);
+        assert_eq!(st.count, Some(0));
+        assert!(st.error.is_none());
+        forget(req);
+    }
+
+    #[test]
+    fn wait_when_inactive_returns_empty_status() {
+        let mut req = PersistentRequest::<u8>::new(0, Vec::new());
+        let result = req.wait();
+        let Ok(st) = result else {
+            panic!("expected Ok(_), got: {result:?}");
+        };
+        assert_eq!(st.source, Source::Any);
+        assert_eq!(st.tag, Tag::Any);
+        assert_eq!(st.count, Some(0));
+        assert!(st.error.is_none());
         forget(req);
     }
 

@@ -677,9 +677,12 @@ fn main() {
             .allreduce_init(vec![rank as f64; 5], vec![0.0f64; 5], ReduceOp::Sum)
             .expect("allreduce_init for test() polling failed");
 
-        // test() on inactive request should return true immediately
+        // test() on inactive request should report completion immediately
         let completed = req.test().expect("test() on inactive failed");
-        assert!(completed, "test() on inactive request should return true");
+        assert!(
+            completed.is_some(),
+            "test() on inactive request should return Some"
+        );
         assert!(!req.is_active(), "should remain inactive after test()");
 
         // Start and poll until complete
@@ -691,7 +694,7 @@ fn main() {
         loop {
             let done = req.test().expect("test() polling failed");
             poll_count += 1;
-            if done {
+            if done.is_some() {
                 break;
             }
             assert!(
@@ -701,7 +704,7 @@ fn main() {
         }
         assert!(
             !req.is_active(),
-            "should be inactive after test() returns true"
+            "should be inactive after test() returns Some"
         );
 
         // Verify result

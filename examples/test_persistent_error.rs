@@ -110,11 +110,11 @@ fn part2_test(world: &Communicator, rank: i32) {
         world.barrier().expect("part2: barrier A");
         world.barrier().expect("part2: barrier B");
 
-        let mut result = Ok(false);
+        let mut result = Ok(None);
         for _ in 0..1_000_000 {
             result = req.test();
             match &result {
-                Ok(false) => continue,
+                Ok(None) => continue,
                 _ => break,
             }
         }
@@ -290,11 +290,11 @@ fn part5_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
         let mut ok = class_of(&result_a) == Some(MpiErrorClass::Truncate);
         ok &= !req_a.is_active();
 
-        let mut result_b = Ok(false);
+        let mut result_b = Ok(None);
         for _ in 0..1_000_000 {
             result_b = req_b.test();
             match &result_b {
-                Ok(false) => continue,
+                Ok(None) => continue,
                 _ => break,
             }
         }

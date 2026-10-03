@@ -20,7 +20,7 @@
 //! - the init thread drops the handed-back pair, which leaks it without an MPI
 //!   call, although another thread started it;
 //! - the second worker tests its receive, which is a completion call and is
-//!   still admitted (`Ok(false)`: nothing matched), and then drops it, which
+//!   still admitted (`Ok(None)`: nothing matched), and then drops it, which
 //!   leaks it without an MPI call.
 //!
 //! No check after the drop can use `common::check`, whose allreduce is refused by
@@ -92,7 +92,7 @@ fn main() {
                 .expect("init thread hung up before the drop returned");
             check(never.is_active(), "the held receive is still active");
             check(
-                matches!(never.test(), Ok(false)),
+                matches!(never.test(), Ok(None)),
                 "test is admitted after the drop and finds nothing",
             );
             drop(never);

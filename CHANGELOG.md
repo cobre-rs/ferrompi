@@ -150,6 +150,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which the request keeps alive until it is freed. A bitwise or logical op on
   `f32`/`f64` returns `Error::InvalidArgument` before MPI. Migration: pass the
   `Vec`s by value; a `ReduceOp` argument still compiles.
+- **`PersistentRequest::wait` returns `Status` and `test` returns
+  `Option<Status>`**, as `Request`'s do. A persistent receive reports the
+  matched source, tag and count on every start. A persistent send or
+  collective reports the empty status, as does an inactive request.
+  Migration: `wait()?` still compiles where the value was discarded; replace
+  `test()? == true` with `test()?.is_some()`.
 
 ### Added
 

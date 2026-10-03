@@ -127,7 +127,8 @@ static uint8_t request_state[MAX_REQUESTS];
 // request_state: the datatype a receive was posted with, MPI_DATATYPE_NULL
 // for every other request (send, collective, RMA). It is the request's kind,
 // recorded at creation: only a receive has a source, tag and count to
-// report. Read before free_request releases the slot.
+// report. A persistent receive records it at recv_init, and it is kept across
+// starts until the slot is freed. Read before free_request releases the slot.
 static MPI_Datatype request_dtype[MAX_REQUESTS];
 
 // Window table
@@ -1142,6 +1143,16 @@ static void completion_status(MPI_Datatype dt, const MPI_Status* st, ferrompi_st
         (void)MPI_Test_cancelled(st, &cancelled);
         if (!cancelled) {
             (void)fill_status(st, dt, out);
+            // A completed receive reports the sender of the message it matched
+            // (MPI-4.1 3.2.5, p.39), or MPI_PROC_NULL for a receive from
+            // MPI_PROC_NULL (3.10, p.111, l.13-16), never MPI_ANY_SOURCE. MPICH
+            // completes a persistent receive from MPI_PROC_NULL with the empty
+            // status, because MPIDI_prequest_start returns early for it, so an
+            // MPI_ANY_SOURCE source here is that receive's MPI_PROC_NULL. A
+            // persistent receive that MPI never started (left active by a
+            // failed MPI_Startall) completes with the empty status too, and is
+            // reported the same way.
+            if (out->source == FERROMPI_ANY_SOURCE) out->source = FERROMPI_PROC_NULL;
             return;
         }
     }
@@ -2336,6 +2347,7 @@ int ferrompi_recv_init(
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
         }
+        set_recv_dtype(*request_handle, dt);
     }
 
     return ret;

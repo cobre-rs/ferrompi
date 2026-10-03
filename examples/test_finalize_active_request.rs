@@ -68,8 +68,8 @@ fn main() {
     let mut recv_c = world.recv_init(vec![0i32], peer, 12).expect("recv_init c");
     send_c.start().expect("start c (send)");
     recv_c.start().expect("start c (recv)");
-    while !send_c.test().expect("test c (send)") {}
-    while !recv_c.test().expect("test c (recv)") {}
+    while send_c.test().expect("test c (send)").is_none() {}
+    while recv_c.test().expect("test c (recv)").is_none() {}
 
     drop(mpi);
 

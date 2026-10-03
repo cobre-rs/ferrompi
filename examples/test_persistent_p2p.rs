@@ -2,12 +2,20 @@
 //!
 //! Verifies that `Communicator::send_init` and `Communicator::recv_init` produce
 //! correct results over 100 iterations and that `PersistentRequest` can be reused
-//! without leaking MPI state.
+//! without leaking MPI state. Every `wait` also returns the right `Status`: the
+//! receiver's reports the matched source, tag and element count on each of the
+//! 100 starts, and the sender's is the empty status.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_p2p
 // mpi-test: np=2
 
-use ferrompi::Mpi;
+use ferrompi::{Mpi, Source, Status, Tag};
+
+mod common;
+
+fn is_empty_status(st: &Status) -> bool {
+    st.source == Source::Any && st.tag == Tag::Any && st.count == Some(0) && st.error.is_none()
+}
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -24,6 +32,9 @@ fn main() {
     const ITERS: usize = 100;
     const TAG: i32 = 7;
 
+    let mut sends_empty = true;
+    let mut recvs_matched = true;
+
     if rank == 0 {
         // Rank 0: initialize a persistent send for a 100-element f64 buffer.
         let mut req = world
@@ -37,7 +48,8 @@ fn main() {
                 *x = (iter * N + i) as f64;
             }
             req.start().expect("start failed on rank 0");
-            req.wait().expect("wait failed on rank 0");
+            let st = req.wait().expect("wait failed on rank 0");
+            sends_empty &= is_empty_status(&st);
         }
 
         // Drop the request to exercise PersistentRequest::Drop cleanly.
@@ -50,7 +62,11 @@ fn main() {
 
         for iter in 0..ITERS {
             req.start().expect("start failed on rank 1");
-            req.wait().expect("wait failed on rank 1");
+            let st = req.wait().expect("wait failed on rank 1");
+            recvs_matched &= st.source == Source::Rank(0)
+                && st.tag == Tag::Value(TAG)
+                && st.count == Some(N)
+                && st.error.is_none();
 
             // Verify: recv[i] must equal iter * N + i
             let recv = req.buffer().expect("buffer failed on rank 1");
@@ -66,6 +82,17 @@ fn main() {
         // Drop the request to exercise PersistentRequest::Drop cleanly.
         drop(req);
     }
+
+    common::check(
+        &world,
+        sends_empty,
+        "every persistent send wait returns the empty status",
+    );
+    common::check(
+        &world,
+        recvs_matched,
+        "every persistent receive wait reports the sender, tag and count",
+    );
 
     // Sentinel allreduce to confirm both ranks reached this point cleanly.
     let local: i64 = 1;
