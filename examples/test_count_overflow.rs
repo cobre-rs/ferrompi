@@ -50,15 +50,18 @@ fn v_collectives(world: &Communicator) {
         "allgatherv with a 2^32+16-byte send returns Count",
     );
 
-    let igatherv_result = world.igatherv(&send, &mut recv, &counts, &displs, 0);
-    let igatherv_ok = if common::is_count(&igatherv_result) {
-        true
-    } else {
-        if let Ok(req) = igatherv_result {
-            let _ = req.wait();
-        }
-        false
-    };
+    let igatherv_ok = ferrompi::scope(|s| {
+        let igatherv_result = world.igatherv(s, &send, &mut recv, &counts, &displs, 0);
+        Ok(if common::is_count(&igatherv_result) {
+            true
+        } else {
+            if let Ok(req) = igatherv_result {
+                let _ = req.wait();
+            }
+            false
+        })
+    })
+    .expect("scope for igatherv");
     common::check(
         world,
         igatherv_ok,
@@ -302,15 +305,18 @@ fn main() {
     // A red run's ferrompi_ibcast truncates the count and actually issues a
     // real (16-byte) MPI_Ibcast, so `Ok` must still be drained via `wait()`
     // before counting the failure, rather than leaking the request.
-    let ibcast_result = world.ibroadcast(&mut recv, 0);
-    let ibroadcast_ok = if common::is_count(&ibcast_result) {
-        true
-    } else {
-        if let Ok(req) = ibcast_result {
-            let _ = req.wait();
-        }
-        false
-    };
+    let ibroadcast_ok = ferrompi::scope(|s| {
+        let ibcast_result = world.ibroadcast(s, &mut recv, 0);
+        Ok(if common::is_count(&ibcast_result) {
+            true
+        } else {
+            if let Ok(req) = ibcast_result {
+                let _ = req.wait();
+            }
+            false
+        })
+    })
+    .expect("scope for ibroadcast");
     common::check(
         &world,
         ibroadcast_ok,

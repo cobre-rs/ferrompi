@@ -145,8 +145,7 @@ fn igather(world: &Communicator) -> Result<()> {
     let size = world.size();
     if rank == 0 {
         let mut data = vec![0i32; size as usize];
-        let req = world.igather_inplace(&mut data, 0)?;
-        req.wait()?;
+        ferrompi::scope(|s| world.igather_inplace(s, &mut data, 0)?.wait())?;
         let expected: Vec<i32> = (0..size).map(|r| r * 10).collect();
         assert_eq!(
             data, expected,
@@ -155,8 +154,7 @@ fn igather(world: &Communicator) -> Result<()> {
     } else {
         let send = vec![rank * 10];
         let mut recv: Vec<i32> = vec![];
-        let req = world.igather(&send, &mut recv, 0)?;
-        req.wait()?;
+        ferrompi::scope(|s| world.igather(s, &send, &mut recv, 0)?.wait())?;
     }
     Ok(())
 }
@@ -171,8 +169,7 @@ fn igather_all_inplace(world: &Communicator) -> Result<()> {
     } else {
         vec![rank * 10]
     };
-    let req = world.igather_inplace(&mut data, 0)?;
-    req.wait()?;
+    ferrompi::scope(|s| world.igather_inplace(s, &mut data, 0)?.wait())?;
     if rank == 0 {
         let expected: Vec<i32> = (0..size).map(|r| r * 10).collect();
         assert_eq!(
@@ -189,8 +186,7 @@ fn iallgather(world: &Communicator) -> Result<()> {
     let size = world.size();
     let mut data = vec![0i32; size as usize];
     data[rank as usize] = rank * 10;
-    let req = world.iallgather_inplace(&mut data)?;
-    req.wait()?;
+    ferrompi::scope(|s| world.iallgather_inplace(s, &mut data)?.wait())?;
     let expected: Vec<i32> = (0..size).map(|r| r * 10).collect();
     assert_eq!(
         data, expected,
@@ -205,8 +201,7 @@ fn iscatter(world: &Communicator) -> Result<()> {
     let size = world.size();
     if rank == 0 {
         let mut data: Vec<i32> = (0..size).map(|r| r * 10).collect();
-        let req = world.iscatter_inplace(&mut data, 0)?;
-        req.wait()?;
+        ferrompi::scope(|s| world.iscatter_inplace(s, &mut data, 0)?.wait())?;
         assert_eq!(
             data[0], 0,
             "iscatter: rank 0 expected data[0]==0 but got {}",
@@ -214,8 +209,7 @@ fn iscatter(world: &Communicator) -> Result<()> {
         );
     } else {
         let mut data = vec![0i32; 1];
-        let req = world.iscatter_inplace(&mut data, 0)?;
-        req.wait()?;
+        ferrompi::scope(|s| world.iscatter_inplace(s, &mut data, 0)?.wait())?;
         let expected = rank * 10;
         assert_eq!(
             data[0], expected,
@@ -231,8 +225,7 @@ fn ialltoall(world: &Communicator) -> Result<()> {
     let rank = world.rank();
     let size = world.size();
     let mut data: Vec<i32> = (0..size).map(|s| rank * 10 + s).collect();
-    let req = world.ialltoall_inplace(&mut data)?;
-    req.wait()?;
+    ferrompi::scope(|s| world.ialltoall_inplace(s, &mut data)?.wait())?;
     for s in 0..size {
         let expected = s * 10 + rank;
         assert_eq!(

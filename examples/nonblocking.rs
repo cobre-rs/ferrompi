@@ -29,16 +29,19 @@ fn main() -> Result<()> {
 
         // Start nonblocking broadcast
         let start_time = mpi.wtime();
-        let request = world.ibroadcast(&mut data, 0)?;
-
-        // Simulate some computation while communication proceeds
         let mut compute_result = 0.0;
-        for i in 0..1000 {
-            compute_result += (i as f64).sin();
-        }
+        ferrompi::scope(|s| {
+            let request = world.ibroadcast(s, &mut data, 0)?;
 
-        // Wait for broadcast to complete
-        request.wait()?;
+            // Simulate some computation while communication proceeds
+            for i in 0..1000 {
+                compute_result += (i as f64).sin();
+            }
+
+            // Wait for broadcast to complete
+            request.wait()?;
+            Ok(())
+        })?;
         let elapsed = mpi.wtime() - start_time;
 
         // Verify the result
@@ -126,12 +129,14 @@ fn main() -> Result<()> {
             vec![0.0; 10]
         };
 
-        let req1 = world.ibroadcast(&mut data1, 0)?;
-        let req2 = world.ibroadcast(&mut data2, 0)?;
-        let req3 = world.ibroadcast(&mut data3, 0)?;
+        ferrompi::scope(|s| {
+            let req1 = world.ibroadcast(s, &mut data1, 0)?;
+            let req2 = world.ibroadcast(s, &mut data2, 0)?;
+            let req3 = world.ibroadcast(s, &mut data3, 0)?;
 
-        // Wait for all at once
-        Request::wait_all(&mut [req1, req2, req3])?;
+            // Wait for all at once
+            Request::wait_all(&mut [req1, req2, req3])
+        })?;
 
         // Verify
         assert!(data1.iter().all(|&x| (x - 1.0).abs() < 1e-10));
@@ -155,15 +160,18 @@ fn main() -> Result<()> {
             vec![0.0; 100]
         };
 
-        let mut request = world.ibroadcast(&mut data, 0)?;
-
-        // Poll until complete
         let mut polls = 0;
-        while request.test()?.is_none() {
-            polls += 1;
-            // Do a tiny bit of work between polls
-            std::hint::spin_loop();
-        }
+        ferrompi::scope(|s| {
+            let mut request = world.ibroadcast(s, &mut data, 0)?;
+
+            // Poll until complete
+            while request.test()?.is_none() {
+                polls += 1;
+                // Do a tiny bit of work between polls
+                std::hint::spin_loop();
+            }
+            Ok(())
+        })?;
 
         assert!(data.iter().all(|&x| (x - 42.0).abs() < 1e-10));
 

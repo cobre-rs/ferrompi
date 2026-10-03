@@ -115,7 +115,7 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Registry {
             inline: [const { Cell::new(0) }; INLINE],
             used: Cell::new(0),

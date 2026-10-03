@@ -439,6 +439,8 @@ fn main() {
             recv_req.wait().expect("irecv wait failed");
 
             // DROP send_req without calling wait() — the scope completes it
+            #[allow(clippy::drop_non_drop)]
+            // Request has no Drop impl in the default build; the drop marks the early release
             drop(send_req);
             Ok(())
         })

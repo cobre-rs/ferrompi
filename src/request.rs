@@ -230,9 +230,11 @@ pub struct Request<'s> {
 #[derive(Clone, Copy)]
 enum Owner<'s> {
     Scoped(&'s Registry, u32),
+    #[cfg(feature = "rma")]
     Unscoped,
 }
 
+#[cfg(feature = "rma")]
 impl Request<'static> {
     /// Create a request that no scope owns, from a raw handle.
     pub(crate) fn new(handle: i64, kind: RequestKind) -> Self {
@@ -265,8 +267,10 @@ impl<'s> Request<'s> {
 impl Request<'_> {
     /// Frees this request's registry slot, once MPI completed the request.
     fn release(&self) {
-        if let Owner::Scoped(registry, slot) = self.owner {
-            registry.release(slot);
+        match self.owner {
+            Owner::Scoped(registry, slot) => registry.release(slot),
+            #[cfg(feature = "rma")]
+            Owner::Unscoped => {}
         }
     }
 
@@ -735,6 +739,7 @@ impl Request<'_> {
     }
 }
 
+#[cfg(feature = "rma")]
 impl Drop for Request<'_> {
     /// Block until the in-flight operation completes, then release the handle.
     ///
@@ -775,15 +780,16 @@ mod tests {
     };
     use crate::error::Error;
     use crate::ffi::FerrompiStatus;
+    use crate::scope::Registry;
     use crate::status::{Source, Status, Tag};
-    use std::mem::{forget, MaybeUninit};
+    use std::mem::MaybeUninit;
 
     fn test_request(completed: bool, kind: RequestKind) -> Request<'static> {
         Request {
             handle: 0,
             completed,
             kind,
-            owner: Owner::Unscoped,
+            owner: Owner::Scoped(Box::leak(Box::new(Registry::new())), 0),
         }
     }
 
@@ -792,18 +798,14 @@ mod tests {
         let mut req = test_request(true, RequestKind::PointToPoint);
         let result = req.test();
         assert!(matches!(result, Ok(Some(Status::EMPTY))));
-        forget(req);
     }
 
     #[test]
     fn wait_when_already_completed_returns_ok() {
-        // wait() takes self by value (consuming).
-        // With completed: true, it returns Ok(Status::EMPTY) before any FFI call.
-        // Drop then runs, but !self.completed is false, so Drop is a no-op.
+        // With completed: true, wait() returns Ok(Status::EMPTY) before any FFI call.
         let req = test_request(true, RequestKind::PointToPoint);
         let result = req.wait();
         assert!(matches!(result, Ok(Status::EMPTY)));
-        // No forget() needed — wait() consumed the value, and Drop was a no-op
     }
 
     #[test]
@@ -917,7 +919,6 @@ mod tests {
         let req = test_request(true, RequestKind::PointToPoint);
         let result = req.get_status();
         assert!(matches!(result, Ok(true)));
-        forget(req);
     }
 
     #[test]
@@ -925,14 +926,12 @@ mod tests {
         let mut req = test_request(true, RequestKind::PointToPoint);
         let result = req.cancel();
         assert!(matches!(result, Ok(())));
-        forget(req);
     }
 
     fn assert_cancel_not_supported(kind: RequestKind) {
         let mut req = test_request(false, kind);
         let result = req.cancel();
         assert!(matches!(result, Err(Error::NotSupported(_))));
-        forget(req);
     }
 
     #[test]

@@ -17,11 +17,18 @@ impl Communicator {
 
     /// Nonblocking broadcast.
     ///
-    /// Returns a request handle that must be waited on before accessing the buffer.
+    /// Initiates the broadcast and returns immediately with a [`Request`] that
+    /// belongs to the scope `s`. `data` is borrowed mutably for the scope: it
+    /// cannot be read or changed until [`scope`](crate::scope) returns, even
+    /// after the request was waited, and the scope completes the broadcast at
+    /// the latest then.
     ///
-    /// # Safety Note
+    /// # Arguments
     ///
-    /// The buffer must remain valid until the request is completed.
+    /// * `s` - The scope that owns the request
+    /// * `data` - The payload at the root, and the buffer that receives it at every
+    ///   other rank, borrowed for the scope
+    /// * `root` - Rank of the root process
     ///
     /// # Example
     ///
@@ -30,19 +37,30 @@ impl Communicator {
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// let mut data = vec![0.0f64; 100];
-    /// let req = world.ibroadcast(&mut data, 0).unwrap();
-    /// // ... do other work ...
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.ibroadcast(s, &mut data, 0)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // data is readable again here.
     /// ```
-    pub fn ibroadcast<T: MpiDatatype>(&self, data: &mut [T], root: i32) -> Result<Request<'_>> {
+    #[inline]
+    pub fn ibroadcast<'s, T: MpiDatatype>(
+        &self,
+        s: &'s Scope<'s, '_>,
+        data: &'s mut [T],
+        root: i32,
+    ) -> Result<Request<'s>> {
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf_mut(data);
-        // SAFETY: the returned Request does not borrow `data`; keeping it alive and
-        // untouched until the request completes is the caller's documented obligation,
-        // which this signature does not enforce.
+        // SAFETY: data is borrowed mutably for 's. The scope completes every request it holds
+        // before 's ends, so the buffer outlives the span in which MPI may use it, and nothing
+        // touches it meanwhile.
         let ret = unsafe { ffi::ferrompi_ibcast(p, n, dt, root, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "ibcast")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-reduce.
@@ -187,13 +205,18 @@ impl Communicator {
     /// Nonblocking gather to root.
     ///
     /// Initiates a gather operation and returns immediately with a [`Request`]
-    /// handle. Each process sends `send.len()` elements. Root receives
-    /// `send.len() * size` elements total.
+    /// that belongs to the scope `s`. Each process sends `send.len()` elements.
+    /// Root receives `send.len() * size` elements total. `send` is borrowed for
+    /// the scope, and `recv` is borrowed mutably for it: `recv` cannot be read
+    /// until [`scope`](crate::scope) returns, even after the request was
+    /// waited, and the scope completes the gather at the latest then.
     ///
     /// # Arguments
     ///
-    /// * `send` - Data to send from this process
-    /// * `recv` - Buffer for received data (only significant at root)
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to send from this process, borrowed for the scope
+    /// * `recv` - Buffer for received data (only significant at root), borrowed for
+    ///   the scope on every rank
     /// * `root` - Rank of the root process
     ///
     /// # Errors
@@ -209,15 +232,22 @@ impl Communicator {
     /// # let world = mpi.world();
     /// let send = vec![world.rank() as f64; 5];
     /// let mut recv = vec![0.0f64; 5 * world.size() as usize];
-    /// let req = world.igather(&send, &mut recv, 0).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.igather(s, &send, &mut recv, 0)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // recv is readable again here.
     /// ```
-    pub fn igather<T: MpiDatatype>(
+    #[inline]
+    pub fn igather<'s, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
         root: i32,
-    ) -> Result<Request<'_>> {
+    ) -> Result<Request<'s>> {
         if self.rank == root {
             check_rank_slots("recv", recv.len(), send.len(), self.size)?;
         }
@@ -226,21 +256,30 @@ impl Communicator {
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]); at non-root, recv is
         // ignored by MPI. The root-side receive-length relation (recv.len() >= send.len()
-        // * size) is checked above. The returned Request does not borrow either slice;
-        // keeping both alive and untouched until the request completes is the caller's
-        // documented obligation, which this signature does not enforce.
+        // * size) is checked above. send and recv are borrowed for 's (recv mutably). The
+        // scope completes every request it holds before 's ends, so the buffers outlive the
+        // span in which MPI may use them, and nothing touches them meanwhile.
         let ret = unsafe {
             ffi::ferrompi_igather(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "igather")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-gather.
     ///
     /// Initiates an all-gather operation and returns immediately with a
-    /// [`Request`] handle. Each process sends `send.len()` elements and
-    /// receives from all.
+    /// [`Request`] that belongs to the scope `s`. Each process sends
+    /// `send.len()` elements and receives from all. `send` is borrowed for the
+    /// scope, and `recv` is borrowed mutably for it: `recv` cannot be read until
+    /// [`scope`](crate::scope) returns, even after the request was waited, and
+    /// the scope completes the all-gather at the latest then.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to send from this process, borrowed for the scope
+    /// * `recv` - Buffer for the data of every rank, borrowed for the scope
     ///
     /// # Errors
     ///
@@ -254,30 +293,52 @@ impl Communicator {
     /// # let world = mpi.world();
     /// let send = vec![world.rank() as i32; 3];
     /// let mut recv = vec![0i32; 3 * world.size() as usize];
-    /// let req = world.iallgather(&send, &mut recv).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.iallgather(s, &send, &mut recv)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // recv is readable again here.
     /// ```
-    pub fn iallgather<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<Request<'_>> {
+    #[inline]
+    pub fn iallgather<'s, T: MpiDatatype>(
+        &self,
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
+    ) -> Result<Request<'s>> {
         check_rank_slots("recv", recv.len(), send.len(), self.size)?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). The every-rank
-        // receive-length relation (recv.len() >= send.len() * size) is checked above.
-        // The returned Request does not borrow either slice; keeping both alive and
-        // untouched until the request completes is the caller's documented obligation,
-        // which this signature does not enforce.
+        // receive-length relation (recv.len() >= send.len() * size) is checked above. send
+        // and recv are borrowed for 's (recv mutably). The scope completes every request it
+        // holds before 's ends, so the buffers outlive the span in which MPI may use them,
+        // and nothing touches them meanwhile.
         let ret =
             unsafe { ffi::ferrompi_iallgather(sp, n, rp, n, dt, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "iallgather")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking scatter from root.
     ///
     /// Initiates a scatter operation and returns immediately with a [`Request`]
-    /// handle. Root sends `recv.len() * size` elements total, each process
-    /// receives `recv.len()` elements.
+    /// that belongs to the scope `s`. Root sends `recv.len() * size` elements
+    /// total, each process receives `recv.len()` elements. `send` is borrowed
+    /// for the scope, and `recv` is borrowed mutably for it: `recv` cannot be
+    /// read until [`scope`](crate::scope) returns, even after the request was
+    /// waited, and the scope completes the scatter at the latest then.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to scatter (only significant at root), borrowed for the scope
+    ///   on every rank
+    /// * `recv` - Buffer for this rank's block, borrowed for the scope
+    /// * `root` - Rank of the root process
     ///
     /// # Errors
     ///
@@ -292,15 +353,22 @@ impl Communicator {
     /// # let world = mpi.world();
     /// let send = vec![0.0f64; 5 * world.size() as usize];
     /// let mut recv = vec![0.0f64; 5];
-    /// let req = world.iscatter(&send, &mut recv, 0).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.iscatter(s, &send, &mut recv, 0)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // recv is readable again here.
     /// ```
-    pub fn iscatter<T: MpiDatatype>(
+    #[inline]
+    pub fn iscatter<'s, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
         root: i32,
-    ) -> Result<Request<'_>> {
+    ) -> Result<Request<'s>> {
         if self.rank == root {
             check_rank_slots("send", send.len(), recv.len(), self.size)?;
         }
@@ -309,14 +377,14 @@ impl Communicator {
         let (rp, n, dt) = buf_mut(recv);
         // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
         // &mut [T]). The root-side send-length relation (send.len() >= recv.len() * size)
-        // is checked above. The returned Request does not borrow either slice; keeping
-        // both alive and untouched until the request completes is the caller's
-        // documented obligation, which this signature does not enforce.
+        // is checked above. send and recv are borrowed for 's (recv mutably). The scope
+        // completes every request it holds before 's ends, so the buffers outlive the span
+        // in which MPI may use them, and nothing touches them meanwhile.
         let ret = unsafe {
             ffi::ferrompi_iscatter(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "iscatter")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking barrier.
@@ -339,6 +407,7 @@ impl Communicator {
     /// })
     /// .unwrap();
     /// ```
+    #[inline]
     pub fn ibarrier<'s>(&self, s: &'s Scope<'s, '_>) -> Result<Request<'s>> {
         let mut request_handle: i64 = 0;
         // SAFETY: this call takes only the communicator handle and a request out-pointer;
@@ -494,7 +563,17 @@ impl Communicator {
     /// Nonblocking all-to-all personalized communication.
     ///
     /// Initiates an all-to-all operation and returns immediately with a
-    /// [`Request`] handle.
+    /// [`Request`] that belongs to the scope `s`. `send` is borrowed for the
+    /// scope, and `recv` is borrowed mutably for it: `recv` cannot be read until
+    /// [`scope`](crate::scope) returns, even after the request was waited, and
+    /// the scope completes the all-to-all at the latest then.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to send, one block per rank, borrowed for the scope
+    /// * `recv` - Buffer for the blocks received from every rank (same length as
+    ///   `send`), borrowed for the scope
     ///
     /// # Errors
     ///
@@ -511,25 +590,36 @@ impl Communicator {
     /// let size = world.size() as usize;
     /// let send = vec![world.rank() as f64; size * 3];
     /// let mut recv = vec![0.0f64; size * 3];
-    /// let req = world.ialltoall(&send, &mut recv).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.ialltoall(s, &send, &mut recv)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // recv is readable again here.
     /// ```
-    pub fn ialltoall<T: MpiDatatype>(&self, send: &[T], recv: &mut [T]) -> Result<Request<'_>> {
+    #[inline]
+    pub fn ialltoall<'s, T: MpiDatatype>(
+        &self,
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
+    ) -> Result<Request<'s>> {
         check_same_len("recv", send.len(), recv.len())?;
         let count = rank_block("send", send.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len()
-        // and divisibility by size are both verified above. The returned Request does not
-        // borrow either slice; keeping both alive and untouched until the request
-        // completes is the caller's documented obligation, which this signature does not
-        // enforce.
+        // and divisibility by size are both verified above. send and recv are borrowed for
+        // 's (recv mutably). The scope completes every request it holds before 's ends, so
+        // the buffers outlive the span in which MPI may use them, and nothing touches them
+        // meanwhile.
         let ret = unsafe {
             ffi::ferrompi_ialltoall(sp, count, rp, count, dt, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "ialltoall")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking reduce-scatter with uniform block size.
@@ -613,6 +703,11 @@ impl Communicator {
     /// and the receive buffer. At non-root, `data` is that rank's own block (here its
     /// send block), as for [`iscatter_inplace`](Self::iscatter_inplace).
     ///
+    /// The returned [`Request`] belongs to the scope `s`. `data` is borrowed
+    /// mutably for the scope: it cannot be read or changed until
+    /// [`scope`](crate::scope) returns, even after the request was waited, and
+    /// the scope completes the gather at the latest then.
+    ///
     /// # Buffer Layout
     ///
     /// At root, `data` must have length `recvcount * size()` where `recvcount` is
@@ -639,14 +734,20 @@ impl Communicator {
     /// } else {
     ///     vec![world.rank(); 4]
     /// };
-    /// let req = world.igather_inplace(&mut data, 0).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.igather_inplace(s, &mut data, 0)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn igather_inplace<T: MpiDatatype>(
+    #[inline]
+    pub fn igather_inplace<'s, T: MpiDatatype>(
         &self,
-        data: &mut [T],
+        s: &'s Scope<'s, '_>,
+        data: &'s mut [T],
         root: i32,
-    ) -> Result<Request<'_>> {
+    ) -> Result<Request<'s>> {
         let mut request_handle: i64 = 0;
         let ret = if self.rank() == root {
             let recvcount = rank_block("data", data.len(), self.size)? as i64;
@@ -655,9 +756,9 @@ impl Communicator {
             // this NULL is unambiguous); ferrompi_igather maps it to MPI_IN_PLACE, so data
             // serves as both root's send contribution and the receive buffer. recvcount is
             // checked to evenly divide data.len() above, and this branch runs only at root,
-            // the only rank MPI_IN_PLACE is valid for in MPI_Igather. The returned Request does
-            // not borrow data; keeping it alive and untouched until the request completes is
-            // the caller's documented obligation, which this signature does not enforce.
+            // the only rank MPI_IN_PLACE is valid for in MPI_Igather. data is borrowed mutably
+            // for 's. The scope completes every request it holds before 's ends, so the buffer
+            // outlives the span in which MPI may use it, and nothing touches it meanwhile.
             unsafe {
                 ffi::ferrompi_igather(
                     std::ptr::null(),
@@ -674,18 +775,23 @@ impl Communicator {
             let (p, n, dt) = buf_mut(data);
             // SAFETY: p is non-null, so ferrompi_igather does not map it to MPI_IN_PLACE; data is
             // this rank's send block. It is also passed as recvbuf because strict MPI builds
-            // reject a NULL recvbuf at non-root; MPI ignores recvbuf and recvcount there. The
-            // returned Request does not borrow data; keeping it alive and untouched until the
-            // request completes is the caller's documented obligation, which this signature
-            // does not enforce.
+            // reject a NULL recvbuf at non-root; MPI ignores recvbuf and recvcount there. data
+            // is borrowed mutably for 's. The scope completes every request it holds before 's
+            // ends, so the buffer outlives the span in which MPI may use it, and nothing
+            // touches it meanwhile.
             unsafe { ffi::ferrompi_igather(p, n, p, n, dt, root, self.handle, &mut request_handle) }
         };
         Error::check_with_op(ret, "igather_inplace")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking in-place all-gather. Every rank's `data` is both send
     /// contribution and receive buffer.
+    ///
+    /// The returned [`Request`] belongs to the scope `s`. `data` is borrowed
+    /// mutably for the scope: it cannot be read or changed until
+    /// [`scope`](crate::scope) returns, even after the request was waited, and
+    /// the scope completes the all-gather at the latest then.
     ///
     /// # Buffer Layout
     ///
@@ -706,19 +812,28 @@ impl Communicator {
     /// let size = world.size() as usize;
     /// let mut data = vec![0i32; size];
     /// data[rank] = rank as i32 * 10;
-    /// let req = world.iallgather_inplace(&mut data).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.iallgather_inplace(s, &mut data)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn iallgather_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<Request<'_>> {
+    #[inline]
+    pub fn iallgather_inplace<'s, T: MpiDatatype>(
+        &self,
+        s: &'s Scope<'s, '_>,
+        data: &'s mut [T],
+    ) -> Result<Request<'s>> {
         let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
         // this NULL is unambiguous); ferrompi_iallgather maps it to MPI_IN_PLACE. recvcount
         // is checked to evenly divide data.len() above; each rank's slot must be pre-written
-        // by the caller before this call. The returned Request does not borrow data; keeping
-        // it alive and untouched until the request completes is the caller's documented
-        // obligation, which this signature does not enforce.
+        // by the caller before this call. data is borrowed mutably for 's. The scope completes
+        // every request it holds before 's ends, so the buffer outlives the span in which MPI
+        // may use it, and nothing touches it meanwhile.
         let ret = unsafe {
             ffi::ferrompi_iallgather(
                 std::ptr::null(),
@@ -731,12 +846,17 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "iallgather_inplace")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking in-place scatter. At root, `data` is the `sendcount * size()`
     /// send buffer; root's own slot is retained in place. At non-root, `data` is
     /// the `recvcount`-element receive buffer.
+    ///
+    /// The returned [`Request`] belongs to the scope `s`. `data` is borrowed
+    /// mutably for the scope: it cannot be read or changed until
+    /// [`scope`](crate::scope) returns, even after the request was waited, and
+    /// the scope completes the scatter at the latest then.
     ///
     /// # Buffer Layout (root)
     ///
@@ -754,21 +874,25 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// if world.rank() == 0 {
-    ///     let mut data = vec![0i32, 10, 20, 30];
-    ///     let req = world.iscatter_inplace(&mut data, 0).unwrap();
-    ///     req.wait().unwrap();
+    /// let mut data = if world.rank() == 0 {
+    ///     vec![0i32, 10, 20, 30]
     /// } else {
-    ///     let mut data = vec![0i32; 1];
-    ///     let req = world.iscatter_inplace(&mut data, 0).unwrap();
-    ///     req.wait().unwrap();
-    /// }
+    ///     vec![0i32; 1]
+    /// };
+    /// ferrompi::scope(|s| {
+    ///     let req = world.iscatter_inplace(s, &mut data, 0)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn iscatter_inplace<T: MpiDatatype>(
+    #[inline]
+    pub fn iscatter_inplace<'s, T: MpiDatatype>(
         &self,
-        data: &mut [T],
+        s: &'s Scope<'s, '_>,
+        data: &'s mut [T],
         root: i32,
-    ) -> Result<Request<'_>> {
+    ) -> Result<Request<'s>> {
         let (sendbuf, sendcount, recvbuf, recvcount, dt) =
             scatter_inplace_args(data, self.rank() == root, self.size)?;
         let mut request_handle: i64 = 0;
@@ -776,9 +900,9 @@ impl Communicator {
         // null, so this NULL is unambiguous); ferrompi_iscatter maps it to MPI_IN_PLACE so
         // root's own slot is retained. scatter_inplace_args checks that the block size
         // evenly divides data.len(). At non-root, sendbuf is null, which the MPI standard
-        // ignores on non-root scatter. The returned Request does not borrow data; keeping
-        // it alive and untouched until the request completes is the caller's documented
-        // obligation, which this signature does not enforce.
+        // ignores on non-root scatter. data is borrowed mutably for 's. The scope completes
+        // every request it holds before 's ends, so the buffer outlives the span in which
+        // MPI may use it, and nothing touches it meanwhile.
         let ret = unsafe {
             ffi::ferrompi_iscatter(
                 sendbuf,
@@ -792,11 +916,16 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "iscatter_inplace")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking in-place all-to-all personalized communication. `data` is
     /// both send and receive buffer on every rank.
+    ///
+    /// The returned [`Request`] belongs to the scope `s`. `data` is borrowed
+    /// mutably for the scope: it cannot be read or changed until
+    /// [`scope`](crate::scope) returns, even after the request was waited, and
+    /// the scope completes the all-to-all at the latest then.
     ///
     /// Before the call, rank `r` must pre-write into slot `s` (at offset
     /// `s * count`) the payload it wishes to send to rank `s`. After the wait,
@@ -821,19 +950,28 @@ impl Communicator {
     /// let r = world.rank() as i32;
     /// let size = world.size() as usize;
     /// let mut data: Vec<i32> = (0..size as i32).map(|s| r * 10 + s).collect();
-    /// let req = world.ialltoall_inplace(&mut data).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.ialltoall_inplace(s, &mut data)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn ialltoall_inplace<T: MpiDatatype>(&self, data: &mut [T]) -> Result<Request<'_>> {
+    #[inline]
+    pub fn ialltoall_inplace<'s, T: MpiDatatype>(
+        &self,
+        s: &'s Scope<'s, '_>,
+        data: &'s mut [T],
+    ) -> Result<Request<'s>> {
         let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
         // this NULL is unambiguous); ferrompi_ialltoall maps it to MPI_IN_PLACE. recvcount
         // is checked to evenly divide data.len() above; the caller must pre-write each slot
-        // before calling this method. The returned Request does not borrow data; keeping it
-        // alive and untouched until the request completes is the caller's documented
-        // obligation, which this signature does not enforce.
+        // before calling this method. data is borrowed mutably for 's. The scope completes
+        // every request it holds before 's ends, so the buffer outlives the span in which MPI
+        // may use it, and nothing touches it meanwhile.
         let ret = unsafe {
             ffi::ferrompi_ialltoall(
                 std::ptr::null(),
@@ -846,7 +984,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "ialltoall_inplace")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 }
 
@@ -957,7 +1095,7 @@ mod tests {
     fn iallgather_inplace_mismatched_len_returns_invalid_argument() {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
-        let result = comm.iallgather_inplace(&mut data);
+        let result = crate::scope(|s| comm.iallgather_inplace(s, &mut data).map(|_| ()));
         assert!(matches!(
             result,
             Err(Error::InvalidArgument {
@@ -971,7 +1109,7 @@ mod tests {
     fn ialltoall_inplace_mismatched_len_returns_invalid_argument() {
         let comm = test_comm(0, 4);
         let mut data = vec![0u32; 7];
-        let result = comm.ialltoall_inplace(&mut data);
+        let result = crate::scope(|s| comm.ialltoall_inplace(s, &mut data).map(|_| ()));
         assert!(matches!(
             result,
             Err(Error::InvalidArgument {

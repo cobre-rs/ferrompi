@@ -121,6 +121,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `f32`/`f64` returns `Error::InvalidArgument` before MPI. Migration: call
   them inside `ferrompi::scope` with `s` first; a `ReduceOp` argument still
   compiles.
+- **The non-reducing nonblocking collectives take the scope:** `ibroadcast`,
+  `igather`, `iallgather`, `iscatter`, `ialltoall`, their in-place forms and
+  `igatherv`, `iscatterv`, `iallgatherv`, `ialltoallv` take `s` first and
+  borrow their buffers, and the v-forms their count and displacement arrays,
+  until the scope returns. Migration: call them inside `ferrompi::scope`.
 
 ### Added
 

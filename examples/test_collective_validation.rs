@@ -46,7 +46,7 @@ fn check_unit(result: Result<()>, rank: i32, method: &str, expected: &Expect, lo
 }
 
 fn check_request(
-    result: Result<Request>,
+    result: Result<Request<'_>>,
     rank: i32,
     method: &str,
     expected: &Expect,
@@ -116,8 +116,12 @@ fn main() {
         check_unit(result, rank, "gather", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
-        let result = world.igather(&send, &mut backing[..2 * size - 1], 0);
-        check_request(result, rank, "igather", &BUFFER_SIZE, &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.igather(s, &send, &mut backing[..2 * size - 1], 0);
+            check_request(result, rank, "igather", &BUFFER_SIZE, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for igather");
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.gather_init(&send, &mut backing[..2 * size - 1], 0);
@@ -133,8 +137,12 @@ fn main() {
         check_unit(result, rank, "allgather", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
-        let result = world.iallgather(&send, &mut backing[..2 * size - 1]);
-        check_request(result, rank, "iallgather", &BUFFER_SIZE, &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.iallgather(s, &send, &mut backing[..2 * size - 1]);
+            check_request(result, rank, "iallgather", &BUFFER_SIZE, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for iallgather");
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.allgather_init(&send, &mut backing[..2 * size - 1]);
@@ -150,8 +158,12 @@ fn main() {
         check_unit(result, rank, "scatter", &BUFFER_SIZE, &mut local_ok);
 
         let send_backing = vec![1i32; 2 * size];
-        let result = world.iscatter(&send_backing[..2 * size - 1], &mut recv, 0);
-        check_request(result, rank, "iscatter", &BUFFER_SIZE, &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.iscatter(s, &send_backing[..2 * size - 1], &mut recv, 0);
+            check_request(result, rank, "iscatter", &BUFFER_SIZE, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for iscatter");
 
         let send_backing = vec![1i32; 2 * size];
         let result = world.scatter_init(&send_backing[..2 * size - 1], &mut recv, 0);
@@ -170,8 +182,19 @@ fn main() {
         check_unit(result, rank, "gatherv", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
-        let result = world.igatherv(&send, &mut backing[..2 * size - 1], &recvcounts, &displs, 0);
-        check_request(result, rank, "igatherv", &BUFFER_SIZE, &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.igatherv(
+                s,
+                &send,
+                &mut backing[..2 * size - 1],
+                &recvcounts,
+                &displs,
+                0,
+            );
+            check_request(result, rank, "igatherv", &BUFFER_SIZE, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for igatherv");
 
         let mut backing = vec![0i32; 2 * size];
         let result =
@@ -196,14 +219,19 @@ fn main() {
         );
         check_unit(result, rank, "scatterv", &BUFFER_SIZE, &mut local_ok);
 
-        let result = world.iscatterv(
-            &send,
-            &mut recv,
-            &sendcounts_full[..size - 1],
-            &displs_full[..size - 1],
-            0,
-        );
-        check_request(result, rank, "iscatterv", &BUFFER_SIZE, &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.iscatterv(
+                s,
+                &send,
+                &mut recv,
+                &sendcounts_full[..size - 1],
+                &displs_full[..size - 1],
+                0,
+            );
+            check_request(result, rank, "iscatterv", &BUFFER_SIZE, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for iscatterv");
 
         let result = world.scatterv_init(
             &send,
@@ -228,14 +256,18 @@ fn main() {
         check_unit(result, rank, "allgatherv", &INVALID_ARGUMENT, &mut local_ok);
 
         let mut backing = vec![0i32; size + 1];
-        let result = world.iallgatherv(&send, &mut backing[1..], &recvcounts, &displs);
-        check_request(
-            result,
-            rank,
-            "iallgatherv",
-            &INVALID_ARGUMENT,
-            &mut local_ok,
-        );
+        ferrompi::scope(|s| {
+            let result = world.iallgatherv(s, &send, &mut backing[1..], &recvcounts, &displs);
+            check_request(
+                result,
+                rank,
+                "iallgatherv",
+                &INVALID_ARGUMENT,
+                &mut local_ok,
+            );
+            Ok(())
+        })
+        .expect("scope for iallgatherv");
 
         let mut backing = vec![0i32; size + 1];
         let result = world.allgatherv_init(&send, &mut backing[1..], &recvcounts, &displs);
@@ -268,15 +300,20 @@ fn main() {
         );
         check_unit(result, rank, "alltoallv", &INVALID_ARGUMENT, &mut local_ok);
 
-        let result = world.ialltoallv(
-            &send,
-            &mut recv,
-            &sendcounts,
-            &sdispls,
-            &recvcounts,
-            &rdispls,
-        );
-        check_request(result, rank, "ialltoallv", &INVALID_ARGUMENT, &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.ialltoallv(
+                s,
+                &send,
+                &mut recv,
+                &sendcounts,
+                &sdispls,
+                &recvcounts,
+                &rdispls,
+            );
+            check_request(result, rank, "ialltoallv", &INVALID_ARGUMENT, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for ialltoallv");
 
         let result = world.alltoallv_init(
             &send,

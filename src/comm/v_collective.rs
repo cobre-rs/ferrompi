@@ -7,6 +7,7 @@ use crate::error::{Error, Result};
 use crate::ffi;
 use crate::persistent::PersistentRequest;
 use crate::request::{Request, RequestKind};
+use crate::scope::Scope;
 
 #[derive(Clone, Copy)]
 enum VFault {
@@ -445,14 +446,22 @@ impl Communicator {
     /// Nonblocking gather variable amounts of data to root.
     ///
     /// Initiates a variable-count gather and returns immediately with a
-    /// [`Request`] handle.
+    /// [`Request`] that belongs to the scope `s`. `send`, `recvcounts` and
+    /// `displs` are borrowed for the scope, and `recv` is borrowed mutably for
+    /// it: `recv` cannot be read until [`scope`](crate::scope) returns, even
+    /// after the request was waited, and the scope completes the gather at the
+    /// latest then.
     ///
     /// # Arguments
     ///
-    /// * `send` - Data to send from this process
-    /// * `recv` - Buffer for received data (only significant at root)
-    /// * `recvcounts` - Number of elements received from each rank
-    /// * `displs` - Displacement in `recv` for data from each rank
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to send from this process, borrowed for the scope
+    /// * `recv` - Buffer for received data (only significant at root), borrowed for
+    ///   the scope on every rank
+    /// * `recvcounts` - Number of elements received from each rank, borrowed for the
+    ///   scope on every rank
+    /// * `displs` - Displacement in `recv` for data from each rank, borrowed for the
+    ///   scope on every rank
     /// * `root` - Rank of the root process
     ///
     /// # Errors
@@ -479,17 +488,24 @@ impl Communicator {
     ///     .collect();
     /// let total: i32 = recvcounts.iter().sum();
     /// let mut recv = vec![0.0f64; total as usize];
-    /// let req = world.igatherv(&send, &mut recv, &recvcounts, &displs, 0).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.igatherv(s, &send, &mut recv, &recvcounts, &displs, 0)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // recv is readable again here.
     /// ```
-    pub fn igatherv<T: MpiDatatype>(
+    #[inline]
+    pub fn igatherv<'s, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        recvcounts: &[i32],
-        displs: &[i32],
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
+        recvcounts: &'s [i32],
+        displs: &'s [i32],
         root: i32,
-    ) -> Result<Request<'_>> {
+    ) -> Result<Request<'s>> {
         if self.rank == root {
             check_v_args(
                 "recvcounts",
@@ -507,10 +523,11 @@ impl Communicator {
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). At root, recvcounts and
         // displs are checked above to have size() entries, non-negative counts, and each
         // positive-count block inside recv; at non-root MPI does not read recvcounts or
-        // displs, so they are unchecked here. The returned Request does not borrow send,
-        // recv, recvcounts or displs; keeping all four alive and untouched until the
-        // request completes is the caller's documented obligation, which this signature
-        // does not enforce.
+        // displs, so they are unchecked here. send, recv, recvcounts and displs are all
+        // borrowed for 's (recv mutably), and MPI may read the count and displacement arrays
+        // until the request completes. The scope completes every request it holds before 's
+        // ends, so the buffers and the arrays outlive the span in which MPI may use them, and
+        // nothing touches them meanwhile.
         let ret = unsafe {
             ffi::ferrompi_igatherv(
                 sp,
@@ -525,20 +542,28 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "igatherv")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking scatter variable amounts of data from root.
     ///
     /// Initiates a variable-count scatter and returns immediately with a
-    /// [`Request`] handle.
+    /// [`Request`] that belongs to the scope `s`. `send`, `sendcounts` and
+    /// `displs` are borrowed for the scope, and `recv` is borrowed mutably for
+    /// it: `recv` cannot be read until [`scope`](crate::scope) returns, even
+    /// after the request was waited, and the scope completes the scatter at the
+    /// latest then.
     ///
     /// # Arguments
     ///
-    /// * `send` - Data to scatter (only significant at root)
-    /// * `recv` - Buffer for received data
-    /// * `sendcounts` - Number of elements sent to each rank
-    /// * `displs` - Displacement in `send` for data to each rank
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to scatter (only significant at root), borrowed for the scope
+    ///   on every rank
+    /// * `recv` - Buffer for received data, borrowed for the scope
+    /// * `sendcounts` - Number of elements sent to each rank, borrowed for the scope
+    ///   on every rank
+    /// * `displs` - Displacement in `send` for data to each rank, borrowed for the
+    ///   scope on every rank
     /// * `root` - Rank of the root process
     ///
     /// # Errors
@@ -565,17 +590,24 @@ impl Communicator {
     /// let total: i32 = sendcounts.iter().sum();
     /// let send = vec![0.0f64; total as usize];
     /// let mut recv = vec![0.0f64; (rank + 1) as usize];
-    /// let req = world.iscatterv(&send, &mut recv, &sendcounts, &displs, 0).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.iscatterv(s, &send, &mut recv, &sendcounts, &displs, 0)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // recv is readable again here.
     /// ```
-    pub fn iscatterv<T: MpiDatatype>(
+    #[inline]
+    pub fn iscatterv<'s, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        sendcounts: &[i32],
-        displs: &[i32],
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
+        sendcounts: &'s [i32],
+        displs: &'s [i32],
         root: i32,
-    ) -> Result<Request<'_>> {
+    ) -> Result<Request<'s>> {
         if self.rank == root {
             check_v_args(
                 "sendcounts",
@@ -593,10 +625,11 @@ impl Communicator {
         // SAFETY: send is ignored by MPI at non-root; send and recv cannot alias (&[T] vs
         // &mut [T]). At root, sendcounts and displs are checked above to have size()
         // entries, non-negative counts, and each positive-count block inside send; at
-        // non-root MPI does not read sendcounts or displs, so they are unchecked here. The
-        // returned Request does not borrow send, recv, sendcounts or displs; keeping all
-        // four alive and untouched until the request completes is the caller's documented
-        // obligation, which this signature does not enforce.
+        // non-root MPI does not read sendcounts or displs, so they are unchecked here. send,
+        // recv, sendcounts and displs are all borrowed for 's (recv mutably), and MPI may read
+        // the count and displacement arrays until the request completes. The scope completes
+        // every request it holds before 's ends, so the buffers and the arrays outlive the
+        // span in which MPI may use them, and nothing touches them meanwhile.
         let ret = unsafe {
             ffi::ferrompi_iscatterv(
                 sp,
@@ -611,20 +644,27 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "iscatterv")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-gather variable amounts of data.
     ///
     /// Initiates a variable-count all-gather and returns immediately with a
-    /// [`Request`] handle.
+    /// [`Request`] that belongs to the scope `s`. `send`, `recvcounts` and
+    /// `displs` are borrowed for the scope, and `recv` is borrowed mutably for
+    /// it: `recv` cannot be read until [`scope`](crate::scope) returns, even
+    /// after the request was waited, and the scope completes the all-gather at
+    /// the latest then.
     ///
     /// # Arguments
     ///
-    /// * `send` - Data to send from this process
-    /// * `recv` - Buffer for received data
-    /// * `recvcounts` - Number of elements received from each rank
-    /// * `displs` - Displacement in `recv` for data from each rank
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to send from this process, borrowed for the scope
+    /// * `recv` - Buffer for received data, borrowed for the scope
+    /// * `recvcounts` - Number of elements received from each rank, borrowed for the
+    ///   scope
+    /// * `displs` - Displacement in `recv` for data from each rank, borrowed for the
+    ///   scope
     ///
     /// # Errors
     ///
@@ -650,16 +690,23 @@ impl Communicator {
     ///     .collect();
     /// let total: i32 = recvcounts.iter().sum();
     /// let mut recv = vec![0.0f64; total as usize];
-    /// let req = world.iallgatherv(&send, &mut recv, &recvcounts, &displs).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.iallgatherv(s, &send, &mut recv, &recvcounts, &displs)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // recv is readable again here.
     /// ```
-    pub fn iallgatherv<T: MpiDatatype>(
+    #[inline]
+    pub fn iallgatherv<'s, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        recvcounts: &[i32],
-        displs: &[i32],
-    ) -> Result<Request<'_>> {
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
+        recvcounts: &'s [i32],
+        displs: &'s [i32],
+    ) -> Result<Request<'s>> {
         check_v_args(
             "recvcounts",
             "displs",
@@ -674,10 +721,11 @@ impl Communicator {
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). recvcounts and displs are
         // checked above, on every rank, to have size() entries, non-negative counts, and
-        // each positive-count block inside recv. The returned Request does not borrow
-        // send, recv, recvcounts or displs; keeping all four alive and untouched until the
-        // request completes is the caller's documented obligation, which this signature
-        // does not enforce.
+        // each positive-count block inside recv. send, recv, recvcounts and displs are all
+        // borrowed for 's (recv mutably), and MPI may read the count and displacement arrays
+        // until the request completes. The scope completes every request it holds before 's
+        // ends, so the buffers and the arrays outlive the span in which MPI may use them, and
+        // nothing touches them meanwhile.
         let ret = unsafe {
             ffi::ferrompi_iallgatherv(
                 sp,
@@ -691,22 +739,28 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "iallgatherv")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-to-all with variable counts.
     ///
     /// Initiates a variable-count all-to-all and returns immediately with a
-    /// [`Request`] handle.
+    /// [`Request`] that belongs to the scope `s`. `send` and the four count and
+    /// displacement arrays are borrowed for the scope, and `recv` is borrowed
+    /// mutably for it: `recv` cannot be read until [`scope`](crate::scope)
+    /// returns, even after the request was waited, and the scope completes the
+    /// all-to-all at the latest then.
     ///
     /// # Arguments
     ///
-    /// * `send` - Send buffer
-    /// * `recv` - Receive buffer
-    /// * `sendcounts` - Number of elements to send to each rank
-    /// * `sdispls` - Send displacement for each rank
-    /// * `recvcounts` - Number of elements to receive from each rank
-    /// * `rdispls` - Receive displacement for each rank
+    /// * `s` - The scope that owns the request
+    /// * `send` - Send buffer, borrowed for the scope
+    /// * `recv` - Receive buffer, borrowed for the scope
+    /// * `sendcounts` - Number of elements to send to each rank, borrowed for the scope
+    /// * `sdispls` - Send displacement for each rank, borrowed for the scope
+    /// * `recvcounts` - Number of elements to receive from each rank, borrowed for the
+    ///   scope
+    /// * `rdispls` - Receive displacement for each rank, borrowed for the scope
     ///
     /// # Errors
     ///
@@ -730,18 +784,26 @@ impl Communicator {
     /// let rdispls: Vec<i32> = (0..size as i32).collect();
     /// let send = vec![world.rank() as f64; size];
     /// let mut recv = vec![0.0f64; size];
-    /// let req = world.ialltoallv(&send, &mut recv, &sendcounts, &sdispls, &recvcounts, &rdispls).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.ialltoallv(s, &send, &mut recv, &sendcounts, &sdispls, &recvcounts, &rdispls)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // recv is readable again here.
     /// ```
-    pub fn ialltoallv<T: MpiDatatype>(
+    #[inline]
+    #[allow(clippy::too_many_arguments)] // the scope plus MPI_Ialltoallv's two buffers and four arrays
+    pub fn ialltoallv<'s, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        sendcounts: &[i32],
-        sdispls: &[i32],
-        recvcounts: &[i32],
-        rdispls: &[i32],
-    ) -> Result<Request<'_>> {
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
+        sendcounts: &'s [i32],
+        sdispls: &'s [i32],
+        recvcounts: &'s [i32],
+        rdispls: &'s [i32],
+    ) -> Result<Request<'s>> {
         check_v_args(
             "sendcounts",
             "sdispls",
@@ -766,10 +828,10 @@ impl Communicator {
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). sendcounts/sdispls and
         // recvcounts/rdispls are each checked above, on every rank, to have size() entries,
         // non-negative counts, and each positive-count block inside send/recv respectively.
-        // The returned Request does not borrow send, recv, or any of the four
-        // count/displacement arrays; keeping all of them alive and untouched until the
-        // request completes is the caller's documented obligation, which this signature
-        // does not enforce.
+        // send, recv and all four count/displacement arrays are borrowed for 's (recv
+        // mutably), and MPI may read the arrays until the request completes. The scope
+        // completes every request it holds before 's ends, so the buffers and the arrays
+        // outlive the span in which MPI may use them, and nothing touches them meanwhile.
         let ret = unsafe {
             ffi::ferrompi_ialltoallv(
                 sp,
@@ -784,7 +846,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "ialltoallv")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     // ========================================================================
@@ -1456,7 +1518,10 @@ mod tests {
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
-        let result = comm.igatherv(&send, &mut recv, &recvcounts, &displs, 0);
+        let result = crate::scope(|s| {
+            comm.igatherv(s, &send, &mut recv, &recvcounts, &displs, 0)
+                .map(|_| ())
+        });
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1474,7 +1539,10 @@ mod tests {
         let sendcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
         let mut recv = vec![0.0f64; 10];
-        let result = comm.iscatterv(&send, &mut recv, &sendcounts, &displs, 0);
+        let result = crate::scope(|s| {
+            comm.iscatterv(s, &send, &mut recv, &sendcounts, &displs, 0)
+                .map(|_| ())
+        });
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1492,7 +1560,10 @@ mod tests {
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
-        let result = comm.iallgatherv(&send, &mut recv, &recvcounts, &displs);
+        let result = crate::scope(|s| {
+            comm.iallgatherv(s, &send, &mut recv, &recvcounts, &displs)
+                .map(|_| ())
+        });
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1512,14 +1583,18 @@ mod tests {
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let rdispls = vec![0i32, 10, 20, 30];
-        let result = comm.ialltoallv(
-            &send,
-            &mut recv,
-            &sendcounts,
-            &sdispls,
-            &recvcounts,
-            &rdispls,
-        );
+        let result = crate::scope(|s| {
+            comm.ialltoallv(
+                s,
+                &send,
+                &mut recv,
+                &sendcounts,
+                &sdispls,
+                &recvcounts,
+                &rdispls,
+            )
+            .map(|_| ())
+        });
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -1539,14 +1614,18 @@ mod tests {
         let mut recv = vec![0.0f64; 40];
         let recvcounts = vec![10i32; 4];
         let rdispls = vec![0i32, 10, 20]; // 3 elements != 4
-        let result = comm.ialltoallv(
-            &send,
-            &mut recv,
-            &sendcounts,
-            &sdispls,
-            &recvcounts,
-            &rdispls,
-        );
+        let result = crate::scope(|s| {
+            comm.ialltoallv(
+                s,
+                &send,
+                &mut recv,
+                &sendcounts,
+                &sdispls,
+                &recvcounts,
+                &rdispls,
+            )
+            .map(|_| ())
+        });
         assert!(matches!(
             result,
             Err(Error::BufferSize {
