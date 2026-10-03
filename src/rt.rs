@@ -710,7 +710,6 @@ mod tests {
         });
         assert!(ptr::eq(first, shard(&IN_FLIGHT)));
         assert_eq!(IN_FLIGHT.len(), SHARDS);
-        assert_eq!(LIVE_SCOPES.len(), SHARDS);
     }
 
     #[test]

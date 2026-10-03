@@ -133,7 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `AccumulateOp` and `FetchOp`, the op types of the RMA accumulate calls.
 - **`ferrompi::scope` and `Scope`**: nonblocking requests are created inside a
   closure scope that completes every request before it returns or unwinds; a
-  request error at scope end is returned.
+  request error at scope end is returned. Dropping `Mpi` waits, with no
+  timeout, for the scopes open on other threads to end.
 
 ### Changed
 
@@ -176,8 +177,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **At `Serialized`/`Multiple`, dropping `Mpi` waits for MPI calls in
   progress on other threads** before `MPI_Finalize`; a call that starts after
   the drop began returns `Error::Finalized` without calling MPI (it could
-  previously reach MPI after `MPI_Finalize`). `Mpi::is_finalized()` is `true`
-  from the start of the drop.
+  previously reach MPI after `MPI_Finalize`), except a completion, test or
+  cancel call on a request that a scope open on another thread still holds,
+  which the drop waits for. `Mpi::is_finalized()` is `true` from the start of
+  the drop.
 - **A user op in `reduce_scatter_block` (blocking, nonblocking and persistent)
   returns `Error::Mpi` with class `Count` when `send.len()` exceeds
   `i32::MAX`**, instead of reaching MPI with a span the user function's `int`

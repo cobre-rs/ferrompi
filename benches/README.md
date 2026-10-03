@@ -137,7 +137,7 @@ compare with, and the scope holds no request, so the time is the scope's own ope
 Y and Z, the thread-level overhead budgets, are read from the group cases; the 0.7 section below gives their limits and the reference build each is measured against:
 
 - Y is the T=1 delta at multiple minus the same case's multiple delta recorded for the reference build (`0.6.0`, or `pre-counter` for `group rank`), with the sum of both sessions' A/A deltas as tolerance; it is never a same-session multiple-minus-funneled difference.
-- Z is the T=8 ferrompi per-call cost against T=1.
+- Z is the same difference at T=8: the T=8 delta at multiple minus the same case's T=8 delta recorded for the reference build, with the same tolerance.
 
 **Thread level.** The environment variable `FERROMPI_BENCH_LEVEL` selects the level MPI
 is initialized with: `funneled` (the default when unset) or `multiple`. Any other value
@@ -232,8 +232,9 @@ The budgets:
 
 - B: a blocking collective at `funneled` costs at most 1 ns more than at 0.6.0. Those arms
   hold no scope, so B also shows the in-flight count stays off the blocking path.
-- X: a nonblocking scope costs at most 5 ns per request, with no heap allocation per
-  iteration while 64 or fewer requests are in flight (`examples/test_scope_alloc.rs`).
+- X: a nonblocking scope costs at most 5 ns per request at `funneled`, with no heap
+  allocation per iteration while 64 or fewer requests are in flight
+  (`examples/test_scope_alloc.rs`).
 - Y: one enter/exit pair of the in-flight counter at `multiple`, uncontended, costs at
   most 15 ns. It is the `multiple` delta at `head` minus the `multiple` delta of the
   `0.6.0` reference, never a `multiple` minus `funneled` difference in one session.
