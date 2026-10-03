@@ -9,6 +9,11 @@
 //! requests, the buffer holds the message after the scope, and every call that
 //! is not a completion returns `Error::Finalized`.
 //!
+//! The scope also holds a receive that nothing will match. After the drop the
+//! closure cancels it: a cancel must be admitted while finalizing, or the
+//! scope-end wait on that receive would never return. A refused cancel fails
+//! the example at once, through the local check.
+//!
 //! No check after the drop can use `common::check`, whose allreduce is refused
 //! by then. A failed check prints `FAIL:` and exits with status 2, which the
 //! runner reports as a failure; status 1 would be accepted under
@@ -18,7 +23,7 @@
 // mpi-test: np=1 expect=unfinalized valgrind
 // mpi-test-stderr: MPI_Finalize skipped: a nonblocking scope is still open
 
-use ferrompi::{Error, Mpi, ThreadLevel};
+use ferrompi::{Error, Mpi, Source, Tag, ThreadLevel};
 
 fn check(ok: bool, name: &str) {
     if !ok {
@@ -37,10 +42,13 @@ fn main() {
 
     let data = [6u8; 64];
     let mut buf = vec![0u8; 64];
+    let mut unmatched = [9u8; 8];
     let result = ferrompi::scope(|s| {
         world.irecv(s, &mut buf, 0, 6)?;
         world.isend(s, &data, 0, 6)?;
+        let mut never = world.irecv(s, &mut unmatched, Source::Any, Tag::Value(99))?;
         drop(mpi);
+        check(never.cancel().is_ok(), "cancel is admitted after the drop");
         Ok(())
     });
 
@@ -49,6 +57,7 @@ fn main() {
         buf == data,
         "scope end completes the receive after the drop",
     );
+    check(unmatched == [9u8; 8], "the cancelled receive wrote nothing");
     check(
         Mpi::is_finalized(),
         "the skipped finalize reports finalized",

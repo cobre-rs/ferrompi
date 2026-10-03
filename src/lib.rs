@@ -283,9 +283,9 @@ pub enum ThreadLevel {
 /// finalize still leaves MPI requests unfreed.
 ///
 /// When `MPI_Finalize` is skipped, MPI stays initialized: a `wait` or `test`
-/// on a request still pending completes it, every other call returns
-/// `Err(`[`Error::Finalized`]`)`, and handles dropped afterwards are leaked
-/// without an MPI call.
+/// on a request still pending completes it, a `cancel` on one still reaches
+/// MPI, every other call returns `Err(`[`Error::Finalized`]`)`, and handles
+/// dropped afterwards are leaked without an MPI call.
 ///
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
 /// whose `Drop` calls MPI — an uncompleted request from the RMA request calls
@@ -299,10 +299,12 @@ pub enum ThreadLevel {
 /// At [`ThreadLevel::Serialized`]/[`ThreadLevel::Multiple`], dropping this
 /// handle waits for every MPI call that other threads have in progress
 /// through this crate to return; a call that starts after the drop began
-/// returns `Err(`[`Error::Finalized`]`)` without calling MPI. A thread blocked
-/// forever inside an MPI call, for example in a collective its peers never
-/// enter, blocks the drop; MPI requires every thread's MPI calls to complete
-/// before `MPI_Finalize`.
+/// returns `Err(`[`Error::Finalized`]`)` without calling MPI, except a
+/// completion, test or cancel call on a request that a scope open on another
+/// thread still holds, which the drop waits for. A thread blocked forever
+/// inside an MPI call, for example in a collective its peers never enter,
+/// blocks the drop; MPI requires every thread's MPI calls to complete before
+/// `MPI_Finalize`.
 ///
 /// A call that would fail one of the checks above (finalized, wrong
 /// thread) and is also given invalid arguments may return the argument

@@ -6,7 +6,12 @@
 //! with the message delivered, and MPI must really finalize, which the runner
 //! checks by the absence of the `MPI_Finalize skipped` warning. The worker's
 //! scope-end `MPI_Waitall` therefore runs while `Mpi::drop` is finalizing, with
-//! three live slots.
+//! four live slots.
+//!
+//! The worker also posts a receive that nothing will match, waits until
+//! `Mpi::is_finalized()` reports the drop, and cancels it. The cancel must be
+//! admitted while finalizing: refused, the scope could never end, and the drop
+//! would wait for it forever.
 //!
 //! A second worker polls `test()` on pending self `irecv`s until the init thread
 //! announces the drop. It then posts the matching `isend`s, and the drop begins
@@ -25,7 +30,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use ferrompi::{Error, Mpi, ThreadLevel};
+use ferrompi::{Error, Mpi, Source, Tag, ThreadLevel};
 
 mod common;
 
@@ -57,12 +62,22 @@ fn main() {
     let (scope_result, delivered, admitted, drop_start, drop_end) = std::thread::scope(|t| {
         let worker = t.spawn(|| {
             let mut delivered = [0.0f64; 4];
+            let mut unmatched = [0u8; 1];
             let result = ferrompi::scope(|s| {
                 world.ibarrier(s)?;
                 world.irecv(s, &mut delivered, 0, 7)?;
                 world.isend(s, &message, 0, 7)?;
+                let mut never = world.irecv(s, &mut unmatched, Source::Any, Tag::Value(99))?;
                 posted.send(()).expect("init thread hung up");
-                std::thread::sleep(Duration::from_millis(200));
+                while !Mpi::is_finalized() {
+                    std::thread::yield_now();
+                }
+                if never.cancel().is_err() {
+                    // The scope would wait for the receive forever, so no
+                    // return path can report the failure.
+                    eprintln!("FAIL: cancel was refused while Mpi began to drop");
+                    std::process::exit(2);
+                }
                 Ok(Instant::now())
             });
             (result, delivered)

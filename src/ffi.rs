@@ -127,8 +127,8 @@ pub unsafe fn ferrompi_error_info(
 /// declarations live in `raw` so call sites (`ffi::ferrompi_x`) keep
 /// resolving to the guarded wrapper without any change.
 ///
-/// The externs after the trailing marker complete or test a request that is
-/// already pending. Their wrappers take the completion entry instead, which
+/// The externs after the trailing marker complete, test or cancel a request that
+/// is already pending. Their wrappers take the completion entry instead, which
 /// admits them while finalizing; both lists share one `raw` module and one
 /// wrapper body.
 macro_rules! guarded_extern {
@@ -912,11 +912,6 @@ guarded_extern! {
     ) -> c_int;
 
     // ============================================================
-    // Request Management
-    // ============================================================
-    pub fn ferrompi_cancel(request: int64_t) -> c_int;
-
-    // ============================================================
     // Persistent Request Management
     // ============================================================
     pub fn ferrompi_start(request: int64_t) -> c_int;
@@ -1228,9 +1223,9 @@ guarded_extern! {
     ) -> c_int;
 
     // ============================================================
-    // Request Completion
-    // Complete or test a request that is already pending: admitted while
-    // finalizing, unlike every call above.
+    // Request Completion and Cancellation
+    // Complete, test or cancel a request that is already pending: admitted
+    // while finalizing, unlike every call above.
     // ============================================================
     @completion
     pub fn ferrompi_wait(request: int64_t, status: *mut FerrompiStatus) -> c_int;
@@ -1284,4 +1279,6 @@ guarded_extern! {
         done: *mut u8,
         statuses: *mut FerrompiStatus,
     ) -> c_int;
+
+    pub fn ferrompi_cancel(request: int64_t) -> c_int;
 }

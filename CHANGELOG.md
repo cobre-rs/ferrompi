@@ -146,9 +146,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ireduce` checks `recv`'s length only at the root**; another rank may pass
   an empty buffer.
 - **After a skipped `MPI_Finalize` (a window still alive when `Mpi` is
-  dropped), `wait`/`test` on a pending request still complete it** instead of
-  returning `Error::Finalized` and leaving it pending; every other call still
-  returns `Error::Finalized`.
+  dropped), `wait`/`test` on a pending request still complete it, and
+  `cancel` still reaches it,** instead of returning `Error::Finalized` and
+  leaving it pending; every other call still returns `Error::Finalized`.
+  Dropping `Mpi` inside a `scope` on the same thread also skips
+  `MPI_Finalize`, with a warning: the scope's requests complete at scope end.
 - **`Error::from_code` no longer asks MPI for the error text while
   `MPI_Finalize` is running or after it returned**, or on a thread the thread
   level does not allow to call MPI: the error has class `Raw` and the message

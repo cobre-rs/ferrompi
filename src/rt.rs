@@ -25,11 +25,11 @@
 //! for the rest of the process.
 //!
 //! [`enter_completion`] and [`check_completion`] are the entry for the calls
-//! that complete or test a request that is already pending. They differ from
-//! [`enter`] and [`check`] only in admitting `Finalizing`, under the thread
-//! rule of the granted level, including a counted call that read an active
-//! state just before the `Finalizing` store. The error-code lookup behind
-//! `Error::from_code` takes the same entry, so it never overlaps
+//! that complete, test or cancel a request that is already pending. They differ
+//! from [`enter`] and [`check`] only in admitting `Finalizing`, under the
+//! thread rule of the granted level, including a counted call that read an
+//! active state just before the `Finalizing` store. The error-code lookup
+//! behind `Error::from_code` takes the same entry, so it never overlaps
 //! `MPI_Finalize`.
 //!
 //! A nonblocking scope holds a [`ScopeToken`] for its whole extent, at every
@@ -383,12 +383,13 @@ fn enter_other(state: u8) -> std::result::Result<InFlight, c_int> {
     Ok(InFlight(None))
 }
 
-/// [`enter`] for the calls that complete or test a request that is already
-/// pending. It differs only in `Finalizing`, which it admits under the thread
-/// rule of the granted level: the init-thread check at `Single`/`Funneled`, the
-/// counted path at `Serialized`/`Multiple`. That includes a call that read an
-/// active state just before the `Finalizing` store. `Finalized` is still
-/// refused. Also the entry of the error-code lookup.
+/// [`enter`] for the calls that complete, test or cancel a request that is
+/// already pending. It differs only in `Finalizing`, which it admits under the
+/// thread rule of the granted level: the init-thread check at
+/// `Single`/`Funneled`, the counted path at `Serialized`/`Multiple`. That
+/// includes a call that read an active state just before the `Finalizing`
+/// store. `Finalized` is still refused. Also the entry of the error-code
+/// lookup.
 #[inline(always)]
 pub(crate) fn enter_completion() -> std::result::Result<InFlight, c_int> {
     // Relaxed: see `enter`'s comment.

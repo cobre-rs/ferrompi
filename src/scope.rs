@@ -333,7 +333,10 @@ pub struct Scope<'s, 'env: 's> {
 /// that is itself finalizing) blocks the drop. A scope open on the thread that
 /// drops `Mpi` makes the drop skip `MPI_Finalize`, with a warning on stderr.
 /// MPI then stays initialized, and the scope still completes its requests when
-/// it ends.
+/// it ends. While `Mpi` is dropping, and after it skipped `MPI_Finalize`, a
+/// request the scope already holds can still be waited for, tested or
+/// cancelled, so a scope that holds a receive nothing will match can cancel it
+/// and end; any other call returns [`Error::Finalized`].
 pub fn scope<'env, R>(f: impl for<'s> FnOnce(&'s Scope<'s, 'env>) -> Result<R>) -> Result<R> {
     let token = rt::open_scope().map_err(|code| Error::from_code_with_op(code, "scope"))?;
     let scope = Scope {
