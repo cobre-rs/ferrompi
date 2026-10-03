@@ -31,7 +31,7 @@ mpiexec -n <N> target/release/<program>
 ```
 
 - `soundness`, `c-shim` and `perf` enable `ferrompi/rma`.
-- Some fixes will make a repro stop compiling on purpose. The SND-01, SND-02, SND-05 and SND-08 (case B) repros rely on APIs that the fix removes. A compile error is then the expected "after fix" result, and the repro should be replaced by a `compile_fail` doctest.
+- Some fixes will make a repro stop compiling on purpose. The SND-02, SND-05 and SND-08 (case B) repros rely on APIs that the fix removes. A compile error is then the expected "after fix" result, and the repro should be replaced by a `compile_fail` doctest.
 
 Building the C programs:
 
@@ -59,7 +59,6 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 
 | Program | Finding | What it does | How to run | Observed on v0.5.0 | Expected after fix |
 |---|---|---|---|---|---|
-| `soundness/src/bin/r1_irecv_uaf.rs` | SND-01 | `irecv` into a `Vec` that is dropped while the receive is pending, then allocates a same-size victim `Vec` that reuses the freed memory | np=2 | `victim bytes overwritten by MPI = 256 / 256 (first=0x55)`: MPI writes into the reused allocation | Does not compile: the request or scope keeps the buffer borrowed |
 | `soundness/src/bin/r6_fetch_drop.rs` | SND-04 | Drops a `PendingFetchResult` before the closing fence on a `Win::allocate` window, plus a `get` into a buffer dropped mid-epoch | np=2 | **Did not manifest**: MPICH completes allocate-window RMA eagerly. Kept as the negative control for r6b | Same (no corruption) |
 | `soundness/src/bin/r6b_fetch_drop_create.rs` | SND-04 | Same as r6, over a `Win::create` window (MPICH defers the operation to the fence) | np=2 | `unrelated Vec after get() completes = 0x1111111111111112 (expected 0x3333333333333333)`: the fetched value lands in freed and reused memory | Does not compile, or the result is kept alive until the epoch closes |
 | `soundness/src/bin/r8_forget_win.rs` | SND-05 | `mem::forget(Win::create(&mut buf))`, `drop(buf)`, victim `Vec` reuses the memory, then rank 1 does a locked `put` | np=2 | `victim[0..4] = 0x5555555555555555…`: the remote `put` writes into the freed and reused allocation | Does not compile, or `Win::create` owns the buffer so forgetting it leaks the buffer instead of freeing it |
