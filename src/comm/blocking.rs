@@ -1019,7 +1019,7 @@ impl Communicator {
     ///   communicator size
     /// - [`Error::BufferSize`] if `send.len() != recv.len() * size`
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
-    ///   `op` is a user op and `recv.len()` exceeds `i32::MAX`, on every MPI version
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///

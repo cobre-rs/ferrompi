@@ -3,8 +3,8 @@
 //! Each rank creates:
 //! - an idle persistent send (`send_init`, never started): inactive, freed
 //!   by the sweep, not counted;
-//! - an active nonblocking collective (`iallreduce`, never waited): active,
-//!   counted;
+//! - a nonblocking collective (`iallreduce`) in a scope: the scope completes
+//!   it before `Mpi` is dropped, so it is not counted;
 //! - five matched `send_init`/`recv_init` pairs with its peer rank, one pair
 //!   per completion path:
 //!   - `start` then `wait` on each side individually: completes, both
@@ -23,13 +23,12 @@
 //!
 //! `Mpi` is then dropped. The finalize sweep frees every inactive
 //! persistent request without counting it, and leaves every active request
-//! alone, counting it: the iallreduce plus the two never-completed pairs
-//! (1 + 2 + 2 = 5). Dropping the remaining request handles after `Mpi`
-//! makes no further MPI call.
+//! alone, counting it: the two never-completed pairs (2 + 2 = 4). Dropping
+//! the remaining request handles after `Mpi` makes no further MPI call.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_finalize_active_request
 // mpi-test: np=2
-// mpi-test-stderr: ferrompi: MPI_Finalize leaves 5 active request(s) unfreed
+// mpi-test-stderr: ferrompi: MPI_Finalize leaves 4 active request(s) unfreed
 
 use ferrompi::{Mpi, PersistentRequest, ReduceOp};
 
@@ -41,10 +40,13 @@ fn main() {
 
     let idle = world.send_init(&[7i32], peer, 1).expect("send_init failed");
 
+    let allreduce_send = [1.0f64];
     let mut allreduce_recv = [0.0f64; 1];
-    let active = world
-        .iallreduce(&[1.0f64], &mut allreduce_recv, ReduceOp::Sum)
-        .expect("iallreduce failed");
+    ferrompi::scope(|s| {
+        world.iallreduce(s, &allreduce_send, &mut allreduce_recv, ReduceOp::Sum)?;
+        Ok(())
+    })
+    .expect("iallreduce failed");
 
     // Path A: start + wait on each side -> completes, both freed.
     let send_buf_a = [10i32];
@@ -104,7 +106,6 @@ fn main() {
     drop(mpi);
 
     drop(idle);
-    drop(active);
     drop(send_a);
     drop(recv_a);
     drop(pair_b);

@@ -526,6 +526,19 @@ pub unsafe extern "C" fn ferrompi_op_drop_closure(slot: i32) {
 /// MPI never invokes the closure after it is dropped, because the op is freed
 /// only when the last reference to its registration goes away.
 ///
+/// # Dropping
+///
+/// Dropping the last `UserOp` handle frees the op (`MPI_Op_free`).
+///
+/// - At `Single`/`Funneled`, drop it on the thread that initialized MPI;
+///   another thread aborts the process.
+/// - At `Serialized`, the drop is an MPI call, which the program serializes
+///   like any other.
+/// - Once [`Mpi`](crate::Mpi) is being dropped, or after it was dropped, the
+///   drop makes no MPI call.
+/// - A nonblocking reduction borrows the op until its scope returns, so it
+///   cannot be dropped while the reduction is pending.
+///
 /// # Slot-table limit
 ///
 /// At most 16 `UserOp` instances may be live concurrently per process, and a

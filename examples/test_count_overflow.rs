@@ -1,6 +1,7 @@
 //! Regression test for the `count > INT_MAX` guard across the 30 scalar-count
-//! shims (blocking/nonblocking p2p and collectives, plus every blocking
-//! reduction with a user op), the 6 v-collective shims, and the 7 RMA shims.
+//! shims (blocking/nonblocking p2p and collectives, plus every blocking and
+//! nonblocking reduction with a user op), the 6 v-collective shims, and the 7
+//! RMA shims.
 //!
 //! On MPI < 4, a scalar count above `INT_MAX` must return
 //! `Err(Error::Mpi { class: MpiErrorClass::Count, .. })` before any MPI
@@ -17,6 +18,10 @@
 //! direct C call can observe it — and only on MPI < 4,
 //! since on MPI >= 4 the fixed shim would hand the oversized count to
 //! `MPI_Put_c` over a four-element window.
+//!
+//! A user op in `reduce_scatter_block` reduces `recv.len() * size` elements, so
+//! it is also refused when that span exceeds `INT_MAX`, though `recv.len()`
+//! does not.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_count_overflow
 // mpi-test: np=2.. skip-ok=mpich
@@ -129,8 +134,9 @@ fn rma_put(world: &Communicator) {
     );
 }
 
-/// A user op's classic function takes an `int` length: every blocking reduction
-/// with a user op must reject a count above `INT_MAX` on every MPI version.
+/// A user op's classic function takes an `int` length: every blocking and
+/// nonblocking reduction with a user op must reject a count above `INT_MAX` on
+/// every MPI version, and `reduce_scatter_block` a reduced span above it.
 fn user_op_reduction(world: &Communicator) {
     // Zeroed allocations whose pages the fixed shim never touches: the guard
     // must fire before any MPI call reads or writes them.
@@ -170,6 +176,82 @@ fn user_op_reduction(world: &Communicator) {
         world,
         exscan_ok,
         "exscan of 2^32+16 bytes with a user op returns Count",
+    );
+
+    // Each refusal returns before registering a request, so the scope has
+    // nothing to wait for.
+    let iallreduce_ok = ferrompi::scope(|s| {
+        Ok(common::is_count(
+            &world.iallreduce(s, &send, &mut recv, &max_op),
+        ))
+    })
+    .expect("scope failed");
+    common::check(
+        world,
+        iallreduce_ok,
+        "iallreduce of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let ireduce_ok = ferrompi::scope(|s| {
+        Ok(common::is_count(
+            &world.ireduce(s, &send, &mut recv, &max_op, 0),
+        ))
+    })
+    .expect("scope failed");
+    common::check(
+        world,
+        ireduce_ok,
+        "ireduce of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let iscan_ok =
+        ferrompi::scope(|s| Ok(common::is_count(&world.iscan(s, &send, &mut recv, &max_op))))
+            .expect("scope failed");
+    common::check(
+        world,
+        iscan_ok,
+        "iscan of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let iexscan_ok = ferrompi::scope(|s| {
+        Ok(common::is_count(
+            &world.iexscan(s, &send, &mut recv, &max_op),
+        ))
+    })
+    .expect("scope failed");
+    common::check(
+        world,
+        iexscan_ok,
+        "iexscan of 2^32+16 bytes with a user op returns Count",
+    );
+
+    // One block is within INT_MAX, but the reduction covers one block per
+    // rank, which is not.
+    let block = i32::MAX as usize / world.size() as usize + 1;
+    let span_send = vec![0u8; block * world.size() as usize];
+    let mut span_recv = vec![0u8; block];
+
+    let reduce_scatter_block_ok =
+        common::is_count(&world.reduce_scatter_block(&span_send, &mut span_recv, &max_op));
+    common::check(
+        world,
+        reduce_scatter_block_ok,
+        "reduce_scatter_block with a user op and a span above INT_MAX returns Count",
+    );
+
+    let ireduce_scatter_block_ok = ferrompi::scope(|s| {
+        Ok(common::is_count(&world.ireduce_scatter_block(
+            s,
+            &span_send,
+            &mut span_recv,
+            &max_op,
+        )))
+    })
+    .expect("scope failed");
+    common::check(
+        world,
+        ireduce_scatter_block_ok,
+        "ireduce_scatter_block with a user op and a span above INT_MAX returns Count",
     );
 }
 

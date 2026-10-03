@@ -68,10 +68,17 @@ fn bench_iterative_allreduce(c: &mut Criterion, world: &Communicator) {
             b.iter(|| {
                 common::lead(world, [IALLREDUCE, 0]);
                 for _ in 0..ITERS {
-                    let req = world
-                        .iallreduce(black_box(&send), black_box(&mut recv), ReduceOp::Sum)
-                        .unwrap();
-                    req.wait().unwrap();
+                    ferrompi::scope(|s| {
+                        let req = world.iallreduce(
+                            s,
+                            black_box(&send),
+                            black_box(&mut recv),
+                            ReduceOp::Sum,
+                        )?;
+                        req.wait()?;
+                        Ok(())
+                    })
+                    .unwrap();
                 }
             });
         });
@@ -119,8 +126,12 @@ fn run_follower(world: &Communicator) {
 
         IALLREDUCE => {
             for _ in 0..ITERS {
-                let req = world.iallreduce(&send, &mut recv, ReduceOp::Sum).unwrap();
-                req.wait().unwrap();
+                ferrompi::scope(|s| {
+                    let req = world.iallreduce(s, &send, &mut recv, ReduceOp::Sum)?;
+                    req.wait()?;
+                    Ok(())
+                })
+                .unwrap();
             }
         }
 

@@ -208,9 +208,11 @@ impl Registry {
     /// Waits until no slot is pending, and returns the first error.
     ///
     /// A failed pass that completed some slots is repeated for the rest, which
-    /// MPI reports as `MPI_ERR_PENDING` (MPICH stops at the first failure). A
-    /// pass that completed no slot was refused or left the state of every
-    /// request unknown, so the process aborts.
+    /// MPI reports as `MPI_ERR_PENDING` (Open MPI returns at the first failure
+    /// with them still incomplete; MPICH returns once every receive arrived,
+    /// with them complete but unprocessed). A pass that completed no slot was
+    /// refused or left the state of every request unknown, so the process
+    /// aborts.
     pub(crate) fn complete_all(&self) -> Result<()> {
         let mut first = Ok(());
         loop {

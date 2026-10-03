@@ -1648,8 +1648,14 @@ int ferrompi_reduce_scatter_block(
     MPI_Datatype dt = get_datatype(datatype_tag);
     MPI_Op mpi_op = get_op(op);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    if (is_user_op(op)) {
+        if (recvcount > INT_MAX) return MPI_ERR_COUNT;          /* no MPI call: unit-tested */
+        int size;
+        int r = MPI_Comm_size(comm, &size);
+        if (r != MPI_SUCCESS) return r;
+        if (recvcount > INT_MAX / size) return MPI_ERR_COUNT;    /* reduced span recvcount * size */
+    }
     if (recvcount > INT_MAX) {
-        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         return MPI_Reduce_scatter_block_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op, comm);
 #else
@@ -2224,8 +2230,14 @@ int ferrompi_ireduce_scatter_block(
     MPI_Request req;
     int ret;
 
+    if (is_user_op(op)) {
+        if (recvcount > INT_MAX) return MPI_ERR_COUNT;          /* no MPI call: unit-tested */
+        int size;
+        int r = MPI_Comm_size(comm, &size);
+        if (r != MPI_SUCCESS) return r;
+        if (recvcount > INT_MAX / size) return MPI_ERR_COUNT;    /* reduced span recvcount * size */
+    }
     if (recvcount > INT_MAX) {
-        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Ireduce_scatter_block_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op, comm, &req);
 #else
@@ -2972,8 +2984,14 @@ int ferrompi_reduce_scatter_block_init(
     MPI_Request req;
     int ret;
 
+    if (is_user_op(op)) {
+        if (recvcount > INT_MAX) return MPI_ERR_COUNT;          /* no MPI call: unit-tested */
+        int size;
+        int r = MPI_Comm_size(comm, &size);
+        if (r != MPI_SUCCESS) return r;
+        if (recvcount > INT_MAX / size) return MPI_ERR_COUNT;    /* reduced span recvcount * size */
+    }
     if (recvcount > INT_MAX) {
-        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Reduce_scatter_block_init_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op,
                                                comm, MPI_INFO_NULL, &req);
@@ -3527,8 +3545,11 @@ int ferrompi_waitall(int64_t count, const int64_t* request_handles, uint8_t* don
 
     // Whatever ret is, mark done[i] for every request MPI completed: all of
     // them on success, or on MPI_ERR_IN_STATUS the ones whose own status
-    // error is not MPI_ERR_PENDING (MPICH stops at the first failure and
-    // reports the rest pending; Open MPI completes them all).
+    // error is not MPI_ERR_PENDING. After a failure the library reports the
+    // rest MPI_ERR_PENDING: Open MPI's MPI_Waitall returns at the first error,
+    // with those requests still incomplete; MPICH's returns only after every
+    // request completed, with its MPI_ERR_PENDING entry complete but not yet
+    // processed. A second MPI_Waitall over the remainder completes both.
     for (int64_t i = 0; i < count; i++) {
         done[i] = (ret == MPI_SUCCESS)
             || (ret == MPI_ERR_IN_STATUS && sts[i].MPI_ERROR != MPI_ERR_PENDING);

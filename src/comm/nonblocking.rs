@@ -6,9 +6,9 @@ use crate::comm::{
 use crate::datatype::{buf, buf_mut, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::op::CollectiveOp;
 use crate::request::{Request, RequestKind};
 use crate::scope::Scope;
-use crate::ReduceOp;
 
 impl Communicator {
     // ========================================================================
@@ -47,7 +47,27 @@ impl Communicator {
 
     /// Nonblocking all-reduce.
     ///
-    /// Returns a request handle that must be waited on before accessing the buffer.
+    /// Initiates the reduction and returns immediately with a [`Request`] that
+    /// belongs to the scope `s`. `send` and a user `op` are borrowed for the
+    /// scope, and `recv` is borrowed mutably for it: `recv` cannot be read until
+    /// [`scope`](crate::scope) returns, even after the request was waited, and
+    /// the scope completes the reduction at the latest then.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to send from this process, borrowed for the scope
+    /// * `recv` - Buffer for the result, borrowed for the scope
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (borrowed
+    ///   until the scope returns), or a [`CollectiveOp`]
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -57,47 +77,66 @@ impl Communicator {
     /// # let world = mpi.world();
     /// let send = vec![1.0f64; 10];
     /// let mut recv = vec![0.0f64; 10];
-    /// let req = world.iallreduce(&send, &mut recv, ReduceOp::Sum).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.iallreduce(s, &send, &mut recv, ReduceOp::Sum)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // recv is readable again here.
     /// ```
-    pub fn iallreduce<T: MpiDatatype>(
+    #[inline]
+    pub fn iallreduce<'s, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        op: ReduceOp,
-    ) -> Result<Request<'_>> {
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
+        op: impl Into<CollectiveOp<'s, T>>,
+    ) -> Result<Request<'s>> {
+        let op = op.into().code(T::TAG)?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]). The returned Request does not borrow either slice; keeping
-        // both alive and untouched until the request completes is the caller's documented
-        // obligation, which this signature does not enforce.
+        // (&[T] vs &mut [T]). send and recv are borrowed for 's (recv mutably), and a user op
+        // is borrowed for 's through `op`. The scope completes every request it holds before 's
+        // ends, so the buffers and the op outlive the span in which MPI may use them, and
+        // nothing touches the buffers meanwhile.
         let ret = unsafe {
-            ffi::ferrompi_iallreduce(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
+            ffi::ferrompi_iallreduce(sp, rp, n, dt, op, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "iallreduce")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking reduce to root.
     ///
     /// Initiates a reduction operation and returns immediately with a [`Request`]
-    /// handle. The buffers must remain valid until the request is completed.
+    /// that belongs to the scope `s`. `send` and a user `op` are borrowed for the
+    /// scope, and `recv` is borrowed mutably for it: `recv` cannot be read until
+    /// [`scope`](crate::scope) returns, even after the request was waited, and
+    /// the scope completes the reduction at the latest then.
     ///
     /// # Arguments
     ///
-    /// * `send` - Data to send from this process
-    /// * `recv` - Buffer for the result; must have `send.len()` elements on
-    ///   every rank (its contents matter only at the root)
-    /// * `op` - Reduction operation
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to send from this process, borrowed for the scope
+    /// * `recv` - Buffer for the result at the root, which must have
+    ///   `send.len()` elements there; ignored at other ranks, where it may be
+    ///   empty. Borrowed for the scope on every rank
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (borrowed
+    ///   until the scope returns), or a [`CollectiveOp`]
     /// * `root` - Rank of the root process
     ///
     /// # Errors
     ///
-    /// Returns [`Error::BufferSize`] if `recv.len() != send.len()`, on
-    /// any rank.
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::BufferSize`] if this rank is `root` and `recv.len() != send.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -107,38 +146,42 @@ impl Communicator {
     /// # let world = mpi.world();
     /// let send = vec![1.0f64; 10];
     /// let mut recv = vec![0.0f64; 10];
-    /// let req = world.ireduce(&send, &mut recv, ReduceOp::Sum, 0).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.ireduce(s, &send, &mut recv, ReduceOp::Sum, 0)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // recv is readable again here.
     /// ```
-    pub fn ireduce<T: MpiDatatype>(
+    #[inline]
+    pub fn ireduce<'s, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        op: ReduceOp,
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
+        op: impl Into<CollectiveOp<'s, T>>,
         root: i32,
-    ) -> Result<Request<'_>> {
-        check_same_len("recv", send.len(), recv.len())?;
+    ) -> Result<Request<'s>> {
+        let op = op.into().code(T::TAG)?;
+        if self.rank == root {
+            check_same_len("recv", send.len(), recv.len())?;
+        }
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
-        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]). The returned Request does not borrow either slice; keeping
-        // both alive and untouched until the request completes is the caller's documented
-        // obligation, which this signature does not enforce.
+        // SAFETY: send.len() == recv.len() is verified above at the root; MPI ignores recvbuf at
+        // every other rank (MPI-4.1 section 6.9.1). The two slices cannot alias (&[T] vs
+        // &mut [T]). send and recv are borrowed for 's (recv mutably), and a user op is borrowed
+        // for 's through `op`. The scope completes every request it holds before 's ends, so the
+        // buffers and the op outlive the span in which MPI may use them, and nothing touches the
+        // buffers meanwhile.
         let ret = unsafe {
-            ffi::ferrompi_ireduce(
-                sp,
-                rp,
-                n,
-                dt,
-                op as i32,
-                root,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_ireduce(sp, rp, n, dt, op, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "ireduce")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking gather to root.
@@ -309,12 +352,29 @@ impl Communicator {
     /// Nonblocking inclusive prefix reduction (scan).
     ///
     /// Initiates an inclusive scan and returns immediately with a [`Request`]
-    /// handle. On rank `i`, `recv` will contain the reduction of `send` values
-    /// from ranks `0..=i` once the request completes.
+    /// that belongs to the scope `s`. On rank `i`, `recv` will contain the
+    /// reduction of `send` values from ranks `0..=i` once the request completes.
+    /// `send` and a user `op` are borrowed for the scope, and `recv` is borrowed
+    /// mutably for it: `recv` cannot be read until [`scope`](crate::scope)
+    /// returns, even after the request was waited, and the scope completes the
+    /// scan at the latest then.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to contribute from this process, borrowed for the scope
+    /// * `recv` - Buffer for the prefix-reduced result (must be same length as
+    ///   `send`), borrowed for the scope
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (borrowed
+    ///   until the scope returns), or a [`CollectiveOp`]
     ///
     /// # Errors
     ///
-    /// Returns [`Error::BufferSize`] if `send.len() != recv.len()`.
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -324,43 +384,69 @@ impl Communicator {
     /// # let world = mpi.world();
     /// let send = vec![1.0f64; 10];
     /// let mut recv = vec![0.0f64; 10];
-    /// let req = world.iscan(&send, &mut recv, ReduceOp::Sum).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.iscan(s, &send, &mut recv, ReduceOp::Sum)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // On rank i, recv[j] == (i + 1) * send[j]
     /// ```
-    pub fn iscan<T: MpiDatatype>(
+    #[inline]
+    pub fn iscan<'s, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        op: ReduceOp,
-    ) -> Result<Request<'_>> {
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
+        op: impl Into<CollectiveOp<'s, T>>,
+    ) -> Result<Request<'s>> {
+        let op = op.into().code(T::TAG)?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]). The returned Request does not borrow either slice; keeping
-        // both alive and untouched until the request completes is the caller's documented
-        // obligation, which this signature does not enforce.
-        let ret = unsafe {
-            ffi::ferrompi_iscan(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
-        };
+        // (&[T] vs &mut [T]). send and recv are borrowed for 's (recv mutably), and a user op
+        // is borrowed for 's through `op`. The scope completes every request it holds before 's
+        // ends, so the buffers and the op outlive the span in which MPI may use them, and
+        // nothing touches the buffers meanwhile.
+        let ret =
+            unsafe { ffi::ferrompi_iscan(sp, rp, n, dt, op, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "iscan")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking exclusive prefix reduction (exscan).
     ///
     /// Initiates an exclusive scan and returns immediately with a [`Request`]
-    /// handle. On rank `i`, `recv` will contain the reduction of `send` values
-    /// from ranks `0..i` once the request completes.
+    /// that belongs to the scope `s`. On rank `i`, `recv` will contain the
+    /// reduction of `send` values from ranks `0..i` once the request completes.
+    /// `send` and a user `op` are borrowed for the scope, and `recv` is borrowed
+    /// mutably for it: `recv` cannot be read until [`scope`](crate::scope)
+    /// returns, even after the request was waited, and the scope completes the
+    /// scan at the latest then.
     ///
     /// # Rank 0 Behavior
     ///
     /// **Per the MPI standard, the contents of `recv` on rank 0 are undefined.**
     ///
+    /// # Arguments
+    ///
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to contribute from this process, borrowed for the scope
+    /// * `recv` - Buffer for the prefix-reduced result (must be same length as
+    ///   `send`; **undefined on rank 0**), borrowed for the scope
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (borrowed
+    ///   until the scope returns), or a [`CollectiveOp`]
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::BufferSize`] if `send.len() != recv.len()`.
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::BufferSize`] if `send.len() != recv.len()`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -370,28 +456,39 @@ impl Communicator {
     /// # let world = mpi.world();
     /// let send = vec![1.0f64; 10];
     /// let mut recv = vec![0.0f64; 10];
-    /// let req = world.iexscan(&send, &mut recv, ReduceOp::Sum).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.iexscan(s, &send, &mut recv, ReduceOp::Sum)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // On rank i > 0, recv[j] == i * send[j]
+    /// // On rank 0, recv is undefined per the MPI standard.
     /// ```
-    pub fn iexscan<T: MpiDatatype>(
+    #[inline]
+    pub fn iexscan<'s, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        op: ReduceOp,
-    ) -> Result<Request<'_>> {
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
+        op: impl Into<CollectiveOp<'s, T>>,
+    ) -> Result<Request<'s>> {
+        let op = op.into().code(T::TAG)?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
         // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
-        // (&[T] vs &mut [T]). The returned Request does not borrow either slice; keeping
-        // both alive and untouched until the request completes is the caller's documented
-        // obligation, which this signature does not enforce.
-        let ret = unsafe {
-            ffi::ferrompi_iexscan(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
-        };
+        // (&[T] vs &mut [T]). send and recv are borrowed for 's (recv mutably), and a user op
+        // is borrowed for 's through `op`. The scope completes every request it holds before 's
+        // ends, so the buffers and the op outlive the span in which MPI may use them, and
+        // nothing touches the buffers meanwhile. MPI leaves recv undefined on rank 0,
+        // documented above.
+        let ret =
+            unsafe { ffi::ferrompi_iexscan(sp, rp, n, dt, op, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "iexscan")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking all-to-all personalized communication.
@@ -438,15 +535,32 @@ impl Communicator {
     /// Nonblocking reduce-scatter with uniform block size.
     ///
     /// Initiates a reduce-scatter operation and returns immediately with a
-    /// [`Request`] handle. Performs an element-wise reduction across all
-    /// processes, then scatters the result so that each process receives
-    /// `recv.len()` elements.
+    /// [`Request`] that belongs to the scope `s`. Performs an element-wise
+    /// reduction across all processes, then scatters the result so that each
+    /// process receives `recv.len()` elements. `send` and a user `op` are
+    /// borrowed for the scope, and `recv` is borrowed mutably for it: `recv`
+    /// cannot be read until [`scope`](crate::scope) returns, even after the
+    /// request was waited, and the scope completes the reduction at the latest
+    /// then.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The scope that owns the request
+    /// * `send` - Data to send from this process, borrowed for the scope; it must
+    ///   have exactly `recv.len() * size` elements
+    /// * `recv` - Buffer for this rank's block of the result, borrowed for the scope
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (borrowed
+    ///   until the scope returns), or a [`CollectiveOp`]
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidArgument`] if `send.len()` is not evenly divisible
-    /// by the communicator size, or [`Error::BufferSize`] if
-    /// `send.len() != recv.len() * size`.
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::InvalidArgument`] if `send.len()` is not evenly divisible by the
+    ///   communicator size
+    /// - [`Error::BufferSize`] if `send.len() != recv.len() * size`
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `send.len()` exceeds `i32::MAX`, on every MPI version
     ///
     /// # Example
     ///
@@ -457,15 +571,24 @@ impl Communicator {
     /// let size = world.size() as usize;
     /// let send = vec![1.0f64; size * 5];
     /// let mut recv = vec![0.0f64; 5];
-    /// let req = world.ireduce_scatter_block(&send, &mut recv, ReduceOp::Sum).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.ireduce_scatter_block(s, &send, &mut recv, ReduceOp::Sum)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // recv is readable again here.
     /// ```
-    pub fn ireduce_scatter_block<T: MpiDatatype>(
+    #[inline]
+    pub fn ireduce_scatter_block<'s, T: MpiDatatype>(
         &self,
-        send: &[T],
-        recv: &mut [T],
-        op: ReduceOp,
-    ) -> Result<Request<'_>> {
+        s: &'s Scope<'s, '_>,
+        send: &'s [T],
+        recv: &'s mut [T],
+        op: impl Into<CollectiveOp<'s, T>>,
+    ) -> Result<Request<'s>> {
+        let op = op.into().code(T::TAG)?;
         check_same_len(
             "recv",
             rank_block("send", send.len(), self.size)?,
@@ -474,23 +597,16 @@ impl Communicator {
         let mut request_handle: i64 = 0;
         let (sp, _, _) = buf(send);
         let (rp, n, dt) = buf_mut(recv);
-        // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). send.len() == recv.len()
-        // * size is verified above. The returned Request does not borrow either slice;
-        // keeping both alive and untouched until the request completes is the caller's
-        // documented obligation, which this signature does not enforce.
+        // SAFETY: send.len() == recv.len() * size is verified above; the two slices cannot alias
+        // (&[T] vs &mut [T]). send and recv are borrowed for 's (recv mutably), and a user op
+        // is borrowed for 's through `op`. The scope completes every request it holds before 's
+        // ends, so the buffers and the op outlive the span in which MPI may use them, and
+        // nothing touches the buffers meanwhile.
         let ret = unsafe {
-            ffi::ferrompi_ireduce_scatter_block(
-                sp,
-                rp,
-                n,
-                dt,
-                op as i32,
-                self.handle,
-                &mut request_handle,
-            )
+            ffi::ferrompi_ireduce_scatter_block(sp, rp, n, dt, op, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "ireduce_scatter_block")?;
-        Ok(Request::new(request_handle, RequestKind::Collective))
+        Ok(s.request(request_handle, RequestKind::Collective))
     }
 
     /// Nonblocking in-place gather. At root, `data` is both the send contribution
@@ -745,7 +861,10 @@ mod tests {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
-        let result = comm.iallreduce(&send, &mut recv, ReduceOp::Sum);
+        let result = crate::scope(|s| {
+            comm.iallreduce(s, &send, &mut recv, ReduceOp::Sum)
+                .map(|_| ())
+        });
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -761,7 +880,10 @@ mod tests {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
-        let result = comm.ireduce(&send, &mut recv, ReduceOp::Sum, 0);
+        let result = crate::scope(|s| {
+            comm.ireduce(s, &send, &mut recv, ReduceOp::Sum, 0)
+                .map(|_| ())
+        });
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -777,7 +899,7 @@ mod tests {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
-        let result = comm.iscan(&send, &mut recv, ReduceOp::Sum);
+        let result = crate::scope(|s| comm.iscan(s, &send, &mut recv, ReduceOp::Sum).map(|_| ()));
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -793,7 +915,7 @@ mod tests {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
-        let result = comm.iexscan(&send, &mut recv, ReduceOp::Sum);
+        let result = crate::scope(|s| comm.iexscan(s, &send, &mut recv, ReduceOp::Sum).map(|_| ()));
         assert!(matches!(
             result,
             Err(Error::BufferSize {
@@ -802,6 +924,33 @@ mod tests {
                 actual: 5
             })
         ));
+    }
+
+    #[test]
+    fn nonblocking_reductions_report_a_bad_op_before_the_buffers() {
+        let comm = test_comm(0, 1);
+        let send = vec![1.0f64; 10];
+        let mut recv = vec![0.0f64; 5];
+        let op = ReduceOp::BitwiseOr;
+        let results = [
+            crate::scope(|s| comm.iallreduce(s, &send, &mut recv, op).map(|_| ())),
+            crate::scope(|s| comm.ireduce(s, &send, &mut recv, op, 0).map(|_| ())),
+            crate::scope(|s| comm.iscan(s, &send, &mut recv, op).map(|_| ())),
+            crate::scope(|s| comm.iexscan(s, &send, &mut recv, op).map(|_| ())),
+            crate::scope(|s| {
+                comm.ireduce_scatter_block(s, &send, &mut recv, op)
+                    .map(|_| ())
+            }),
+        ];
+        for result in results {
+            assert!(matches!(
+                result,
+                Err(Error::InvalidArgument {
+                    arg: "op",
+                    reason: "bitwise and logical ops do not apply to floating-point types"
+                })
+            ));
+        }
     }
 
     #[test]

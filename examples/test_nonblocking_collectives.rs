@@ -63,10 +63,14 @@ fn main() {
     {
         let send = vec![rank as f64; 5];
         let mut recv = vec![0.0f64; 5];
-        let req = world
-            .iallreduce(&send, &mut recv, ReduceOp::Sum)
-            .expect("iallreduce failed");
-        req.wait().expect("iallreduce wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .iallreduce(s, &send, &mut recv, ReduceOp::Sum)
+                .expect("iallreduce failed");
+            req.wait().expect("iallreduce wait failed");
+            Ok(())
+        })
+        .expect("iallreduce scope failed");
 
         // Sum of ranks: 0 + 1 + ... + (size-1) = size*(size-1)/2
         let expected = (size * (size - 1) / 2) as f64;
@@ -90,10 +94,14 @@ fn main() {
     {
         let send = vec![(rank + 1) as f64; 4];
         let mut recv = vec![0.0f64; 4];
-        let req = world
-            .ireduce(&send, &mut recv, ReduceOp::Sum, 0)
-            .expect("ireduce failed");
-        req.wait().expect("ireduce wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .ireduce(s, &send, &mut recv, ReduceOp::Sum, 0)
+                .expect("ireduce failed");
+            req.wait().expect("ireduce wait failed");
+            Ok(())
+        })
+        .expect("ireduce scope failed");
 
         if rank == 0 {
             // Sum of 1 + 2 + ... + size = size*(size+1)/2
@@ -104,6 +112,28 @@ fn main() {
                     "ireduce recv[{i}] = {v}, expected {expected}"
                 );
             }
+        }
+
+        // MPI ignores recv at a non-root rank, so it may be empty there. An
+        // empty u8 slice's pointer is 0x1, which is MPI_IN_PLACE on some MPI
+        // libraries.
+        let send_u8 = vec![(rank + 1) as u8; 4];
+        let mut recv_u8 = if rank == 0 { vec![0u8; 4] } else { Vec::new() };
+        ferrompi::scope(|s| {
+            let req = world
+                .ireduce(s, &send_u8, &mut recv_u8, ReduceOp::Sum, 0)
+                .expect("ireduce with an empty non-root recv failed");
+            req.wait()
+                .expect("ireduce with an empty non-root recv wait failed");
+            Ok(())
+        })
+        .expect("ireduce with an empty non-root recv scope failed");
+        if rank == 0 {
+            let expected = (size * (size + 1) / 2) as u8;
+            assert!(
+                recv_u8.iter().all(|&v| v == expected),
+                "ireduce u8 recv = {recv_u8:?}, expected {expected} in every element"
+            );
         }
         test_count += 1;
         if rank == 0 {
@@ -239,10 +269,14 @@ fn main() {
     {
         let send = vec![1.0f64; 3];
         let mut recv = vec![0.0f64; 3];
-        let req = world
-            .iscan(&send, &mut recv, ReduceOp::Sum)
-            .expect("iscan failed");
-        req.wait().expect("iscan wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .iscan(s, &send, &mut recv, ReduceOp::Sum)
+                .expect("iscan failed");
+            req.wait().expect("iscan wait failed");
+            Ok(())
+        })
+        .expect("iscan scope failed");
 
         // On rank i, inclusive scan of 1.0 from all ranks 0..=i => (i+1)
         let expected = (rank + 1) as f64;
@@ -266,10 +300,14 @@ fn main() {
     {
         let send = vec![1.0f64; 3];
         let mut recv = vec![0.0f64; 3];
-        let req = world
-            .iexscan(&send, &mut recv, ReduceOp::Sum)
-            .expect("iexscan failed");
-        req.wait().expect("iexscan wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .iexscan(s, &send, &mut recv, ReduceOp::Sum)
+                .expect("iexscan failed");
+            req.wait().expect("iexscan wait failed");
+            Ok(())
+        })
+        .expect("iexscan scope failed");
 
         // On rank i > 0, exclusive scan of 1.0 from ranks 0..i => i
         // On rank 0, result is undefined per MPI standard — skip assertion
@@ -494,10 +532,14 @@ fn main() {
         let send = vec![1.0f64; block_size * sz];
         let mut recv = vec![0.0f64; block_size];
 
-        let req = world
-            .ireduce_scatter_block(&send, &mut recv, ReduceOp::Sum)
-            .expect("ireduce_scatter_block failed");
-        req.wait().expect("ireduce_scatter_block wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .ireduce_scatter_block(s, &send, &mut recv, ReduceOp::Sum)
+                .expect("ireduce_scatter_block failed");
+            req.wait().expect("ireduce_scatter_block wait failed");
+            Ok(())
+        })
+        .expect("ireduce_scatter_block scope failed");
 
         // Each element is the sum across all ranks of 1.0 => size
         let expected = size as f64;

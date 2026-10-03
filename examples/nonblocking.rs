@@ -69,16 +69,19 @@ fn main() -> Result<()> {
 
         // Start nonblocking all-reduce
         let start_time = mpi.wtime();
-        let request = world.iallreduce(&send, &mut recv, ReduceOp::Sum)?;
-
-        // Do some work
         let mut work_done = 0;
-        for i in 0..10000 {
-            work_done += i;
-        }
+        ferrompi::scope(|s| {
+            let request = world.iallreduce(s, &send, &mut recv, ReduceOp::Sum)?;
 
-        // Wait for completion
-        request.wait()?;
+            // Do some work
+            for i in 0..10000 {
+                work_done += i;
+            }
+
+            // Wait for completion
+            request.wait()?;
+            Ok(())
+        })?;
         let elapsed = mpi.wtime() - start_time;
 
         // Verify: sum should be 1 + 2 + ... + size

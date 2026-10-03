@@ -53,14 +53,16 @@ fn main() -> Result<()> {
     {
         let send = [1.0f64; 4];
         let mut recv = [0.0f64; 4];
-        let mut req = world.iallreduce(&send, &mut recv, ReduceOp::Sum)?;
-        let cancel_ok = matches!(req.cancel(), Err(Error::NotSupported(_)));
-        common::check(
-            &world,
-            cancel_ok,
-            "cancel on iallreduce returns NotSupported",
-        );
-        let status = req.wait()?;
+        let status = ferrompi::scope(|s| {
+            let mut req = world.iallreduce(s, &send, &mut recv, ReduceOp::Sum)?;
+            let cancel_ok = matches!(req.cancel(), Err(Error::NotSupported(_)));
+            common::check(
+                &world,
+                cancel_ok,
+                "cancel on iallreduce returns NotSupported",
+            );
+            req.wait()
+        })?;
         let recv_ok = recv == [size as f64; 4];
         common::check(&world, recv_ok, "iallreduce completes after refused cancel");
         common::check(

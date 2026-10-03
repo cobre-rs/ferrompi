@@ -114,6 +114,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dest, tag)` inside `ferrompi::scope(|s| ...)`; the buffers are usable again
   when `scope` returns. Migration: wrap the requests' code in
   `ferrompi::scope` and read receive buffers after it.
+- **The nonblocking reductions take the scope and
+  `op: impl Into<CollectiveOp<T>>`:** `iallreduce`, `ireduce`, `iscan`,
+  `iexscan` and `ireduce_scatter_block` accept a `ReduceOp` or a `&UserOp<T>`
+  (borrowed until the scope returns), and a bitwise or logical op on
+  `f32`/`f64` returns `Error::InvalidArgument` before MPI. Migration: call
+  them inside `ferrompi::scope` with `s` first; a `ReduceOp` argument still
+  compiles.
 
 ### Added
 
@@ -131,6 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there.
 - **`reduce` checks `recv`'s length only at the root**; another rank may pass
   an empty buffer, as for `gather` and `scatter`.
+- **`ireduce` checks `recv`'s length only at the root**; another rank may pass
+  an empty buffer.
 - **After a skipped `MPI_Finalize` (a window still alive when `Mpi` is
   dropped), `wait`/`test` on a pending request still complete it** instead of
   returning `Error::Finalized` and leaving it pending; every other call still
@@ -159,6 +168,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the drop began returns `Error::Finalized` without calling MPI (it could
   previously reach MPI after `MPI_Finalize`). `Mpi::is_finalized()` is `true`
   from the start of the drop.
+- **A user op in `reduce_scatter_block` (blocking, nonblocking and persistent)
+  returns `Error::Mpi` with class `Count` when `send.len()` exceeds
+  `i32::MAX`**, instead of reaching MPI with a span the user function's `int`
+  length cannot hold.
 
 ## [0.6.0] - 2026-10-01
 

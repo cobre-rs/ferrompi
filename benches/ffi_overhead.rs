@@ -543,11 +543,13 @@ fn main() {
             20_000,
             || direct_iallreduce(&send_d, &mut recv_d),
             || {
-                world
-                    .iallreduce(black_box(&send_f), black_box(&mut recv_f), ReduceOp::Sum)
-                    .unwrap()
-                    .wait()
-                    .unwrap();
+                ferrompi::scope(|s| {
+                    world
+                        .iallreduce(s, black_box(&send_f), black_box(&mut recv_f), ReduceOp::Sum)?
+                        .wait()?;
+                    Ok(())
+                })
+                .unwrap();
             },
         );
     }

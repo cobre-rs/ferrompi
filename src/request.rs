@@ -203,13 +203,17 @@ pub(crate) enum RequestKind {
 /// let send = vec![world.rank() as f64; 10];
 /// let mut recv = vec![0.0; 10];
 ///
-/// // Start nonblocking all-reduce
-/// let request = world.iallreduce(&send, &mut recv, ReduceOp::Sum).unwrap();
+/// ferrompi::scope(|s| {
+///     // Start nonblocking all-reduce
+///     let request = world.iallreduce(s, &send, &mut recv, ReduceOp::Sum)?;
 ///
-/// // Do other work while communication proceeds...
+///     // Do other work while communication proceeds...
 ///
-/// // Wait for completion
-/// request.wait().unwrap();
+///     // Wait for completion
+///     request.wait()?;
+///     Ok(())
+/// })
+/// .unwrap();
 ///
 /// // Now recv contains the result
 /// println!("Sum: {:?}", recv);
