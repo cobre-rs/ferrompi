@@ -282,6 +282,13 @@ pub enum ThreadLevel {
 /// [`doc::mpi_compatibility`]. Debug builds print a note to stderr when
 /// finalize still leaves MPI requests unfreed.
 ///
+/// `MPI_Finalize` is also skipped, with a stderr warning, if any
+/// [`PersistentRequest`] is active, whatever thread holds it: finalizing with a
+/// request pending is erroneous (MPI-4.1 §11.2.2), and the request can be moved
+/// to a thread this drop cannot wait for. The request can still be completed
+/// with `wait`/`test` afterwards; dropping it then makes no MPI call and leaks
+/// its handle and, if it is still active, its buffers.
+///
 /// When `MPI_Finalize` is skipped, MPI stays initialized: a `wait` or `test`
 /// on a request still pending completes it, a `cancel` on one still reaches
 /// MPI, every other call returns `Err(`[`Error::Finalized`]`)`, and handles
@@ -301,7 +308,9 @@ pub enum ThreadLevel {
 /// through this crate to return; a call that starts after the drop began
 /// returns `Err(`[`Error::Finalized`]`)` without calling MPI, except a
 /// completion, test or cancel call on a request that a scope open on another
-/// thread still holds, which the drop waits for. A thread blocked forever
+/// thread still holds, which the drop waits for. A `wait` or `test` on an
+/// active [`PersistentRequest`] is admitted too, and the drop does not wait for
+/// the request: it skips `MPI_Finalize` instead. A thread blocked forever
 /// inside an MPI call, for example in a collective its peers never enter,
 /// blocks the drop; MPI requires every thread's MPI calls to complete before
 /// `MPI_Finalize`.
@@ -712,14 +721,21 @@ impl Drop for Mpi {
 }
 
 /// Why `Mpi::drop` must not call `MPI_Finalize`, or `None` when it may: a
-/// nonblocking scope open on the dropping thread, or a live window (feature
-/// `rma`). This is the one place the skip is decided.
+/// nonblocking scope open on the dropping thread, an active persistent request
+/// on any thread, or a live window (feature `rma`). This is the one place the
+/// skip is decided.
 fn finalize_skip_reason() -> Option<String> {
     if rt::scopes_on_this_thread() > 0 {
         return Some(
             "a nonblocking scope is still open on this thread; its requests complete when the scope ends"
                 .into(),
         );
+    }
+    let live = rt::live_handle_tokens();
+    if live > 0 {
+        return Some(format!(
+            "{live} persistent request(s) still active; their buffers stay valid until the process exits"
+        ));
     }
     #[cfg(feature = "rma")]
     {
@@ -808,6 +824,28 @@ mod tests {
             Some("a nonblocking scope is still open on this thread; its requests complete when the scope ends")
         );
         assert_eq!(crate::rt::scopes_on_this_thread(), 0);
+    }
+
+    #[test]
+    fn finalize_skip_reason_names_an_active_persistent_request() {
+        let before = crate::rt::live_handle_tokens();
+        let token = crate::rt::open_handle_tokens(1)
+            .expect("an uninitialized process opens a token")
+            .take()
+            .expect("one token was opened");
+        let reason = super::finalize_skip_reason().expect("an active request skips the finalize");
+        assert!(
+            reason.contains("persistent request(s) still active"),
+            "unexpected reason: {reason}"
+        );
+        drop(token);
+        // Other tests hold tokens for a moment too, so wait for the sum to come
+        // back to its earlier value instead of asserting zero.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while crate::rt::live_handle_tokens() > before && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(crate::rt::live_handle_tokens() <= before);
     }
 
     // ── Mpi::create_from_group unit tests ─────────────────────────────────

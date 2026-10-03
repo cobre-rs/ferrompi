@@ -187,6 +187,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dropping a request from a `scope` does not wait for it; the scope completes
   it.** Only the RMA request calls (`rput`, `rget`, `raccumulate`) still return
   a request that waits when dropped.
+- **Dropping `Mpi` while a `PersistentRequest` is active skips
+  `MPI_Finalize`**, on whatever thread the request is, with a stderr warning,
+  instead of finalizing with the request pending. The request can still be
+  completed afterwards; dropping it then makes no MPI call.
 
 ### Removed
 

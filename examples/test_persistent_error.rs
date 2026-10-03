@@ -25,17 +25,17 @@
 //! whichever of the two requests did start, and the receive's data must
 //! have arrived.
 //!
-//! Part 5 checks the other half of the same bookkeeping: the finalize sweep
-//! must not count a request that failed through `wait`/`test` as still
-//! active. Rank 0 keeps its two failed persistent requests alive (never
-//! dropped) alongside one persistent receive it starts and deliberately never
-//! completes, then drops `Mpi` while all three are still alive. Only the
-//! never-completed receive should still be counted; the stderr directive
-//! below pins the expected count.
+//! Part 5 checks the other half of the same bookkeeping: a request that failed
+//! through `wait`/`test` must release the token every active persistent request
+//! holds, and must not be counted as still active at finalize. Rank 0 keeps its
+//! two failed persistent requests alive (never dropped) and drops `Mpi` while
+//! both are still alive. `MPI_Finalize` must run: the runner fails the example
+//! if it prints the skip marker, which it does when a request still holds its
+//! token. The sweep then frees both without counting them, so no note about
+//! unfreed active requests is printed either.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_error
 // mpi-test: np=2 valgrind
-// mpi-test-stderr: ferrompi: MPI_Finalize leaves 1 active request(s) unfreed
 
 use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, PersistentRequest};
 
@@ -269,11 +269,10 @@ fn part4_partial_start_all(world: &Communicator, mpi: &Mpi, rank: i32, mpich: bo
 }
 
 // Rank 0 keeps two failed persistent requests (one completed through
-// `wait`, one through `test`) and one started, never-completed persistent
-// receive alive across `drop(mpi)`, then finalizes while all three are still
-// registered. Only the never-completed receive should be counted active; the
-// module-level `mpi-test-stderr` directive pins the expected count to
-// catch the finalize sweep miscounting either failed persistent request.
+// `wait`, one through `test`) alive across `drop(mpi)`, then finalizes while
+// both are still registered. Neither may hold a token or be counted active:
+// `MPI_Finalize` must run, which the runner checks by the absence of the skip
+// marker, and the sweep must not report an unfreed active request.
 fn part5_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
     if rank == 0 {
         let mut req_a = world
@@ -302,27 +301,18 @@ fn part5_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
         ok &= class_of(&result_b) == Some(MpiErrorClass::Truncate);
         ok &= !req_b.is_active();
 
-        // Never waited: stays active until finalize, giving the sweep
-        // exactly one request it must count.
-        let mut ctrl_req = world
-            .recv_init(vec![0i32; 1], 1, 78)
-            .expect("part5: recv_init ctrl");
-        ctrl_req.start().expect("part5: start ctrl");
-        world.barrier().expect("part5: barrier C");
-
         common::check(
             world,
             ok,
             "part 5: a failed persistent wait or test does not leave the request counted active at finalize",
         );
 
-        // Drop Mpi while req_a, req_b and ctrl_req are still alive: their
-        // own Drop impls run afterward, see the finalized lifecycle state,
-        // and make no further MPI call.
+        // Drop Mpi while req_a and req_b are still alive: their own Drop
+        // impls run afterward, see the finalized lifecycle state, and make no
+        // further MPI call.
         drop(mpi);
         drop(req_a);
         drop(req_b);
-        drop(ctrl_req);
     } else {
         world.barrier().expect("part5: barrier A");
         world
@@ -332,9 +322,6 @@ fn part5_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
             .send(&PAYLOAD, 0, 77)
             .expect("part5: send b (truncates)");
         world.barrier().expect("part5: barrier B");
-
-        world.barrier().expect("part5: barrier C");
-        world.send(&[9i32], 0, 78).expect("part5: send ctrl");
 
         common::check(
             world,

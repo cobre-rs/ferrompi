@@ -1,34 +1,32 @@
-//! Regression for `MPI_Finalize`'s request sweep freeing an active request.
+//! Regression for `MPI_Finalize`'s request sweep, and for the token that every
+//! completion path releases.
 //!
 //! Each rank creates:
 //! - an idle persistent send (`send_init`, never started): inactive, freed
 //!   by the sweep, not counted;
 //! - a nonblocking collective (`iallreduce`) in a scope: the scope completes
 //!   it before `Mpi` is dropped, so it is not counted;
-//! - five matched `send_init`/`recv_init` pairs with its peer rank, one pair
-//!   per completion path:
-//!   - `start` then `wait` on each side individually: completes, both
-//!     freed, not counted;
-//!   - `start_all` then `wait_all` on the pair together: completes, both
-//!     freed, not counted;
-//!   - `start` then a `test` loop on each side until it reports complete:
-//!     completes, both freed, not counted;
-//!   - `start`, never completed: both sides stay active, both counted;
-//!   - `start_all`, never completed: both sides stay active, both counted.
+//! - three matched `send_init`/`recv_init` pairs with its peer rank, one pair
+//!   per completion path, each using distinct tags:
+//!   - `start` then `wait` on each side individually;
+//!   - `start_all` then `wait_all` on the pair together;
+//!   - `start` then a `test` loop on each side until it reports complete.
 //!
 //! Every pair is pairwise-matched (rank 0 and rank 1 run the same code
-//! against each other, using distinct tags per path), so nothing deadlocks
-//! and the never-completed pairs really stay pending at `Mpi::drop` without
-//! blocking it.
+//! against each other), so nothing deadlocks, and every request is completed
+//! before `Mpi` is dropped.
 //!
-//! `Mpi` is then dropped. The finalize sweep frees every inactive
-//! persistent request without counting it, and leaves every active request
-//! alone, counting it: the two never-completed pairs (2 + 2 = 4). Dropping
-//! the remaining request handles after `Mpi` makes no further MPI call.
+//! `Mpi` is then dropped with every request handle still alive. Completing a
+//! request releases the token it holds, so no persistent request is active,
+//! and the drop finalizes MPI: the runner fails the example if it prints the
+//! skip marker. The finalize sweep frees every inactive persistent request
+//! without counting it, so the debug note about unfreed active requests is not
+//! printed either. A request left active at the drop skips `MPI_Finalize`
+//! instead; `test_persistent_finalize` covers that. Dropping the remaining
+//! request handles after `Mpi` makes no further MPI call.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_finalize_active_request
 // mpi-test: np=2
-// mpi-test-stderr: ferrompi: MPI_Finalize leaves 4 active request(s) unfreed
 
 use ferrompi::{Mpi, PersistentRequest, ReduceOp};
 
@@ -73,18 +71,6 @@ fn main() {
     while !send_c.test().expect("test c (send)") {}
     while !recv_c.test().expect("test c (recv)") {}
 
-    // Path D: start, never completed -> both sides stay active, both counted.
-    let mut send_d = world.send_init(vec![13i32], peer, 13).expect("send_init d");
-    let mut recv_d = world.recv_init(vec![0i32], peer, 13).expect("recv_init d");
-    send_d.start().expect("start d (send)");
-    recv_d.start().expect("start d (recv)");
-
-    // Path E: start_all, never completed -> both sides stay active, both counted.
-    let send_e = world.send_init(vec![14i32], peer, 14).expect("send_init e");
-    let recv_e = world.recv_init(vec![0i32], peer, 14).expect("recv_init e");
-    let mut pair_e = [send_e, recv_e];
-    PersistentRequest::start_all(&mut pair_e).expect("start_all e");
-
     drop(mpi);
 
     drop(idle);
@@ -93,9 +79,6 @@ fn main() {
     drop(pair_b);
     drop(send_c);
     drop(recv_c);
-    drop(send_d);
-    drop(recv_d);
-    drop(pair_e);
 
     println!("PASS: test_finalize_active_request");
 }

@@ -40,6 +40,12 @@
 //! thread's own count, which costs no atomic operation; every other scope is
 //! also counted in its thread's shard of `LIVE_SCOPES`, which [`begin_finalize`]
 //! waits on.
+//!
+//! An active persistent request holds a [`HandleToken`], counted in a shard of
+//! `LIVE_HANDLES` at every thread level, whatever thread holds the request.
+//! [`begin_finalize`] never waits for it, because the request can be held by a
+//! thread that is itself waiting for the finalizer; [`live_handle_tokens`] lets
+//! `Mpi::drop` skip `MPI_Finalize` instead while the sum is nonzero.
 
 use std::cell::Cell;
 use std::io::Write;
@@ -72,8 +78,8 @@ thread_local! {
     /// `STATE` and this flag are always written by the same single thread.
     static ON_INIT_THREAD: Cell<bool> = const { Cell::new(false) };
 
-    /// This thread's index into `IN_FLIGHT` and `LIVE_SCOPES`; `usize::MAX`
-    /// until its first counted use.
+    /// This thread's index into `IN_FLIGHT`, `LIVE_SCOPES` and `LIVE_HANDLES`;
+    /// `usize::MAX` until its first counted use.
     static SHARD: Cell<usize> = const { Cell::new(usize::MAX) };
 
     /// How many nonblocking scopes are open on this thread.
@@ -85,9 +91,9 @@ thread_local! {
 
 const SHARDS: usize = 64;
 
-/// One shard of `IN_FLIGHT` or `LIVE_SCOPES`. 128-byte alignment keeps two
-/// shards off the same pair of cache lines, so threads counting on different
-/// shards do not contend.
+/// One shard of `IN_FLIGHT`, `LIVE_SCOPES` or `LIVE_HANDLES`. 128-byte
+/// alignment keeps two shards off the same pair of cache lines, so threads
+/// counting on different shards do not contend.
 #[repr(align(128))]
 struct Shard(AtomicUsize);
 
@@ -100,6 +106,12 @@ static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 /// scope counts in the shard its thread's `SHARD` index names, and the sum of
 /// the shards is the count.
 static LIVE_SCOPES: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARDS];
+
+/// How many persistent requests are active, on any thread and at any thread
+/// level. A request counts in the shard its opening thread's `SHARD` index
+/// names, and the token it holds subtracts from that same shard from whatever
+/// thread drops it; the sum of the shards is the count.
+static LIVE_HANDLES: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARDS];
 
 /// Held by a guarded call or `Drop` path for as long as it may call MPI. At
 /// `Serialized`/`Multiple` it owns one count in a shard of `IN_FLIGHT`,
@@ -142,9 +154,57 @@ impl Drop for ScopeToken {
     }
 }
 
+/// Held by an active persistent request, at every thread level, from before its
+/// start until MPI completed it. Unlike a [`ScopeToken`] it is movable: it keeps
+/// no thread-local count and can be dropped on any thread, so it always counts in
+/// its shard and [`begin_finalize`] never waits for it. [`live_handle_tokens`]
+/// feeds the skip decision of `Mpi::drop`.
+#[must_use]
+pub(crate) struct HandleToken(&'static Shard);
+
+impl Drop for HandleToken {
+    #[inline]
+    fn drop(&mut self) {
+        // Release: pairs with the SeqCst (hence acquiring) loads in
+        // `live_handle_tokens`, so every MPI call that completed the request
+        // happens-before the `MPI_Finalize` that follows a sum of zero.
+        self.0 .0.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// `n` tokens counted by one increment, from [`open_handle_tokens`]. Each
+/// [`take`](Self::take) hands out one; what is not handed out by the time this
+/// drops is released with it.
+#[must_use]
+pub(crate) struct HandleTokens {
+    shard: &'static Shard,
+    left: Cell<usize>,
+}
+
+impl HandleTokens {
+    /// The next token, or `None` once all were handed out.
+    #[inline]
+    pub(crate) fn take(&self) -> Option<HandleToken> {
+        let left = self.left.get().checked_sub(1)?;
+        self.left.set(left);
+        Some(HandleToken(self.shard))
+    }
+}
+
+impl Drop for HandleTokens {
+    #[inline]
+    fn drop(&mut self) {
+        let left = self.left.get();
+        if left > 0 {
+            // Release: as in `HandleToken`'s drop.
+            self.shard.0.fetch_sub(left, Ordering::Release);
+        }
+    }
+}
+
 /// This thread's shard of `shards`, taken round-robin on first use and kept.
-/// `IN_FLIGHT` and `LIVE_SCOPES` both go through it, so a thread uses one index
-/// in both.
+/// `IN_FLIGHT`, `LIVE_SCOPES` and `LIVE_HANDLES` all go through it, so a thread
+/// uses one index in all three.
 #[inline]
 fn shard(shards: &'static [Shard; SHARDS]) -> &'static Shard {
     let index = SHARD.with(Cell::get);
@@ -263,6 +323,98 @@ pub(crate) fn open_scope() -> std::result::Result<ScopeToken, c_int> {
 /// How many nonblocking scopes are open on the calling thread.
 pub(crate) fn scopes_on_this_thread() -> usize {
     SCOPES_HERE.with(Cell::get)
+}
+
+/// Counts `n` persistent requests about to start, with one increment: returns
+/// the tokens, or `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or
+/// `Finalized`, or `Err(FERROMPI_ERR_THREAD_LEVEL)` on a thread other than the
+/// init thread at `Single`/`Funneled`, counting nothing. The count rises before
+/// the guarded start call, so that call's per-call release cannot precede it.
+///
+/// A token is counted on every thread and never takes [`open_scope`]'s uncounted
+/// branch: it can move to a thread whose own count `Mpi::drop` does not read.
+/// At `Single`/`Funneled` the increment is Relaxed, because every start,
+/// completion and release of a request runs on the init thread, where
+/// `Mpi::drop` reads the sum: another thread's start and completion are
+/// refused, and a drop there aborts while the request is active and, once
+/// `Finalizing`, leaks it with its token forgotten.
+#[inline]
+pub(crate) fn open_handle_tokens(n: usize) -> std::result::Result<HandleTokens, c_int> {
+    // Relaxed: see `enter`'s comment.
+    let state = STATE.load(Ordering::Relaxed);
+    if state == FINALIZING || state == FINALIZED {
+        return Err(FERROMPI_ERR_FINALIZED);
+    }
+    let counted_in;
+    if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
+        if !ON_INIT_THREAD.with(Cell::get) {
+            return Err(FERROMPI_ERR_THREAD_LEVEL);
+        }
+        counted_in = shard(&LIVE_HANDLES);
+        // Relaxed: this thread is the only one that starts, completes or
+        // releases a request at this level (a drop elsewhere aborts in
+        // `Active` and leaks at `Finalizing`), and it reads the sum in
+        // `Mpi::drop`.
+        counted_in.0.fetch_add(n, Ordering::Relaxed);
+    } else {
+        counted_in = shard(&LIVE_HANDLES);
+        // SeqCst: the increment of the pair with `begin_finalize`'s
+        // `Finalizing` store, as in `open_scope`. Either the later sum sees this
+        // count or the re-check below sees that store. Every other state takes
+        // this path, `Uninit` and `Initializing` included.
+        counted_in.0.fetch_add(n, Ordering::SeqCst);
+        // SeqCst: reads `Finalizing` or `Finalized` if that store precedes the
+        // increment in the SeqCst order.
+        let state = STATE.load(Ordering::SeqCst);
+        if state == FINALIZING || state == FINALIZED {
+            counted_in.0.fetch_sub(n, Ordering::Release);
+            return Err(FERROMPI_ERR_FINALIZED);
+        }
+    }
+    Ok(HandleTokens {
+        shard: counted_in,
+        left: Cell::new(n),
+    })
+}
+
+/// Takes back one count a forgotten [`HandleToken`] left on this thread's shard,
+/// so a test that leaks a token on purpose does not keep the sum raised for the
+/// rest of the process.
+#[cfg(test)]
+pub(crate) fn release_forgotten_handle_token() {
+    shard(&LIVE_HANDLES).0.fetch_sub(1, Ordering::Release);
+}
+
+/// How many persistent requests are active, summed over the shards of
+/// `LIVE_HANDLES`. Read by `Mpi::drop` after [`begin_finalize`], which does not
+/// wait for them: a nonzero sum makes it skip `MPI_Finalize`.
+///
+/// The shards are read one after another, not as a snapshot, and a sum of zero
+/// is still exact:
+/// - A request adds one to a shard before its start call and takes one from that
+///   same shard once MPI completed it, so a shard never reads below its floor and
+///   the sum is zero only if every shard reads zero.
+/// - The `Finalizing` store precedes every load below. An open on the SeqCst path
+///   has its increment either before the load of its shard in the SeqCst order,
+///   so the load sees it unless it also sees the request's release, or after,
+///   and then its re-check reads `Finalizing`, the open fails and takes the count
+///   back. A back-out can only raise a reading, never hide a request: it can
+///   cause a skip that was not needed, never a missed one. So can a start the
+///   guarded call refuses after the open succeeded, which gives the count back,
+///   and a `wait` or `test` racing `Mpi::drop`, which releases its token after
+///   its own call returned.
+/// - Every write to a shard is a read-modify-write, so each Release decrement
+///   heads a release sequence holding all later writes, whichever thread made
+///   them. A load that sees a shard without a request's count read that
+///   request's release or a later write, and so acquires the `MPI_Wait`,
+///   `MPI_Test` or `MPI_Waitall` that completed it.
+pub(crate) fn live_handle_tokens() -> usize {
+    // SeqCst: the load of the pair with `open_handle_tokens`'s increment, and an
+    // acquire of the release sequence the value it reads belongs to.
+    LIVE_HANDLES
+        .iter()
+        .map(|shard| shard.0.load(Ordering::SeqCst))
+        .sum()
 }
 
 /// Waits until every counted scope open on another thread has closed. No
@@ -637,9 +789,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        check, check_completion, drain_shards, enter, enter_completion, open_scope,
-        scopes_on_this_thread, shard, InFlight, Shard, COUNTED_HERE, IN_FLIGHT, LIVE_SCOPES,
-        SHARDS,
+        check, check_completion, drain_shards, enter, enter_completion, live_handle_tokens,
+        open_handle_tokens, open_scope, scopes_on_this_thread, shard, HandleToken, HandleTokens,
+        InFlight, Shard, COUNTED_HERE, IN_FLIGHT, LIVE_HANDLES, LIVE_SCOPES, SHARDS,
     };
     #[cfg(debug_assertions)]
     use super::{release_in_call_flag, take_in_call_flag};
@@ -697,6 +849,7 @@ mod tests {
         assert!(ptr::eq(first, shard(&IN_FLIGHT)));
         assert!(IN_FLIGHT.iter().any(|s| ptr::eq(s, first)));
         assert_eq!(index_of(&IN_FLIGHT), index_of(&LIVE_SCOPES));
+        assert_eq!(index_of(&IN_FLIGHT), index_of(&LIVE_HANDLES));
 
         std::thread::scope(|s| {
             s.spawn(|| {
@@ -704,6 +857,7 @@ mod tests {
                 assert!(ptr::eq(mine, shard(&IN_FLIGHT)));
                 assert!(IN_FLIGHT.iter().any(|s| ptr::eq(s, mine)));
                 assert_eq!(index_of(&IN_FLIGHT), index_of(&LIVE_SCOPES));
+                assert_eq!(index_of(&IN_FLIGHT), index_of(&LIVE_HANDLES));
             })
             .join()
             .expect("shard thread panicked");
@@ -760,5 +914,69 @@ mod tests {
         assert_eq!((scopes_on_this_thread(), counted_here()), (1, 1));
         drop(outer);
         assert_eq!((scopes_on_this_thread(), counted_here()), (0, 0));
+    }
+
+    #[test]
+    fn handle_token_opened_before_init_is_counted() {
+        let tokens = open_handle_tokens(2).expect("an uninitialized process opens tokens");
+        // Other tests open tokens concurrently, so the sum of the shards is
+        // only bounded below by this thread's own.
+        assert!(live_handle_tokens() >= 2);
+        let first = tokens.take().expect("two tokens were opened");
+        let second = tokens.take().expect("two tokens were opened");
+        assert!(ptr::eq(first.0, shard(&LIVE_HANDLES)));
+        assert!(ptr::eq(second.0, shard(&LIVE_HANDLES)));
+        assert!(tokens.take().is_none());
+        drop(tokens);
+        assert!(live_handle_tokens() >= 2);
+        drop(first);
+        drop(second);
+    }
+
+    #[test]
+    fn handle_token_released_on_another_thread() {
+        static UNDER_TEST: Shard = Shard(AtomicUsize::new(0));
+
+        fn is_send<X: Send>() {}
+        is_send::<HandleToken>();
+
+        UNDER_TEST.0.fetch_add(1, Ordering::SeqCst);
+        let token = HandleToken(&UNDER_TEST);
+        assert_eq!(UNDER_TEST.0.load(Ordering::SeqCst), 1);
+        std::thread::scope(|s| {
+            s.spawn(move || drop(token))
+                .join()
+                .expect("release thread panicked");
+        });
+        assert_eq!(UNDER_TEST.0.load(Ordering::SeqCst), 0);
+
+        let moved = std::thread::scope(|s| {
+            s.spawn(|| {
+                open_handle_tokens(1)
+                    .expect("an uninitialized process opens a token")
+                    .take()
+                    .expect("one token was opened")
+            })
+            .join()
+            .expect("open thread panicked")
+        });
+        assert!(live_handle_tokens() >= 1);
+        drop(moved);
+    }
+
+    #[test]
+    fn handle_tokens_not_handed_out_are_released_with_the_batch() {
+        static UNDER_TEST: Shard = Shard(AtomicUsize::new(0));
+
+        UNDER_TEST.0.fetch_add(3, Ordering::SeqCst);
+        let tokens = HandleTokens {
+            shard: &UNDER_TEST,
+            left: Cell::new(3),
+        };
+        let token = tokens.take().expect("three tokens were opened");
+        drop(tokens);
+        assert_eq!(UNDER_TEST.0.load(Ordering::SeqCst), 1);
+        drop(token);
+        assert_eq!(UNDER_TEST.0.load(Ordering::SeqCst), 0);
     }
 }
