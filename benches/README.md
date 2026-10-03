@@ -115,13 +115,13 @@ and reports each arm's median ns/call plus their delta. The first case,
 `A/A direct iallreduce+wait`, runs the direct call on both arms to give the noise floor
 the other cases' deltas are judged against.
 
-**Seventeen cases** (13 at `funneled`, see Thread level), in run order:
+**Nineteen cases** (14 at `funneled`, see Thread level), in run order:
 `A/A direct iallreduce+wait` (noise floor), then the blocking collectives
 `allreduce f64 sum`, `allreduce u64 bor`, `allgatherv u8 x64`, `broadcast f64` and
 `barrier`, then `isend+irecv+wait`, `8x(isend+irecv)+waitall`, `iallreduce+wait`,
 `persistent start+wait`, and `8x persistent start_all+wait_all`, then the six group-query
 cases `group size T=1`, `group rank T=1`, `group size T=4`, `group size T=8`,
-`group rank T=4` and `group rank T=8`.
+`group rank T=4` and `group rank T=8`, and last `scope empty T=1` and `scope empty T=8`.
 
 The group-query cases compare `MPI_Group_size` / `MPI_Group_rank` with `Group::size` /
 `Group::rank` on one shared group, 20 000 calls per thread. `T=n` is the thread count:
@@ -129,6 +129,10 @@ each round runs one arm on `n` scoped threads released together by a barrier, an
 round's value is the median of the threads' ns/call. The `T=4` and `T=8` cases run only at
 `multiple`: at `funneled` a thread other than the initializing one cannot call MPI through
 ferrompi. The `T=8` cases are meant to run pinned, for example under `taskset -c 0-7`.
+
+The `scope empty` cases time `ferrompi::scope` around an empty closure, 200 000 scopes per
+thread, with the same `T=n` rounds. They have no direct arm: there is no `MPI_*` call to
+compare with, and the scope holds no request, so the time is the scope's own open and close.
 
 Y and Z, the thread-level overhead budgets, are read from the group cases; the 0.7 section below gives their limits and the reference build each is measured against:
 
@@ -139,9 +143,10 @@ Y and Z, the thread-level overhead budgets, are read from the group cases; the 0
 is initialized with: `funneled` (the default when unset) or `multiple`. Any other value
 panics with `FERROMPI_BENCH_LEVEL must be funneled or multiple, got <value>`. If the
 library grants a different level than requested, the bench prints
-`ffi_overhead: <level> not provided; skipped` and exits 0. The eleven original cases and
-the two `T=1` group cases run at either level, 13 case lines at `funneled`; `multiple`
-adds the four `T=4` and `T=8` group cases, 17 case lines.
+`ffi_overhead: <level> not provided; skipped` and exits 0. The eleven original cases, the
+two `T=1` group cases and `scope empty T=1` run at either level, 14 case lines at
+`funneled`; `multiple` adds the four `T=4` and `T=8` group cases and `scope empty T=8`,
+19 case lines.
 
 ```
 FERROMPI_BENCH_LEVEL=multiple mpiexec -n 1 target/release/deps/ffi_overhead-<hash>
@@ -149,7 +154,8 @@ FERROMPI_BENCH_LEVEL=multiple mpiexec -n 1 target/release/deps/ffi_overhead-<has
 
 **Output.** A header line, `# <library line>; level <Level>; 21 interleaved rounds per
 arm; median ns per call`, then one line per case:
-`<case> direct X ns   ferrompi Y ns   delta ±Z ns`.
+`<case> direct <a> ns   ferrompi <b> ns   delta <±d> ns`. The `scope empty` lines have no
+direct arm and read `<case> ferrompi <b> ns`.
 
 **MPICH-only direct arm.** The direct arm declares MPICH's integer handle values and
 calls only MPI-1/MPI-3 symbols, so the binary links on every MPI implementation. At run
@@ -273,6 +279,25 @@ the measuring machine. There the direct call's T=8/T=1 ratio is 1.08 for `group 
 the call qualifies for the 8-thread budget. Under `taskset -c 0-7`, which puts two
 threads on each of four cores, the same ratios are 1.64 and 1.77. The T=8/T=1 ratio of
 ferrompi at `head` is 0.90 for `group size` and 0.96 for `group rank`.
+
+**Scope count across threads.** `scope empty T=1` and `scope empty T=8` time a scope that holds
+no request, so they show the scope's own open and close. No budget covers them, and neither
+`0.6.0` nor `pre-counter` has `ferrompi::scope`. The table compares the build before the open
+scopes were counted per thread (`before`, `c9c5649`) with the build that counts them per thread
+(`after`). One session on 2026-10-03, local MPICH 4.2.3 (`ch4:ofi`), a singleton, the binaries
+run as `before` `after` `after` `before`. Values are the median ns per scope over the slots.
+
+| Case | Level, pinning | Slots each | before | after |
+|---|---|---|---|---|
+| scope empty T=1 | funneled, `taskset -c 0-7` | 60 | 2.9 | 2.9 |
+| scope empty T=1 | multiple, `taskset -c 0,2,4,6,8,10,12,14` | 48 | 10.8 | 10.8 |
+| scope empty T=8 | multiple, `taskset -c 0,2,4,6,8,10,12,14` | 48 | 165.5 | 10.8 |
+
+The largest |A/A| of a slot was 1.6 ns (`before`) and 1.4 ns (`after`) at `funneled`, and 1.4 and
+2.0 ns at `multiple`. Budget X is a `Single`/`Funneled` budget: at `Multiple` a scope costs two
+SeqCst read-modify-writes, about 10 ns, and counting per thread removes the cross-thread
+contention between them. At `funneled` the init thread's scope is uncounted, so that row does
+not move.
 
 `examples/test_scope_alloc.rs` counts the heap allocations Rust code makes, not MPI's own,
 with a counting global allocator. After 10 warm-up iterations, 1000 scopes of 64 requests

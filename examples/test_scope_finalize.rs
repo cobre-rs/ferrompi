@@ -22,6 +22,11 @@
 //! before the store must still be admitted: no completion call on either worker
 //! may return `Err(Finalized)`.
 //!
+//! Sixty-six more workers each open a scope that holds no request, signal, hold
+//! the scope for up to 20 ms and set their own flag before it ends. That is more
+//! threads than the 64 shards the runtime counts open scopes in, so some of them
+//! share a shard. The drop must return only after every flag is set.
+//!
 //! Run with: mpiexec -n 1 ./target/debug/examples/test_scope_finalize
 // mpi-test: np=1
 
@@ -35,6 +40,7 @@ use ferrompi::{Error, Mpi, Source, Tag, ThreadLevel};
 mod common;
 
 const POLLED: usize = 1024;
+const HELD: usize = 66;
 
 fn main() {
     let mpi = Mpi::init_thread(ThreadLevel::Multiple).expect("MPI init failed");
@@ -58,6 +64,9 @@ fn main() {
     let sent = AtomicBool::new(false);
     let message = [7.0f64; 4];
     let polled_message = [8.0f64; 4];
+    let held_flags: Vec<AtomicBool> = (0..HELD).map(|_| AtomicBool::new(false)).collect();
+    let (held, held_rx) = mpsc::channel();
+    let mut held_done = false;
 
     let (scope_result, delivered, admitted, drop_start, drop_end) = std::thread::scope(|t| {
         let worker = t.spawn(|| {
@@ -118,8 +127,30 @@ fn main() {
             })
         });
 
+        for flag in &held_flags {
+            let held = held.clone();
+            t.spawn(move || {
+                let result = ferrompi::scope(|_| {
+                    held.send(()).expect("init thread hung up");
+                    let hold = RandomState::new().hash_one(()) % 20_000_000;
+                    std::thread::sleep(Duration::from_nanos(hold));
+                    flag.store(true, Ordering::Relaxed);
+                    Ok(())
+                });
+                if let Err(e) = result {
+                    eprintln!("FAIL: a held scope returned {e}");
+                    std::process::exit(2);
+                }
+            });
+        }
+
         posted_rx.recv().expect("worker hung up before posting");
         polling_rx.recv().expect("poller hung up before posting");
+        for _ in 0..HELD {
+            held_rx
+                .recv()
+                .expect("a held worker hung up before signalling");
+        }
         dropping.store(true, Ordering::Release);
         while !sent.load(Ordering::Acquire) {
             std::hint::spin_loop();
@@ -132,12 +163,16 @@ fn main() {
         let drop_start = Instant::now();
         drop(mpi);
         let drop_end = Instant::now();
+        // Relaxed: the drop's wait must order each store before this load by
+        // itself.
+        held_done = held_flags.iter().all(|flag| flag.load(Ordering::Relaxed));
 
         let (scope_result, delivered) = worker.join().expect("worker panicked");
         let admitted = poller.join().expect("poller panicked");
         (scope_result, delivered, admitted, drop_start, drop_end)
     });
 
+    assert!(held_done, "Mpi::drop returned while a held scope was open");
     let scope_end = scope_result.expect("the worker's scope must return Ok");
     assert!(
         drop_start < scope_end,

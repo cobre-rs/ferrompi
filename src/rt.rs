@@ -38,7 +38,8 @@
 //! open on its own thread, whose requests the scope still completes. A scope
 //! opened on the init thread at `Single`/`Funneled` is tracked only by that
 //! thread's own count, which costs no atomic operation; every other scope is
-//! also counted in `LIVE_SCOPES`, which [`begin_finalize`] waits on.
+//! also counted in its thread's shard of `LIVE_SCOPES`, which [`begin_finalize`]
+//! waits on.
 
 use std::cell::Cell;
 use std::io::Write;
@@ -71,22 +72,22 @@ thread_local! {
     /// `STATE` and this flag are always written by the same single thread.
     static ON_INIT_THREAD: Cell<bool> = const { Cell::new(false) };
 
-    /// This thread's index into `IN_FLIGHT`; `usize::MAX` until its first
-    /// counted use.
+    /// This thread's index into `IN_FLIGHT` and `LIVE_SCOPES`; `usize::MAX`
+    /// until its first counted use.
     static SHARD: Cell<usize> = const { Cell::new(usize::MAX) };
 
     /// How many nonblocking scopes are open on this thread.
     static SCOPES_HERE: Cell<usize> = const { Cell::new(0) };
 
-    /// How many of those are also counted in `LIVE_SCOPES`.
+    /// How many of those are also counted in a shard of `LIVE_SCOPES`.
     static COUNTED_HERE: Cell<usize> = const { Cell::new(0) };
 }
 
 const SHARDS: usize = 64;
 
-/// One in-flight counter. 128-byte alignment keeps two shards off the same
-/// pair of cache lines, so threads counting on different shards do not
-/// contend.
+/// One shard of `IN_FLIGHT` or `LIVE_SCOPES`. 128-byte alignment keeps two
+/// shards off the same pair of cache lines, so threads counting on different
+/// shards do not contend.
 #[repr(align(128))]
 struct Shard(AtomicUsize);
 
@@ -95,8 +96,10 @@ static IN_FLIGHT: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARD
 static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 
 /// How many nonblocking scopes are open on any thread, except those opened on
-/// the init thread at `Single`/`Funneled`, which only `SCOPES_HERE` counts.
-static LIVE_SCOPES: AtomicUsize = AtomicUsize::new(0);
+/// the init thread at `Single`/`Funneled`, which only `SCOPES_HERE` counts. A
+/// scope counts in the shard its thread's `SHARD` index names, and the sum of
+/// the shards is the count.
+static LIVE_SCOPES: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARDS];
 
 /// Held by a guarded call or `Drop` path for as long as it may call MPI. At
 /// `Serialized`/`Multiple` it owns one count in a shard of `IN_FLIGHT`,
@@ -120,45 +123,46 @@ impl Drop for InFlight {
 /// [`begin_finalize`] waits for the counted tokens of scopes on other threads,
 /// and [`scopes_on_this_thread`] feeds the skip decision for the finalizing
 /// thread. A token is counted unless it was opened on the init thread at
-/// `Single`/`Funneled`; a scope opened before `Mpi::init` stays counted.
+/// `Single`/`Funneled`; a scope opened before `Mpi::init` stays counted, in the
+/// shard of `LIVE_SCOPES` the token holds.
 #[must_use]
-pub(crate) struct ScopeToken {
-    counted: bool,
-}
+pub(crate) struct ScopeToken(Option<&'static Shard>);
 
 impl Drop for ScopeToken {
     #[inline]
     fn drop(&mut self) {
         SCOPES_HERE.with(|here| here.set(here.get() - 1));
-        if self.counted {
+        if let Some(shard) = self.0 {
             COUNTED_HERE.with(|here| here.set(here.get() - 1));
             // Release: pairs with the SeqCst (hence acquiring) load in
             // `wait_for_other_scopes`, so every MPI call the scope made
             // happens-before the `MPI_Finalize` that follows the wait.
-            LIVE_SCOPES.fetch_sub(1, Ordering::Release);
+            shard.0.fetch_sub(1, Ordering::Release);
         }
     }
 }
 
-/// This thread's shard, taken round-robin on first use and kept.
+/// This thread's shard of `shards`, taken round-robin on first use and kept.
+/// `IN_FLIGHT` and `LIVE_SCOPES` both go through it, so a thread uses one index
+/// in both.
 #[inline]
-fn shard() -> &'static Shard {
+fn shard(shards: &'static [Shard; SHARDS]) -> &'static Shard {
     let index = SHARD.with(Cell::get);
     if index < SHARDS {
-        &IN_FLIGHT[index]
+        &shards[index]
     } else {
-        assign_shard()
+        assign_shard(shards)
     }
 }
 
 #[cold]
 #[inline(never)]
-fn assign_shard() -> &'static Shard {
+fn assign_shard(shards: &'static [Shard; SHARDS]) -> &'static Shard {
     // Relaxed: the counter only spreads threads over shards; it orders
     // nothing.
     let index = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS;
     SHARD.with(|cell| cell.set(index));
-    &IN_FLIGHT[index]
+    &shards[index]
 }
 
 /// Move `Uninit` to `Initializing`, serialising concurrent
@@ -220,6 +224,7 @@ pub(crate) fn open_scope() -> std::result::Result<ScopeToken, c_int> {
     if state == FINALIZING || state == FINALIZED {
         return Err(FERROMPI_ERR_FINALIZED);
     }
+    let counted_in;
     if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
         if ON_INIT_THREAD.with(Cell::get) {
             // Uncounted: at `Single`/`Funneled` only the init thread can create
@@ -227,30 +232,32 @@ pub(crate) fn open_scope() -> std::result::Result<ScopeToken, c_int> {
             // thread and skips `MPI_Finalize` while `scopes_on_this_thread()`
             // is positive. No other thread's wait needs to see this scope.
             SCOPES_HERE.with(|here| here.set(here.get() + 1));
-            return Ok(ScopeToken { counted: false });
+            return Ok(ScopeToken(None));
         }
+        counted_in = shard(&LIVE_SCOPES);
         // Relaxed: a scope on another thread holds no request at this level, so
         // only its count matters, not its order.
-        LIVE_SCOPES.fetch_add(1, Ordering::Relaxed);
+        counted_in.0.fetch_add(1, Ordering::Relaxed);
     } else {
+        counted_in = shard(&LIVE_SCOPES);
         // SeqCst: the increment of the pair with `begin_finalize`'s
         // `Finalizing` store, as in `enter_counted`. Either the wait sees this
         // count or the re-check below sees that store. Every other state takes
         // this path, `Uninit` and `Initializing` included: a thread may open a
         // scope before `Mpi` is initialized and post its first request after,
         // and only this pair orders that count before the finalizer's wait.
-        LIVE_SCOPES.fetch_add(1, Ordering::SeqCst);
+        counted_in.0.fetch_add(1, Ordering::SeqCst);
         // SeqCst: reads `Finalizing` or `Finalized` if that store precedes the
         // increment in the SeqCst order.
         let state = STATE.load(Ordering::SeqCst);
         if state == FINALIZING || state == FINALIZED {
-            LIVE_SCOPES.fetch_sub(1, Ordering::Release);
+            counted_in.0.fetch_sub(1, Ordering::Release);
             return Err(FERROMPI_ERR_FINALIZED);
         }
     }
     SCOPES_HERE.with(|here| here.set(here.get() + 1));
     COUNTED_HERE.with(|here| here.set(here.get() + 1));
-    Ok(ScopeToken { counted: true })
+    Ok(ScopeToken(Some(counted_in)))
 }
 
 /// How many nonblocking scopes are open on the calling thread.
@@ -261,12 +268,40 @@ pub(crate) fn scopes_on_this_thread() -> usize {
 /// Waits until every counted scope open on another thread has closed. No
 /// timeout: a scope that never ends blocks this wait, as a blocked MPI call
 /// blocks [`drain_shards`].
+///
+/// It spins until the sum of the shards equals this thread's own counted
+/// scopes. Another thread's scope may be on any shard, this thread's own
+/// included, so the wait reads them all; the sum reaches that count only when
+/// every shard is at its floor. The shards are read one after another, not as a
+/// snapshot, and the sum is still exact:
+/// - A scope adds one to a shard and later takes one from that same shard. So
+///   by coherence a shard never reads below its floor, this thread's own
+///   scopes on it, the sum never reads below `here`, and it equals `here` only
+///   if no shard reads another thread's scope. A scope never moves between
+///   shards, so the reads need no common instant.
+/// - The `Finalizing` store precedes every load below. An open on the SeqCst
+///   path has its increment either before the load of its shard in the SeqCst
+///   order, so the load sees it unless it also sees the scope's decrement, or
+///   after, and then its re-check reads `Finalizing`, the open fails and takes
+///   the count back. A back-out only raises a reading for a moment: it can
+///   delay this wait, not end it early.
+/// - Every write to a shard is a read-modify-write, so each Release decrement
+///   heads a release sequence holding all later writes, whichever thread made
+///   them. A load that sees a shard without a scope's count read that scope's
+///   decrement or a later write, and so acquires every MPI call the scope made.
+/// - An open at `Single`/`Funneled` on another thread takes the Relaxed path
+///   with no re-check. It holds no request, so this wait need not see it.
 #[cold]
 fn wait_for_other_scopes() {
     let here = COUNTED_HERE.with(Cell::get);
     // SeqCst: the load of the pair with `open_scope`'s increment, and an
-    // acquire of the Release decrement it observes.
-    while LIVE_SCOPES.load(Ordering::SeqCst) != here {
+    // acquire of the release sequence the value it reads belongs to.
+    while LIVE_SCOPES
+        .iter()
+        .map(|shard| shard.0.load(Ordering::SeqCst))
+        .sum::<usize>()
+        != here
+    {
         for _ in 0..64 {
             std::hint::spin_loop();
         }
@@ -479,7 +514,7 @@ fn check_finalized(code: c_int) -> c_int {
 /// the re-check refuses only `Finalized`; otherwise `Finalizing` too.
 #[inline]
 fn enter_counted(completion: bool) -> std::result::Result<InFlight, c_int> {
-    let shard = shard();
+    let shard = shard(&IN_FLIGHT);
     // SeqCst: the increment of the pair with `begin_finalize`'s `Finalizing`
     // store and `end_finalize`'s `Finalized` store. It is ordered before the
     // re-check below, so either the drain sees this count or the re-check
@@ -648,23 +683,34 @@ mod tests {
         assert_eq!(UNDER_TEST.0.load(Ordering::SeqCst), 0);
     }
 
+    fn index_of(shards: &'static [Shard; SHARDS]) -> usize {
+        let mine = shard(shards);
+        shards
+            .iter()
+            .position(|s| ptr::eq(s, mine))
+            .expect("a thread's shard is in its array")
+    }
+
     #[test]
     fn shard_is_stable_per_thread() {
-        let first = shard();
-        assert!(ptr::eq(first, shard()));
+        let first = shard(&IN_FLIGHT);
+        assert!(ptr::eq(first, shard(&IN_FLIGHT)));
         assert!(IN_FLIGHT.iter().any(|s| ptr::eq(s, first)));
+        assert_eq!(index_of(&IN_FLIGHT), index_of(&LIVE_SCOPES));
 
         std::thread::scope(|s| {
             s.spawn(|| {
-                let mine = shard();
-                assert!(ptr::eq(mine, shard()));
+                let mine = shard(&IN_FLIGHT);
+                assert!(ptr::eq(mine, shard(&IN_FLIGHT)));
                 assert!(IN_FLIGHT.iter().any(|s| ptr::eq(s, mine)));
+                assert_eq!(index_of(&IN_FLIGHT), index_of(&LIVE_SCOPES));
             })
             .join()
             .expect("shard thread panicked");
         });
-        assert!(ptr::eq(first, shard()));
+        assert!(ptr::eq(first, shard(&IN_FLIGHT)));
         assert_eq!(IN_FLIGHT.len(), SHARDS);
+        assert_eq!(LIVE_SCOPES.len(), SHARDS);
     }
 
     #[test]
@@ -698,9 +744,10 @@ mod tests {
         assert_eq!((scopes_on_this_thread(), counted_here()), (0, 0));
         let token = open_scope().expect("an uninitialized process opens a scope");
         assert_eq!((scopes_on_this_thread(), counted_here()), (1, 1));
-        // Other tests open scopes concurrently, so the global count is only
-        // bounded below by this thread's own.
-        assert!(LIVE_SCOPES.load(Ordering::SeqCst) >= counted_here());
+        // Other tests open scopes concurrently, so the sum of the shards is
+        // only bounded below by this thread's own.
+        let live: usize = LIVE_SCOPES.iter().map(|s| s.0.load(Ordering::SeqCst)).sum();
+        assert!(live >= counted_here());
         drop(token);
         assert_eq!((scopes_on_this_thread(), counted_here()), (0, 0));
     }

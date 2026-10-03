@@ -246,6 +246,16 @@ fn compare_threads(
     );
 }
 
+/// A case with no direct arm: the median over `ROUNDS` rounds of
+/// `ns_per_call_threads`, after one warm-up round.
+fn ferrompi_threads(name: &str, threads: usize, iters: usize, ferrompi: impl Fn() + Sync) {
+    ns_per_call_threads(threads, iters / 4 + 1, &ferrompi);
+    let mut ns: Vec<f64> = (0..ROUNDS)
+        .map(|_| ns_per_call_threads(threads, iters, &ferrompi))
+        .collect();
+    println!("{name:<34} ferrompi {:>8.1} ns", median(&mut ns));
+}
+
 fn main() {
     let requested =
         std::env::var_os("FERROMPI_BENCH_LEVEL").map(|v| v.to_string_lossy().into_owned());
@@ -744,6 +754,18 @@ fn main() {
         // joined.
         unsafe {
             MPI_Group_free(&mut g);
+        }
+    }
+
+    // scope empty: a scope that holds no request, so the cost is the scope's own
+    // open and close; there is no direct arm. T=8 runs only at Multiple.
+    {
+        let empty = || {
+            ferrompi::scope(|_| Ok(())).unwrap();
+        };
+        ferrompi_threads("scope empty T=1", 1, 200_000, empty);
+        if level == ThreadLevel::Multiple {
+            ferrompi_threads("scope empty T=8", 8, 200_000, empty);
         }
     }
 }
