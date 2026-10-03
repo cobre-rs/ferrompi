@@ -278,7 +278,7 @@ fn wait_for_other_scopes() {
 /// `Drop` path has returned. No timeout: a thread blocked forever inside an
 /// MPI call blocks this wait, as it would block `MPI_Finalize`.
 #[cold]
-pub(crate) fn drain_shards() {
+fn drain_shards() {
     for shard in &IN_FLIGHT {
         // SeqCst: the shard load of the pair with `enter_counted`'s increment,
         // and an acquire of the Release decrement it observes.
@@ -431,7 +431,7 @@ fn enter_other_completion(state: u8) -> std::result::Result<InFlight, c_int> {
 /// the same states. [`check_completion`], for the two `wait` pre-checks, builds
 /// on it; their guarded `ffi` call takes the token.
 #[inline(always)]
-pub(crate) fn check() -> c_int {
+fn check() -> c_int {
     // Relaxed: see `enter`'s comment.
     let state = STATE.load(Ordering::Relaxed);
     if state == FINALIZING || state == FINALIZED {

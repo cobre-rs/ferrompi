@@ -328,6 +328,15 @@ pub struct Scope<'s, 'env: 's> {
 ///   That is the case when MPI refuses the final wait, and when an error
 ///   leaves the state of every request unknown.
 ///
+/// # Thread level
+///
+/// A scope that ends with requests pending makes `MPI_Waitall` calls on the
+/// thread that opened it: one, repeated after a partial failure. At
+/// [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized) the program must
+/// serialize them with its other MPI calls, as for any other call; in a debug
+/// build, an overlap with another thread's MPI call makes the scope print a
+/// message and abort the process.
+///
 /// # Finalize
 ///
 /// [`Mpi`](crate::Mpi)'s drop waits for a scope open on another thread, with
