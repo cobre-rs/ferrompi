@@ -12,15 +12,11 @@
 //!    reporting the empty status.
 // mpi-test: np=2
 
-use ferrompi::{Error, Mpi, ReduceOp, Result, Source, Status, Tag};
+use ferrompi::{Error, Mpi, ReduceOp, Result};
 #[cfg(feature = "rma")]
 use ferrompi::{LockType, Win};
 
 mod common;
-
-fn is_empty_status(st: &Status) -> bool {
-    st.source == Source::Any && st.tag == Tag::Any && st.count == Some(0) && st.error.is_none()
-}
 
 fn main() -> Result<()> {
     let mpi = Mpi::init()?;
@@ -38,7 +34,7 @@ fn main() -> Result<()> {
             let complete = req.get_status()?;
             assert!(!complete, "get_status must report incomplete before cancel");
             req.cancel()?;
-            Ok(is_empty_status(&req.wait()?))
+            Ok(common::is_empty_status(&req.wait()?))
         })?;
         println!("rank 1: cancel+wait completed");
     }
@@ -67,7 +63,7 @@ fn main() -> Result<()> {
         common::check(&world, recv_ok, "iallreduce completes after refused cancel");
         common::check(
             &world,
-            is_empty_status(&status),
+            common::is_empty_status(&status),
             "iallreduce waits to the empty status",
         );
     }
@@ -83,7 +79,7 @@ fn main() -> Result<()> {
         let status = req.wait()?;
         common::check(
             &world,
-            is_empty_status(&status),
+            common::is_empty_status(&status),
             "rput waits to the empty status",
         );
         drop(guard);

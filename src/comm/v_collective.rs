@@ -941,20 +941,14 @@ impl Communicator {
         let (rp, _, _) = vec_buf_mut(&mut recv);
         let (counts, [cp, dp]) = copy_arrays([recvcounts, displs]);
         // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
-        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
-        // sits between it and its allocation and the accessors' slices are its children.
-        // The two Vecs are distinct allocations. At root, recvcounts and displs are checked
-        // above to have size() entries, non-negative counts, and each positive-count block
-        // inside recv; at non-root MPI does not read recvcounts or displs, so they are
-        // unchecked here. `cp` and `dp` point into `counts`, the request's own copy of both
-        // arrays, taken after the check and from the Vec itself. The returned request owns
-        // `send`, `recv` and `counts` until it is freed, and moving a `Vec` leaves its
-        // allocation in place. The allocations are never resized, because the accessors
-        // hand out slices only and nothing reaches `counts`. From start() to completion MPI
-        // is the only user of the buffers, because the accessors refuse while the request is
-        // active, and Drop leaks all three when MPI may still use them. If the call fails,
-        // MPI recorded nothing (or the shim freed the inactive request), and all three are
-        // dropped here.
+        // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
+        // allocations. At root, recvcounts and displs are checked above to have size()
+        // entries, non-negative counts, and each positive-count block inside recv; at
+        // non-root MPI does not read recvcounts or displs, so they are unchecked here. `cp`
+        // and `dp` point into `counts`, the request's own copy of both arrays, taken after
+        // the check and from the Vec itself. The request built below owns `send`, `recv`
+        // and `counts` under the ownership invariant documented on
+        // `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_gatherv_init(
                 sp,
@@ -1048,20 +1042,14 @@ impl Communicator {
         let (rp, n, dt) = vec_buf_mut(&mut recv);
         let (counts, [cp, dp]) = copy_arrays([sendcounts, displs]);
         // SAFETY: `sp`, `rp` and `n` describe the heap allocations of `send` and `recv`,
-        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
-        // sits between it and its allocation and the accessors' slices are its children.
-        // The two Vecs are distinct allocations, and `send` is ignored by MPI at non-root.
-        // At root, sendcounts and displs are checked above to have size() entries,
-        // non-negative counts, and each positive-count block inside send; at non-root MPI
-        // does not read sendcounts or displs, so they are unchecked here. `cp` and `dp`
-        // point into `counts`, the request's own copy of both arrays, taken after the check
-        // and from the Vec itself. The returned request owns `send`, `recv` and `counts`
-        // until it is freed, and moving a `Vec` leaves its allocation in place. The
-        // allocations are never resized, because the accessors hand out slices only and
-        // nothing reaches `counts`. From start() to completion MPI is the only user of the
-        // buffers, because the accessors refuse while the request is active, and Drop leaks
-        // all three when MPI may still use them. If the call fails, MPI recorded nothing (or
-        // the shim freed the inactive request), and all three are dropped here.
+        // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
+        // allocations, and `send` is ignored by MPI at non-root. At root, sendcounts and
+        // displs are checked above to have size() entries, non-negative counts, and each
+        // positive-count block inside send; at non-root MPI does not read sendcounts or
+        // displs, so they are unchecked here. `cp` and `dp` point into `counts`, the
+        // request's own copy of both arrays, taken after the check and from the Vec itself.
+        // The request built below owns `send`, `recv` and `counts` under the ownership
+        // invariant documented on `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_scatterv_init(
                 sp,
@@ -1149,19 +1137,13 @@ impl Communicator {
         let (rp, _, _) = vec_buf_mut(&mut recv);
         let (counts, [cp, dp]) = copy_arrays([recvcounts, displs]);
         // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
-        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
-        // sits between it and its allocation and the accessors' slices are its children.
-        // The two Vecs are distinct allocations. recvcounts and displs are checked above,
-        // on every rank, to have size() entries, non-negative counts, and each
-        // positive-count block inside recv. `cp` and `dp` point into `counts`, the
-        // request's own copy of both arrays, taken after the check and from the Vec itself.
-        // The returned request owns `send`, `recv` and `counts` until it is freed, and
-        // moving a `Vec` leaves its allocation in place. The allocations are never resized,
-        // because the accessors hand out slices only and nothing reaches `counts`. From
-        // start() to completion MPI is the only user of the buffers, because the accessors
-        // refuse while the request is active, and Drop leaks all three when MPI may still
-        // use them. If the call fails, MPI recorded nothing (or the shim freed the inactive
-        // request), and all three are dropped here.
+        // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
+        // allocations. recvcounts and displs are checked above, on every rank, to have
+        // size() entries, non-negative counts, and each positive-count block inside recv.
+        // `cp` and `dp` point into `counts`, the request's own copy of both arrays, taken
+        // after the check and from the Vec itself. The request built below owns `send`,
+        // `recv` and `counts` under the ownership invariant documented on
+        // `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_allgatherv_init(sp, n, rp, cp, dp, dt, self.handle, &mut request_handle)
         };
@@ -1256,20 +1238,14 @@ impl Communicator {
         let (rp, _, _) = vec_buf_mut(&mut recv);
         let (counts, [scp, sdp, rcp, rdp]) =
             copy_arrays([sendcounts, sdispls, recvcounts, rdispls]);
-        // SAFETY: `sp` and `rp` describe the heap allocations of `send` and `recv`, and each
-        // pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference sits between
-        // it and its allocation and the accessors' slices are its children. The two Vecs are
-        // distinct allocations. sendcounts/sdispls and recvcounts/rdispls are each checked
-        // above, on every rank, to have size() entries, non-negative counts, and each
-        // positive-count block inside send/recv respectively. `scp`, `sdp`, `rcp` and `rdp`
-        // point into `counts`, the request's own copy of the four arrays, taken after the
-        // checks and from the Vec itself. The returned request owns `send`, `recv` and
-        // `counts` until it is freed, and moving a `Vec` leaves its allocation in place. The
-        // allocations are never resized, because the accessors hand out slices only and
-        // nothing reaches `counts`. From start() to completion MPI is the only user of the
-        // buffers, because the accessors refuse while the request is active, and Drop leaks
-        // all three when MPI may still use them. If the call fails, MPI recorded nothing (or
-        // the shim freed the inactive request), and all three are dropped here.
+        // SAFETY: `sp` and `rp` describe the heap allocations of `send` and `recv`, taken
+        // from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct allocations.
+        // sendcounts/sdispls and recvcounts/rdispls are each checked above, on every rank,
+        // to have size() entries, non-negative counts, and each positive-count block inside
+        // send/recv respectively. `scp`, `sdp`, `rcp` and `rdp` point into `counts`, the
+        // request's own copy of the four arrays, taken after the checks and from the Vec
+        // itself. The request built below owns `send`, `recv` and `counts` under the
+        // ownership invariant documented on `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_alltoallv_init(
                 sp,

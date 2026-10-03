@@ -21,10 +21,6 @@ fn is_proc_null_status(st: &Status) -> bool {
     st.source == Source::ProcNull && st.tag == Tag::Any && st.count == Some(0) && st.error.is_none()
 }
 
-fn is_empty_status(st: &Status) -> bool {
-    st.source == Source::Any && st.tag == Tag::Any && st.count == Some(0) && st.error.is_none()
-}
-
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -153,7 +149,7 @@ fn main() {
     common::check(&world, r.is_ok(), "isend to ProcNull completes");
     common::check(
         &world,
-        r.as_ref().is_ok_and(is_empty_status),
+        r.as_ref().is_ok_and(common::is_empty_status),
         "isend to ProcNull waits to the empty status",
     );
 
@@ -183,7 +179,7 @@ fn main() {
         for _ in 0..3 {
             let r = request.start().and_then(|()| request.wait());
             sends_ok &= r.is_ok();
-            send_statuses_ok &= r.as_ref().is_ok_and(is_empty_status);
+            send_statuses_ok &= r.as_ref().is_ok_and(common::is_empty_status);
         }
     }
     common::check(

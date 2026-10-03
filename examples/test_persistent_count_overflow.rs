@@ -14,7 +14,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_count_overflow
 // mpi-test: np=2
 
-use ferrompi::{Error, Mpi, MpiErrorClass};
+use ferrompi::{Error, Mpi};
 
 mod common;
 
@@ -42,13 +42,7 @@ fn main() {
     let ok = if common::mpi_major() >= 4 {
         p2p.is_ok() && coll.is_ok()
     } else {
-        let p2p_ok = matches!(
-            &p2p,
-            Err(Error::Mpi {
-                class: MpiErrorClass::Count,
-                ..
-            })
-        );
+        let p2p_ok = common::is_count(&p2p);
         let coll_ok = if common::has_mpi4_collectives() {
             common::is_count(&coll)
         } else {

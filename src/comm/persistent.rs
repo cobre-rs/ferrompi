@@ -45,15 +45,9 @@ impl Communicator {
     ) -> Result<PersistentRequest<T>> {
         let mut request_handle: i64 = 0;
         let (p, n, dt) = vec_buf_mut(&mut data);
-        // SAFETY: `p` and `n` describe `data`'s heap allocation, and `p` comes from
-        // `Vec::as_mut_ptr`, so no slice reference sits between it and the allocation and
-        // the accessors' slices are its children. The returned request owns `data` until
-        // it is freed, and moving a `Vec` leaves its allocation in place. The allocation
-        // is never resized, because the accessors hand out slices only. From start() to
-        // completion MPI is its only user, because the accessors refuse while the request
-        // is active, and Drop leaks it when MPI may still use it. If the call fails, MPI
-        // recorded nothing (or the shim freed the inactive request), and `data` is dropped
-        // here.
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, taken from the `Vec` by
+        // `vec_buf_mut`. The request built below owns `data` under the ownership invariant
+        // documented on `PersistentRequest::new_pair`.
         let ret =
             unsafe { ffi::ferrompi_bcast_init(p, n, dt, root, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "broadcast_init")?;
@@ -111,17 +105,11 @@ impl Communicator {
         let (sp, n, dt) = vec_buf(&send);
         let (rp, _, _) = vec_buf_mut(&mut recv);
         // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
-        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
-        // sits between it and its allocation and the accessors' slices are its children.
-        // The two Vecs are distinct allocations, or both empty. send.len() == recv.len()
-        // is verified above. The returned request owns both Vecs until it is freed, and
-        // moving a `Vec` leaves its allocation in place. The allocations are never
-        // resized, because the accessors hand out slices only. From start() to
-        // completion MPI is their only user, because the accessors refuse while the
-        // request is active, and Drop leaks them when MPI may still use them. A user op
-        // is cloned into the request below, so its closure outlives every start. If the
-        // call fails, MPI recorded nothing (or the shim freed the inactive request), and
-        // both Vecs are dropped here.
+        // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
+        // allocations, or both empty. send.len() == recv.len() is verified above. The
+        // request built below owns both under the ownership invariant documented on
+        // `PersistentRequest::new_pair`, and a user op is cloned into it, so its closure
+        // outlives every start.
         let ret = unsafe {
             ffi::ferrompi_allreduce_init(sp, rp, n, dt, code, self.handle, &mut request_handle)
         };
@@ -158,18 +146,13 @@ impl Communicator {
         let code = op.code(T::TAG)?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = vec_buf_mut(&mut data);
-        // SAFETY: `p` and `n` describe `data`'s heap allocation, and `p` comes from
-        // `Vec::as_mut_ptr`, so no slice reference sits between it and the allocation and
-        // the accessors' slices are its children. NULL sendbuf is the in-place marker (a
-        // Vec's pointer is never null, so this NULL is unambiguous);
-        // ferrompi_allreduce_init maps it to MPI_IN_PLACE, so data serves as both send and
-        // receive buffer. The returned request owns `data` until it is freed, and moving a
-        // `Vec` leaves its allocation in place. The allocation is never resized, because
-        // the accessors hand out slices only. From start() to completion MPI is its only
-        // user, because the accessors refuse while the request is active, and Drop leaks
-        // it when MPI may still use it. A user op is cloned into the request below, so its
-        // closure outlives every start. If the call fails, MPI recorded nothing (or the
-        // shim freed the inactive request), and `data` is dropped here.
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, taken from the `Vec` by
+        // `vec_buf_mut`. NULL sendbuf is the in-place marker (a Vec's pointer is never
+        // null, so this NULL is unambiguous); ferrompi_allreduce_init maps it to
+        // MPI_IN_PLACE, so data serves as both send and receive buffer. The request built
+        // below owns `data` under the ownership invariant documented on
+        // `PersistentRequest::new_pair`, and a user op is cloned into it, so its closure
+        // outlives every start.
         let ret = unsafe {
             ffi::ferrompi_allreduce_init(
                 std::ptr::null(),
@@ -242,18 +225,12 @@ impl Communicator {
         let (sp, n, dt) = vec_buf(&send);
         let (rp, _, _) = vec_buf_mut(&mut recv);
         // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
-        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
-        // sits between it and its allocation and the accessors' slices are its children.
-        // The two Vecs are distinct allocations, or `recv` is empty. send.len() ==
-        // recv.len() is verified above at the root; MPI ignores recvbuf at every other
-        // rank (MPI-4.1 section 6.9.1), where `recv` may be empty. The returned request
-        // owns both Vecs until it is freed, and moving a `Vec` leaves its allocation in
-        // place. The allocations are never resized, because the accessors hand out slices
-        // only. From start() to completion MPI is their only user, because the accessors
-        // refuse while the request is active, and Drop leaks them when MPI may still use
-        // them. A user op is cloned into the request below, so its closure outlives every
-        // start. If the call fails, MPI recorded nothing (or the shim freed the inactive
-        // request), and both Vecs are dropped here.
+        // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
+        // allocations, or `recv` is empty. send.len() == recv.len() is verified above at
+        // the root; MPI ignores recvbuf at every other rank (MPI-4.1 section 6.9.1), where
+        // `recv` may be empty. The request built below owns both under the ownership
+        // invariant documented on `PersistentRequest::new_pair`, and a user op is cloned
+        // into it, so its closure outlives every start.
         let ret = unsafe {
             ffi::ferrompi_reduce_init(sp, rp, n, dt, code, root, self.handle, &mut request_handle)
         };
@@ -312,17 +289,11 @@ impl Communicator {
         let (sp, n, dt) = vec_buf(&send);
         let (rp, _, _) = vec_buf_mut(&mut recv);
         // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
-        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
-        // sits between it and its allocation and the accessors' slices are its children.
-        // The two Vecs are distinct allocations, and `recv` is ignored by MPI at non-root.
-        // The root-side receive-length relation (recv.len() >= send.len() * size) is
-        // checked above. The returned request owns both Vecs until it is freed, and moving
-        // a `Vec` leaves its allocation in place. The allocations are never resized,
-        // because the accessors hand out slices only. From start() to completion MPI is
-        // their only user, because the accessors refuse while the request is active, and
-        // Drop leaks them when MPI may still use them. If the call fails, MPI recorded
-        // nothing (or the shim freed the inactive request), and both Vecs are dropped
-        // here.
+        // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
+        // allocations, and `recv` is ignored by MPI at non-root. The root-side
+        // receive-length relation (recv.len() >= send.len() * size) is checked above. The
+        // request built below owns both under the ownership invariant documented on
+        // `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_gather_init(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
@@ -385,16 +356,11 @@ impl Communicator {
         let (sp, _, _) = vec_buf(&send);
         let (rp, n, dt) = vec_buf_mut(&mut recv);
         // SAFETY: `sp`, `rp` and `n` describe the heap allocations of `send` and `recv`,
-        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
-        // sits between it and its allocation and the accessors' slices are its children.
-        // The two Vecs are distinct allocations, and `send` is ignored by MPI at non-root.
-        // The root-side send-length relation (send.len() >= recv.len() * size) is checked
-        // above. The returned request owns both Vecs until it is freed, and moving a `Vec`
-        // leaves its allocation in place. The allocations are never resized, because the
-        // accessors hand out slices only. From start() to completion MPI is their only
-        // user, because the accessors refuse while the request is active, and Drop leaks
-        // them when MPI may still use them. If the call fails, MPI recorded nothing (or
-        // the shim freed the inactive request), and both Vecs are dropped here.
+        // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
+        // allocations, and `send` is ignored by MPI at non-root. The root-side send-length
+        // relation (send.len() >= recv.len() * size) is checked above. The request built
+        // below owns both under the ownership invariant documented on
+        // `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_scatter_init(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
@@ -450,16 +416,10 @@ impl Communicator {
         let (sp, n, dt) = vec_buf(&send);
         let (rp, _, _) = vec_buf_mut(&mut recv);
         // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
-        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
-        // sits between it and its allocation and the accessors' slices are its children.
-        // The two Vecs are distinct allocations. The every-rank receive-length relation
-        // (recv.len() >= send.len() * size) is checked above. The returned request owns
-        // both Vecs until it is freed, and moving a `Vec` leaves its allocation in place.
-        // The allocations are never resized, because the accessors hand out slices only.
-        // From start() to completion MPI is their only user, because the accessors refuse
-        // while the request is active, and Drop leaks them when MPI may still use them. If
-        // the call fails, MPI recorded nothing (or the shim freed the inactive request),
-        // and both Vecs are dropped here.
+        // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
+        // allocations. The every-rank receive-length relation (recv.len() >= send.len() *
+        // size) is checked above. The request built below owns both under the ownership
+        // invariant documented on `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_allgather_init(sp, n, rp, n, dt, self.handle, &mut request_handle)
         };
@@ -521,17 +481,11 @@ impl Communicator {
         let (sp, n, dt) = vec_buf(&send);
         let (rp, _, _) = vec_buf_mut(&mut recv);
         // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
-        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
-        // sits between it and its allocation and the accessors' slices are its children.
-        // The two Vecs are distinct allocations, or both empty. send.len() == recv.len()
-        // is verified above. The returned request owns both Vecs until it is freed, and
-        // moving a `Vec` leaves its allocation in place. The allocations are never
-        // resized, because the accessors hand out slices only. From start() to
-        // completion MPI is their only user, because the accessors refuse while the
-        // request is active, and Drop leaks them when MPI may still use them. A user op
-        // is cloned into the request below, so its closure outlives every start. If the
-        // call fails, MPI recorded nothing (or the shim freed the inactive request), and
-        // both Vecs are dropped here.
+        // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
+        // allocations, or both empty. send.len() == recv.len() is verified above. The
+        // request built below owns both under the ownership invariant documented on
+        // `PersistentRequest::new_pair`, and a user op is cloned into it, so its closure
+        // outlives every start.
         let ret = unsafe {
             ffi::ferrompi_scan_init(sp, rp, n, dt, code, self.handle, &mut request_handle)
         };
@@ -591,17 +545,11 @@ impl Communicator {
         let (sp, n, dt) = vec_buf(&send);
         let (rp, _, _) = vec_buf_mut(&mut recv);
         // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
-        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
-        // sits between it and its allocation and the accessors' slices are its children.
-        // The two Vecs are distinct allocations, or both empty. send.len() == recv.len()
-        // is verified above. MPI leaves recv undefined on rank 0, documented above. The
-        // returned request owns both Vecs until it is freed, and moving a `Vec` leaves
-        // its allocation in place. The allocations are never resized, because the
-        // accessors hand out slices only. From start() to completion MPI is their only
-        // user, because the accessors refuse while the request is active, and Drop leaks
-        // them when MPI may still use them. A user op is cloned into the request below,
-        // so its closure outlives every start. If the call fails, MPI recorded nothing
-        // (or the shim freed the inactive request), and both Vecs are dropped here.
+        // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
+        // allocations, or both empty. send.len() == recv.len() is verified above. MPI
+        // leaves recv undefined on rank 0, documented above. The request built below owns
+        // both under the ownership invariant documented on `PersistentRequest::new_pair`,
+        // and a user op is cloned into it, so its closure outlives every start.
         let ret = unsafe {
             ffi::ferrompi_exscan_init(sp, rp, n, dt, code, self.handle, &mut request_handle)
         };
@@ -650,17 +598,11 @@ impl Communicator {
         let mut request_handle: i64 = 0;
         let (sp, _, dt) = vec_buf(&send);
         let (rp, _, _) = vec_buf_mut(&mut recv);
-        // SAFETY: `sp` and `rp` describe the heap allocations of `send` and `recv`, and
-        // each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference sits
-        // between it and its allocation and the accessors' slices are its children. The
-        // two Vecs are distinct allocations. send.len() == recv.len() and divisibility by
-        // size are both verified above. The returned request owns both Vecs until it is
-        // freed, and moving a `Vec` leaves its allocation in place. The allocations are
-        // never resized, because the accessors hand out slices only. From start() to
-        // completion MPI is their only user, because the accessors refuse while the
-        // request is active, and Drop leaks them when MPI may still use them. If the call
-        // fails, MPI recorded nothing (or the shim freed the inactive request), and both
-        // Vecs are dropped here.
+        // SAFETY: `sp` and `rp` describe the heap allocations of `send` and `recv`, taken
+        // from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct allocations.
+        // send.len() == recv.len() and divisibility by size are both verified above. The
+        // request built below owns both under the ownership invariant documented on
+        // `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_alltoall_init(
                 sp,
@@ -738,17 +680,11 @@ impl Communicator {
         let (sp, _, _) = vec_buf(&send);
         let (rp, n, dt) = vec_buf_mut(&mut recv);
         // SAFETY: `sp`, `rp` and `n` describe the heap allocations of `send` and `recv`,
-        // and each pointer comes from `Vec::as_ptr`/`as_mut_ptr`, so no slice reference
-        // sits between it and its allocation and the accessors' slices are its children.
-        // The two Vecs are distinct allocations, or both empty. send.len() == recv.len() *
-        // size is verified above. The returned request owns both Vecs until it is freed,
-        // and moving a `Vec` leaves its allocation in place. The allocations are never
-        // resized, because the accessors hand out slices only. From start() to
-        // completion MPI is their only user, because the accessors refuse while the
-        // request is active, and Drop leaks them when MPI may still use them. A user op
-        // is cloned into the request below, so its closure outlives every start. If the
-        // call fails, MPI recorded nothing (or the shim freed the inactive request), and
-        // both Vecs are dropped here.
+        // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
+        // allocations, or both empty. send.len() == recv.len() * size is verified above.
+        // The request built below owns both under the ownership invariant documented on
+        // `PersistentRequest::new_pair`, and a user op is cloned into it, so its closure
+        // outlives every start.
         let ret = unsafe {
             ffi::ferrompi_reduce_scatter_block_init(
                 sp,
@@ -821,20 +757,14 @@ impl Communicator {
         let ret = if self.rank() == root {
             let recvcount = rank_block("data", data.len(), self.size)? as i64;
             let (p, _, dt) = vec_buf_mut(&mut data);
-            // SAFETY: `p` describes `data`'s heap allocation and comes from
-            // `Vec::as_mut_ptr`, so no slice reference sits between it and the allocation
-            // and the accessors' slices are its children. NULL sendbuf is the in-place
-            // marker (a Vec's pointer is never null, so this NULL is unambiguous);
-            // ferrompi_gather_init maps it to MPI_IN_PLACE, so data serves as both root's
-            // send contribution and the receive buffer. recvcount is checked to evenly
-            // divide data.len() above, and this branch runs only at root, the only rank
-            // MPI_IN_PLACE is valid for in MPI_Gather_init. The returned request owns
-            // `data` until it is freed, and moving a `Vec` leaves its allocation in place.
-            // The allocation is never resized, because the accessors hand out slices only.
-            // From start() to completion MPI is its only user, because the accessors
-            // refuse while the request is active, and Drop leaks it when MPI may still use
-            // it. If the call fails, MPI recorded nothing (or the shim freed the inactive
-            // request), and `data` is dropped.
+            // SAFETY: `p` describes `data`'s heap allocation, taken from the `Vec` by
+            // `vec_buf_mut`. NULL sendbuf is the in-place marker (a Vec's pointer is never
+            // null, so this NULL is unambiguous); ferrompi_gather_init maps it to
+            // MPI_IN_PLACE, so data serves as both root's send contribution and the
+            // receive buffer. recvcount is checked to evenly divide data.len() above, and
+            // this branch runs only at root, the only rank MPI_IN_PLACE is valid for in
+            // MPI_Gather_init. The request built below owns `data` under the ownership
+            // invariant documented on `PersistentRequest::new_pair`.
             unsafe {
                 ffi::ferrompi_gather_init(
                     std::ptr::null(),
@@ -849,18 +779,12 @@ impl Communicator {
             }
         } else {
             let (p, n, dt) = vec_buf_mut(&mut data);
-            // SAFETY: `p` and `n` describe `data`'s heap allocation, and `p` comes from
-            // `Vec::as_mut_ptr`, so no slice reference sits between it and the allocation
-            // and the accessors' slices are its children. p is non-null, so
-            // ferrompi_gather_init does not map it to MPI_IN_PLACE; data is this rank's
-            // send block. It is also passed as recvbuf because strict MPI builds reject a
-            // NULL recvbuf at non-root; MPI ignores recvbuf and recvcount there. The
-            // returned request owns `data` until it is freed, and moving a `Vec` leaves its
-            // allocation in place. The allocation is never resized, because the accessors
-            // hand out slices only. From start() to completion MPI is its only user,
-            // because the accessors refuse while the request is active, and Drop leaks it
-            // when MPI may still use it. If the call fails, MPI recorded nothing (or the
-            // shim freed the inactive request), and `data` is dropped.
+            // SAFETY: `p` and `n` describe `data`'s heap allocation, taken from the `Vec`
+            // by `vec_buf_mut`. p is non-null, so ferrompi_gather_init does not map it to
+            // MPI_IN_PLACE; data is this rank's send block. It is also passed as recvbuf
+            // because strict MPI builds reject a NULL recvbuf at non-root; MPI ignores
+            // recvbuf and recvcount there. The request built below owns `data` under the
+            // ownership invariant documented on `PersistentRequest::new_pair`.
             unsafe {
                 ffi::ferrompi_gather_init(p, n, p, n, dt, root, self.handle, &mut request_handle)
             }
@@ -912,18 +836,13 @@ impl Communicator {
         let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = vec_buf_mut(&mut data);
-        // SAFETY: `p` describes `data`'s heap allocation and comes from `Vec::as_mut_ptr`,
-        // so no slice reference sits between it and the allocation and the accessors'
-        // slices are its children. NULL sendbuf is the in-place marker (a Vec's pointer is
-        // never null, so this NULL is unambiguous); ferrompi_allgather_init maps it to
+        // SAFETY: `p` describes `data`'s heap allocation, taken from the `Vec` by
+        // `vec_buf_mut`. NULL sendbuf is the in-place marker (a Vec's pointer is never
+        // null, so this NULL is unambiguous); ferrompi_allgather_init maps it to
         // MPI_IN_PLACE. recvcount is checked to evenly divide data.len() above; each rank's
         // slot (at offset rank*recvcount) must be pre-written through buffer_mut() before
-        // each start(). The returned request owns `data` until it is freed, and moving a
-        // `Vec` leaves its allocation in place. The allocation is never resized, because
-        // the accessors hand out slices only. From start() to completion MPI is its only
-        // user, because the accessors refuse while the request is active, and Drop leaks it
-        // when MPI may still use it. If the call fails, MPI recorded nothing (or the shim
-        // freed the inactive request), and `data` is dropped here.
+        // each start(). The request built below owns `data` under the ownership invariant
+        // documented on `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_allgather_init(
                 std::ptr::null(),
@@ -994,21 +913,17 @@ impl Communicator {
         } else {
             (std::ptr::null(), p)
         };
-        // SAFETY: `p` describes `data`'s heap allocation and comes from `Vec::as_mut_ptr`,
-        // so no slice reference sits between it and the allocation and the accessors'
-        // slices are its children; the pointers scatter_inplace_args derived from a slice
-        // reborrow are discarded, and only its counts and tag are used. At root, recvbuf is
-        // NULL, the in-place marker (a Vec's pointer is never null, so this NULL is
+        // SAFETY: `p` describes `data`'s heap allocation, taken from the `Vec` by
+        // `vec_buf_mut`; the pointers scatter_inplace_args derived from a slice reborrow
+        // are discarded, and only its counts and tag are used. At root, recvbuf is NULL,
+        // the in-place marker (a Vec's pointer is never null, so this NULL is
         // unambiguous); ferrompi_scatter_init maps it to MPI_IN_PLACE so root's own slot is
         // retained, and sendbuf is `data`. The one `vec_buf_mut` pointer serves both
         // branches: it is recvbuf at non-root and, cast to const, sendbuf at root.
         // scatter_inplace_args checks that the block size evenly divides data.len(). At
-        // non-root, sendbuf is null, which the MPI standard ignores on non-root scatter. The returned request owns `data` until it is freed, and moving
-        // a `Vec` leaves its allocation in place. The allocation is never resized, because
-        // the accessors hand out slices only. From start() to completion MPI is its only
-        // user, because the accessors refuse while the request is active, and Drop leaks it
-        // when MPI may still use it. If the call fails, MPI recorded nothing (or the shim
-        // freed the inactive request), and `data` is dropped.
+        // non-root, sendbuf is null, which the MPI standard ignores on non-root scatter.
+        // The request built below owns `data` under the ownership invariant documented on
+        // `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_scatter_init(
                 sendbuf,
@@ -1076,18 +991,13 @@ impl Communicator {
         let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = vec_buf_mut(&mut data);
-        // SAFETY: `p` describes `data`'s heap allocation and comes from `Vec::as_mut_ptr`,
-        // so no slice reference sits between it and the allocation and the accessors'
-        // slices are its children. NULL sendbuf is the in-place marker (a Vec's pointer is
-        // never null, so this NULL is unambiguous); ferrompi_alltoall_init maps it to
+        // SAFETY: `p` describes `data`'s heap allocation, taken from the `Vec` by
+        // `vec_buf_mut`. NULL sendbuf is the in-place marker (a Vec's pointer is never
+        // null, so this NULL is unambiguous); ferrompi_alltoall_init maps it to
         // MPI_IN_PLACE. recvcount is checked to evenly divide data.len() above; the caller
         // must pre-write each slot through buffer_mut() before each start() call. The
-        // returned request owns `data` until it is freed, and moving a `Vec` leaves its
-        // allocation in place. The allocation is never resized, because the accessors hand
-        // out slices only. From start() to completion MPI is its only user, because the
-        // accessors refuse while the request is active, and Drop leaks it when MPI may
-        // still use it. If the call fails, MPI recorded nothing (or the shim freed the
-        // inactive request), and `data` is dropped here.
+        // request built below owns `data` under the ownership invariant documented on
+        // `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_alltoall_init(
                 std::ptr::null(),

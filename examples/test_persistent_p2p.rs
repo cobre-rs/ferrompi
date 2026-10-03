@@ -9,13 +9,9 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_p2p
 // mpi-test: np=2
 
-use ferrompi::{Mpi, Source, Status, Tag};
+use ferrompi::{Mpi, Source, Tag};
 
 mod common;
-
-fn is_empty_status(st: &Status) -> bool {
-    st.source == Source::Any && st.tag == Tag::Any && st.count == Some(0) && st.error.is_none()
-}
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -49,7 +45,7 @@ fn main() {
             }
             req.start().expect("start failed on rank 0");
             let st = req.wait().expect("wait failed on rank 0");
-            sends_empty &= is_empty_status(&st);
+            sends_empty &= common::is_empty_status(&st);
         }
 
         // Drop the request to exercise PersistentRequest::Drop cleanly.

@@ -793,10 +793,10 @@ fn main() {
     world.barrier().expect("barrier failed");
 
     // ========================================================================
-    // Test 18: drop without start (exercises Drop when active=false)
+    // Test 18: drop without start (exercises Drop of an inactive request)
     //
     // Creates a persistent request, does NOT start it, then drops it.
-    // This exercises the `!self.active` path in Drop (just calls request_free).
+    // This exercises Drop of an inactive request, which only frees it.
     // ========================================================================
     {
         let req = world
@@ -817,10 +817,10 @@ fn main() {
     world.barrier().expect("barrier failed");
 
     // ========================================================================
-    // Test 19: drop after start but before wait (exercises Drop when active=true)
+    // Test 19: drop after start but before wait (exercises Drop of an active request)
     //
     // Creates a persistent request, starts it, does NOT wait, then drops it.
-    // This exercises the `self.active` path in Drop (calls wait then request_free).
+    // This exercises Drop of an active request, which waits and then frees it.
     // The Drop impl will wait for completion, so this won't corrupt MPI state.
     // ========================================================================
     {

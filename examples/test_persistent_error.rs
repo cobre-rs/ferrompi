@@ -37,7 +37,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_error
 // mpi-test: np=2 valgrind
 
-use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, PersistentRequest};
+use ferrompi::{Communicator, Mpi, MpiErrorClass, PersistentRequest};
 
 mod common;
 
@@ -63,14 +63,7 @@ fn part1_wait(world: &Communicator, rank: i32, mpich: bool) {
             ok &= req.wait().is_ok();
             ok &= req.buffer().is_ok_and(|b| b == [5]);
         } else {
-            let start_result = req.start();
-            ok &= matches!(
-                start_result,
-                Err(Error::Mpi {
-                    class: MpiErrorClass::Request,
-                    ..
-                })
-            );
+            ok &= class_of(&req.start()) == Some(MpiErrorClass::Request);
             world.barrier().expect("part1: barrier C");
             world.barrier().expect("part1: barrier D");
         }

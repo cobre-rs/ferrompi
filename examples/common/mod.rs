@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, ReduceOp, Result};
+use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, ReduceOp, Result, Source, Status, Tag};
 
 /// Aggregates this rank's verdict across `world` via `allreduce(Min)`. If any
 /// rank reports failure, rank 0 prints `FAIL: {name}` and every rank exits
@@ -38,6 +38,12 @@ pub fn is_count<T>(r: &Result<T>) -> bool {
             ..
         })
     )
+}
+
+/// True iff `st` is the empty status: `Source::Any`, `Tag::Any`, a count of 0
+/// and no error.
+pub fn is_empty_status(st: &Status) -> bool {
+    st.source == Source::Any && st.tag == Tag::Any && st.count == Some(0) && st.error.is_none()
 }
 
 /// Parses the major version number from `Mpi::version()` (format `MPI

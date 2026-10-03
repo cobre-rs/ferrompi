@@ -220,6 +220,18 @@ impl<T> PersistentRequest<T> {
     /// Create a persistent request that owns a send buffer, a receive buffer
     /// and the copy of the count and displacement arrays a v-collective was
     /// given (empty for the other collectives).
+    ///
+    /// The `*_init` constructors hand MPI pointers into these `Vec`s, taken
+    /// from each `Vec` itself ([`vec_buf`], [`vec_buf_mut`], or `as_ptr` for
+    /// `counts`), and their `SAFETY` comments rely on this ownership invariant:
+    /// the request owns the `Vec`s until it is freed, and moving a `Vec` leaves
+    /// its allocation in place. The allocations are never resized, because the
+    /// accessors hand out slices only and nothing reaches `counts`. From
+    /// start() to completion MPI is the only user of the buffers, because the
+    /// accessors refuse while the request is active, and `Drop` leaks them when
+    /// MPI may still use them. If the init call fails, MPI recorded nothing (or
+    /// the shim freed the inactive request), and the constructor drops its
+    /// `Vec`s without building a request.
     pub(crate) fn new_pair(handle: i64, send: Vec<T>, buffer: Vec<T>, counts: Vec<i32>) -> Self {
         PersistentRequest {
             handle,
@@ -403,13 +415,11 @@ impl<T> PersistentRequest<T> {
         Ok(&self.buffer)
     }
 
-    /// The request's buffer for writing, while the request is inactive.
+    /// The request's buffer for writing, while the request is inactive: the
+    /// buffer [`buffer`](Self::buffer) reads.
     ///
     /// Write the next iteration's input here between `wait()` and the next
-    /// `start()`. For a collective with separate send and receive buffers it is
-    /// the receive buffer; reach the send buffer with
-    /// [`send_buffer_mut`](Self::send_buffer_mut). The slice cannot be resized,
-    /// because MPI holds a pointer into the allocation.
+    /// `start()`.
     ///
     /// # Errors
     ///
@@ -429,8 +439,7 @@ impl<T> PersistentRequest<T> {
     ///
     /// Write the next iteration's input here between `wait()` and the next
     /// `start()`. The slice is empty for a request that owns one buffer: a
-    /// point-to-point request, a broadcast or an in-place collective. The slice
-    /// cannot be resized, because MPI holds a pointer into the allocation.
+    /// point-to-point request, a broadcast or an in-place collective.
     ///
     /// # Errors
     ///

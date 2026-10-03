@@ -95,11 +95,13 @@ Outcome rules:
   every non-SKIP run, or the run fails.
 - A run whose output contains `MPI_Finalize skipped` fails unless the example
   declares `expect=unfinalized`.
+- A run whose output contains `FAIL` as a word fails in every mode, whatever
+  the exit status: `mpiexec` can return 0 for a job whose ranks all exited
+  non-zero, and a program that falls through to its own failure path after an
+  `MPI_Abort` that returned must still fail.
 - An `expect=abort` run passes when it exits non-zero with the `mpi-test-stderr`
-  literal in its output and no line starting `FAIL: ` (a program that falls
-  through to its own failure path after an `MPI_Abort` that returned still
-  fails, even if the exit code and stderr literal look right). One that exits
-  0 after a `SKIP:` line follows the SKIP rule above.
+  literal in its output. One that exits 0 after a `SKIP:` line follows the
+  SKIP rule above.
 
 `examples/common/mod.rs` has the shared helpers: `check` (aggregate a per-rank
 verdict via `allreduce(Min)` and report `FAIL: <name>` from rank 0), `skip` (print

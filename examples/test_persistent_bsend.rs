@@ -72,7 +72,6 @@ fn main() {
     // Detach the buffer on every rank (blocks until all buffered sends using
     // it have completed — rank 0's sends are already done at this point).
     let _buf = mpi.buffer_detach().expect("buffer_detach failed");
-    // _buf is dropped here; the allocation is freed.
 
     // Sentinel allreduce to confirm both ranks completed without error.
     let local: i64 = 1;
