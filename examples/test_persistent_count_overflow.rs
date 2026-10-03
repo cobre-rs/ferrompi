@@ -36,7 +36,7 @@ fn main() {
     let send = vec![0u8; N];
     let mut data = vec![0u8; N];
 
-    let p2p = world.send_init(&send, 1 - rank, 3);
+    let p2p = world.send_init(send, 1 - rank, 3);
     let coll = world.bcast_init(&mut data, 0);
 
     let ok = if common::mpi_major() >= 4 {

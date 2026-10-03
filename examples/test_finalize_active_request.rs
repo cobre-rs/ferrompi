@@ -38,7 +38,9 @@ fn main() {
     let rank = world.rank();
     let peer = 1 - rank;
 
-    let idle = world.send_init(&[7i32], peer, 1).expect("send_init failed");
+    let idle = world
+        .send_init(vec![7i32], peer, 1)
+        .expect("send_init failed");
 
     let allreduce_send = [1.0f64];
     let mut allreduce_recv = [0.0f64; 1];
@@ -49,57 +51,37 @@ fn main() {
     .expect("iallreduce failed");
 
     // Path A: start + wait on each side -> completes, both freed.
-    let send_buf_a = [10i32];
-    let mut recv_buf_a = [0i32];
-    let mut send_a = world.send_init(&send_buf_a, peer, 10).expect("send_init a");
-    let mut recv_a = world
-        .recv_init(&mut recv_buf_a, peer, 10)
-        .expect("recv_init a");
+    let mut send_a = world.send_init(vec![10i32], peer, 10).expect("send_init a");
+    let mut recv_a = world.recv_init(vec![0i32], peer, 10).expect("recv_init a");
     send_a.start().expect("start a (send)");
     recv_a.start().expect("start a (recv)");
     send_a.wait().expect("wait a (send)");
     recv_a.wait().expect("wait a (recv)");
 
     // Path B: start_all + wait_all on the pair -> completes, both freed.
-    let send_buf_b = [11i32];
-    let mut recv_buf_b = [0i32];
-    let send_b = world.send_init(&send_buf_b, peer, 11).expect("send_init b");
-    let recv_b = world
-        .recv_init(&mut recv_buf_b, peer, 11)
-        .expect("recv_init b");
+    let send_b = world.send_init(vec![11i32], peer, 11).expect("send_init b");
+    let recv_b = world.recv_init(vec![0i32], peer, 11).expect("recv_init b");
     let mut pair_b = [send_b, recv_b];
     PersistentRequest::start_all(&mut pair_b).expect("start_all b");
     PersistentRequest::wait_all(&mut pair_b).expect("wait_all b");
 
     // Path C: start + test loop on each side until complete -> both freed.
-    let send_buf_c = [12i32];
-    let mut recv_buf_c = [0i32];
-    let mut send_c = world.send_init(&send_buf_c, peer, 12).expect("send_init c");
-    let mut recv_c = world
-        .recv_init(&mut recv_buf_c, peer, 12)
-        .expect("recv_init c");
+    let mut send_c = world.send_init(vec![12i32], peer, 12).expect("send_init c");
+    let mut recv_c = world.recv_init(vec![0i32], peer, 12).expect("recv_init c");
     send_c.start().expect("start c (send)");
     recv_c.start().expect("start c (recv)");
     while !send_c.test().expect("test c (send)") {}
     while !recv_c.test().expect("test c (recv)") {}
 
     // Path D: start, never completed -> both sides stay active, both counted.
-    let send_buf_d = [13i32];
-    let mut recv_buf_d = [0i32];
-    let mut send_d = world.send_init(&send_buf_d, peer, 13).expect("send_init d");
-    let mut recv_d = world
-        .recv_init(&mut recv_buf_d, peer, 13)
-        .expect("recv_init d");
+    let mut send_d = world.send_init(vec![13i32], peer, 13).expect("send_init d");
+    let mut recv_d = world.recv_init(vec![0i32], peer, 13).expect("recv_init d");
     send_d.start().expect("start d (send)");
     recv_d.start().expect("start d (recv)");
 
     // Path E: start_all, never completed -> both sides stay active, both counted.
-    let send_buf_e = [14i32];
-    let mut recv_buf_e = [0i32];
-    let send_e = world.send_init(&send_buf_e, peer, 14).expect("send_init e");
-    let recv_e = world
-        .recv_init(&mut recv_buf_e, peer, 14)
-        .expect("recv_init e");
+    let send_e = world.send_init(vec![14i32], peer, 14).expect("send_init e");
+    let recv_e = world.recv_init(vec![0i32], peer, 14).expect("recv_init e");
     let mut pair_e = [send_e, recv_e];
     PersistentRequest::start_all(&mut pair_e).expect("start_all e");
 

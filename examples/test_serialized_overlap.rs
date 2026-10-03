@@ -43,13 +43,11 @@ fn main() {
         return;
     }
 
-    let mut buf_a = [0i32; 1];
-    let mut buf_b = [0i32; 1];
     let mut buf_c = [0i32; 1];
 
-    let mut a = world.recv_init(&mut buf_a, 1, 98).expect("recv_init a");
+    let mut a = world.recv_init(vec![0i32], 1, 98).expect("recv_init a");
     a.start().expect("start a");
-    let mut b = world.recv_init(&mut buf_b, 1, 98).expect("recv_init b");
+    let mut b = world.recv_init(vec![0i32], 1, 98).expect("recv_init b");
     let flag = AtomicBool::new(false);
     let mut ok = true;
 

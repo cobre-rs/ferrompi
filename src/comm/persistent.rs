@@ -37,7 +37,7 @@ impl Communicator {
         &self,
         data: &mut [T],
         root: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf_mut(data);
         // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
@@ -47,7 +47,7 @@ impl Communicator {
         let ret =
             unsafe { ffi::ferrompi_bcast_init(p, n, dt, root, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "bcast_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent all-reduce operation.
@@ -73,7 +73,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         op: ReduceOp,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -87,7 +87,7 @@ impl Communicator {
             ffi::ferrompi_allreduce_init(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "allreduce_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent in-place all-reduce operation.
@@ -97,7 +97,7 @@ impl Communicator {
         &self,
         data: &mut [T],
         op: ReduceOp,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
@@ -118,7 +118,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "allreduce_init_inplace")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent reduce operation.
@@ -159,7 +159,7 @@ impl Communicator {
         recv: &mut [T],
         op: ReduceOp,
         root: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -183,7 +183,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "reduce_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent gather operation.
@@ -199,7 +199,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         root: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         if self.rank == root {
             check_rank_slots("recv", recv.len(), send.len(), self.size)?;
         }
@@ -216,7 +216,7 @@ impl Communicator {
             ffi::ferrompi_gather_init(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "gather_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent scatter operation.
@@ -254,7 +254,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         root: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         if self.rank == root {
             check_rank_slots("send", send.len(), recv.len(), self.size)?;
         }
@@ -271,7 +271,7 @@ impl Communicator {
             ffi::ferrompi_scatter_init(sp, n, rp, n, dt, root, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "scatter_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent all-gather operation.
@@ -306,7 +306,7 @@ impl Communicator {
         &self,
         send: &[T],
         recv: &mut [T],
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         check_rank_slots("recv", recv.len(), send.len(), self.size)?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -321,7 +321,7 @@ impl Communicator {
             ffi::ferrompi_allgather_init(sp, n, rp, n, dt, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "allgather_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent scan (inclusive prefix reduction) operation.
@@ -354,7 +354,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         op: ReduceOp,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -368,7 +368,7 @@ impl Communicator {
             ffi::ferrompi_scan_init(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "scan_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent exclusive scan (exclusive prefix reduction) operation.
@@ -401,7 +401,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         op: ReduceOp,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -416,7 +416,7 @@ impl Communicator {
             ffi::ferrompi_exscan_init(sp, rp, n, dt, op as i32, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "exscan_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent all-to-all operation.
@@ -448,7 +448,7 @@ impl Communicator {
         &self,
         send: &[T],
         recv: &mut [T],
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         check_same_len("recv", send.len(), recv.len())?;
         let count_per_rank = rank_block("send", send.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
@@ -471,7 +471,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "alltoall_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent reduce-scatter-block operation.
@@ -505,7 +505,7 @@ impl Communicator {
         send: &[T],
         recv: &mut [T],
         op: ReduceOp,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         check_same_len(
             "recv",
             rank_block("send", send.len(), self.size)?,
@@ -531,7 +531,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "reduce_scatter_block_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent in-place gather operation. At root, `data` is both
@@ -576,7 +576,7 @@ impl Communicator {
         &self,
         data: &mut [T],
         root: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         let mut request_handle: i64 = 0;
         let ret = if self.rank() == root {
             let recvcount = rank_block("data", data.len(), self.size)? as i64;
@@ -615,7 +615,7 @@ impl Communicator {
             }
         };
         Error::check_with_op(ret, "gather_init_inplace")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent in-place all-gather operation. Every rank's `data`
@@ -653,7 +653,7 @@ impl Communicator {
     pub fn allgather_init_inplace<T: MpiDatatype>(
         &self,
         data: &mut [T],
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
@@ -676,7 +676,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "allgather_init_inplace")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent in-place scatter operation. At root, `data` is the
@@ -722,7 +722,7 @@ impl Communicator {
         &self,
         data: &mut [T],
         root: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         let (sendbuf, sendcount, recvbuf, recvcount, dt) =
             scatter_inplace_args(data, self.rank() == root, self.size)?;
         let mut request_handle: i64 = 0;
@@ -747,7 +747,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "scatter_init_inplace")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent in-place all-to-all personalized communication.
@@ -788,7 +788,7 @@ impl Communicator {
     pub fn alltoall_init_inplace<T: MpiDatatype>(
         &self,
         data: &mut [T],
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         let recvcount = rank_block("data", data.len(), self.size)? as i64;
         let mut request_handle: i64 = 0;
         let (p, _, dt) = buf_mut(data);
@@ -811,7 +811,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "alltoall_init_inplace")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 }
 

@@ -593,10 +593,8 @@ fn main() {
             );
         }
 
-        let mut recv_f = [0.0f64];
-        let send_f = [1.0f64];
-        let mut recv_preq = world.recv_init(&mut recv_f, 0, 0).unwrap();
-        let mut send_preq = world.send_init(&send_f, 0, 0).unwrap();
+        let mut recv_preq = world.recv_init(vec![0.0f64], 0, 0).unwrap();
+        let mut send_preq = world.send_init(vec![1.0f64], 0, 0).unwrap();
 
         compare(
             "persistent start+wait",
@@ -665,14 +663,12 @@ fn main() {
             }
         }
 
-        let mut recv_f = [0.0f64; BATCH];
-        let send_f = [1.0f64; BATCH];
-        let mut preqs_f: Vec<PersistentRequest> = Vec::with_capacity(2 * BATCH);
-        for (i, x) in recv_f.chunks_mut(1).enumerate() {
-            preqs_f.push(world.recv_init(x, 0, i as i32).unwrap());
+        let mut preqs_f: Vec<PersistentRequest<f64>> = Vec::with_capacity(2 * BATCH);
+        for i in 0..BATCH {
+            preqs_f.push(world.recv_init(vec![0.0f64], 0, i as i32).unwrap());
         }
-        for (i, x) in send_f.chunks(1).enumerate() {
-            preqs_f.push(world.send_init(x, 0, i as i32).unwrap());
+        for i in 0..BATCH {
+            preqs_f.push(world.send_init(vec![1.0f64], 0, i as i32).unwrap());
         }
 
         compare(

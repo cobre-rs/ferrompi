@@ -6,7 +6,7 @@ use crate::datatype::{buf, buf_mut, MpiDatatype, PlainData};
 use crate::datatype_builder::CustomDatatype;
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::persistent::PersistentRequest;
+use crate::persistent::{vec_buf, vec_buf_mut, PersistentRequest};
 use crate::request::{Request, RequestKind};
 use crate::scope::Scope;
 use crate::status::{Source, Status, Tag};
@@ -388,8 +388,9 @@ impl Communicator {
     /// Initialize a persistent send operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// The caller must not modify `data` while the request is active
-    /// (between `start()` and `wait()`).
+    /// The request owns `data`; write the next iteration's values through
+    /// `buffer_mut()`, which refuses while the request is active (between
+    /// `start()` and `wait()`).
     ///
     /// Available in all MPI versions (MPI 1.1+).
     ///
@@ -399,7 +400,8 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `data` - Send buffer (must remain valid for lifetime of handle)
+    /// * `data` - Send buffer, owned by the request; reach it with `buffer`/`buffer_mut`
+    ///   while the request is inactive, or take it back with `into_buffer`
     /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
@@ -409,8 +411,7 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1.0f64; 100];
-    /// let mut req = world.send_init(&send, 1, 7).unwrap();
+    /// let mut req = world.send_init(vec![1.0f64; 100], 1, 7).unwrap();
     /// for _ in 0..10 {
     ///     req.start().unwrap();
     ///     req.wait().unwrap();
@@ -418,22 +419,27 @@ impl Communicator {
     /// ```
     pub fn send_init<T: MpiDatatype>(
         &self,
-        data: &[T],
+        data: Vec<T>,
         dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
-        let (p, n, dt) = buf(data);
-        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
-        // is freed and does not borrow it; keeping `data` alive and untouched between
-        // start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (p, n, dt) = vec_buf(&data);
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, and `p` comes from
+        // `Vec::as_ptr`, so no slice reference sits between it and the allocation and
+        // the accessors' slices are its children. The returned request owns `data`
+        // until it is freed, and moving a `Vec` leaves its allocation in place. The
+        // allocation is never resized, because the accessors hand out slices only. From
+        // start() to completion MPI is its only user, because the accessors refuse while
+        // the request is active, and Drop leaks it when MPI may still use it. If the
+        // call fails, MPI recorded nothing (or the shim freed the inactive request), and
+        // `data` is dropped here.
         let ret = unsafe {
             ffi::ferrompi_send_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "send_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, data))
     }
 
     /// Initialize a persistent buffered-mode send operation.
@@ -461,7 +467,8 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `data` - Send buffer (must remain valid for lifetime of handle)
+    /// * `data` - Send buffer, owned by the request; reach it with `buffer`/`buffer_mut`
+    ///   while the request is inactive, or take it back with `into_buffer`
     /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
@@ -474,8 +481,7 @@ impl Communicator {
     /// // Attach a 64 KiB buffer before creating buffered send requests.
     /// mpi.buffer_attach(vec![0u8; 64 * 1024].into_boxed_slice()).unwrap();
     ///
-    /// let send = vec![1.0f64; 100];
-    /// let mut req = world.bsend_init(&send, 1, 7).unwrap();
+    /// let mut req = world.bsend_init(vec![1.0f64; 100], 1, 7).unwrap();
     /// for _ in 0..10 {
     ///     req.start().unwrap();
     ///     req.wait().unwrap();
@@ -485,22 +491,27 @@ impl Communicator {
     /// ```
     pub fn bsend_init<T: MpiDatatype>(
         &self,
-        data: &[T],
+        data: Vec<T>,
         dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
-        let (p, n, dt) = buf(data);
-        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
-        // is freed and does not borrow it; keeping `data` alive and untouched between
-        // start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (p, n, dt) = vec_buf(&data);
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, and `p` comes from
+        // `Vec::as_ptr`, so no slice reference sits between it and the allocation and
+        // the accessors' slices are its children. The returned request owns `data`
+        // until it is freed, and moving a `Vec` leaves its allocation in place. The
+        // allocation is never resized, because the accessors hand out slices only. From
+        // start() to completion MPI is its only user, because the accessors refuse while
+        // the request is active, and Drop leaks it when MPI may still use it. If the
+        // call fails, MPI recorded nothing (or the shim freed the inactive request), and
+        // `data` is dropped here.
         let ret = unsafe {
             ffi::ferrompi_bsend_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "bsend_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, data))
     }
 
     /// Initialize a persistent ready-mode send operation.
@@ -527,8 +538,8 @@ impl Communicator {
     /// `barrier()` after the receiver posts its receive and before the sender
     /// calls `start()` to ensure the ordering is respected.
     ///
-    /// The caller must not modify `data` while the request is active
-    /// (between `start()` and `wait()`).
+    /// The request owns `data`; `buffer_mut()` refuses while the request is
+    /// active (between `start()` and `wait()`).
     ///
     /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
     /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
@@ -536,7 +547,8 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `data` - Send buffer (must remain valid for lifetime of handle)
+    /// * `data` - Send buffer, owned by the request; reach it with `buffer`/`buffer_mut`
+    ///   while the request is inactive, or take it back with `into_buffer`
     /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
@@ -548,30 +560,34 @@ impl Communicator {
     /// # let world = mpi.world();
     /// // Safety contract: receiver must post recv before we call start().
     /// // Use a barrier to guarantee the ordering.
-    /// let send = vec![42.0f64; 10];
-    /// let mut req = world.rsend_init(&send, 1, 7).unwrap();
+    /// let mut req = world.rsend_init(vec![42.0f64; 10], 1, 7).unwrap();
     /// world.barrier().unwrap(); // recv on rank 1 is posted by now
     /// req.start().unwrap();
     /// req.wait().unwrap();
     /// ```
     pub fn rsend_init<T: MpiDatatype>(
         &self,
-        data: &[T],
+        data: Vec<T>,
         dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
-        let (p, n, dt) = buf(data);
-        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
-        // is freed and does not borrow it; keeping `data` alive and untouched between
-        // start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (p, n, dt) = vec_buf(&data);
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, and `p` comes from
+        // `Vec::as_ptr`, so no slice reference sits between it and the allocation and
+        // the accessors' slices are its children. The returned request owns `data`
+        // until it is freed, and moving a `Vec` leaves its allocation in place. The
+        // allocation is never resized, because the accessors hand out slices only. From
+        // start() to completion MPI is its only user, because the accessors refuse while
+        // the request is active, and Drop leaks it when MPI may still use it. If the
+        // call fails, MPI recorded nothing (or the shim freed the inactive request), and
+        // `data` is dropped here.
         let ret = unsafe {
             ffi::ferrompi_rsend_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "rsend_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, data))
     }
 
     /// Initialize a persistent synchronous-mode send operation.
@@ -587,8 +603,8 @@ impl Communicator {
     /// to standard or buffered sends.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// The caller must not modify `data` while the request is active
-    /// (between `start()` and `wait()`).
+    /// The request owns `data`; `buffer_mut()` refuses while the request is
+    /// active (between `start()` and `wait()`).
     ///
     /// Available in all MPI versions (MPI 1.1+).
     ///
@@ -598,7 +614,8 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `data` - Send buffer (must remain valid for lifetime of handle)
+    /// * `data` - Send buffer, owned by the request; reach it with `buffer`/`buffer_mut`
+    ///   while the request is inactive, or take it back with `into_buffer`
     /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
@@ -608,8 +625,7 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1i32; 5];
-    /// let mut req = world.ssend_init(&send, 1, 3).unwrap();
+    /// let mut req = world.ssend_init(vec![1i32; 5], 1, 3).unwrap();
     /// for _ in 0..5 {
     ///     req.start().unwrap();
     ///     req.wait().unwrap(); // returns only after receiver has started
@@ -617,22 +633,27 @@ impl Communicator {
     /// ```
     pub fn ssend_init<T: MpiDatatype>(
         &self,
-        data: &[T],
+        data: Vec<T>,
         dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
-        let (p, n, dt) = buf(data);
-        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
-        // is freed and does not borrow it; keeping `data` alive and untouched between
-        // start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (p, n, dt) = vec_buf(&data);
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, and `p` comes from
+        // `Vec::as_ptr`, so no slice reference sits between it and the allocation and
+        // the accessors' slices are its children. The returned request owns `data`
+        // until it is freed, and moving a `Vec` leaves its allocation in place. The
+        // allocation is never resized, because the accessors hand out slices only. From
+        // start() to completion MPI is its only user, because the accessors refuse while
+        // the request is active, and Drop leaks it when MPI may still use it. If the
+        // call fails, MPI recorded nothing (or the shim freed the inactive request), and
+        // `data` is dropped here.
         let ret = unsafe {
             ffi::ferrompi_ssend_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "ssend_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, data))
     }
 
     /// Initialize a persistent receive operation.
@@ -645,7 +666,8 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `data`   - Receive buffer (must remain valid for lifetime of handle)
+    /// * `data`   - Receive buffer, owned by the request; reach it with `buffer`/`buffer_mut`
+    ///   while the request is inactive, or take it back with `into_buffer`
     /// * `source` - Source rank, [`Source::Any`] or [`Source::ProcNull`]
     /// * `tag`    - Message tag or [`Tag::Any`]
     ///
@@ -655,8 +677,7 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let mut recv = vec![0.0f64; 100];
-    /// let mut req = world.recv_init(&mut recv, 0, 7).unwrap();
+    /// let mut req = world.recv_init(vec![0.0f64; 100], 0, 7).unwrap();
     /// for _ in 0..10 {
     ///     req.start().unwrap();
     ///     req.wait().unwrap();
@@ -664,23 +685,28 @@ impl Communicator {
     /// ```
     pub fn recv_init<T: MpiDatatype>(
         &self,
-        data: &mut [T],
+        mut data: Vec<T>,
         source: impl Into<Source>,
         tag: impl Into<Tag>,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         let source = source.into().source_code("source")?;
         let tag = tag.into().tag_code("tag")?;
         let mut request_handle: i64 = 0;
-        let (p, n, dt) = buf_mut(data);
-        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
-        // is freed and does not borrow it; keeping `data` alive and untouched between
-        // start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (p, n, dt) = vec_buf_mut(&mut data);
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, and `p` comes from
+        // `Vec::as_mut_ptr`, so no slice reference sits between it and the allocation and
+        // the accessors' slices are its children. The returned request owns `data`
+        // until it is freed, and moving a `Vec` leaves its allocation in place. The
+        // allocation is never resized, because the accessors hand out slices only. From
+        // start() to completion MPI is its only user, because the accessors refuse while
+        // the request is active, and Drop leaks it when MPI may still use it. If the
+        // call fails, MPI recorded nothing (or the shim freed the inactive request), and
+        // `data` is dropped here.
         let ret = unsafe {
             ffi::ferrompi_recv_init(p, n, dt, source, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "recv_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, data))
     }
 
     /// Send a slice of values to another process using a committed custom datatype.

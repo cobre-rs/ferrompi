@@ -333,16 +333,13 @@ fn part5_test_some_in_status(world: &Communicator, rank: i32) {
 }
 
 fn part6_persistent_wait_all(world: &Communicator, rank: i32, mpich: bool) {
-    let mut small = [0i32; 1];
-    let mut big = [0i32; 4];
-
     if rank == 0 {
         let mut reqs = vec![
             world
-                .recv_init(&mut small, 1, 51)
+                .recv_init(vec![0i32; 1], 1, 51)
                 .expect("part6: recv_init small"),
             world
-                .recv_init(&mut big, 1, 52)
+                .recv_init(vec![0i32; 4], 1, 52)
                 .expect("part6: recv_init big"),
         ];
         PersistentRequest::start_all(&mut reqs).expect("part6: start_all");
@@ -363,28 +360,27 @@ fn part6_persistent_wait_all(world: &Communicator, rank: i32, mpich: bool) {
             ok &= !reqs[1].is_active();
         }
 
+        ok &= !mpich || reqs[1].buffer().is_ok_and(|b| b == PAYLOAD);
+
         // MPICH reports the unfinished request as pending and it stays active.
         // Open MPI may report it pending too, or return success when both had
         // finished. Open MPI frees an errored persistent request, so the
         // restart uses fresh requests.
         drop(reqs);
-        ok &= !mpich || big == PAYLOAD;
 
-        let mut fresh_small = [0i32; 1];
-        let mut fresh_big = [0i32; 4];
         let mut fresh = vec![
             world
-                .recv_init(&mut fresh_small, 1, 51)
+                .recv_init(vec![0i32; 1], 1, 51)
                 .expect("part6: recv_init fresh small"),
             world
-                .recv_init(&mut fresh_big, 1, 52)
+                .recv_init(vec![0i32; 4], 1, 52)
                 .expect("part6: recv_init fresh big"),
         ];
         PersistentRequest::start_all(&mut fresh).expect("part6: restart start_all");
         world.barrier().expect("part6: barrier before restart send");
 
         ok &= PersistentRequest::wait_all(&mut fresh).is_ok();
-        ok &= fresh_small == [9];
+        ok &= fresh[0].buffer().is_ok_and(|b| b == [9]);
 
         common::check(
             world,
@@ -415,16 +411,13 @@ fn part6_persistent_wait_all(world: &Communicator, rank: i32, mpich: bool) {
 }
 
 fn part7_persistent_wait_all_finished(world: &Communicator, rank: i32) {
-    let mut small = [0i32; 1];
-    let mut big = [0i32; 4];
-
     if rank == 0 {
         let mut reqs = vec![
             world
-                .recv_init(&mut small, 1, 61)
+                .recv_init(vec![0i32; 1], 1, 61)
                 .expect("part7: recv_init small"),
             world
-                .recv_init(&mut big, 1, 62)
+                .recv_init(vec![0i32; 4], 1, 62)
                 .expect("part7: recv_init big"),
         ];
         PersistentRequest::start_all(&mut reqs).expect("part7: start_all");
@@ -449,8 +442,8 @@ fn part7_persistent_wait_all_finished(world: &Communicator, rank: i32) {
 
         std::thread::sleep(Duration::from_millis(20));
         ok &= PersistentRequest::wait_all(&mut reqs).is_ok();
-        ok &= small == [9];
-        ok &= big == PAYLOAD;
+        ok &= reqs[0].buffer().is_ok_and(|b| b == [9]);
+        ok &= reqs[1].buffer().is_ok_and(|b| b == PAYLOAD);
 
         common::check(
             world,

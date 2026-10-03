@@ -267,8 +267,8 @@ For Y and Z it is the sum of the largest |A/A| of each side's slots in the set. 
 
 The context rows have no limit: no budget covers the persistent requests or the
 two-request arm. Persistent `start+wait` at `multiple` reads about +45 ns over
-`pre-counter` (about 20 ns per counted call on MPI-heavy paths), so budget Y, measured
-on `Group::size`, understates the counter's cost on those paths.
+`pre-counter`. The arm makes four counted calls (two `start`, two `wait`), about 11 ns
+each, in line with budget Y's per-call figure.
 
 The largest |A/A| per binary, for `0.6.0`, `pre-counter` and `head`, was 0.4, 1.2 and
 1.8 ns in the `funneled` set, 0.9, 0.1 and 0.5 ns in the `multiple` set, and 1.6, 0.9

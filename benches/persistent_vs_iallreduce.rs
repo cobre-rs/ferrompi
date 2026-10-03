@@ -96,7 +96,7 @@ fn bench_iterative_allreduce(c: &mut Criterion, world: &Communicator) {
 fn run_follower(world: &Communicator) {
     let mut send: Vec<f64> = Vec::new();
     let mut recv: Vec<f64> = Vec::new();
-    let mut persistent: Option<PersistentRequest> = None;
+    let mut persistent: Option<PersistentRequest<f64>> = None;
 
     common::follow(world, |[op, arg]| match op {
         SETUP => {

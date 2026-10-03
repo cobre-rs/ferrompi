@@ -34,23 +34,24 @@ fn main() {
     if rank == 0 {
         // Rank 0: initialize a persistent buffered send request, loop 10 times,
         // each time filling the send buffer with a per-iteration value.
-        let mut send = vec![0.0f64; N];
         let mut send_req = world
-            .bsend_init(&send, 1, TAG)
+            .bsend_init(vec![0.0f64; N], 1, TAG)
             .expect("bsend_init failed on rank 0");
 
         for iter in 0..ITERS {
             let value = (iter + 1) as f64;
-            send.fill(value);
+            send_req
+                .buffer_mut()
+                .expect("bsend buffer_mut failed")
+                .fill(value);
             send_req.start().expect("bsend start failed");
             send_req.wait().expect("bsend wait failed");
         }
     } else {
         // Rank 1: initialize a persistent receive request, loop 10 times,
         // each time verifying the received values.
-        let mut recv = vec![0.0f64; N];
         let mut recv_req = world
-            .recv_init(&mut recv, 0, TAG)
+            .recv_init(vec![0.0f64; N], 0, TAG)
             .expect("recv_init failed on rank 1");
 
         for iter in 0..ITERS {
@@ -58,6 +59,7 @@ fn main() {
             recv_req.start().expect("recv start failed");
             recv_req.wait().expect("recv wait failed");
 
+            let recv = recv_req.buffer().expect("recv buffer failed");
             for (i, &v) in recv.iter().enumerate() {
                 assert!(
                     (v - expected).abs() < f64::EPSILON,

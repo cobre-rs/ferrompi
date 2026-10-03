@@ -898,7 +898,7 @@ impl Communicator {
         recvcounts: &[i32],
         displs: &[i32],
         root: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         if self.rank == root {
             check_v_args(
                 "recvcounts",
@@ -934,7 +934,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "gatherv_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent scatterv operation (variable-count scatter).
@@ -982,7 +982,7 @@ impl Communicator {
         displs: &[i32],
         recv: &mut [T],
         root: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         if self.rank == root {
             check_v_args(
                 "sendcounts",
@@ -1018,7 +1018,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "scatterv_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent all-gatherv operation (variable-count all-gather).
@@ -1064,7 +1064,7 @@ impl Communicator {
         recv: &mut [T],
         recvcounts: &[i32],
         displs: &[i32],
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         check_v_args(
             "recvcounts",
             "displs",
@@ -1096,7 +1096,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "allgatherv_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 
     /// Initialize a persistent all-to-allv operation (variable-count all-to-all).
@@ -1151,7 +1151,7 @@ impl Communicator {
         recv: &mut [T],
         recvcounts: &[i32],
         rdispls: &[i32],
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
         check_v_args(
             "sendcounts",
             "sdispls",
@@ -1194,7 +1194,7 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "alltoallv_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
     }
 }
 

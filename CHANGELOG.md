@@ -126,6 +126,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `igatherv`, `iscatterv`, `iallgatherv`, `ialltoallv` take `s` first and
   borrow their buffers, and the v-forms their count and displacement arrays,
   until the scope returns. Migration: call them inside `ferrompi::scope`.
+- **Persistent point-to-point requests own their buffer:** `send_init`,
+  `bsend_init`, `rsend_init`, `ssend_init` and `recv_init` take a `Vec<T>` and
+  return `PersistentRequest<T>`. `buffer()`/`buffer_mut()` reach the buffer
+  while the request is inactive (`Error::InvalidState` while active), and
+  `into_buffer()` returns it. `start_all` and `wait_all` take requests of one
+  element type. Migration: pass the `Vec` by value and read results through
+  `buffer()`; a mixed-type batch is split by type.
 
 ### Added
 

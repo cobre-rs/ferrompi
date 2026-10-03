@@ -1,70 +1,118 @@
 //! The `PersistentRequest` handle returned by the persistent `*_init` constructors.
 
-use crate::error::{Error, Result, FERROMPI_ERR_THREAD_LEVEL};
+use crate::datatype::MpiDatatype;
+use crate::error::{Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL};
 use crate::ffi;
 use crate::rt;
+use std::ffi::c_void;
 
-/// A persistent MPI request handle.
+/// Describes the heap allocation of `v` for MPI FFI as `(pointer, count, tag)`,
+/// like `datatype::buf` but with the pointer taken from the `Vec` itself
+/// (`Vec::as_ptr`) instead of from a slice reborrow.
 ///
-/// This type represents a persistent collective operation that has been
-/// initialized but not yet started. Unlike regular nonblocking operations,
-/// persistent operations can be started multiple times.
+/// A pointer that MPI keeps across calls, as a persistent request does, must
+/// be derived this way: no slice reference then sits between it and the
+/// allocation, so the slices the request's accessors create later are its
+/// children. A pointer taken through a slice reference is invalidated by those
+/// accessors under the Stacked and Tree Borrows models.
+#[allow(
+    clippy::ptr_arg,
+    reason = "the pointer must come from the Vec, not from a slice reborrow"
+)]
+pub(crate) fn vec_buf<T: MpiDatatype>(v: &Vec<T>) -> (*const c_void, i64, i32) {
+    (v.as_ptr().cast(), v.len() as i64, T::TAG as i32)
+}
+
+/// See [`vec_buf`]; the pointer comes from `Vec::as_mut_ptr`.
+pub(crate) fn vec_buf_mut<T: MpiDatatype>(v: &mut Vec<T>) -> (*mut c_void, i64, i32) {
+    (v.as_mut_ptr().cast(), v.len() as i64, T::TAG as i32)
+}
+
+/// A persistent MPI request that owns its buffer.
+///
+/// A persistent request is initialized once and then started and completed
+/// many times, so one setup serves a whole loop of iterations. The `*_init`
+/// constructors take the buffer by value and the request keeps it until it is
+/// freed: MPI holds a pointer into that allocation, so no safe call can
+/// resize or free it behind MPI's back. Reach the buffer with
+/// [`buffer`](Self::buffer) and [`buffer_mut`](Self::buffer_mut) while the
+/// request is inactive, or take it back with
+/// [`into_buffer`](Self::into_buffer).
 ///
 /// # Lifecycle
 ///
-/// 1. Create with `comm.bcast_init()` or similar
-/// 2. Start with `start()` or `start_all()`
-/// 3. Wait for completion with `wait()`
-/// 4. Repeat steps 2-3 as needed
-/// 5. Free on drop
+/// 1. Create with `comm.send_init(vec, ..)`, `comm.recv_init(vec, ..)` or
+///    another `*_init`, which takes the buffer by value.
+/// 2. Update the buffer through `buffer_mut()`. The accessors work only while
+///    the request is inactive and return [`Error::InvalidState`] otherwise.
+/// 3. Start with `start()` or `start_all()`.
+/// 4. Wait for completion with `wait()`, then read the result through
+///    `buffer()`.
+/// 5. Repeat steps 2-4 as needed.
+/// 6. Free on drop, or take the buffer back with `into_buffer()`.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use ferrompi::{Mpi, ReduceOp};
+/// use ferrompi::Mpi;
 ///
-/// let mpi = Mpi::init().unwrap();
+/// # fn main() -> ferrompi::Result<()> {
+/// let mpi = Mpi::init()?;
 /// let world = mpi.world();
+/// let rank = world.rank();
 ///
-/// // Buffer that will be used for all broadcasts
-/// let mut data = vec![0.0f64; 1000];
+/// // Initialize a self-send pair once; each request owns its buffer.
+/// let mut send = world.send_init(vec![0.0f64; 1000], rank, 0)?;
+/// let mut recv = world.recv_init(vec![0.0f64; 1000], rank, 0)?;
 ///
-/// // Initialize persistent broadcast (MPI 4.0, or Open MPI 5)
-/// let mut persistent = world.bcast_init(&mut data, 0).unwrap();
-///
-/// // Run many iterations
 /// for iter in 0..1000 {
-///     // Update data on root
-///     if world.rank() == 0 {
-///         for (i, x) in data.iter_mut().enumerate() {
-///             *x = (iter * 1000 + i) as f64;
-///         }
+///     for (i, x) in send.buffer_mut()?.iter_mut().enumerate() {
+///         *x = (iter * 1000 + i) as f64;
 ///     }
 ///
-///     // Start the broadcast
-///     persistent.start().unwrap();
+///     recv.start()?;
+///     send.start()?;
+///     send.wait()?;
+///     recv.wait()?;
 ///
-///     // Optionally do other work here...
-///
-///     // Wait for completion
-///     persistent.wait().unwrap();
-///
-///     // data now contains broadcast result on all ranks
+///     assert_eq!(recv.buffer()?[0], (iter * 1000) as f64);
 /// }
 ///
-/// // Cleanup happens automatically on drop
+/// // Cleanup happens automatically on drop.
+/// # Ok(())
+/// # }
 /// ```
-pub struct PersistentRequest {
+///
+/// # Dropping
+///
+/// Dropping an active request completes it (`MPI_Wait`, which blocks until the
+/// peer operation completes), then frees it (`MPI_Request_free`), and only
+/// then frees the buffer.
+///
+/// - At `Single`/`Funneled`, drop it on the thread that initialized MPI;
+///   another thread aborts the process.
+/// - At `Serialized` and `Multiple`, the drop is an MPI call, which the
+///   program serializes like any other.
+/// - Once [`Mpi`](crate::Mpi) is being dropped, or after it was dropped, the
+///   drop makes no MPI call. It leaks the request handle, and also the buffer
+///   when the request is active, because MPI may still write into it. The
+///   buffer of an inactive request is freed normally.
+/// - A drop on another thread while `Mpi` is being dropped either completes
+///   before `MPI_Finalize`, because it holds a per-call count the finalizer
+///   waits for, or makes no MPI call and leaks as above.
+pub struct PersistentRequest<T> {
     handle: i64,
     active: bool,
+    buffer: Vec<T>,
 }
 
-impl PersistentRequest {
-    /// Create a new persistent request from a raw handle.
-    pub(crate) fn new(handle: i64) -> Self {
+impl<T> PersistentRequest<T> {
+    /// Create a new persistent request from a raw handle and the buffer it owns.
+    pub(crate) fn new(handle: i64, buffer: Vec<T>) -> Self {
         PersistentRequest {
             handle,
             active: false,
+            buffer,
         }
     }
 
@@ -81,7 +129,7 @@ impl PersistentRequest {
     /// Start the persistent operation.
     ///
     /// This initiates the communication. You must call `wait()` before starting
-    /// again or accessing the buffers.
+    /// again or reaching the buffer.
     ///
     /// # Errors
     ///
@@ -107,8 +155,9 @@ impl PersistentRequest {
     /// Wait for the operation to complete.
     ///
     /// This blocks until the communication started by `start()` is finished.
-    /// After this returns, the buffers can be safely accessed and the operation
-    /// can be started again.
+    /// After this returns, the buffer can be reached with
+    /// [`buffer`](Self::buffer) and [`buffer_mut`](Self::buffer_mut), and the
+    /// operation can be started again.
     ///
     /// # Errors
     ///
@@ -128,11 +177,12 @@ impl PersistentRequest {
         // entry (checked above), so start() was called and MPI holds an
         // in-flight operation on this handle for ferrompi_wait to complete.
         let ret = unsafe { ffi::ferrompi_wait(self.handle, std::ptr::null_mut()) };
-        // A debug build's Serialized overlap check rejects the call before MPI
-        // sees it; the request is then still active. Otherwise MPI completed it
-        // whatever it returned: it is inactive now, or freed if the library
+        // A call the guard rejects before MPI sees it leaves the request
+        // active: a debug build's Serialized overlap check, or a finalize that
+        // stored `Finalized` after the pre-check above. Otherwise MPI completed
+        // it whatever it returned: it is inactive now, or freed if the library
         // frees failed persistent requests.
-        if ret != FERROMPI_ERR_THREAD_LEVEL {
+        if ret != FERROMPI_ERR_THREAD_LEVEL && ret != FERROMPI_ERR_FINALIZED {
             self.active = false;
         }
         Error::check_with_op(ret, "wait")
@@ -161,6 +211,62 @@ impl PersistentRequest {
         Ok(flag != 0)
     }
 
+    /// The request's buffer, while the request is inactive.
+    ///
+    /// This is the send data of a send request, and the received data of a
+    /// receive request after its `wait()`. The slice cannot be resized,
+    /// because MPI holds a pointer into the allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidState`] while the request is active: MPI owns
+    /// the buffer from `start()` until `wait()`, `wait_all()`, or a `test()`
+    /// that reports completion, returns.
+    #[inline]
+    pub fn buffer(&self) -> Result<&[T]> {
+        if self.active {
+            return Err(Error::InvalidState {
+                reason: "request is active",
+            });
+        }
+        Ok(&self.buffer)
+    }
+
+    /// The request's buffer for writing, while the request is inactive.
+    ///
+    /// Write the next iteration's input here between `wait()` and the next
+    /// `start()`. The slice cannot be resized, because MPI holds a pointer into
+    /// the allocation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidState`] while the request is active.
+    #[inline]
+    pub fn buffer_mut(&mut self) -> Result<&mut [T]> {
+        if self.active {
+            return Err(Error::InvalidState {
+                reason: "request is active",
+            });
+        }
+        Ok(&mut self.buffer)
+    }
+
+    /// Complete the request if it is active, free it, and return its buffer.
+    ///
+    /// The request is freed before this returns. Freeing a request is an MPI
+    /// call, so `Drop`'s thread rule applies: at `Single`/`Funneled`, on a
+    /// thread other than the one that initialized MPI, the process aborts.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of [`wait`](Self::wait) if completing an active
+    /// request fails. The request is then dropped as `Drop` does, and the
+    /// buffer is not returned.
+    pub fn into_buffer(mut self) -> Result<Vec<T>> {
+        self.wait()?;
+        Ok(std::mem::take(&mut self.buffer))
+    }
+
     /// Start multiple persistent operations.
     ///
     /// This is more efficient than starting each operation individually.
@@ -171,7 +277,7 @@ impl PersistentRequest {
     /// request is already active. If MPI reports an error, it may have started
     /// some of the requests; every request is then marked active, so `wait`,
     /// `wait_all` or `Drop` completes whichever did start.
-    pub fn start_all(requests: &mut [PersistentRequest]) -> Result<()> {
+    pub fn start_all(requests: &mut [PersistentRequest<T>]) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
         }
@@ -207,7 +313,7 @@ impl PersistentRequest {
     /// On a failed request, the returned error carries that request's own
     /// class and code, and its message ends with `(request N)`, `N` being
     /// its index in `requests`.
-    pub fn wait_all(requests: &mut [PersistentRequest]) -> Result<()> {
+    pub fn wait_all(requests: &mut [PersistentRequest<T>]) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
         }
@@ -234,19 +340,27 @@ impl PersistentRequest {
     }
 }
 
-impl Drop for PersistentRequest {
-    /// Complete any in-flight operation, then free the persistent request handle.
+impl<T> Drop for PersistentRequest<T> {
+    /// Complete any in-flight operation, free the persistent request handle,
+    /// then free the buffer.
     ///
     /// When `self.active` is `true` (i.e., `start()` was called but `wait()` has
     /// not yet returned), this calls `MPI_Wait` before freeing the handle.
     /// **`MPI_Wait` blocks** until the peer operation completes; if the peer is
     /// unreachable, this deadlocks. This two-step sequence upholds the MPI
     /// standard requirement that `MPI_Request_free` must not be called on an
-    /// active request.
+    /// active request. The buffer is freed last, once MPI is done with it.
     ///
-    /// See ADR-0004 §"Drop behavior: wait before free" for the full rationale.
+    /// Once [`Mpi`](crate::Mpi) is being dropped, or after it was dropped, the
+    /// drop makes no MPI call and leaks the request handle. An active
+    /// request's buffer is leaked too, because MPI may still write into it; an
+    /// inactive request's buffer is freed, because MPI uses it only after a
+    /// new start, and no start can be issued any more.
     fn drop(&mut self) {
         let Some(_call) = rt::drop_guard("PersistentRequest") else {
+            if self.active {
+                std::mem::forget(std::mem::take(&mut self.buffer));
+            }
             return;
         };
         if self.active {
@@ -270,15 +384,17 @@ impl Drop for PersistentRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::PersistentRequest;
+    use super::{vec_buf, vec_buf_mut, PersistentRequest};
+    use crate::datatype::MpiDatatype;
     use crate::error::Error;
     use std::mem::forget;
 
     #[test]
     fn start_when_already_active_returns_error() {
-        let mut req = PersistentRequest {
+        let mut req = PersistentRequest::<u8> {
             handle: 0,
             active: true,
+            buffer: Vec::new(),
         };
         let result = req.start();
         assert!(
@@ -295,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_when_inactive_returns_true() {
-        let mut req = PersistentRequest::new(0);
+        let mut req = PersistentRequest::<u8>::new(0, Vec::new());
         let result = req.test();
         assert!(
             matches!(result, Ok(true)),
@@ -306,15 +422,16 @@ mod tests {
 
     #[test]
     fn start_all_empty_slice_returns_ok() {
-        let result = PersistentRequest::start_all(&mut []);
+        let result = PersistentRequest::<u8>::start_all(&mut []);
         assert!(result.is_ok());
     }
 
     #[test]
     fn start_all_with_active_request_returns_error() {
-        let mut req = PersistentRequest {
+        let mut req = PersistentRequest::<u8> {
             handle: 0,
             active: true,
+            buffer: Vec::new(),
         };
         let result = PersistentRequest::start_all(std::slice::from_mut(&mut req));
         assert!(
@@ -331,7 +448,102 @@ mod tests {
 
     #[test]
     fn wait_all_empty_slice_returns_ok() {
-        let result = PersistentRequest::wait_all(&mut []);
+        let result = PersistentRequest::<u8>::wait_all(&mut []);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn buffer_when_active_returns_invalid_state() {
+        let mut req = PersistentRequest {
+            handle: 0,
+            active: true,
+            buffer: vec![0u8],
+        };
+        let shared = req.buffer();
+        assert!(
+            matches!(
+                shared,
+                Err(Error::InvalidState {
+                    reason: "request is active"
+                })
+            ),
+            "expected Err(InvalidState), got: {shared:?}"
+        );
+        let exclusive = req.buffer_mut();
+        assert!(
+            matches!(
+                exclusive,
+                Err(Error::InvalidState {
+                    reason: "request is active"
+                })
+            ),
+            "expected Err(InvalidState), got: {exclusive:?}"
+        );
+        drop(std::mem::take(&mut req.buffer));
+        forget(req);
+    }
+
+    /// The request is `Send` for every element type and `Sync` for the
+    /// concrete ones, so a field added later cannot silently remove either.
+    #[test]
+    fn persistent_request_is_send_and_sync() {
+        fn is_send<X: Send>() {}
+        fn is_send_for_every_element_type<T: MpiDatatype>() {
+            is_send::<PersistentRequest<T>>();
+        }
+        fn is_sync<X: Sync>() {}
+        is_send_for_every_element_type::<f64>();
+        is_sync::<PersistentRequest<f64>>();
+        is_sync::<PersistentRequest<i32>>();
+        is_sync::<PersistentRequest<u8>>();
+    }
+
+    /// Stands in for MPI writing a receive between `start` and completion:
+    /// the pointer `vec_buf_mut` returned must stay usable across the
+    /// accessors. Run under Miri, with and without `-Zmiri-tree-borrows`, to
+    /// check its provenance.
+    #[test]
+    fn recorded_receive_pointer_survives_accessors() {
+        let mut req = PersistentRequest::new(0, vec![0u64; 4]);
+        let (p, n, _) = vec_buf_mut(&mut req.buffer);
+        let p = p.cast::<u64>();
+        assert_eq!(n, 4);
+        for round in 1..=3u64 {
+            req.buffer_mut().expect("inactive").fill(round);
+            req.active = true;
+            for i in 0..4 {
+                // SAFETY: `p` addresses the live allocation of four `u64`s that
+                // `vec_buf_mut` derived it from, and no accessor slice is live
+                // while the flag is set.
+                unsafe { p.add(i).write(round * 10 + i as u64) };
+            }
+            req.active = false;
+            let expected = [round * 10, round * 10 + 1, round * 10 + 2, round * 10 + 3];
+            assert_eq!(req.buffer().expect("inactive"), expected);
+        }
+        drop(std::mem::take(&mut req.buffer));
+        forget(req);
+    }
+
+    /// The send counterpart: MPI reads through the pointer `vec_buf`
+    /// returned after the accessors rewrote the buffer.
+    #[test]
+    fn recorded_send_pointer_survives_accessors() {
+        let mut req = PersistentRequest::new(0, vec![0u64; 4]);
+        let (p, _, _) = vec_buf(&req.buffer);
+        let p = p.cast::<u64>();
+        for round in 1..=3u64 {
+            req.buffer_mut().expect("inactive").fill(round);
+            req.active = true;
+            for i in 0..4 {
+                // SAFETY: `p` addresses the live allocation of four `u64`s that
+                // `vec_buf` derived it from, and no accessor slice is live while
+                // the flag is set.
+                assert_eq!(unsafe { p.add(i).read() }, round);
+            }
+            req.active = false;
+        }
+        drop(std::mem::take(&mut req.buffer));
+        forget(req);
     }
 }

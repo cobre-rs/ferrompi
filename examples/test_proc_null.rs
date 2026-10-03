@@ -105,7 +105,7 @@ fn main() {
     );
 
     let mut persistent = world
-        .recv_init(&mut buf, Source::ProcNull, Tag::Any)
+        .recv_init(UNTOUCHED.to_vec(), Source::ProcNull, Tag::Any)
         .expect("recv_init failed");
     let mut rounds_ok = true;
     for _ in 0..3 {
@@ -113,7 +113,7 @@ fn main() {
     }
     common::check(
         &world,
-        rounds_ok && buf == UNTOUCHED,
+        rounds_ok && persistent.buffer().is_ok_and(|b| b == UNTOUCHED),
         "recv_init from ProcNull completes on every start and leaves the buffer untouched",
     );
 
@@ -162,10 +162,10 @@ fn main() {
     mpi.buffer_attach(vec![0u8; 64 * 1024].into_boxed_slice())
         .expect("buffer_attach failed");
     let requests = [
-        world.send_init(&send, Source::ProcNull, RING_TAG),
-        world.bsend_init(&send, Source::ProcNull, RING_TAG),
-        world.rsend_init(&send, Source::ProcNull, RING_TAG),
-        world.ssend_init(&send, Source::ProcNull, RING_TAG),
+        world.send_init(send.to_vec(), Source::ProcNull, RING_TAG),
+        world.bsend_init(send.to_vec(), Source::ProcNull, RING_TAG),
+        world.rsend_init(send.to_vec(), Source::ProcNull, RING_TAG),
+        world.ssend_init(send.to_vec(), Source::ProcNull, RING_TAG),
     ];
     let mut sends_ok = true;
     for request in requests {

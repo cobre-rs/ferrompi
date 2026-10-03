@@ -54,7 +54,7 @@ fn main() {
         "irecv after finalize must return Err(Finalized)"
     );
     assert!(
-        matches!(world.send_init(&buf, 0, 0), Err(Error::Finalized)),
+        matches!(world.send_init(buf.to_vec(), 0, 0), Err(Error::Finalized)),
         "send_init after finalize must return Err(Finalized)"
     );
     assert!(

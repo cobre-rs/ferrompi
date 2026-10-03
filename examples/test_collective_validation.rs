@@ -73,7 +73,7 @@ fn check_request(
 }
 
 fn check_persistent(
-    result: Result<PersistentRequest>,
+    result: Result<PersistentRequest<i32>>,
     rank: i32,
     method: &str,
     expected: &Expect,

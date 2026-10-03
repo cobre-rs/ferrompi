@@ -26,13 +26,13 @@ fn main() {
 
     if rank == 0 {
         // Rank 0: initialize a persistent send for a 100-element f64 buffer.
-        let mut send = vec![0.0f64; N];
         let mut req = world
-            .send_init(&send, 1, TAG)
+            .send_init(vec![0.0f64; N], 1, TAG)
             .expect("send_init failed on rank 0");
 
         for iter in 0..ITERS {
             // Fill send buffer: send[i] = iter * N + i
+            let send = req.buffer_mut().expect("buffer_mut failed on rank 0");
             for (i, x) in send.iter_mut().enumerate() {
                 *x = (iter * N + i) as f64;
             }
@@ -44,9 +44,8 @@ fn main() {
         drop(req);
     } else {
         // Rank 1: initialize a persistent recv for a 100-element f64 buffer.
-        let mut recv = vec![0.0f64; N];
         let mut req = world
-            .recv_init(&mut recv, 0, TAG)
+            .recv_init(vec![0.0f64; N], 0, TAG)
             .expect("recv_init failed on rank 1");
 
         for iter in 0..ITERS {
@@ -54,6 +53,7 @@ fn main() {
             req.wait().expect("wait failed on rank 1");
 
             // Verify: recv[i] must equal iter * N + i
+            let recv = req.buffer().expect("buffer failed on rank 1");
             for (i, &v) in recv.iter().enumerate() {
                 let expected = (iter * N + i) as f64;
                 assert!(

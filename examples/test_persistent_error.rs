@@ -44,11 +44,9 @@ mod common;
 use common::{class_of, PAYLOAD};
 
 fn part1_wait(world: &Communicator, rank: i32, mpich: bool) {
-    let mut small = [0i32; 1];
-
     if rank == 0 {
         let mut req = world
-            .recv_init(&mut small, 1, 71)
+            .recv_init(vec![0i32; 1], 1, 71)
             .expect("part1: recv_init");
         req.start().expect("part1: start");
         world.barrier().expect("part1: barrier A");
@@ -63,7 +61,7 @@ fn part1_wait(world: &Communicator, rank: i32, mpich: bool) {
             world.barrier().expect("part1: barrier C");
             world.barrier().expect("part1: barrier D");
             ok &= req.wait().is_ok();
-            ok &= small == [5];
+            ok &= req.buffer().is_ok_and(|b| b == [5]);
         } else {
             let start_result = req.start();
             ok &= matches!(
@@ -104,11 +102,9 @@ fn part1_wait(world: &Communicator, rank: i32, mpich: bool) {
 }
 
 fn part2_test(world: &Communicator, rank: i32) {
-    let mut small = [0i32; 1];
-
     if rank == 0 {
         let mut req = world
-            .recv_init(&mut small, 1, 72)
+            .recv_init(vec![0i32; 1], 1, 72)
             .expect("part2: recv_init");
         req.start().expect("part2: start");
         world.barrier().expect("part2: barrier A");
@@ -153,15 +149,12 @@ fn part2_test(world: &Communicator, rank: i32) {
 // handle no longer names a live request on a library that frees a failed
 // persistent request.
 fn part3_wait_all_skips_inactive(world: &Communicator, rank: i32) {
-    let mut small = [0i32; 1];
-    let mut full = [0i32; 4];
-
     if rank == 0 {
         let req_small = world
-            .recv_init(&mut small, 1, 73)
+            .recv_init(vec![0i32; 1], 1, 73)
             .expect("part3: recv_init small");
         let req_full = world
-            .recv_init(&mut full, 1, 74)
+            .recv_init(vec![0i32; 4], 1, 74)
             .expect("part3: recv_init full");
         let mut reqs = [req_small, req_full];
         PersistentRequest::start_all(&mut reqs).expect("part3: start_all");
@@ -176,7 +169,7 @@ fn part3_wait_all_skips_inactive(world: &Communicator, rank: i32) {
         world.barrier().expect("part3: barrier D");
 
         ok &= PersistentRequest::wait_all(&mut reqs).is_ok();
-        ok &= full == PAYLOAD;
+        ok &= reqs[1].buffer().is_ok_and(|b| b == PAYLOAD);
         ok &= !reqs[1].is_active();
 
         common::check(
@@ -218,19 +211,16 @@ fn part3_wait_all_skips_inactive(world: &Communicator, rank: i32) {
 // reports one, must not stop the receive from completing.
 fn part4_partial_start_all(world: &Communicator, mpi: &Mpi, rank: i32, mpich: bool) {
     if rank == 0 {
-        let mut small = [0i32; 1];
-        let payload = [0.0f64; 1];
-
         if !mpich {
             mpi.buffer_attach(vec![0u8; 64 * 1024].into_boxed_slice())
                 .expect("part4: buffer_attach");
         }
 
         let recv_req = world
-            .recv_init(&mut small, 0, 75)
+            .recv_init(vec![0i32; 1], 0, 75)
             .expect("part4: recv_init from self");
         let bsend_req = world
-            .bsend_init(&payload, 0, 79)
+            .bsend_init(vec![0i32; 1], 0, 79)
             .expect("part4: bsend_init");
         let mut reqs = [recv_req, bsend_req];
 
@@ -258,7 +248,7 @@ fn part4_partial_start_all(world: &Communicator, mpi: &Mpi, rank: i32, mpich: bo
         };
         ok &= !reqs[0].is_active();
         ok &= !reqs[1].is_active();
-        ok &= small == [42];
+        ok &= reqs[0].buffer().is_ok_and(|b| b == [42]);
 
         if !mpich {
             ok &= mpi.buffer_detach().is_ok();
@@ -285,16 +275,12 @@ fn part4_partial_start_all(world: &Communicator, mpi: &Mpi, rank: i32, mpich: bo
 // module-level `mpi-test-stderr` directive pins the expected count to
 // catch the finalize sweep miscounting either failed persistent request.
 fn part5_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
-    let mut small_a = [0i32; 1];
-    let mut small_b = [0i32; 1];
-    let mut ctrl = [0i32; 1];
-
     if rank == 0 {
         let mut req_a = world
-            .recv_init(&mut small_a, 1, 76)
+            .recv_init(vec![0i32; 1], 1, 76)
             .expect("part5: recv_init a");
         let mut req_b = world
-            .recv_init(&mut small_b, 1, 77)
+            .recv_init(vec![0i32; 1], 1, 77)
             .expect("part5: recv_init b");
         req_a.start().expect("part5: start a");
         req_b.start().expect("part5: start b");
@@ -319,7 +305,7 @@ fn part5_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
         // Never waited: stays active until finalize, giving the sweep
         // exactly one request it must count.
         let mut ctrl_req = world
-            .recv_init(&mut ctrl, 1, 78)
+            .recv_init(vec![0i32; 1], 1, 78)
             .expect("part5: recv_init ctrl");
         ctrl_req.start().expect("part5: start ctrl");
         world.barrier().expect("part5: barrier C");

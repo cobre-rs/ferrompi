@@ -38,7 +38,6 @@ fn main() {
         s.spawn(move || {
             let mut ok = true;
             let mut rbuf = [0i32; 1];
-            let sbuf = [1i32; 1];
 
             ok &= matches!(world_ref.barrier(), Err(Error::ThreadLevelViolation));
             ok &= matches!(
@@ -58,7 +57,7 @@ fn main() {
                 Err(Error::ThreadLevelViolation)
             );
             ok &= matches!(
-                world_ref.send_init(&sbuf, 0, 1),
+                world_ref.send_init(vec![1i32], 0, 1),
                 Err(Error::ThreadLevelViolation)
             );
             ok &= matches!(world_ref.duplicate(), Err(Error::ThreadLevelViolation));
@@ -88,10 +87,8 @@ fn main() {
 
     // A wait() rejected by the thread check must leave `active` unchanged,
     // so a later wait() on the init thread still owns a live request.
-    let mut rbuf7 = [0i32; 1];
-    let sbuf7 = [7i32; 1];
-    let mut recv_req = world.recv_init(&mut rbuf7, 0, 7).expect("recv_init failed");
-    let mut send_req = world.send_init(&sbuf7, 0, 7).expect("send_init failed");
+    let mut recv_req = world.recv_init(vec![0i32], 0, 7).expect("recv_init failed");
+    let mut send_req = world.send_init(vec![7i32], 0, 7).expect("send_init failed");
     recv_req.start().expect("recv start failed");
     send_req.start().expect("send start failed");
 
@@ -110,7 +107,11 @@ fn main() {
 
     recv_req.wait().expect("recv wait failed");
     send_req.wait().expect("send wait failed");
-    common::check(&world, rbuf7 == sbuf7, "recv/send data matches after wait");
+    common::check(
+        &world,
+        matches!((recv_req.buffer(), send_req.buffer()), (Ok(r), Ok(s)) if r == s),
+        "recv/send data matches after wait",
+    );
     common::check(
         &world,
         !recv_req.is_active() && !send_req.is_active(),

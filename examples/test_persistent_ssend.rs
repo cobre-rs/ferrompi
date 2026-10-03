@@ -27,13 +27,15 @@ fn main() {
     const ITERS: usize = 5;
 
     if rank == 0 {
-        let mut send = vec![0i32; N];
         let mut send_req = world
-            .ssend_init(&send, 1, TAG)
+            .ssend_init(vec![0i32; N], 1, TAG)
             .expect("ssend_init failed on rank 0");
 
         for iter in 0..ITERS {
             // Fill the send buffer for this iteration.
+            let send = send_req
+                .buffer_mut()
+                .expect("ssend buffer_mut failed on rank 0");
             for (i, slot) in send.iter_mut().enumerate() {
                 *slot = (iter * N + i) as i32;
             }
@@ -48,9 +50,8 @@ fn main() {
         }
     } else {
         // Rank 1
-        let mut recv = vec![0i32; N];
         let mut recv_req = world
-            .recv_init(&mut recv, 0, TAG)
+            .recv_init(vec![0i32; N], 0, TAG)
             .expect("recv_init failed on rank 1");
 
         for iter in 0..ITERS {
@@ -59,6 +60,7 @@ fn main() {
             recv_req.wait().expect("recv wait failed on rank 1");
 
             // Verify the payload.
+            let recv = recv_req.buffer().expect("recv buffer failed on rank 1");
             for (i, &val) in recv.iter().enumerate() {
                 let expected = (iter * N + i) as i32;
                 assert_eq!(
