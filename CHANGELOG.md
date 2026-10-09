@@ -275,6 +275,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns `Error::Mpi` with class `Count` when `send.len()` exceeds
   `i32::MAX`**, instead of reaching MPI with a span the user function's `int`
   length cannot hold.
+- **A window is not freed while its `post` exposure epoch is open.** A peer's
+  `start` epoch could still write into it, yet Open MPI 5 freed the window and
+  `Win::into_buffer` handed the buffer back. `into_buffer` now returns
+  `Error::InvalidState` without calling `MPI_Win_free` and drops the window,
+  which is leaked, and so is a window dropped in that state; `Mpi` then skips
+  `MPI_Finalize`. Close the epoch with `wait_exposure`, or a `test_exposure` that
+  returns `true`, first.
 
 ## [0.6.0] - 2026-10-01
 

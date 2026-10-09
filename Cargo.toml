@@ -61,6 +61,10 @@ name = "test_rma_epoch_panic"
 required-features = ["rma"]
 
 [[example]]
+name = "test_rma_free_exposed_window"
+required-features = ["rma"]
+
+[[example]]
 name = "test_rma_put"
 required-features = ["rma"]
 

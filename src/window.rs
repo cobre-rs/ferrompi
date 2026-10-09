@@ -52,6 +52,7 @@
 //! println!("Rank 0's first value: {}", remote[0]);
 //! ```
 
+use std::cell::Cell;
 use std::io::Write;
 use std::marker::PhantomData;
 use std::ops::{BitOr, BitOrAssign};
@@ -1019,7 +1020,7 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 /// # Dropping
 ///
 /// `MPI_Win_free` is collective and is called when the `Win` is dropped. It
-/// ends in one of three ways:
+/// ends in one of four ways:
 ///
 /// - The free succeeds: the window leaves the live-window count, and the
 ///   buffer of a `Win::create` window is dropped after the call. For
@@ -1030,6 +1031,10 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 ///   buffer is leaked. Its memory stays valid until the process exits.
 /// - The free fails: the buffer is leaked and the window stays counted as
 ///   alive.
+/// - An exposure epoch opened by [`post`](Win::post) is still open: no MPI call
+///   is made, the window stays counted as alive (so `Mpi` skips
+///   `MPI_Finalize`), and the buffer is leaked, because a peer may still write
+///   into the window (MPI-4.1 §12.2.5).
 ///
 /// # Thread Safety
 ///
@@ -1069,6 +1074,11 @@ pub struct Win<T: MpiDatatype> {
     /// borrowed while the window lives, so every slice stays a child of
     /// `local_ptr`; only `into_buffer` and `Drop` touch it, after the free.
     buffer: Option<Vec<T>>,
+    /// Whether a [`post`](Win::post) exposure epoch is open: set by a
+    /// successful `post`, cleared by a successful `wait_exposure` or a
+    /// `test_exposure` that returned `true`. While it is set, a peer may still
+    /// write into the window, so neither `into_buffer` nor `Drop` frees it.
+    exposure_open: Cell<bool>,
 }
 
 /// The handle an active-target access epoch gives its closure.
@@ -2321,6 +2331,7 @@ impl<T: MpiDatatype> Win<T> {
             local_len: buf.len(),
             words,
             buffer: Some(buf),
+            exposure_open: Cell::new(false),
         })
     }
 
@@ -2413,6 +2424,7 @@ impl<T: MpiDatatype> Win<T> {
             local_len: local_count,
             words,
             buffer: None,
+            exposure_open: Cell::new(false),
         })
     }
 
@@ -2433,6 +2445,13 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// # Errors
     ///
+    /// - `Error::InvalidState` while an exposure epoch opened by
+    ///   [`post`](Self::post) is open, because a peer may still write into the
+    ///   window (MPI-4.1 §12.2.5): no MPI call is made. The call takes the
+    ///   window, so the refusal drops it, which leaks the window and its buffer
+    ///   and keeps the window counted as alive. Close the epoch with
+    ///   [`wait_exposure`](Self::wait_exposure) or a
+    ///   [`test_exposure`](Self::test_exposure) that returns `true` first.
     /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped: no MPI
     ///   call is made and the buffer is leaked.
     /// - `Error::Mpi` with `operation: Some("win_free")` if the free fails:
@@ -2452,6 +2471,11 @@ impl<T: MpiDatatype> Win<T> {
     /// assert_eq!(buf[0], 1.5);
     /// ```
     pub fn into_buffer(mut self) -> Result<Option<Vec<T>>> {
+        if self.exposure_open.get() {
+            return Err(Error::InvalidState {
+                reason: "an exposure epoch opened by post is still open",
+            });
+        }
         let _call = rt::enter().map_err(|code| Error::from_code_with_op(code, "win_free"))?;
         // SAFETY: `win_handle` is the live window's handle. Only this call
         // frees it: `WIN_FREED`, set right below, keeps `Drop` from freeing it
@@ -2641,6 +2665,10 @@ impl<T: MpiDatatype> Win<T> {
     /// exposure epoch with [`Win::wait_exposure`] or [`Win::test_exposure`].
     ///
     /// The exposure epoch has no handle: this rank issues no RMA call in it.
+    /// While it is open, a peer may still write into this window, so
+    /// [`into_buffer`](Win::into_buffer) is refused and dropping the window
+    /// leaks it instead of freeing it (MPI-4.1 §12.2.5; see the type's
+    /// `# Dropping` section).
     ///
     /// # Arguments
     ///
@@ -2651,8 +2679,11 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// # Errors
     ///
-    /// Returns `Error::Mpi { operation: Some("win_post"), .. }` if MPI reports
-    /// an error.
+    /// * `Error::Finalized` or `Error::ThreadLevelViolation` if the call is
+    ///   refused before MPI runs it: no exposure epoch opens.
+    /// * `Error::Mpi { operation: Some("win_post"), .. }` if MPI reports an
+    ///   error. The exposure epoch then counts as open, because a post that
+    ///   failed may still have opened it (MPI-4.1 §9.4, p.460).
     ///
     /// # Example
     ///
@@ -2674,6 +2705,11 @@ impl<T: MpiDatatype> Win<T> {
         // `assert.bits()` is either 0 or a combination of MPI_MODE_* constants
         // returned by the MPI implementation.
         let ret = unsafe { ffi::ferrompi_win_post(group.handle, assert.bits(), self.win_handle) };
+        // Any other return means MPI ran the call, and a post that failed may
+        // still have opened the epoch (MPI-4.1 §9.4), so the window leaks.
+        if ret != FERROMPI_ERR_FINALIZED && ret != FERROMPI_ERR_THREAD_LEVEL {
+            self.exposure_open.set(true);
+        }
         Error::check_with_op(ret, "win_post")
     }
 
@@ -2774,12 +2810,13 @@ impl<T: MpiDatatype> Win<T> {
     /// Wraps `MPI_Win_wait`. Blocks until all RMA operations issued by the
     /// access group (those that ran [`Win::start`]) against this rank's window
     /// are complete. Closes the exposure epoch opened by [`Win::post`], which
-    /// has no handle: this rank issues no RMA call in it.
+    /// has no handle: this rank issues no RMA call in it. A successful call
+    /// lets [`into_buffer`](Win::into_buffer) free the window again.
     ///
     /// # Errors
     ///
     /// Returns `Error::Mpi { operation: Some("win_wait"), .. }` if MPI reports
-    /// an error.
+    /// an error; the exposure epoch then counts as still open.
     ///
     /// # Example
     ///
@@ -2797,7 +2834,9 @@ impl<T: MpiDatatype> Win<T> {
         // SAFETY: `win_handle` is a valid MPI window handle. An active exposure
         // epoch was opened by a prior call to `ferrompi_win_post`.
         let ret = unsafe { ffi::ferrompi_win_wait(self.win_handle) };
-        Error::check_with_op(ret, "win_wait")
+        Error::check_with_op(ret, "win_wait")?;
+        self.exposure_open.set(false);
+        Ok(())
     }
 
     /// Nonblocking test for exposure epoch completion (active-target PSCW).
@@ -2805,12 +2844,14 @@ impl<T: MpiDatatype> Win<T> {
     /// Wraps `MPI_Win_test`. Returns `true` if the exposure epoch started by
     /// [`Win::post`] has completed (i.e., all access-side ranks have closed
     /// their [`Win::start`] epochs), `false` otherwise. Does not block. That
-    /// exposure epoch has no handle: this rank issues no RMA call in it.
+    /// exposure epoch has no handle: this rank issues no RMA call in it. A call
+    /// that returns `true` lets [`into_buffer`](Win::into_buffer) free the
+    /// window again.
     ///
     /// # Errors
     ///
     /// Returns `Error::Mpi { operation: Some("win_test"), .. }` if MPI reports
-    /// an error.
+    /// an error; the exposure epoch then counts as still open.
     ///
     /// # Example
     ///
@@ -2833,7 +2874,11 @@ impl<T: MpiDatatype> Win<T> {
         // `*flag` output parameter.
         let ret = unsafe { ffi::ferrompi_win_test(self.win_handle, &mut flag) };
         Error::check_with_op(ret, "win_test")?;
-        Ok(flag != 0)
+        let closed = flag != 0;
+        if closed {
+            self.exposure_open.set(false);
+        }
+        Ok(closed)
     }
 
     /// Run a closure in a passive-target epoch on one rank's window.
@@ -3455,9 +3500,18 @@ impl<T: MpiDatatype> Win<T> {
 ///   buffer is leaked.
 /// - The free fails: the buffer is leaked and the window stays counted as
 ///   alive.
+/// - An exposure epoch opened by [`Win::post`] is still open: no MPI call is
+///   made, the window stays counted as alive, and the buffer is leaked.
 impl<T: MpiDatatype> Drop for Win<T> {
     fn drop(&mut self) {
         if self.win_handle == WIN_FREED {
+            return;
+        }
+        // A peer may still write into the window until the exposure epoch
+        // closes (MPI-4.1 §12.2.5), so the window is neither freed nor
+        // uncounted, and the buffer outlives the process.
+        if self.exposure_open.get() {
+            std::mem::forget(self.buffer.take());
             return;
         }
         let Some(_call) = rt::drop_guard("Win") else {
@@ -3618,8 +3672,10 @@ mod tests {
         check_fence_asserts, check_rma_target, window_word, Access, Error, Win, WinFenceAssert,
         WinPscwAssert, WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT, WIN_FREED,
     };
+    use crate::group::Group;
     use crate::persistent::vec_buf_mut;
     use crate::{MpiDatatype, ReduceOp};
+    use std::cell::Cell;
     use std::ptr::NonNull;
 
     // -------------------------------------------------------------------------
@@ -3776,6 +3832,7 @@ mod tests {
             local_len: 4,
             words: Box::new([]),
             buffer: Some(v),
+            exposure_open: Cell::new(false),
         };
         for round in 1..=3u64 {
             win.local_slice_mut().fill(round);
@@ -3792,6 +3849,44 @@ mod tests {
         assert_eq!(buffer, [30, 31, 32, 33]);
     }
 
+    /// `into_buffer` refuses while an exposure epoch is open, before any MPI
+    /// call (none is initialized here), and the window it then drops makes none
+    /// either. The window's empty buffer owns no allocation, so the leak is
+    /// empty.
+    #[test]
+    fn into_buffer_refuses_while_an_exposure_epoch_is_open() {
+        let win = Win::<u64> {
+            win_handle: 0,
+            local_ptr: NonNull::dangling(),
+            local_len: 0,
+            words: Box::new([]),
+            buffer: Some(Vec::new()),
+            exposure_open: Cell::new(true),
+        };
+        assert!(matches!(win.into_buffer(), Err(Error::InvalidState { .. })));
+    }
+
+    /// A `post` that was not refused before MPI could run it counts as opened,
+    /// even when it returns an error (MPI-4.1 §9.4). The sentinel window makes
+    /// the C shim return `MPI_ERR_WIN` without calling MPI, which stands in for
+    /// a call that failed.
+    #[test]
+    #[cfg_attr(miri, ignore = "calls the C layer")]
+    fn post_that_returned_an_mpi_error_counts_as_open() {
+        let win = Win::<u64> {
+            win_handle: WIN_FREED,
+            local_ptr: NonNull::dangling(),
+            local_len: 0,
+            words: Box::new([]),
+            buffer: Some(Vec::new()),
+            exposure_open: Cell::new(false),
+        };
+        assert!(win
+            .post(&Group { handle: -1 }, WinPscwAssert::none())
+            .is_err());
+        assert!(win.exposure_open.get());
+    }
+
     /// The fetch helpers validate the op before the target and refuse before any
     /// MPI call, so a window with the sentinel handle stands in for a real one,
     /// and a refused call writes nothing into the caller's `result`.
@@ -3804,6 +3899,7 @@ mod tests {
                 local_len: 0,
                 words: Box::new([window_word::<T>(1), window_word::<T>(1)]),
                 buffer: None,
+                exposure_open: Cell::new(false),
             }
         }
 
