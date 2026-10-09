@@ -98,7 +98,9 @@ cat >"$d/example_unfin_np2.rs" <<'EOF'
 // mpi-test-stderr: done
 fn main() {}
 EOF
-check_discover_rejects "discover: expect=unfinalized requires np=1 rejected" "$d"
+rc=0
+out=$( (discover "$d"; echo "${DIRECTIVE_NP[example_unfin_np2]}|${DIRECTIVE_EXPECT[example_unfin_np2]}") 2>&1 ) || rc=$?
+check "discover: expect=unfinalized accepted at np=2" "$rc|$out" "0|2|unfinalized"
 
 # --- discover: file-grammar rejections ------------------------------------
 
@@ -288,6 +290,24 @@ check "classify: expect=unfinalized, FAIL: line, exit 1" \
 f=$(mk_outfile $'shutdown complete\nrank 0: FAIL: some check\n')
 check "classify: expect=unfinalized, rank N: FAIL: line, exit 0" \
   "$(classify 0 "$f" "" "unfinalized" "shutdown" "unknown")" "$fail_line_outcome"
+
+# Two ranks that skip MPI_Finalize each print the marker. Open MPI exits 1 for
+# that, and Open MPI and MPICH can turn a failing rank's exit 2 into 0 or 1, so
+# the FAIL line is what fails a failing rank; a status of 2 or more fails on its
+# own.
+f=$(mk_outfile $'skipped\nskipped\n')
+check "classify: expect=unfinalized, two ranks, exit 0, literal present" \
+  "$(classify 0 "$f" "" "unfinalized" "skipped" "unknown")" "PASS"
+check "classify: expect=unfinalized, two ranks, exit 1, literal present" \
+  "$(classify 1 "$f" "" "unfinalized" "skipped" "unknown")" "PASS"
+check "classify: expect=unfinalized, two ranks, a rank's exit 2" \
+  "$(classify 2 "$f" "" "unfinalized" "skipped" "unknown")" "FAIL exit 2"
+
+f=$(mk_outfile $'skipped\nskipped\nFAIL: rank 1 check\n')
+check "classify: expect=unfinalized, two ranks, FAIL: line, exit 1" \
+  "$(classify 1 "$f" "" "unfinalized" "skipped" "unknown")" "$fail_line_outcome"
+check "classify: expect=unfinalized, two ranks, FAIL: line, exit 0" \
+  "$(classify 0 "$f" "" "unfinalized" "skipped" "unknown")" "$fail_line_outcome"
 
 f=$(mk_outfile $'boom\nrank 1: FAIL: returned instead of aborting\n')
 check "classify: expect=abort, exit 134, literal present, rank N: FAIL: line" \

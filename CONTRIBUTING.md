@@ -79,8 +79,11 @@ and at most one:
 // mpi-test-stderr: <literal>
 ```
 
-`mpi-test-stderr` is required when `expect=` is set; `expect=unfinalized` additionally
-requires `np=1`.
+`mpi-test-stderr` is required when `expect=` is set. `expect=unfinalized` accepts any `np`;
+every rank that skips `MPI_Finalize` prints the marker, and a rank that fails prints `FAIL`
+and exits 2. At `np` of 2 or more the launcher may stop the other ranks once one exits, so
+run every check before dropping `Mpi` (with `common::check`) or immediately after it; the
+exit status of a failing rank can be lost, and only its `FAIL` line is reliable.
 
 Examples run in a build with debug assertions: an example may check debug-only
 diagnostics, and the runner refuses to run when cargo reports the `ferrompi`

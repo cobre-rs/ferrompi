@@ -413,10 +413,6 @@ discover() {
       die "$f: expect=$expect requires a // mpi-test-stderr line"
     fi
 
-    if [[ "$expect" == "unfinalized" && "$np" != "1" ]]; then
-      die "$f: expect=unfinalized requires np=1"
-    fi
-
     DIRECTIVE_ORDER+=("$base")
     DIRECTIVE_NP["$base"]="$np"
     DIRECTIVE_TIMEOUT["$base"]="${tmo:-$MPI_TEST_TIMEOUT}"
