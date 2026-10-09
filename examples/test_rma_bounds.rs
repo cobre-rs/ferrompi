@@ -1,14 +1,16 @@
 //! Regression for RMA target bounds checking.
 //!
-//! Every `Win` RMA method (`put`, `get`, `accumulate`, `get_accumulate`,
-//! `rput`, `rget`, `raccumulate`, `fetch_and_op`, `compare_and_swap`) must
-//! reject an out-of-bounds target — a bad rank (including -1), a negative
-//! displacement, an access past the target's exposed window, a negative
-//! `target_count`, or a buffer length that does not match `target_count` —
-//! with `Err(InvalidArgument)` or `Err(BufferSize)` naming the argument,
-//! before any MPI call. Rank 0 is the origin; rank 1 is the target. Canary
-//! words around the length-mismatch buffer, the `Win::create` window's
-//! unchanged contents and valgrind prove no out-of-bounds write reaches memory.
+//! Every RMA method (`put`, `get`, `accumulate`, `get_accumulate`, `rput`,
+//! `rget`, `raccumulate`, `fetch_and_op`, `compare_and_swap`) must reject an
+//! out-of-bounds target — a bad rank (including -1), a negative displacement,
+//! or an access past the target's exposed window — with `Err(InvalidArgument)`
+//! naming the argument, before any MPI call. The count of `put`, `get`,
+//! `accumulate` and `get_accumulate` is the slice length, so a transfer longer
+//! than the target's window is a past-window access, and a `get_accumulate`
+//! whose `result` is shorter than its `origin` returns `Err(BufferSize)`. Rank
+//! 0 is the origin; rank 1 is the target. Canary words around the short
+//! `result` buffer, the `Win::create` window's unchanged contents and valgrind
+//! prove no out-of-bounds write reaches memory.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_bounds
 // mpi-test: np=2 valgrind skip-ok=openmpi-4
@@ -23,7 +25,6 @@ const CANARY: u64 = 0xC0FFEE;
 
 const BAD_RANK: (&str, &str) = ("target_rank", "rank outside the window's communicator");
 const NEGATIVE_DISP: (&str, &str) = ("target_disp", "negative displacement");
-const NEGATIVE_COUNT: (&str, &str) = ("target_count", "negative count");
 const PAST_WINDOW: (&str, &str) = ("target_disp", "access extends past the target's window");
 
 fn is_rejection(err: &Error, want: (&str, &str)) -> bool {
@@ -100,14 +101,14 @@ fn check_rejected_pending(
 }
 
 /// Runs the seven bulk-access methods (`put`, `accumulate`, `get`,
-/// `get_accumulate`, `rput`, `rget`, `raccumulate`) with a 4-element
-/// buffer and `target_count` 4, and the two single-element methods
-/// (`fetch_and_op`, `compare_and_swap`), against every out-of-bounds
-/// `(target_rank, target_disp)` case: the six that complete with a fence in one
-/// fence epoch, the three request-returning ones outside it (MPI allows
-/// request-based RMA only in a passive-target epoch, and a rejected call
-/// makes no MPI call). Only rank 0 issues calls; every one must return
-/// `Err(InvalidArgument)` naming the rejected argument. `len` is
+/// `get_accumulate`, `rput`, `rget`, `raccumulate`) with a 4-element buffer
+/// (and `target_count` 4 for the three request-returning ones), and the two
+/// single-element methods (`fetch_and_op`, `compare_and_swap`), against every
+/// out-of-bounds `(target_rank, target_disp)` case: the six that complete with
+/// a fence in one fence epoch, the three request-returning ones outside it
+/// (MPI allows request-based RMA only in a passive-target epoch, and a
+/// rejected call makes no MPI call). Only rank 0 issues calls; every one must
+/// return `Err(InvalidArgument)` naming the rejected argument. `len` is
 /// `win`'s exposed length in elements. Returns the aggregate local
 /// verdict (`true` on every rank but 0, which has no cases to fail).
 fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i64) -> bool {
@@ -117,17 +118,23 @@ fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i
     let mut stray_pending: Vec<PendingFetchResult<u64>> = Vec::new();
     let origin = [1u64, 2, 3, 4];
     let mut get_buf = [0u64; 4];
-    let mut result = [0u64; 4];
+    // Each epoch call borrows its buffer until the epoch closes, so every case
+    // gets its own `get` destination and `get_accumulate` result.
     let bulk_cases = [
         (1, (len - 2).max(0), PAST_WINDOW),
         (1, -1, NEGATIVE_DISP),
         (size, 0, BAD_RANK),
         (-1, 0, BAD_RANK),
     ];
+    let mut epoch_get_bufs = bulk_cases.map(|_| [0u64; 4]);
+    let mut epoch_results = bulk_cases.map(|_| [0u64; 4]);
 
     win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
         if world.rank() == 0 {
-            for &(rank, disp, want) in &bulk_cases {
+            for (&(rank, disp, want), (epoch_get_buf, epoch_result)) in bulk_cases
+                .iter()
+                .zip(epoch_get_bufs.iter_mut().zip(epoch_results.iter_mut()))
+            {
                 let label = |op: &str| format!("{name}/{op}");
                 check_rejected(
                     &mut ok,
@@ -135,7 +142,7 @@ fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i
                     rank,
                     disp,
                     want,
-                    e.put(&origin, rank, disp, 4),
+                    e.put(&origin, rank, disp),
                 );
                 check_rejected(
                     &mut ok,
@@ -143,7 +150,7 @@ fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i
                     rank,
                     disp,
                     want,
-                    e.accumulate(&origin, rank, disp, 4, ReduceOp::Sum),
+                    e.accumulate(&origin, rank, disp, ReduceOp::Sum),
                 );
                 check_rejected(
                     &mut ok,
@@ -151,7 +158,7 @@ fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i
                     rank,
                     disp,
                     want,
-                    e.get(&mut get_buf, rank, disp, 4),
+                    e.get(epoch_get_buf, rank, disp),
                 );
                 check_rejected(
                     &mut ok,
@@ -159,7 +166,7 @@ fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i
                     rank,
                     disp,
                     want,
-                    e.get_accumulate(&origin, &mut result, rank, disp, 4, ReduceOp::Sum),
+                    e.get_accumulate(&origin, epoch_result, rank, disp, ReduceOp::Sum),
                 );
             }
 
@@ -301,67 +308,55 @@ fn main() {
         }
     }
 
-    // Length mismatches against the alloc4 window: a 1-element buffer
+    // The count is the slice length. A 5-element transfer into the 4-element
+    // alloc4 window is a past-window access, and a get_accumulate whose result
+    // is shorter than its origin is a BufferSize error. The 1-element result is
     // surrounded by canary words rank 0 checks after the closing fence.
     let mut small = Box::new(Small {
         buf: [0u64; 1],
         canary: [CANARY; 7],
     });
     let four = [1u64, 2, 3, 4];
+    let five = [1u64, 2, 3, 4, 5];
+    let mut five_get = [0u64; 5];
     win_a.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
         if rank == 0 {
-            let result = e.put(&four, 1, 0, 2);
-        if !matches!(
-            result,
-            Err(Error::BufferSize {
-                arg: "origin",
-                required: 2,
-                actual: 4,
-                ..
-            })
-        ) {
-            eprintln!(
-                "FAIL: put target_count 2 != origin.len() 4 did not return Err(BufferSize {{ arg: \"origin\", required: 2, actual: 4 }}): {result:?}"
-            );
-            local_ok = false;
-        }
-        let result = e.put(&four, 1, 0, -4);
-        if !matches!(&result, Err(e) if is_rejection(e, NEGATIVE_COUNT)) {
-            eprintln!(
-                "FAIL: put with negative target_count did not return Err(InvalidArgument {{ arg: \"target_count\" }}): {result:?}"
-            );
-            local_ok = false;
-        }
-        let result = e.get(&mut small.buf, 1, 0, 4);
-        if !matches!(
-            result,
-            Err(Error::BufferSize {
-                arg: "origin",
-                required: 4,
-                actual: 1,
-                ..
-            })
-        ) {
-            eprintln!(
-                "FAIL: get of 4 elements into a 1-element origin did not return Err(BufferSize {{ arg: \"origin\", required: 4, actual: 1 }}): {result:?}"
-            );
-            local_ok = false;
-        }
-        let result = e.get_accumulate(&four, &mut small.buf, 1, 0, 4, ReduceOp::Sum);
-        if !matches!(
-            result,
-            Err(Error::BufferSize {
-                arg: "result",
-                required: 4,
-                actual: 1,
-                ..
-            })
-        ) {
-            eprintln!(
-                "FAIL: get_accumulate with a 1-element result did not return Err(BufferSize {{ arg: \"result\", required: 4, actual: 1 }}): {result:?}"
-            );
-            local_ok = false;
-        }
+            let result = e.put(&five, 1, 0);
+            if !matches!(&result, Err(e) if is_rejection(e, PAST_WINDOW)) {
+                eprintln!(
+                    "FAIL: put of 5 elements into a 4-element window did not return Err(InvalidArgument {{ arg: \"target_disp\" }}): {result:?}"
+                );
+                local_ok = false;
+            }
+            let result = e.get(&mut five_get, 1, 0);
+            if !matches!(&result, Err(e) if is_rejection(e, PAST_WINDOW)) {
+                eprintln!(
+                    "FAIL: get of 5 elements from a 4-element window did not return Err(InvalidArgument {{ arg: \"target_disp\" }}): {result:?}"
+                );
+                local_ok = false;
+            }
+            let result = e.accumulate(&five, 1, 0, ReduceOp::Sum);
+            if !matches!(&result, Err(e) if is_rejection(e, PAST_WINDOW)) {
+                eprintln!(
+                    "FAIL: accumulate of 5 elements into a 4-element window did not return Err(InvalidArgument {{ arg: \"target_disp\" }}): {result:?}"
+                );
+                local_ok = false;
+            }
+            let result = e.get_accumulate(&four, &mut small.buf, 1, 0, ReduceOp::Sum);
+            if !matches!(
+                result,
+                Err(Error::BufferSize {
+                    arg: "result",
+                    required: 4,
+                    actual: 1,
+                    ..
+                })
+            ) {
+                eprintln!(
+                    "FAIL: get_accumulate with a 1-element result did not return Err(BufferSize {{ arg: \"result\", required: 4, actual: 1 }}): {result:?}"
+                );
+                local_ok = false;
+            }
         }
         Ok(())
     })

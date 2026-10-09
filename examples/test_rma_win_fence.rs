@@ -120,7 +120,7 @@ fn main() {
 
         let epoch = win.fence(no_precede, no_succeed, |e| {
             if rank == 0 {
-                e.put(&buf, 1, 0, buf.len() as i64)?;
+                e.put(&buf, 1, 0)?;
             }
             Ok(())
         });

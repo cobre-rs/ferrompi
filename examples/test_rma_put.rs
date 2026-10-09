@@ -1,4 +1,4 @@
-//! Integration test for `Win::put` — one-sided write with a fence epoch.
+//! Integration test for `ActiveEpoch::put` — one-sided write with a fence epoch.
 //!
 //! Verifies that rank 0 can write `[10.0, 20.0, 30.0, 40.0]` into rank 1's
 //! window at displacement 0, and that rank 1 observes the correct data after
@@ -37,7 +37,7 @@ fn main() {
         // Open the fence epoch on all ranks; the put completes when it closes
         let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
             if rank == 0 {
-                e.put(&buf, 1, 0, buf.len() as i64)
+                e.put(&buf, 1, 0)
             } else {
                 Ok(())
             }
@@ -63,7 +63,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 1 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::put with fence epoch");
+        println!("PASS: ActiveEpoch::put with fence epoch");
     }
 
     // ========================================================================
@@ -78,7 +78,7 @@ fn main() {
         let buf = [1.0f64, 2.0, 3.0, 4.0];
 
         win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
-            if rank == 0 && e.put(&buf, 5, 0, buf.len() as i64).is_ok() {
+            if rank == 0 && e.put(&buf, 5, 0).is_ok() {
                 eprintln!("FAIL: expected Err for invalid rank 5, got Ok");
                 local_ok = false;
             }
@@ -91,7 +91,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 2 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::put invalid rank returns error");
+        println!("PASS: ActiveEpoch::put invalid rank returns error");
     }
 
     common::check(&world, local_ok, "test_rma_put");

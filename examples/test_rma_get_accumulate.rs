@@ -1,13 +1,13 @@
-//! Integration test for `Win::get_accumulate` — atomic read-modify-write over a
-//! fence epoch.
+//! Integration test for `ActiveEpoch::get_accumulate` — atomic read-modify-write
+//! over a fence epoch.
 //!
 //! Verifies two test cases:
 //!   1. Sum: rank 1's window starts at `[10, 20, 30, 40]`; rank 0 calls
-//!      `get_accumulate([1, 2, 3, 4], &mut result, 1, 0, 4, Sum)`; after the
+//!      `get_accumulate([1, 2, 3, 4], &mut result, 1, 0, Sum)`; after the
 //!      closing fence, `result == [10, 20, 30, 40]` (pre-update) and rank 1's
 //!      window equals `[11, 22, 33, 44]` (post-update).
 //!   2. NoOp: rank 1's window starts at `[99]`; rank 0 calls
-//!      `get_accumulate([0], &mut result, 1, 0, 1, FetchOp::NO_OP)`; after the closing
+//!      `get_accumulate([0], &mut result, 1, 0, FetchOp::NO_OP)`; after the closing
 //!      fence, `result == [99]` and rank 1's window is unchanged at `[99]`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_get_accumulate
@@ -49,13 +49,15 @@ fn main() {
 
         let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
             if rank == 0 {
-                e.get_accumulate(&origin, &mut result, 1, 0, N as i64, ReduceOp::Sum)
+                e.get_accumulate(&origin, &mut result, 1, 0, ReduceOp::Sum)
             } else {
                 Ok(())
             }
         });
         if let Err(e) = epoch {
-            eprintln!("FAIL: rank {rank} Win::get_accumulate Sum epoch returned error: {e}");
+            eprintln!(
+                "FAIL: rank {rank} ActiveEpoch::get_accumulate Sum epoch returned error: {e}"
+            );
             local_ok = false;
         }
 
@@ -83,7 +85,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 1 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::get_accumulate Sum (fetch + accumulate)");
+        println!("PASS: ActiveEpoch::get_accumulate Sum (fetch + accumulate)");
     }
 
     // ========================================================================
@@ -105,13 +107,15 @@ fn main() {
 
         let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
             if rank == 0 {
-                e.get_accumulate(&origin, &mut result, 1, 0, N as i64, FetchOp::NO_OP)
+                e.get_accumulate(&origin, &mut result, 1, 0, FetchOp::NO_OP)
             } else {
                 Ok(())
             }
         });
         if let Err(e) = epoch {
-            eprintln!("FAIL: rank {rank} Win::get_accumulate NoOp epoch returned error: {e}");
+            eprintln!(
+                "FAIL: rank {rank} ActiveEpoch::get_accumulate NoOp epoch returned error: {e}"
+            );
             local_ok = false;
         }
 
@@ -139,7 +143,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 2 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::get_accumulate NoOp (atomic read)");
+        println!("PASS: ActiveEpoch::get_accumulate NoOp (atomic read)");
     }
 
     common::check(&world, local_ok, "test_rma_get_accumulate");

@@ -1,5 +1,5 @@
-//! Integration test for `Win::accumulate` — one-sided reduction with a fence
-//! epoch.
+//! Integration test for `ActiveEpoch::accumulate` — one-sided reduction with a
+//! fence epoch.
 //!
 //! Verifies three test cases:
 //!   1. Sum: rank 0 accumulates `[10, 20, 30, 40]` onto rank 1's window which
@@ -52,13 +52,13 @@ fn main() {
         // closes
         let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
             if rank == 0 {
-                e.accumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum)
+                e.accumulate(&buf, 1, 0, ReduceOp::Sum)
             } else {
                 Ok(())
             }
         });
         if let Err(e) = epoch {
-            eprintln!("FAIL: rank {rank} Win::accumulate Sum epoch returned error: {e}");
+            eprintln!("FAIL: rank {rank} ActiveEpoch::accumulate Sum epoch returned error: {e}");
             local_ok = false;
         }
 
@@ -74,7 +74,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 1 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::accumulate Sum");
+        println!("PASS: ActiveEpoch::accumulate Sum");
     }
 
     // ========================================================================
@@ -98,13 +98,15 @@ fn main() {
         // closes
         let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
             if rank == 0 {
-                e.accumulate(&buf, 1, 0, buf.len() as i64, AccumulateOp::REPLACE)
+                e.accumulate(&buf, 1, 0, AccumulateOp::REPLACE)
             } else {
                 Ok(())
             }
         });
         if let Err(e) = epoch {
-            eprintln!("FAIL: rank {rank} Win::accumulate Replace epoch returned error: {e}");
+            eprintln!(
+                "FAIL: rank {rank} ActiveEpoch::accumulate Replace epoch returned error: {e}"
+            );
             local_ok = false;
         }
 
@@ -122,7 +124,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 2 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::accumulate Replace");
+        println!("PASS: ActiveEpoch::accumulate Replace");
     }
 
     // ========================================================================
@@ -141,13 +143,13 @@ fn main() {
         let mut out = [0.0f64; N];
 
         win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
-            let accumulate = e.accumulate(&buf, 1, 0, N as i64, ReduceOp::BitwiseOr);
+            let accumulate = e.accumulate(&buf, 1, 0, ReduceOp::BitwiseOr);
             if !matches!(accumulate, Err(Error::InvalidArgument { arg: "op", .. })) {
                 eprintln!("FAIL: rank {rank} accumulate BitwiseOr on f64: expected InvalidArgument for op, got {accumulate:?}");
                 local_ok = false;
             }
             let get_accumulate =
-                e.get_accumulate(&buf, &mut out, 1, 0, N as i64, ReduceOp::LogicalAnd);
+                e.get_accumulate(&buf, &mut out, 1, 0, ReduceOp::LogicalAnd);
             if !matches!(
                 get_accumulate,
                 Err(Error::InvalidArgument { arg: "op", .. })
@@ -170,7 +172,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 3 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::accumulate and get_accumulate reject a bitwise op on f64");
+        println!("PASS: ActiveEpoch::accumulate and get_accumulate reject a bitwise op on f64");
     }
 
     common::check(&world, local_ok, "test_rma_accumulate");

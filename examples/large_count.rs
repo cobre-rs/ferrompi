@@ -69,7 +69,7 @@ fn main() {
         b.fill(0);
         let mut win = Win::create(&world, b).expect("Win::create failed");
         win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
-            e.put(&a, 0, 0, N as i64)
+            e.put(&a, 0, 0)
         })
         .expect("put epoch failed");
         let b = win
@@ -96,7 +96,7 @@ fn main() {
         let mut win = Win::<u8>::allocate(&world, N).expect("Win::allocate failed");
         let put_ok = win
             .fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
-                Ok(common::is_count(&e.put(&a, 0, 0, N as i64)))
+                Ok(common::is_count(&e.put(&a, 0, 0)))
             })
             .expect("fence epoch failed");
         all_ok &= report("put of 2^31+16 bytes below MPI 4 returns Count", put_ok);

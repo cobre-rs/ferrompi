@@ -3,7 +3,7 @@
 //! Verifies that the PSCW epoch methods — `Win::post`, `Win::start` (whose
 //! closure ends with `MPI_Win_complete`), and `Win::wait_exposure` — correctly
 //! open and close epochs. Tests 1 and 2 exercise the epoch helpers alone (no
-//! RMA data operations); test 3 issues a real `Win::put` inside a
+//! RMA data operations); test 3 issues a real `put` inside a
 //! `WinPscwAssert::no_check()` epoch on its own window and checks the
 //! transferred data; test 4 returns an error from the access closure after a
 //! put and checks that the epoch is still closed and the put delivered.
@@ -262,7 +262,7 @@ fn main() {
 
             let buf = [1.0f64, 2.0, 3.0, 4.0];
             let epoch = win3.start(&exposure_group, WinPscwAssert::no_check(), |e| {
-                e.put(&buf, 0, 0, buf.len() as i64)
+                e.put(&buf, 0, 0)
             });
             if let Err(e) = epoch {
                 eprintln!("rank {rank}: FAIL: Win::start(no_check) with put failed: {e}");
@@ -312,8 +312,8 @@ fn main() {
         } else {
             let buf = [5.0f64, 6.0, 7.0, 8.0];
             let epoch = win4.start(&peer_group(&world, 0), WinPscwAssert::default(), |e| {
-                e.put(&buf, 0, 0, buf.len() as i64)?;
-                e.put(&buf, 2, 0, buf.len() as i64)
+                e.put(&buf, 0, 0)?;
+                e.put(&buf, 2, 0)
             });
             if !matches!(
                 epoch,

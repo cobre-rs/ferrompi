@@ -178,6 +178,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Win::flush_local_all`, `Win::sync`, `WinLockGuard` and `WinLockAllGuard` are
   removed. Migration: move the guard's scope into the closure and call the
   flushes on its argument.
+- **`put`, `get`, `accumulate` and `get_accumulate` are epoch-handle methods**
+  (`ActiveEpoch`, `PassiveEpoch`) that borrow their buffers until the epoch
+  closes and take their count from the slice: `e.put(&origin, rank, disp)`.
+  `get_accumulate` requires `result` as long as `origin`. Migration: drop the
+  `target_count` argument; pass a sub-slice for a shorter transfer; declare the
+  buffers before the epoch closure.
 
 ### Added
 

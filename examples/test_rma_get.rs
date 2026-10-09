@@ -1,4 +1,4 @@
-//! Integration test for `Win::get` — one-sided read with a fence epoch.
+//! Integration test for `ActiveEpoch::get` — one-sided read with a fence epoch.
 //!
 //! Verifies that rank 0 can read `[100.0, 200.0, 300.0, 400.0]` from rank 1's
 //! window at displacement 0, and that rank 0 observes the correct data after
@@ -26,7 +26,7 @@ fn main() {
 
     // ========================================================================
     // Test 1: rank 1 writes [100.0, 200.0, 300.0, 400.0] into its own window;
-    // rank 0 reads that data via Win::get. Verified by rank 0 after the
+    // rank 0 reads that data via ActiveEpoch::get. Verified by rank 0 after the
     // closing fence.
     // ========================================================================
     {
@@ -45,7 +45,7 @@ fn main() {
         // and local_buf is valid after it
         let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
             if rank == 0 {
-                e.get(&mut local_buf, 1, 0, N as i64)
+                e.get(&mut local_buf, 1, 0)
             } else {
                 Ok(())
             }
@@ -68,7 +68,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 1 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::get with fence epoch");
+        println!("PASS: ActiveEpoch::get with fence epoch");
     }
 
     // ========================================================================
@@ -83,7 +83,7 @@ fn main() {
         let mut buf = [0.0f64; 4];
 
         win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
-            if rank == 0 && e.get(&mut buf, 5, 0, 4).is_ok() {
+            if rank == 0 && e.get(&mut buf, 5, 0).is_ok() {
                 eprintln!("FAIL: expected Err for invalid rank 5, got Ok");
                 local_ok = false;
             }
@@ -96,7 +96,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 2 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::get invalid rank returns error");
+        println!("PASS: ActiveEpoch::get invalid rank returns error");
     }
 
     common::check(&world, local_ok, "test_rma_get");

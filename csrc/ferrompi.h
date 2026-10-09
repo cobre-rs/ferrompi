@@ -627,35 +627,32 @@ int ferrompi_win_test(int32_t win, int32_t* flag);
 
 void ferrompi_win_pscw_mode_values(int32_t* out);
 
-int ferrompi_put(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                 int32_t target_rank, int64_t target_disp, int64_t target_count,
-                 int32_t target_dt_tag, int32_t win_handle);
+/* Each transfer shim below takes one count and one datatype tag and uses them as the origin, target (and result) count and type. A count above INT_MAX calls the _c variant on MPI >= 4 and returns MPI_ERR_COUNT below. */
+int ferrompi_put(const void* origin, int64_t count, int32_t dt_tag,
+                 int32_t target_rank, int64_t target_disp, int32_t win_handle);
 
-int ferrompi_rput(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                  int32_t target_rank, int64_t target_disp, int64_t target_count,
-                  int32_t target_dt_tag, int32_t win_handle, int64_t* request_handle);
+int ferrompi_rput(const void* origin, int64_t count, int32_t dt_tag,
+                  int32_t target_rank, int64_t target_disp, int32_t win_handle,
+                  int64_t* request_handle);
 
-int ferrompi_get(void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                 int32_t target_rank, int64_t target_disp, int64_t target_count,
-                 int32_t target_dt_tag, int32_t win_handle);
+int ferrompi_get(void* origin, int64_t count, int32_t dt_tag,
+                 int32_t target_rank, int64_t target_disp, int32_t win_handle);
 
-int ferrompi_rget(void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                  int32_t target_rank, int64_t target_disp, int64_t target_count,
-                  int32_t target_dt_tag, int32_t win_handle, int64_t* request_handle);
+int ferrompi_rget(void* origin, int64_t count, int32_t dt_tag,
+                  int32_t target_rank, int64_t target_disp, int32_t win_handle,
+                  int64_t* request_handle);
 
-int ferrompi_accumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                        int32_t target_rank, int64_t target_disp, int64_t target_count,
-                        int32_t target_dt_tag, int32_t op_tag, int32_t win_handle);
+int ferrompi_accumulate(const void* origin, int64_t count, int32_t dt_tag,
+                        int32_t target_rank, int64_t target_disp, int32_t op_tag,
+                        int32_t win_handle);
 
-int ferrompi_raccumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                         int32_t target_rank, int64_t target_disp, int64_t target_count,
-                         int32_t target_dt_tag, int32_t op_tag, int32_t win_handle,
-                         int64_t* request_handle);
+int ferrompi_raccumulate(const void* origin, int64_t count, int32_t dt_tag,
+                         int32_t target_rank, int64_t target_disp, int32_t op_tag,
+                         int32_t win_handle, int64_t* request_handle);
 
-int ferrompi_get_accumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                            void* result, int64_t result_count, int32_t result_dt_tag,
-                            int32_t target_rank, int64_t target_disp, int64_t target_count,
-                            int32_t target_dt_tag, int32_t op_tag, int32_t win_handle);
+int ferrompi_get_accumulate(const void* origin, void* result, int64_t count,
+                            int32_t dt_tag, int32_t target_rank, int64_t target_disp,
+                            int32_t op_tag, int32_t win_handle);
 
 int ferrompi_fetch_and_op(const void* origin, void* result, int32_t dt_tag,
                           int32_t target_rank, int64_t target_disp,

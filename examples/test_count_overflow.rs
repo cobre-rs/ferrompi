@@ -14,10 +14,10 @@
 //! function takes an `int` length, so both are checked before that skip. A
 //! persistent reduction without persistent collectives is refused with
 //! `Error::NotSupported` instead. RMA is exercised through a raw `extern "C"`
-//! call to `ferrompi_put`, not the safe `Win::put` API: the window's bounds
-//! check rejects a mismatched `target_count` in Rust before the C guard is ever
-//! reached, so only a direct C call can observe it — and only on MPI < 4,
-//! since on MPI >= 4 the fixed shim would hand the oversized count to
+//! call to `ferrompi_put`, not the safe `put` method: the count is the slice
+//! length, so a count above `INT_MAX`, which no safe call can pass without a
+//! 32 GiB slice, reaches the C guard only through a direct C call — and only on
+//! MPI < 4, since on MPI >= 4 the fixed shim would hand the oversized count to
 //! `MPI_Put_c` over a four-element window.
 //!
 //! A user op in `reduce_scatter_block` reduces `recv.len() * size` elements, so
@@ -76,26 +76,24 @@ fn v_collectives(world: &Communicator) {
 // without an API extension on the Rust side.
 //
 // SAFETY invariant for the call in rma_put below: the C guard rejects
-// target_count before MPI_Put/MPI_Put_c is called, so `origin` is never
+// count before MPI_Put/MPI_Put_c is called, so `origin` is never
 // read by MPI and need only be valid for the duration of the call.
 #[cfg(feature = "rma")]
 extern "C" {
     fn ferrompi_put(
         origin: *const std::ffi::c_void,
-        origin_count: i64,
-        origin_dt_tag: i32,
+        count: i64,
+        dt_tag: i32,
         target_rank: i32,
         target_disp: i64,
-        target_count: i64,
-        target_dt_tag: i32,
         win_handle: i32,
     ) -> std::ffi::c_int;
 }
 
-/// Calls the C `ferrompi_put` shim directly with a `target_count` above
-/// `INT_MAX` over a real 4-element window, bypassing `Win::put`'s bounds
-/// check so the C-side guard is reachable. Only reachable on MPI < 4: the
-/// fixed shim on MPI >= 4 would pass the oversized count to `MPI_Put_c`.
+/// Calls the C `ferrompi_put` shim directly with a `count` above `INT_MAX`
+/// over a real 4-element window, bypassing the safe `put`'s bounds check so
+/// the C-side guard is reachable. Only reachable on MPI < 4: the fixed shim on
+/// MPI >= 4 would pass the oversized count to `MPI_Put_c`.
 #[cfg(feature = "rma")]
 fn rma_put(world: &Communicator) {
     let mut win = Win::<u64>::allocate(world, 4).expect("Win::allocate failed");
@@ -110,12 +108,10 @@ fn rma_put(world: &Communicator) {
                 // SAFETY: see the invariant comment on the extern "C" block above.
                 ferrompi_put(
                     origin.as_ptr().cast(),
-                    4,
+                    (1i64 << 32) + 4,
                     dt_tag,
                     1,
                     0,
-                    (1i64 << 32) + 4,
-                    dt_tag,
                     handle,
                 )
             };
@@ -132,11 +128,7 @@ fn rma_put(world: &Communicator) {
     .expect("fence epoch failed");
     drop(win);
 
-    common::check(
-        world,
-        rma_put_ok,
-        "put with a 2^32+4 target count returns Count",
-    );
+    common::check(world, rma_put_ok, "put with a 2^32+4 count returns Count");
 }
 
 /// True iff `r` is what a persistent reduction with a user op above `INT_MAX`

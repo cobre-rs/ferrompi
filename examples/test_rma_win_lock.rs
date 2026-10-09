@@ -160,7 +160,7 @@ fn main() {
     // ========================================================================
     if rank == 0 {
         let buf = [1.0f64];
-        let epoch = win.lock(LockType::Exclusive, 0, |e| e.put(&buf, size, 0, 1));
+        let epoch = win.lock(LockType::Exclusive, 0, |e| e.put(&buf, size, 0));
         if !matches!(
             epoch,
             Err(Error::InvalidArgument {

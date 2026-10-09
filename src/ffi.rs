@@ -1123,24 +1123,20 @@ guarded_extern! {
     #[cfg(feature = "rma")]
     pub fn ferrompi_put(
         origin: *const c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         win_handle: int32_t,
     ) -> c_int;
 
     #[cfg(feature = "rma")]
     pub fn ferrompi_rput(
         origin: *const c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         win_handle: int32_t,
         request_handle: *mut int64_t,
     ) -> c_int;
@@ -1148,24 +1144,20 @@ guarded_extern! {
     #[cfg(feature = "rma")]
     pub fn ferrompi_get(
         origin: *mut c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         win_handle: int32_t,
     ) -> c_int;
 
     #[cfg(feature = "rma")]
     pub fn ferrompi_rget(
         origin: *mut c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         win_handle: int32_t,
         request_handle: *mut int64_t,
     ) -> c_int;
@@ -1173,12 +1165,10 @@ guarded_extern! {
     #[cfg(feature = "rma")]
     pub fn ferrompi_accumulate(
         origin: *const c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         op_tag: int32_t,
         win_handle: int32_t,
     ) -> c_int;
@@ -1186,12 +1176,10 @@ guarded_extern! {
     #[cfg(feature = "rma")]
     pub fn ferrompi_raccumulate(
         origin: *const c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         op_tag: int32_t,
         win_handle: int32_t,
         request_handle: *mut int64_t,
@@ -1200,15 +1188,11 @@ guarded_extern! {
     #[cfg(feature = "rma")]
     pub fn ferrompi_get_accumulate(
         origin: *const c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
         result: *mut c_void,
-        result_count: int64_t,
-        result_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         op_tag: int32_t,
         win_handle: int32_t,
     ) -> c_int;

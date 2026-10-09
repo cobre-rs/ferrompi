@@ -4198,52 +4198,47 @@ void ferrompi_win_pscw_mode_values(int32_t* out) {
     out[2] = MPI_MODE_NOPUT;
 }
 
-int ferrompi_put(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                 int32_t target_rank, int64_t target_disp, int64_t target_count,
-                 int32_t target_dt_tag, int32_t win_handle) {
+int ferrompi_put(const void* origin, int64_t count, int32_t dt_tag,
+                 int32_t target_rank, int64_t target_disp, int32_t win_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        return MPI_Put_c(origin, (MPI_Count)origin_count, origin_dt,
-                         target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                         target_dt, win);
+        return MPI_Put_c(origin, (MPI_Count)count, dt,
+                         target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                         dt, win);
 #else
         return MPI_ERR_COUNT;
 #endif
     }
-    return MPI_Put(origin, (int)origin_count, origin_dt,
-                   target_rank, (MPI_Aint)target_disp, (int)target_count,
-                   target_dt, win);
+    return MPI_Put(origin, (int)count, dt,
+                   target_rank, (MPI_Aint)target_disp, (int)count,
+                   dt, win);
 }
 
-int ferrompi_rput(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                  int32_t target_rank, int64_t target_disp, int64_t target_count,
-                  int32_t target_dt_tag, int32_t win_handle, int64_t* request_handle) {
+int ferrompi_rput(const void* origin, int64_t count, int32_t dt_tag,
+                  int32_t target_rank, int64_t target_disp, int32_t win_handle,
+                  int64_t* request_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
     int ret;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Rput_c(origin, (MPI_Count)origin_count, origin_dt,
-                         target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                         target_dt, win, &req);
+        ret = MPI_Rput_c(origin, (MPI_Count)count, dt,
+                         target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                         dt, win, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Rput(origin, (int)origin_count, origin_dt,
-                       target_rank, (MPI_Aint)target_disp, (int)target_count,
-                       target_dt, win, &req);
+        ret = MPI_Rput(origin, (int)count, dt,
+                       target_rank, (MPI_Aint)target_disp, (int)count,
+                       dt, win, &req);
     }
     if (ret == MPI_SUCCESS) {
         *request_handle = alloc_request(req, 0);
@@ -4255,52 +4250,47 @@ int ferrompi_rput(const void* origin, int64_t origin_count, int32_t origin_dt_ta
     return ret;
 }
 
-int ferrompi_get(void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                 int32_t target_rank, int64_t target_disp, int64_t target_count,
-                 int32_t target_dt_tag, int32_t win_handle) {
+int ferrompi_get(void* origin, int64_t count, int32_t dt_tag,
+                 int32_t target_rank, int64_t target_disp, int32_t win_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        return MPI_Get_c(origin, (MPI_Count)origin_count, origin_dt,
-                         target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                         target_dt, win);
+        return MPI_Get_c(origin, (MPI_Count)count, dt,
+                         target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                         dt, win);
 #else
         return MPI_ERR_COUNT;
 #endif
     }
-    return MPI_Get(origin, (int)origin_count, origin_dt,
-                   target_rank, (MPI_Aint)target_disp, (int)target_count,
-                   target_dt, win);
+    return MPI_Get(origin, (int)count, dt,
+                   target_rank, (MPI_Aint)target_disp, (int)count,
+                   dt, win);
 }
 
-int ferrompi_rget(void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                  int32_t target_rank, int64_t target_disp, int64_t target_count,
-                  int32_t target_dt_tag, int32_t win_handle, int64_t* request_handle) {
+int ferrompi_rget(void* origin, int64_t count, int32_t dt_tag,
+                  int32_t target_rank, int64_t target_disp, int32_t win_handle,
+                  int64_t* request_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
     int ret;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Rget_c(origin, (MPI_Count)origin_count, origin_dt,
-                         target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                         target_dt, win, &req);
+        ret = MPI_Rget_c(origin, (MPI_Count)count, dt,
+                         target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                         dt, win, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Rget(origin, (int)origin_count, origin_dt,
-                       target_rank, (MPI_Aint)target_disp, (int)target_count,
-                       target_dt, win, &req);
+        ret = MPI_Rget(origin, (int)count, dt,
+                       target_rank, (MPI_Aint)target_disp, (int)count,
+                       dt, win, &req);
     }
     if (ret == MPI_SUCCESS) {
         *request_handle = alloc_request(req, 0);
@@ -4312,57 +4302,52 @@ int ferrompi_rget(void* origin, int64_t origin_count, int32_t origin_dt_tag,
     return ret;
 }
 
-int ferrompi_accumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                        int32_t target_rank, int64_t target_disp, int64_t target_count,
-                        int32_t target_dt_tag, int32_t op_tag, int32_t win_handle) {
+int ferrompi_accumulate(const void* origin, int64_t count, int32_t dt_tag,
+                        int32_t target_rank, int64_t target_disp, int32_t op_tag,
+                        int32_t win_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op_tag);
     if (mpi_op == MPI_OP_NULL) return MPI_ERR_OP;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        return MPI_Accumulate_c(origin, (MPI_Count)origin_count, origin_dt,
-                                target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                                target_dt, mpi_op, win);
+        return MPI_Accumulate_c(origin, (MPI_Count)count, dt,
+                                target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                                dt, mpi_op, win);
 #else
         return MPI_ERR_COUNT;
 #endif
     }
-    return MPI_Accumulate(origin, (int)origin_count, origin_dt,
-                          target_rank, (MPI_Aint)target_disp, (int)target_count,
-                          target_dt, mpi_op, win);
+    return MPI_Accumulate(origin, (int)count, dt,
+                          target_rank, (MPI_Aint)target_disp, (int)count,
+                          dt, mpi_op, win);
 }
 
-int ferrompi_raccumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                         int32_t target_rank, int64_t target_disp, int64_t target_count,
-                         int32_t target_dt_tag, int32_t op_tag, int32_t win_handle,
-                         int64_t* request_handle) {
+int ferrompi_raccumulate(const void* origin, int64_t count, int32_t dt_tag,
+                         int32_t target_rank, int64_t target_disp, int32_t op_tag,
+                         int32_t win_handle, int64_t* request_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op_tag);
     if (mpi_op == MPI_OP_NULL) return MPI_ERR_OP;
     MPI_Request req;
     int ret;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Raccumulate_c(origin, (MPI_Count)origin_count, origin_dt,
-                                target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                                target_dt, mpi_op, win, &req);
+        ret = MPI_Raccumulate_c(origin, (MPI_Count)count, dt,
+                                target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                                dt, mpi_op, win, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Raccumulate(origin, (int)origin_count, origin_dt,
-                              target_rank, (MPI_Aint)target_disp, (int)target_count,
-                              target_dt, mpi_op, win, &req);
+        ret = MPI_Raccumulate(origin, (int)count, dt,
+                              target_rank, (MPI_Aint)target_disp, (int)count,
+                              dt, mpi_op, win, &req);
     }
     if (ret == MPI_SUCCESS) {
         *request_handle = alloc_request(req, 0);
@@ -4374,34 +4359,29 @@ int ferrompi_raccumulate(const void* origin, int64_t origin_count, int32_t origi
     return ret;
 }
 
-int ferrompi_get_accumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                            void* result, int64_t result_count, int32_t result_dt_tag,
-                            int32_t target_rank, int64_t target_disp, int64_t target_count,
-                            int32_t target_dt_tag, int32_t op_tag, int32_t win_handle) {
+int ferrompi_get_accumulate(const void* origin, void* result, int64_t count,
+                            int32_t dt_tag, int32_t target_rank, int64_t target_disp,
+                            int32_t op_tag, int32_t win_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype result_dt = get_datatype(result_dt_tag);
-    if (result_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op_tag);
     if (mpi_op == MPI_OP_NULL) return MPI_ERR_OP;
-    if (origin_count > INT_MAX || target_count > INT_MAX || result_count > INT_MAX) {
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        return MPI_Get_accumulate_c(origin, (MPI_Count)origin_count, origin_dt,
-                                    result, (MPI_Count)result_count, result_dt,
-                                    target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                                    target_dt, mpi_op, win);
+        return MPI_Get_accumulate_c(origin, (MPI_Count)count, dt,
+                                    result, (MPI_Count)count, dt,
+                                    target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                                    dt, mpi_op, win);
 #else
         return MPI_ERR_COUNT;
 #endif
     }
-    return MPI_Get_accumulate(origin, (int)origin_count, origin_dt,
-                              result, (int)result_count, result_dt,
-                              target_rank, (MPI_Aint)target_disp, (int)target_count,
-                              target_dt, mpi_op, win);
+    return MPI_Get_accumulate(origin, (int)count, dt,
+                              result, (int)count, dt,
+                              target_rank, (MPI_Aint)target_disp, (int)count,
+                              dt, mpi_op, win);
 }
 
 int ferrompi_fetch_and_op(const void* origin, void* result, int32_t dt_tag,
