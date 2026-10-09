@@ -978,114 +978,6 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 // Win<T> — general-purpose distributed RMA window
 // ============================================================================
 
-/// Opaque holder for the buffers of a pending RMA fetch operation.
-///
-/// `MPI_Fetch_and_op` and `MPI_Compare_and_swap` only *initiate* the
-/// operation. Both the origin (and `compare`, for CAS) buffer and the
-/// result buffer must remain at stable memory addresses until the
-/// surrounding epoch closes (via `fence`, `complete`/`unlock`, or `flush`)
-/// — MPI's network layer may not actually read/write them until then.
-///
-/// The Rust language's stack-frame and move semantics make naïve
-/// `&origin` / `&result` arguments unsound: the function returns before
-/// the epoch closes, and the stack locations are reused. To guarantee
-/// stable addresses, this type owns heap allocations for the origin (and
-/// compare) operands and the result destination; each is freed exactly
-/// once when the struct is dropped, whether directly or via [`resolve`].
-///
-/// The type also carries an `Option<Box<T>>` for `compare_and_swap`'s
-/// extra `compare` argument; it is `None` for `fetch_and_op`.
-///
-/// [`resolve`]: PendingFetchResult::resolve
-///
-/// # Example
-///
-/// ```no_run
-/// use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
-///
-/// let mpi = Mpi::init().unwrap();
-/// let world = mpi.world();
-/// let mut win = Win::<i32>::allocate(&world, 1).unwrap();
-///
-/// // Close epoch — MPI_Fetch_and_op completes when the fence closes
-/// let pending = win
-///     .fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
-///         e.fetch_and_op(1, 1, 0, ReduceOp::Sum)
-///     })
-///     .unwrap();
-///
-/// // SAFETY: epoch is closed; result is now populated.
-/// let old = unsafe { pending.resolve() };
-/// assert_eq!(old, 100);
-/// ```
-pub struct PendingFetchResult<T> {
-    /// Origin buffer — kept alive so MPI's pending RMA read sees stable
-    /// memory across the epoch.  Not used after resolve(); the Box is
-    /// dropped when PendingFetchResult is dropped.
-    _origin: Box<T>,
-    /// Optional `compare` operand for `MPI_Compare_and_swap`.  `None` for
-    /// `MPI_Fetch_and_op`.  Same lifetime invariant as `_origin`.
-    _compare: Option<Box<T>>,
-    /// Result destination — kept alive so MPI's pending RMA write reaches a
-    /// stable destination.  Owns its allocation via a raw pointer obtained
-    /// from `Box::into_raw` (never a cast from a shared borrow), freed
-    /// exactly once by `Drop`.  resolve() reads the value once the epoch
-    /// has closed.
-    result: NonNull<std::mem::MaybeUninit<T>>,
-}
-
-// SAFETY: `result` is a `NonNull` pointer to a heap allocation exclusively owned by
-// this struct (freed exactly once, by `Drop`), functionally equivalent to
-// `Box<MaybeUninit<T>>`'s ownership semantics. No other code holds a copy of this
-// pointer, so sending the struct across threads is sound whenever T: Send.
-unsafe impl<T: Send> Send for PendingFetchResult<T> {}
-// SAFETY: `result` is a `NonNull` pointer to a heap allocation exclusively owned by
-// this struct, reachable only through `self`-consuming methods (`resolve`, `Drop`); no
-// interior mutability is exposed through `&PendingFetchResult<T>`, so sharing a shared
-// reference across threads is sound whenever T: Sync.
-unsafe impl<T: Sync> Sync for PendingFetchResult<T> {}
-
-impl<T: Copy> PendingFetchResult<T> {
-    /// Consume the pending result and return the fetched value.
-    ///
-    /// # Safety
-    ///
-    /// The caller **must** ensure that the surrounding RMA epoch has been
-    /// closed before calling this method. Specifically:
-    ///
-    /// - For fence-mode windows: [`Win::fence`] must have been called to close
-    ///   the epoch.
-    /// - For PSCW windows: `MPI_Win_complete` / `MPI_Win_wait` must have been
-    ///   called.
-    /// - For lock-mode windows: `MPI_Win_unlock` or `MPI_Win_flush` must have
-    ///   been called.
-    ///
-    /// Reading the result before the epoch closes yields an unspecified,
-    /// possibly uninitialised value (UB in Rust).
-    #[inline]
-    pub unsafe fn resolve(self) -> T {
-        // SAFETY: Caller guarantees the epoch has closed, at which point MPI has
-        // initialised the allocation at `self.result` with the pre-update remote value
-        // per MPI-3 §11.6.  All T: Copy types (enforced by the MpiDatatype +
-        // AtomicMpiDatatype bounds at the call site) are valid for any bit pattern, so
-        // assuming init is sound.  `read()` copies the `MaybeUninit<T>` out of the
-        // allocation without freeing it; `self`'s `Drop` impl frees it exactly once,
-        // along with the `_origin` and `_compare` boxes, when this function returns.
-        unsafe { self.result.as_ptr().read().assume_init() }
-    }
-}
-
-impl<T> Drop for PendingFetchResult<T> {
-    fn drop(&mut self) {
-        // SAFETY: `result` was obtained from `Box::into_raw` in `fetch_and_op` or
-        // `compare_and_swap` and has not been freed since (the only other free site, the
-        // FFI error path in those constructors, returns before a `PendingFetchResult` is
-        // ever built). `Drop::drop` runs at most once per value, so reconstructing the
-        // `Box` here and letting it drop frees the allocation exactly once.
-        unsafe { drop(Box::from_raw(self.result.as_ptr())) };
-    }
-}
-
 /// A general-purpose distributed RMA window.
 ///
 /// `Win<T>` wraps either:
@@ -1172,10 +1064,13 @@ pub struct Win<T: MpiDatatype> {
 ///
 /// The handle carries the invariant lifetimes of [`Scope`](crate::Scope): `'s`
 /// is the epoch, and `'env` outlives it. [`put`](Self::put),
-/// [`get`](Self::get), [`accumulate`](Self::accumulate) and
-/// [`get_accumulate`](Self::get_accumulate) borrow their buffers for `'s`, so
-/// a buffer outlives the closing call, which is when MPI stops using it, and
-/// cannot be dropped, written, or for a `get` read, before then. These four
+/// [`get`](Self::get), [`accumulate`](Self::accumulate),
+/// [`get_accumulate`](Self::get_accumulate),
+/// [`fetch_and_op`](Self::fetch_and_op) and
+/// [`compare_and_swap`](Self::compare_and_swap) borrow their buffers for `'s`,
+/// so a buffer outlives the closing call, which is when MPI stops using it, and
+/// cannot be dropped or written before then. A buffer MPI writes (a `get`
+/// destination or a `result`) cannot be read before then either. These six
 /// methods reject a buffer declared inside the closure, because it is freed
 /// before then. Declare buffers before the call to `fence` or `start`.
 ///
@@ -1189,9 +1084,9 @@ pub struct ActiveEpoch<'s, 'env: 's, T: MpiDatatype> {
     env: PhantomData<&'env mut &'env ()>,
 }
 
-// Transitional: the request-based and atomic RMA operations still live on
-// `Win`, so the handle reaches them by dereferencing. The impl goes away when
-// they move onto the handle.
+// Transitional: the request-based RMA operations still live on `Win`, so the
+// handle reaches them by dereferencing. The impl goes away when they move onto
+// the handle.
 impl<T: MpiDatatype> Deref for ActiveEpoch<'_, '_, T> {
     type Target = Win<T>;
 
@@ -1407,10 +1302,11 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// (MPI-4.1 §12.7.1).
     ///
     /// Wraps `MPI_Get_accumulate`. The operation is posted at once, but `result`
-    /// holds the fetched values, and the target holds the update, only after the
-    /// epoch's closing call returns (the closing fence of [`Win::fence`], or
-    /// `MPI_Win_complete` of [`Win::start`]). `origin` and `result` stay
-    /// borrowed until then, so `result` cannot be read earlier.
+    /// holds the fetched values only after the epoch's closing call returns (the
+    /// closing fence of [`Win::fence`], or `MPI_Win_complete` of [`Win::start`]),
+    /// and the update is visible at the target once the target's own closing call
+    /// returns. `origin` and `result` stay borrowed until the closing call
+    /// returns, so `result` cannot be read earlier.
     ///
     /// `op` is a [`ReduceOp`](crate::ReduceOp), [`FetchOp::NO_OP`] or
     /// [`FetchOp::REPLACE`]; a user op is not accepted (MPI-4.1 §12.3.4).
@@ -1503,6 +1399,205 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
                 .rma_get_accumulate(origin, result, target_rank, target_disp, op)
         }
     }
+
+    /// Single-element atomic fetch-and-update: fetch the pre-update remote
+    /// value into `result`, then apply `op(origin, target_old)` at the target,
+    /// atomically with respect to other accumulate operations on that location
+    /// (MPI-4.1 §12.7.1).
+    ///
+    /// Wraps `MPI_Fetch_and_op`. Restricted to predefined MPI datatypes (no
+    /// derived or custom datatypes); the `T: MpiDatatype` bound enforces this at
+    /// compile time. The operation is posted at once, but `result` holds the
+    /// fetched value only after the epoch's closing call returns (the closing
+    /// fence of [`Win::fence`], or `MPI_Win_complete` of [`Win::start`]), and the
+    /// update is visible at the target once the target's own closing call
+    /// returns. `origin` and `result` stay borrowed until the closing call
+    /// returns, so `result` cannot be read earlier: read it after the closure
+    /// returns.
+    ///
+    /// `op` is a [`ReduceOp`](crate::ReduceOp), [`FetchOp::NO_OP`] (an atomic
+    /// get, which ignores `origin`'s value) or [`FetchOp::REPLACE`] (a swap); a
+    /// user op is not accepted (MPI-4.1 §12.3.4). Under the default
+    /// `accumulate_ops` window info value, `same_op_no_op` (MPI-4.1 §12.2.1),
+    /// concurrent accumulates to one target location must use the same op or
+    /// `MPI_NO_OP`, so mixing [`FetchOp::REPLACE`] and
+    /// [`ReduceOp::Sum`](crate::ReduceOp::Sum) on one location is erroneous,
+    /// and no type prevents it.
+    ///
+    /// # Arguments
+    ///
+    /// * `origin`      — The value to combine with the remote element.
+    /// * `result`      — Local destination for the pre-update remote value.
+    /// * `target_rank` — Target rank (0-based, within this window's
+    ///   communicator).
+    /// * `target_disp` — Displacement at the target, measured in units of
+    ///   `disp_unit` (i.e., multiples of `size_of::<T>()`).
+    /// * `op`          — Reduction operation to apply.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::InvalidArgument`] with `arg: "op"` — if `op` is a predefined
+    ///   op MPI does not define on `T` (a bitwise or logical op on
+    ///   `f32`/`f64`); no MPI call is made.
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, or
+    ///   the access does not fit in the target rank's window; no MPI call is
+    ///   made.
+    /// * [`Error::Finalized`] — once [`Mpi`](crate::Mpi) is being dropped.
+    /// * [`Error::Mpi`] — if `MPI_Fetch_and_op` fails for any other reason.
+    ///
+    /// A call refused before MPI runs writes nothing into `result`, which
+    /// stays borrowed until the epoch closes. After [`Error::Mpi`], `result`
+    /// holds an unspecified value (MPI-4.1 §9.4).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let mut win = Win::<i32>::allocate(&world, 1).unwrap();
+    ///
+    /// // Rank 1 initialises its window slot 0 to 100
+    /// if world.rank() == 1 {
+    ///     win.local_slice_mut()[0] = 100;
+    /// }
+    ///
+    /// // `origin` and `old` are declared before the epoch: MPI uses them until
+    /// // the closing fence returns
+    /// let origin = 1i32;
+    /// let mut old = 0i32;
+    /// win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+    ///     // Rank 0 atomically adds 1 to rank 1's slot 0 and fetches the old value
+    ///     if world.rank() == 0 {
+    ///         e.fetch_and_op(&origin, &mut old, 1, 0, ReduceOp::Sum)?;
+    ///     }
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    ///
+    /// // The epoch is closed: old is now valid
+    /// if world.rank() == 0 {
+    ///     assert_eq!(old, 100); // pre-update value; rank 1's slot 0 is now 101
+    /// }
+    /// ```
+    pub fn fetch_and_op(
+        &self,
+        origin: &'s T,
+        result: &'s mut T,
+        target_rank: i32,
+        target_disp: i64,
+        op: impl Into<FetchOp>,
+    ) -> Result<()> {
+        // SAFETY: `origin` and `result` are borrowed for `'s`, which ends only after
+        // the epoch's closing call, when MPI has written `result`; see `Win::rma_put`.
+        unsafe {
+            self.win
+                .rma_fetch_and_op(origin, result, target_rank, target_disp, op)
+        }
+    }
+}
+
+impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> ActiveEpoch<'s, '_, T> {
+    /// Single-element atomic compare-and-swap: replace the remote element with
+    /// `origin` if it equals `compare`, and fetch the pre-swap remote value into
+    /// `result`.
+    ///
+    /// Wraps `MPI_Compare_and_swap`. `result` is **always** the pre-swap remote
+    /// value, whether or not the swap happened; the swap happened if `result`
+    /// equals `compare`. The operation is posted at once, but `result` holds
+    /// that value only after the epoch's closing call returns (the closing fence
+    /// of [`Win::fence`], or `MPI_Win_complete` of [`Win::start`]), and the
+    /// update is visible at the target once the target's own closing call
+    /// returns. `origin`, `compare` and `result` stay borrowed until the closing
+    /// call returns, so `result` cannot be read earlier: read it after the
+    /// closure returns.
+    ///
+    /// This method exists only for types that implement [`AtomicMpiDatatype`].
+    /// MPI-4.1 §12.3.4 allows only integer, logical and byte datatypes; of
+    /// ferrompi's element types these are `i32`, `i64`, `u32`, `u64` and `u8`,
+    /// so `f32` and `f64` are excluded.
+    ///
+    /// [`AtomicMpiDatatype`]: crate::AtomicMpiDatatype
+    ///
+    /// # Arguments
+    ///
+    /// * `origin`      — The new value to swap in if `compare` matches the
+    ///   remote element.
+    /// * `compare`     — The expected current remote value. The swap occurs
+    ///   only if `remote_value == compare`.
+    /// * `result`      — Local destination for the pre-swap remote value.
+    /// * `target_rank` — Target rank (0-based, within this window's
+    ///   communicator).
+    /// * `target_disp` — Displacement at the target, measured in units of
+    ///   `disp_unit` (i.e., multiples of `size_of::<T>()`).
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1), `target_disp` is negative, or
+    ///   the access does not fit in the target rank's window; no MPI call is
+    ///   made.
+    /// * [`Error::Finalized`] — once [`Mpi`](crate::Mpi) is being dropped.
+    /// * [`Error::Mpi`] — if `MPI_Compare_and_swap` fails (for example, the MPI
+    ///   version is below 3).
+    ///
+    /// A call refused before MPI runs writes nothing into `result`, which
+    /// stays borrowed until the epoch closes. After [`Error::Mpi`], `result`
+    /// holds an unspecified value (MPI-4.1 §9.4).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::{Mpi, Win, WinFenceAssert};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let mut win = Win::<i32>::allocate(&world, 1).unwrap();
+    ///
+    /// // Rank 1 initialises its window slot 0 to 100
+    /// if world.rank() == 1 {
+    ///     win.local_slice_mut()[0] = 100;
+    /// }
+    ///
+    /// // `new_value`, `expected` and `old` are declared before the epoch: MPI
+    /// // uses them until the closing fence returns
+    /// let new_value = 200i32;
+    /// let expected = 100i32;
+    /// let mut old = 0i32;
+    /// win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+    ///     // Rank 0: swap in 200 only if rank 1's slot 0 is 100
+    ///     if world.rank() == 0 {
+    ///         e.compare_and_swap(&new_value, &expected, &mut old, 1, 0)?;
+    ///     }
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    ///
+    /// // The epoch is closed: old is now valid
+    /// if world.rank() == 0 {
+    ///     assert_eq!(old, 100); // pre-swap value; rank 1's slot 0 is now 200
+    ///     let swapped = old == expected;
+    ///     assert!(swapped);
+    /// }
+    /// ```
+    pub fn compare_and_swap(
+        &self,
+        origin: &'s T,
+        compare: &'s T,
+        result: &'s mut T,
+        target_rank: i32,
+        target_disp: i64,
+    ) -> Result<()> {
+        // SAFETY: `origin`, `compare` and `result` are borrowed for `'s`, which ends
+        // only after the epoch's closing call, when MPI has written `result`; see
+        // `Win::rma_put`.
+        unsafe {
+            self.win
+                .rma_compare_and_swap(origin, compare, result, target_rank, target_disp)
+        }
+    }
 }
 
 /// The handle a passive-target epoch gives its closure.
@@ -1522,13 +1617,16 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
 ///
 /// The handle carries the invariant lifetimes of [`Scope`](crate::Scope): `'s`
 /// is the epoch, and `'env` outlives it. [`put`](Self::put),
-/// [`get`](Self::get), [`accumulate`](Self::accumulate) and
-/// [`get_accumulate`](Self::get_accumulate) borrow their buffers for `'s`, so
-/// a buffer outlives the unlock, which is when MPI stops using it, and cannot
-/// be dropped, written, or for a `get` read, before then, even after a flush.
-/// These four methods reject a buffer declared inside the closure, because it
-/// is freed before then. Declare buffers before the call to `lock` or
-/// `lock_all`.
+/// [`get`](Self::get), [`accumulate`](Self::accumulate),
+/// [`get_accumulate`](Self::get_accumulate),
+/// [`fetch_and_op`](Self::fetch_and_op) and
+/// [`compare_and_swap`](Self::compare_and_swap) borrow their buffers for `'s`,
+/// so a buffer outlives the unlock, which is when MPI stops using it, and
+/// cannot be dropped or written before then, even after a flush. A buffer MPI
+/// writes (a `get` destination or a `result`) cannot be read before then
+/// either. These six methods reject a buffer declared inside the closure,
+/// because it is freed before then. Declare buffers before the call to `lock`
+/// or `lock_all`.
 ///
 /// # Thread safety
 ///
@@ -1540,9 +1638,9 @@ pub struct PassiveEpoch<'s, 'env: 's, T: MpiDatatype> {
     env: PhantomData<&'env mut &'env ()>,
 }
 
-// Transitional: the request-based and atomic RMA operations still live on
-// `Win`, so the handle reaches them by dereferencing. The impl goes away when
-// they move onto the handle.
+// Transitional: the request-based RMA operations still live on `Win`, so the
+// handle reaches them by dereferencing. The impl goes away when they move onto
+// the handle.
 impl<T: MpiDatatype> Deref for PassiveEpoch<'_, '_, T> {
     type Target = Win<T>;
 
@@ -1566,10 +1664,12 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
 
     /// One-sided read, as [`ActiveEpoch::get`], in a passive-target epoch.
     ///
-    /// `origin` holds the data when [`flush`](Self::flush) or
-    /// [`flush_local`](Self::flush_local) returns for `target_rank`, and at the
-    /// latest when the epoch's unlock returns. `origin` stays borrowed until the
-    /// unlock returns, so it cannot be read earlier.
+    /// `origin` holds the data once a flush of `target_rank` returns
+    /// ([`flush`](Self::flush), [`flush_all`](Self::flush_all),
+    /// [`flush_local`](Self::flush_local) or
+    /// [`flush_local_all`](Self::flush_local_all)), and at the latest when the
+    /// epoch's unlock returns. `origin` stays borrowed until the unlock returns,
+    /// so it cannot be read earlier.
     pub fn get(&self, origin: &'s mut [T], target_rank: i32, target_disp: i64) -> Result<()> {
         // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock;
         // see `Win::rma_put`.
@@ -1602,11 +1702,14 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// Atomic read-modify-write, as [`ActiveEpoch::get_accumulate`], in a
     /// passive-target epoch.
     ///
-    /// `result` holds the fetched values when [`flush`](Self::flush) or
-    /// [`flush_local`](Self::flush_local) returns for `target_rank`, and the
-    /// target holds the update when `flush` returns; both are complete at the
-    /// latest when the epoch's unlock returns. `origin` and `result` stay
-    /// borrowed until the unlock returns, so `result` cannot be read earlier.
+    /// `result` holds the fetched values once a flush of `target_rank` returns
+    /// ([`flush`](Self::flush), [`flush_all`](Self::flush_all),
+    /// [`flush_local`](Self::flush_local) or
+    /// [`flush_local_all`](Self::flush_local_all)), and the target holds the
+    /// update once [`flush`](Self::flush) or [`flush_all`](Self::flush_all)
+    /// returns; both are complete at the latest when the epoch's unlock returns.
+    /// `origin` and `result` stay borrowed until the unlock returns, so `result`
+    /// cannot be read earlier.
     /// Concurrent accumulates to one target location must use the same op or
     /// `MPI_NO_OP`, as there.
     pub fn get_accumulate(
@@ -1622,6 +1725,35 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
         unsafe {
             self.win
                 .rma_get_accumulate(origin, result, target_rank, target_disp, op)
+        }
+    }
+
+    /// Single-element atomic fetch-and-update, as [`ActiveEpoch::fetch_and_op`],
+    /// in a passive-target epoch.
+    ///
+    /// `result` holds the fetched value once a flush of `target_rank` returns
+    /// ([`flush`](Self::flush), [`flush_all`](Self::flush_all),
+    /// [`flush_local`](Self::flush_local) or
+    /// [`flush_local_all`](Self::flush_local_all)), and the target holds the
+    /// update once [`flush`](Self::flush) or [`flush_all`](Self::flush_all)
+    /// returns; both are complete at the latest when the epoch's unlock returns.
+    /// `origin` and `result` stay borrowed until the unlock returns, so read
+    /// `result` after the closure. Concurrent accumulates to one target location
+    /// must use the same op or `MPI_NO_OP`, as there. Errors are as there; after
+    /// [`Error::Mpi`], `result` holds an unspecified value (MPI-4.1 §9.4).
+    pub fn fetch_and_op(
+        &self,
+        origin: &'s T,
+        result: &'s mut T,
+        target_rank: i32,
+        target_disp: i64,
+        op: impl Into<FetchOp>,
+    ) -> Result<()> {
+        // SAFETY: `origin` and `result` are borrowed for `'s`, which ends only after
+        // the unlock, when MPI has written `result`; see `Win::rma_put`.
+        unsafe {
+            self.win
+                .rma_fetch_and_op(origin, result, target_rank, target_disp, op)
         }
     }
 
@@ -1738,6 +1870,38 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
         // allowed (MPI-4.1 §12.5.4).
         let ret = unsafe { ffi::ferrompi_win_sync(self.win.win_handle) };
         Error::check_with_op(ret, "win_sync")
+    }
+}
+
+impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> PassiveEpoch<'s, '_, T> {
+    /// Single-element atomic compare-and-swap, as
+    /// [`ActiveEpoch::compare_and_swap`], in a passive-target epoch.
+    ///
+    /// `result` holds the pre-swap value once a flush of `target_rank` returns
+    /// ([`flush`](Self::flush), [`flush_all`](Self::flush_all),
+    /// [`flush_local`](Self::flush_local) or
+    /// [`flush_local_all`](Self::flush_local_all)), and the target holds the
+    /// update once [`flush`](Self::flush) or [`flush_all`](Self::flush_all)
+    /// returns; both are complete at the latest when the epoch's unlock returns.
+    /// `origin`, `compare` and `result` stay borrowed until the unlock returns,
+    /// so read `result` after the closure. It exists only for the types of
+    /// [`AtomicMpiDatatype`](crate::AtomicMpiDatatype), as there. Errors are as
+    /// there; after [`Error::Mpi`], `result` holds an unspecified value
+    /// (MPI-4.1 §9.4).
+    pub fn compare_and_swap(
+        &self,
+        origin: &'s T,
+        compare: &'s T,
+        result: &'s mut T,
+        target_rank: i32,
+        target_disp: i64,
+    ) -> Result<()> {
+        // SAFETY: `origin`, `compare` and `result` are borrowed for `'s`, which ends
+        // only after the unlock, when MPI has written `result`; see `Win::rma_put`.
+        unsafe {
+            self.win
+                .rma_compare_and_swap(origin, compare, result, target_rank, target_disp)
+        }
     }
 }
 
@@ -2558,15 +2722,17 @@ impl<T: MpiDatatype> Win<T> {
     /// One-sided write: validates the target and calls `MPI_Put` with a count of
     /// `origin.len()`.
     ///
-    /// The four transfer helpers (`rma_put`, `rma_get`, `rma_accumulate` and
-    /// `rma_get_accumulate`) hand MPI a pointer into a caller buffer that MPI
-    /// keeps using after they return, until the epoch's closing call (the
-    /// closing fence, `MPI_Win_complete` or the unlock) returns. Only the epoch
-    /// handles call them, and each handle method takes its buffers as `&'s [T]`
-    /// or `&'s mut [T]`, where `'s` is the handle's invariant lifetime. `'s`
-    /// ends only after the closing call, so the buffer cannot be dropped,
-    /// moved, written, or for a buffer MPI writes read, before MPI is done with
-    /// it, and a handle exists only while its epoch is open.
+    /// The transfer helpers (`rma_put`, `rma_get`, `rma_accumulate`,
+    /// `rma_get_accumulate`, `rma_fetch_and_op` and `rma_compare_and_swap`) hand
+    /// MPI a pointer into a caller buffer that MPI keeps using after they
+    /// return, until the epoch's closing call (the closing fence,
+    /// `MPI_Win_complete` or the unlock) returns. Only the epoch handles call
+    /// them, and each handle method takes its buffers as `&'s [T]`,
+    /// `&'s mut [T]`, `&'s T` or `&'s mut T`, where `'s` is the handle's
+    /// invariant lifetime. `'s` ends only after the closing call, so the buffer
+    /// cannot be dropped, moved, written, or for a buffer MPI writes read,
+    /// before MPI is done with it, and a handle exists only while its epoch is
+    /// open.
     ///
     /// # Safety
     ///
@@ -3028,129 +3194,38 @@ impl<T: MpiDatatype> Win<T> {
         Error::check_with_op(ret, "get_accumulate")
     }
 
-    /// Single-element atomic fetch-and-update: reads the current value at
-    /// `(target_rank, target_disp)` into the returned [`PendingFetchResult<T>`],
-    /// then applies `op(origin, target_old)` at the target — both atomically
-    /// with respect to other RMA operations in the same epoch.
+    /// Single-element atomic fetch-and-update: validates the op and the target
+    /// and calls `MPI_Fetch_and_op`.
     ///
-    /// Wraps `MPI_Fetch_and_op`. Restricted to predefined MPI datatypes only
-    /// (no derived or custom datatypes); the `T: MpiDatatype` bound enforces
-    /// this at compile time.
+    /// # Safety
     ///
-    /// **Important:** `MPI_Fetch_and_op` only *initiates* the operation. The
-    /// returned `PendingFetchResult<T>` is populated with the pre-update remote
-    /// value **only after the surrounding epoch closes** (via `fence`,
-    /// `complete`, or `unlock`). Call [`PendingFetchResult::resolve`] **only
-    /// after closing the epoch** — reading it earlier is undefined behaviour per
-    /// MPI-3 §11.6.
-    ///
-    /// `op` is a [`ReduceOp`](crate::ReduceOp), [`FetchOp::NO_OP`] (an atomic
-    /// get) or [`FetchOp::REPLACE`] (a swap); a user op is not accepted
-    /// (MPI-4.1 §12.3.4).
-    ///
-    /// # Arguments
-    ///
-    /// * `origin`      — The value to combine with the remote element.
-    /// * `target_rank` — Target rank (0-based, within this window's
-    ///   communicator).
-    /// * `target_disp` — Displacement at the target, measured in units of
-    ///   `disp_unit` (i.e., multiples of `size_of::<T>()`).
-    /// * `op`          — Reduction operation to apply.
-    ///
-    /// # Errors
-    ///
-    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, or
-    ///   the access does not fit in the target rank's window.
-    /// * [`Error::InvalidArgument`] with `arg: "op"` — if `op` is a predefined op
-    ///   MPI does not define on `T` (a bitwise or logical op on `f32`/`f64`).
-    /// * [`Error::Mpi`] — if `MPI_Fetch_and_op` fails for any other reason.
-    ///
-    /// # Safety Contract
-    ///
-    /// 1. This call must be made **inside** an active access epoch (fence,
-    ///    start, or lock). Calling it outside an epoch is undefined per the
-    ///    MPI standard.
-    /// 2. [`PendingFetchResult::resolve`] must not be called until the epoch
-    ///    closes.
-    ///
-    /// The borrow checker cannot enforce the epoch-completion constraint — this
-    /// contract is a documented invariant on [`PendingFetchResult::resolve`].
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let mut win = Win::<i32>::allocate(&world, 1).unwrap();
-    ///
-    /// // Rank 1 initialises its window slot 0 to 100
-    /// if world.rank() == 1 {
-    ///     win.local_slice_mut()[0] = 100;
-    /// }
-    ///
-    /// // Open a fence epoch on all ranks; the fetch_and_op completes when it
-    /// // closes, and the closure hands the pending result out
-    /// let pending = win
-    ///     .fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
-    ///         // Rank 0 atomically adds 1 and fetches the old value (operation initiated)
-    ///         if world.rank() == 0 {
-    ///             Ok(Some(e.fetch_and_op(1, 1, 0, ReduceOp::Sum)?))
-    ///         } else {
-    ///             Ok(None)
-    ///         }
-    ///     })
-    ///     .unwrap();
-    ///
-    /// // SAFETY: epoch is closed; result buffer is now populated.
-    /// if let Some(p) = pending {
-    ///     let old = unsafe { p.resolve() };
-    ///     assert_eq!(old, 100); // pre-update value; window slot is now 101
-    /// }
-    /// ```
-    pub fn fetch_and_op(
+    /// As [`rma_put`](Self::rma_put), and `result` must also stay unread and
+    /// unwritten until the epoch's closing call returns, when MPI has written
+    /// it (MPI-4.1 §12.3 and §12.5). `origin` and `result` cannot alias: they
+    /// are a `&T` and a `&mut T`.
+    unsafe fn rma_fetch_and_op(
         &self,
-        origin: T,
+        origin: &T,
+        result: &mut T,
         target_rank: i32,
         target_disp: i64,
         op: impl Into<FetchOp>,
-    ) -> Result<PendingFetchResult<T>> {
+    ) -> Result<()> {
         let op = op.into().code(T::TAG)?;
         self.check_target(target_rank, target_disp, 1, &[])?;
-        use std::mem::MaybeUninit;
-        // Box the origin and result so they have heap-stable addresses
-        // that survive across the epoch.  MPI_Fetch_and_op only *initiates*
-        // the operation; the actual read of origin and write to result may
-        // not happen until the closing fence/complete/unlock.  Stack-local
-        // storage would be reused before then (function returns before the
-        // epoch closes), causing MPI to read/write into freed memory — UB
-        // observed as zeros on MPICH 4.2.x and as latent corruption on
-        // other implementations.  See PendingFetchResult docs for the
-        // lifetime contract.
-        let origin_box: Box<T> = Box::new(origin);
-        // SAFETY: `Box::into_raw` never returns a null pointer.
-        let result_ptr: NonNull<MaybeUninit<T>> =
-            unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(MaybeUninit::uninit()))) };
-        // SAFETY: `origin_box` points to a heap allocation moved into the returned
-        // `PendingFetchResult`; MPI reads through it until the epoch closes.
-        // `result_ptr` is a raw pointer that owns its allocation (obtained from
-        // `Box::into_raw` above, never a cast from a shared borrow); MPI writes through
-        // it until the epoch closes. The caller must keep the returned
-        // `PendingFetchResult` alive and call `resolve` only after the epoch closes —
-        // `resolve` is `unsafe` for that reason. `result_ptr`'s allocation is freed
-        // exactly once by `PendingFetchResult`'s `Drop`, on both the `resolve` and
-        // drop-without-resolve paths. `T::TAG` matches T's memory layout per the
-        // `MpiDatatype` invariant. `op` is a predefined op code that the shim
-        // maps to an `MPI_Op`. `target_rank` and `target_disp` were checked
-        // above (with `target_count` 1) against the target rank's exposed window, so MPI
-        // accesses only memory the target exposed. `win_handle` is a valid handle owned
-        // by `self`.
+        // SAFETY: the caller upholds this function's contract (see `rma_put`).
+        // `T::TAG` matches `T`'s memory layout per the `MpiDatatype` invariant, and
+        // MPI reads one `T` from `origin` and writes one `T` to `result`, both
+        // pointers taken from the references themselves (`result` from the
+        // `&mut T`, never from a shared borrow), and only MPI writes `result`
+        // while it is borrowed. `op` is a predefined op code that the shim maps
+        // to an `MPI_Op`. `target_rank` and `target_disp` were checked above (with
+        // a count of 1) against the target rank's exposed window, so MPI accesses
+        // only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_fetch_and_op(
-                (origin_box.as_ref() as *const T).cast::<std::ffi::c_void>(),
-                result_ptr.as_ptr().cast::<std::ffi::c_void>(),
+                (origin as *const T).cast(),
+                (result as *mut T).cast(),
                 T::TAG as i32,
                 target_rank,
                 target_disp,
@@ -3158,189 +3233,50 @@ impl<T: MpiDatatype> Win<T> {
                 self.win_handle,
             )
         };
-        Error::check_with_op(ret, "fetch_and_op").inspect_err(|_| {
-            // SAFETY: `result_ptr` was obtained from `Box::into_raw` above and has not
-            // been freed; reconstructing the `Box` here and dropping it frees the
-            // allocation exactly once on this error path.
-            unsafe { drop(Box::from_raw(result_ptr.as_ptr())) };
-        })?;
-        Ok(PendingFetchResult {
-            _origin: origin_box,
-            _compare: None,
-            result: result_ptr,
-        })
+        Error::check_with_op(ret, "fetch_and_op")
     }
-}
 
-impl<T: crate::AtomicMpiDatatype + MpiDatatype> Win<T> {
-    /// Single-element atomic compare-and-swap: conditionally replace a remote
-    /// element if it matches an expected value, returning a
-    /// [`PendingFetchResult<T>`] that holds the pre-CAS remote value once the
-    /// epoch closes.
+    /// Single-element atomic compare-and-swap: validates the target and calls
+    /// `MPI_Compare_and_swap`.
     ///
-    /// Wraps `MPI_Compare_and_swap`. Atomically reads the remote element at
-    /// `(target_rank, target_disp)` and compares it to `compare`. If they are
-    /// equal, the remote element is replaced with `origin`. The
-    /// `PendingFetchResult<T>` is **always** the pre-CAS remote value,
-    /// regardless of whether the swap succeeded — the caller determines swap
-    /// success by calling [`resolve`](PendingFetchResult::resolve) after the
-    /// epoch closes and comparing with `compare`.
+    /// # Safety
     ///
-    /// This method is restricted to types that implement [`AtomicMpiDatatype`]:
-    /// `i32`, `i64`, `u32`, `u64`, and `u8`. Floating-point types (`f32`,
-    /// `f64`) are excluded because the MPI 4.1 standard does not require
-    /// implementations to support floating-point CAS (section 12.5.4).
-    ///
-    /// [`AtomicMpiDatatype`]: crate::AtomicMpiDatatype
-    ///
-    /// **Important:** `MPI_Compare_and_swap` only *initiates* the operation.
-    /// The `PendingFetchResult<T>` is populated with the pre-CAS remote value
-    /// **only after the surrounding epoch closes** (via `fence`, `complete`,
-    /// or `unlock`). Call [`PendingFetchResult::resolve`] **only after closing
-    /// the epoch** — reading it earlier is undefined behaviour per MPI-3 §11.6.
-    ///
-    /// # Arguments
-    ///
-    /// * `origin`      — The new value to swap in if `compare` matches the
-    ///   remote element.
-    /// * `compare`     — The expected current remote value. The swap occurs
-    ///   only if `remote_value == compare`.
-    /// * `target_rank` — Target rank (0-based, within this window's
-    ///   communicator).
-    /// * `target_disp` — Displacement at the target, measured in units of
-    ///   `disp_unit` (i.e., multiples of `size_of::<T>()`).
-    ///
-    /// # Returns
-    ///
-    /// `Ok(PendingFetchResult<T>)` — call [`resolve`](PendingFetchResult::resolve)
-    /// after the epoch closes to obtain the pre-CAS value and check whether
-    /// the swap succeeded:
-    ///
-    /// ```no_run
-    /// # use ferrompi::{Mpi, Win, WinFenceAssert};
-    /// # let mpi = Mpi::init().unwrap();
-    /// # let world = mpi.world();
-    /// # let mut win = Win::<i32>::allocate(&world, 1).unwrap();
-    /// let expected = 100i32;
-    /// let new_val  = 200i32;
-    /// // the epoch closes when `fence` returns
-    /// let pending = win
-    ///     .fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
-    ///         e.compare_and_swap(new_val, expected, 1, 0)
-    ///     })
-    ///     .unwrap();
-    /// // SAFETY: epoch is closed.
-    /// let old = unsafe { pending.resolve() };
-    /// let swapped = old == expected;
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, or
-    ///   the access does not fit in the target rank's window.
-    /// * [`Error::Mpi`] — if `MPI_Compare_and_swap` fails (e.g., the MPI
-    ///   version is < 3).
-    ///
-    /// # Safety Contract
-    ///
-    /// 1. This call must be made **inside** an active access epoch (fence,
-    ///    start, or lock). Calling it outside an epoch is undefined per the
-    ///    MPI standard.
-    /// 2. [`PendingFetchResult::resolve`] must not be called until the epoch
-    ///    closes.
-    ///
-    /// The borrow checker cannot enforce the epoch-completion constraint — this
-    /// contract is a documented invariant on [`PendingFetchResult::resolve`].
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{Mpi, Win, WinFenceAssert};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let mut win = Win::<i32>::allocate(&world, 1).unwrap();
-    ///
-    /// // Rank 1 initialises its window slot 0 to 100
-    /// if world.rank() == 1 {
-    ///     win.local_slice_mut()[0] = 100;
-    /// }
-    ///
-    /// // Open a fence epoch on all ranks; the compare_and_swap completes when
-    /// // it closes, and the closure hands the pending result out
-    /// let pending = win
-    ///     .fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
-    ///         // Rank 0: swap in 200 only if the current value is 100 (initiated here)
-    ///         if world.rank() == 0 {
-    ///             Ok(Some(e.compare_and_swap(200, 100, 1, 0)?))
-    ///         } else {
-    ///             Ok(None)
-    ///         }
-    ///     })
-    ///     .unwrap();
-    ///
-    /// // SAFETY: epoch is closed; result buffer is now populated.
-    /// if let Some(p) = pending {
-    ///     let old = unsafe { p.resolve() };
-    ///     assert_eq!(old, 100); // pre-CAS; slot 0 is now 200
-    /// }
-    /// ```
-    pub fn compare_and_swap(
+    /// As [`rma_fetch_and_op`](Self::rma_fetch_and_op), and `compare` must also
+    /// stay valid and unmodified until the epoch's closing call returns.
+    unsafe fn rma_compare_and_swap(
         &self,
-        origin: T,
-        compare: T,
+        origin: &T,
+        compare: &T,
+        result: &mut T,
         target_rank: i32,
         target_disp: i64,
-    ) -> Result<PendingFetchResult<T>> {
+    ) -> Result<()>
+    where
+        T: crate::AtomicMpiDatatype,
+    {
         self.check_target(target_rank, target_disp, 1, &[])?;
-        use std::mem::MaybeUninit;
-        // Box origin, compare, and result for heap-stable addresses that
-        // survive across the epoch.  MPI_Compare_and_swap is non-blocking
-        // at the MPI level — the actual atomic CAS may not happen until
-        // the closing fence/complete/unlock, by which time stack-local
-        // storage would have been reused.  See PendingFetchResult docs.
-        let origin_box: Box<T> = Box::new(origin);
-        let compare_box: Box<T> = Box::new(compare);
-        // SAFETY: `Box::into_raw` never returns a null pointer.
-        let result_ptr: NonNull<MaybeUninit<T>> =
-            unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(MaybeUninit::uninit()))) };
-        // SAFETY: `origin_box` and `compare_box` point to heap allocations moved into
-        // the returned `PendingFetchResult`; MPI reads through them until the epoch
-        // closes. `result_ptr` is a raw pointer that owns its allocation (obtained from
-        // `Box::into_raw` above, never a cast from a shared borrow); MPI writes through
-        // it until the epoch closes. The caller must keep the returned
-        // `PendingFetchResult` alive and call `resolve` only after the epoch closes —
-        // `resolve` is `unsafe` for that reason. `result_ptr`'s allocation is freed
-        // exactly once by `PendingFetchResult`'s `Drop`, on both the `resolve` and
-        // drop-without-resolve paths. `T::TAG` matches T's memory layout per the
-        // `MpiDatatype` invariant; `AtomicMpiDatatype` restricts T to the integer and
-        // byte types MPI supports for compare-and-swap (MPI 4.1 §12.5.4). `target_rank`
-        // and `target_disp` were checked above (with `target_count` 1) against the target
-        // rank's exposed window, so MPI accesses only memory the target exposed.
-        // `win_handle` is a valid handle owned by `self`.
+        // SAFETY: the caller upholds this function's contract (see `rma_put`).
+        // `T::TAG` matches `T`'s memory layout per the `MpiDatatype` invariant, and
+        // `AtomicMpiDatatype` restricts `T` to the types MPI-4.1 §12.3.4 allows in
+        // compare-and-swap (integer, logical and byte). MPI reads one `T` from
+        // `origin` and from `compare` and writes one `T` to `result`, all three
+        // pointers taken from the references themselves (`result` from the
+        // `&mut T`, never from a shared borrow), and only MPI writes `result`
+        // while it is borrowed. `target_rank` and `target_disp` were checked above
+        // (with a count of 1) against the target rank's exposed window, so MPI
+        // accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_compare_and_swap(
-                (origin_box.as_ref() as *const T).cast::<std::ffi::c_void>(),
-                (compare_box.as_ref() as *const T).cast::<std::ffi::c_void>(),
-                result_ptr.as_ptr().cast::<std::ffi::c_void>(),
+                (origin as *const T).cast(),
+                (compare as *const T).cast(),
+                (result as *mut T).cast(),
                 T::TAG as i32,
                 target_rank,
                 target_disp,
                 self.win_handle,
             )
         };
-        Error::check_with_op(ret, "compare_and_swap").inspect_err(|_| {
-            // SAFETY: `result_ptr` was obtained from `Box::into_raw` above and has not
-            // been freed; reconstructing the `Box` here and dropping it frees the
-            // allocation exactly once on this error path.
-            unsafe { drop(Box::from_raw(result_ptr.as_ptr())) };
-        })?;
-        Ok(PendingFetchResult {
-            _origin: origin_box,
-            _compare: Some(compare_box),
-            result: result_ptr,
-        })
+        Error::check_with_op(ret, "compare_and_swap")
     }
 }
 
@@ -3516,10 +3452,11 @@ impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_fence_asserts, check_rma_target, window_word, Error, PendingFetchResult, Win,
-        WinFenceAssert, WinPscwAssert, WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT, WIN_FREED,
+        check_fence_asserts, check_rma_target, window_word, Error, Win, WinFenceAssert,
+        WinPscwAssert, WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT, WIN_FREED,
     };
     use crate::persistent::vec_buf_mut;
+    use crate::{MpiDatatype, ReduceOp};
     use std::ptr::NonNull;
 
     // -------------------------------------------------------------------------
@@ -3618,39 +3555,6 @@ mod tests {
     // Win<T> unit tests — exercise the type without an MPI runtime
     // -------------------------------------------------------------------------
 
-    #[test]
-    fn pending_fetch_result_resolve_and_drop_without_resolve() {
-        use std::mem::MaybeUninit;
-
-        fn make(value: i32) -> PendingFetchResult<i32> {
-            // SAFETY: `Box::into_raw` never returns a null pointer.
-            let result_ptr =
-                unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(MaybeUninit::new(value)))) };
-            PendingFetchResult {
-                _origin: Box::new(0),
-                _compare: None,
-                result: result_ptr,
-            }
-        }
-
-        // Resolve path: reads the value, then Drop frees `result` (and `_origin`) exactly once.
-        let resolved = make(42);
-        // SAFETY: no MPI epoch is involved; `result` was initialised directly above.
-        let value = unsafe { resolved.resolve() };
-        assert_eq!(value, 42);
-
-        // Drop-without-resolve path: Drop frees `result` (and `_origin`) exactly once.
-        let unresolved = make(7);
-        drop(unresolved);
-
-        // Compile-time witness: the manual Send/Sync impls restore the auto-trait
-        // behavior PendingFetchResult<T> had when `result` was a `Box<MaybeUninit<T>>`.
-        fn assert_send<T: Send>() {}
-        fn assert_sync<T: Sync>() {}
-        assert_send::<PendingFetchResult<i32>>();
-        assert_sync::<PendingFetchResult<i32>>();
-    }
-
     /// Stands in for a peer's RMA write into the window between the slices
     /// the window hands out: the pointer `vec_buf_mut` returned, which
     /// `Win::create` hands to MPI and stores as `local_ptr`, must stay usable
@@ -3684,6 +3588,65 @@ mod tests {
         }
         let buffer = win.buffer.take().expect("a create window owns its buffer");
         assert_eq!(buffer, [30, 31, 32, 33]);
+    }
+
+    /// The fetch helpers validate the op before the target and refuse before any
+    /// MPI call, so a window with the sentinel handle stands in for a real one,
+    /// and a refused call writes nothing into the caller's `result`.
+    #[test]
+    fn fetch_helpers_refuse_op_then_target_and_write_nothing() {
+        fn window<T: MpiDatatype>() -> Win<T> {
+            Win {
+                win_handle: WIN_FREED,
+                local_ptr: NonNull::dangling(),
+                local_len: 0,
+                words: Box::new([window_word::<T>(1), window_word::<T>(1)]),
+                buffer: None,
+            }
+        }
+
+        let float_win = window::<f64>();
+        let mut float_result = 7.5f64;
+        // SAFETY: every call below is refused before any MPI call, so MPI never
+        // sees the pointers and no epoch is needed.
+        let (bad_op, bad_rank) = unsafe {
+            (
+                float_win.rma_fetch_and_op(&1.0, &mut float_result, 2, 0, ReduceOp::BitwiseOr),
+                float_win.rma_fetch_and_op(&1.0, &mut float_result, 2, 0, ReduceOp::Sum),
+            )
+        };
+        assert!(
+            matches!(bad_op, Err(Error::InvalidArgument { arg: "op", .. })),
+            "a bad op is refused before a bad rank: {bad_op:?}"
+        );
+        assert!(
+            matches!(
+                bad_rank,
+                Err(Error::InvalidArgument {
+                    arg: "target_rank",
+                    ..
+                })
+            ),
+            "{bad_rank:?}"
+        );
+
+        let int_win = window::<i32>();
+        let mut int_result = 7i32;
+        // SAFETY: refused before any MPI call, as above.
+        let past_window = unsafe { int_win.rma_compare_and_swap(&1, &2, &mut int_result, 1, 1) };
+        assert!(
+            matches!(
+                past_window,
+                Err(Error::InvalidArgument {
+                    arg: "target_disp",
+                    ..
+                })
+            ),
+            "{past_window:?}"
+        );
+
+        assert_eq!(float_result.to_bits(), 7.5f64.to_bits());
+        assert_eq!(int_result, 7);
     }
 
     // -------------------------------------------------------------------------

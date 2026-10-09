@@ -499,24 +499,36 @@ impl<T: BytePermutable, const N: usize> BytePermutable for [T; N] {}
 /// Trait for types eligible for use with `MPI_Compare_and_swap`.
 ///
 /// This is a **sealed trait** — it cannot be implemented outside this crate.
-/// Per MPI 4.1 section 12.5.4, the predefined types guaranteed to support
-/// `MPI_Compare_and_swap` are the integer and byte types: `i32`, `i64`,
-/// `u32`, `u64`, and `u8`.
+/// MPI-4.1 §12.3.4 allows only integer, logical and byte datatypes in
+/// `MPI_Compare_and_swap`; of ferrompi's element types these are `i32`, `i64`,
+/// `u32`, `u64` and `u8`.
 ///
 /// **Floating-point types (`f32`, `f64`) are intentionally excluded.** The
-/// MPI standard does not require implementations to support floating-point
-/// CAS. Accepting them would introduce silent portability bugs across MPI
-/// implementations.
+/// MPI standard does not allow them in compare-and-swap. Accepting them would
+/// introduce silent portability bugs across MPI implementations.
 ///
-/// This trait is used as a bound on [`Win::compare_and_swap`](crate::Win::compare_and_swap)
+/// This trait is used as a bound on
+/// [`ActiveEpoch::compare_and_swap`](crate::ActiveEpoch::compare_and_swap) and
+/// [`PassiveEpoch::compare_and_swap`](crate::PassiveEpoch::compare_and_swap)
 /// to ensure the method only exists for windows whose element type is
 /// CAS-eligible.
 ///
-/// # Sealed: cannot implement for external types
+/// # Eligible types only
 ///
-/// ```compile_fail
-/// fn _check(w: &ferrompi::Win<f64>) -> ferrompi::Result<f64> {
-///     w.compare_and_swap(0.0, 0.0, 0, 0)
+/// `compare_and_swap` exists only for integer and byte elements: on an `f64`
+/// window the method is not found.
+///
+/// ```compile_fail,E0599
+/// fn _check(e: &ferrompi::ActiveEpoch<'_, '_, f64>, v: &'static f64, r: &'static mut f64) -> ferrompi::Result<()> {
+///     e.compare_and_swap(v, v, r, 0, 0)
+/// }
+/// ```
+///
+/// The same call on an `i64` window compiles:
+///
+/// ```no_run
+/// fn _check(e: &ferrompi::ActiveEpoch<'_, '_, i64>, v: &'static i64, r: &'static mut i64) -> ferrompi::Result<()> {
+///     e.compare_and_swap(v, v, r, 0, 0)
 /// }
 /// ```
 #[cfg(feature = "rma")]

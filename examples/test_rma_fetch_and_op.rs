@@ -1,14 +1,14 @@
-//! Integration test for `Win::fetch_and_op` — single-element atomic fetch-and-update
-//! over a fence epoch.
+//! Integration test for `ActiveEpoch::fetch_and_op` — single-element atomic
+//! fetch-and-update over a fence epoch.
 //!
 //! Verifies two test cases:
 //!   1. Sum: rank 1's window slot 0 starts at `100i32`; rank 0 calls
-//!      `fetch_and_op(1, 1, 0, Sum)`; after the closing fence, rank 0's
-//!      returned value equals `100` (pre-update) and rank 1's window slot 0
+//!      `fetch_and_op(&1, &mut old, 1, 0, Sum)`; after the closing fence,
+//!      rank 0's `old` equals `100` (pre-update) and rank 1's window slot 0
 //!      equals `101` (post-update).
 //!   2. Replace: rank 1's window slot 0 starts at `42i32`; rank 0 calls
-//!      `fetch_and_op(999, 1, 0, FetchOp::REPLACE)`; after the closing fence, rank 0's
-//!      returned value equals `42` (pre-update) and rank 1's window slot 0
+//!      `fetch_and_op(&999, &mut old, 1, 0, FetchOp::REPLACE)`; after the closing
+//!      fence, rank 0's `old` equals `42` (pre-update) and rank 1's window slot 0
 //!      equals `999` (post-update).
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_fetch_and_op
@@ -33,8 +33,8 @@ fn main() {
 
     // ========================================================================
     // Test 1 (Sum + fetch): rank 1 initialises its window slot 0 to 100i32.
-    // Rank 0 calls fetch_and_op(1, 1, 0, Sum). After the closing fence:
-    //   - rank 0's returned value must equal 100 (pre-update)
+    // Rank 0 calls fetch_and_op(&1, &mut old, 1, 0, Sum). After the closing fence:
+    //   - rank 0's `old` must equal 100 (pre-update)
     //   - rank 1's window slot 0 must equal 101 (post-update)
     // ========================================================================
     {
@@ -44,29 +44,20 @@ fn main() {
             win.local_slice_mut()[0] = 100;
         }
 
-        // fetch_and_op returns a PendingFetchResult — result is not yet
-        // populated; must call .resolve() only after the epoch closes, which
-        // is when `fence` returns it.
-        let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
-            if rank == 0 {
-                Ok(Some(e.fetch_and_op(1i32, 1, 0, ReduceOp::Sum)?))
-            } else {
-                Ok(None)
-            }
-        });
-        let pending = epoch.unwrap_or_else(|e| {
-            eprintln!("FAIL: rank {rank} Win::fetch_and_op Sum epoch returned error: {e}");
-            local_ok = false;
-            None
-        });
-
+        // `origin` and `old` are borrowed until the closing fence returns, and
+        // MPI writes `old` there, so it is read only after the fence.
+        let origin = 1i32;
         let mut old = 0i32;
-        if let Some(p) = pending {
-            // SAFETY: the preceding fence closed the epoch, so MPI has
-            // populated the result buffer per PendingFetchResult::resolve's
-            // safety contract.
-            old = unsafe { p.resolve() };
-        }
+        win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 {
+                e.fetch_and_op(&origin, &mut old, 1, 0, ReduceOp::Sum)?;
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("FAIL: rank {rank} ActiveEpoch::fetch_and_op Sum epoch returned error: {e}");
+            local_ok = false;
+        });
 
         if rank == 0 && old != 100 {
             eprintln!("FAIL: rank 0 old value after Sum: expected 100, got {old}");
@@ -84,13 +75,13 @@ fn main() {
 
     world.barrier().expect("barrier after test 1 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::fetch_and_op Sum");
+        println!("PASS: ActiveEpoch::fetch_and_op Sum");
     }
 
     // ========================================================================
     // Test 2 (Replace + fetch): rank 1 initialises its window slot 0 to 42i32.
-    // Rank 0 calls fetch_and_op(999, 1, 0, FetchOp::REPLACE). After the closing fence:
-    //   - rank 0's returned value must equal 42 (pre-update)
+    // Rank 0 calls fetch_and_op(&999, &mut old, 1, 0, FetchOp::REPLACE). After the closing fence:
+    //   - rank 0's `old` must equal 42 (pre-update)
     //   - rank 1's window slot 0 must equal 999 (post-update)
     // ========================================================================
     {
@@ -100,29 +91,20 @@ fn main() {
             win.local_slice_mut()[0] = 42;
         }
 
-        // fetch_and_op returns a PendingFetchResult — result is not yet
-        // populated; must call .resolve() only after the epoch closes, which
-        // is when `fence` returns it.
-        let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
-            if rank == 0 {
-                Ok(Some(e.fetch_and_op(999i32, 1, 0, FetchOp::REPLACE)?))
-            } else {
-                Ok(None)
-            }
-        });
-        let pending = epoch.unwrap_or_else(|e| {
-            eprintln!("FAIL: rank {rank} Win::fetch_and_op Replace epoch returned error: {e}");
-            local_ok = false;
-            None
-        });
-
+        let origin = 999i32;
         let mut old = 0i32;
-        if let Some(p) = pending {
-            // SAFETY: the preceding fence closed the epoch, so MPI has
-            // populated the result buffer per PendingFetchResult::resolve's
-            // safety contract.
-            old = unsafe { p.resolve() };
-        }
+        win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            if rank == 0 {
+                e.fetch_and_op(&origin, &mut old, 1, 0, FetchOp::REPLACE)?;
+            }
+            Ok(())
+        })
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "FAIL: rank {rank} ActiveEpoch::fetch_and_op Replace epoch returned error: {e}"
+            );
+            local_ok = false;
+        });
 
         if rank == 0 && old != 42 {
             eprintln!("FAIL: rank 0 old value after Replace: expected 42, got {old}");
@@ -140,7 +122,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 2 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::fetch_and_op Replace");
+        println!("PASS: ActiveEpoch::fetch_and_op Replace");
     }
 
     common::check(&world, local_ok, "test_rma_fetch_and_op");

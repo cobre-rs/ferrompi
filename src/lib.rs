@@ -201,8 +201,8 @@ pub use topology::SlurmInfo;
 pub use topology::{HostEntry, TopologyInfo};
 #[cfg(feature = "rma")]
 pub use window::{
-    ActiveEpoch, LockAllGuard, LockGuard, LockType, PassiveEpoch, PendingFetchResult, SharedWindow,
-    Win, WinFenceAssert, WinPscwAssert,
+    ActiveEpoch, LockAllGuard, LockGuard, LockType, PassiveEpoch, SharedWindow, Win,
+    WinFenceAssert, WinPscwAssert,
 };
 
 #[cfg(doctest)]

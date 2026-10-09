@@ -184,6 +184,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `get_accumulate` requires `result` as long as `origin`. Migration: drop the
   `target_count` argument; pass a sub-slice for a shorter transfer; declare the
   buffers before the epoch closure.
+- **`fetch_and_op` and `compare_and_swap` write into caller storage:** they
+  are epoch-handle methods taking `origin: &T` (and `compare: &T`) and
+  `result: &mut T`, borrowed until the epoch closes, and return `Result<()>`.
+  `PendingFetchResult` is removed. Migration: declare the result before the
+  epoch closure and read it after the closure returns.
 
 ### Added
 
@@ -234,6 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Error::InvalidBuffer` and `Error::InvalidOp`.** Migration: match
   `Error::BufferSize`, `Error::InvalidArgument` or `Error::InvalidState`;
   each names the argument or state.
+- `PendingFetchResult`.
 
 ### Fixed
 

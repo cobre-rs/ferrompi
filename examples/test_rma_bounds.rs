@@ -9,15 +9,14 @@
 //! than the target's window is a past-window access, and a `get_accumulate`
 //! whose `result` is shorter than its `origin` returns `Err(BufferSize)`. Rank
 //! 0 is the origin; rank 1 is the target. Canary words around the short
-//! `result` buffer, the `Win::create` window's unchanged contents and valgrind
-//! prove no out-of-bounds write reaches memory.
+//! `result` buffer, the `result` cells of the rejected `fetch_and_op` and
+//! `compare_and_swap` calls, the `Win::create` window's unchanged contents and
+//! valgrind prove no out-of-bounds write reaches memory.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_bounds
 // mpi-test: np=2 valgrind skip-ok=openmpi-4
 
-use ferrompi::{
-    Communicator, Error, Mpi, PendingFetchResult, ReduceOp, Request, Win, WinFenceAssert,
-};
+use ferrompi::{Communicator, Error, Mpi, ReduceOp, Request, Win, WinFenceAssert};
 
 mod common;
 
@@ -77,29 +76,6 @@ fn check_rejected_req<'a>(
     }
 }
 
-fn check_rejected_pending(
-    ok: &mut bool,
-    label: &str,
-    rank: i32,
-    disp: i64,
-    want: (&str, &str),
-    result: ferrompi::Result<PendingFetchResult<u64>>,
-    stray: &mut Vec<PendingFetchResult<u64>>,
-) {
-    match result {
-        Err(e) if is_rejection(&e, want) => {}
-        Err(e) => {
-            eprintln!("FAIL: {label} ({rank}, {disp}) returned unexpected error: {e}");
-            *ok = false;
-        }
-        Ok(p) => {
-            eprintln!("FAIL: {label} ({rank}, {disp}) did not return Err(InvalidArgument)");
-            *ok = false;
-            stray.push(p);
-        }
-    }
-}
-
 /// Runs the seven bulk-access methods (`put`, `accumulate`, `get`,
 /// `get_accumulate`, `rput`, `rget`, `raccumulate`) with a 4-element buffer
 /// (and `target_count` 4 for the three request-returning ones), and the two
@@ -108,14 +84,16 @@ fn check_rejected_pending(
 /// a fence in one fence epoch, the three request-returning ones outside it
 /// (MPI allows request-based RMA only in a passive-target epoch, and a
 /// rejected call makes no MPI call). Only rank 0 issues calls; every one must
-/// return `Err(InvalidArgument)` naming the rejected argument. `len` is
-/// `win`'s exposed length in elements. Returns the aggregate local
-/// verdict (`true` on every rank but 0, which has no cases to fail).
+/// return `Err(InvalidArgument)` naming the rejected argument. Each rejected
+/// `fetch_and_op` and `compare_and_swap` call gets its own `result` cell, set
+/// to `CANARY`, which must still hold it after the epoch: a rejected call
+/// writes nothing into caller storage. `len` is `win`'s exposed length in
+/// elements. Returns the aggregate local verdict (`true` on every rank but 0,
+/// which has no cases to fail).
 fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i64) -> bool {
     let size = world.size();
     let mut ok = true;
     let mut stray_requests: Vec<Request> = Vec::new();
-    let mut stray_pending: Vec<PendingFetchResult<u64>> = Vec::new();
     let origin = [1u64, 2, 3, 4];
     let mut get_buf = [0u64; 4];
     // Each epoch call borrows its buffer until the epoch closes, so every case
@@ -128,6 +106,15 @@ fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i
     ];
     let mut epoch_get_bufs = bulk_cases.map(|_| [0u64; 4]);
     let mut epoch_results = bulk_cases.map(|_| [0u64; 4]);
+    let single_cases = [
+        (1, len, PAST_WINDOW),
+        (1, -1, NEGATIVE_DISP),
+        (size, 0, BAD_RANK),
+        (-1, 0, BAD_RANK),
+    ];
+    let (fetch_origin, cas_origin, cas_compare) = (1u64, 2u64, 1u64);
+    let mut fetch_results = single_cases.map(|_| CANARY);
+    let mut cas_results = single_cases.map(|_| CANARY);
 
     win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
         if world.rank() == 0 {
@@ -170,30 +157,26 @@ fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i
                 );
             }
 
-            for &(rank, disp, want) in &[
-                (1, len, PAST_WINDOW),
-                (1, -1, NEGATIVE_DISP),
-                (size, 0, BAD_RANK),
-                (-1, 0, BAD_RANK),
-            ] {
+            for (&(rank, disp, want), (fetch_result, cas_result)) in single_cases
+                .iter()
+                .zip(fetch_results.iter_mut().zip(cas_results.iter_mut()))
+            {
                 let label = |op: &str| format!("{name}/{op}");
-                check_rejected_pending(
+                check_rejected(
                     &mut ok,
                     &label("fetch_and_op"),
                     rank,
                     disp,
                     want,
-                    e.fetch_and_op(1u64, rank, disp, ReduceOp::Sum),
-                    &mut stray_pending,
+                    e.fetch_and_op(&fetch_origin, fetch_result, rank, disp, ReduceOp::Sum),
                 );
-                check_rejected_pending(
+                check_rejected(
                     &mut ok,
                     &label("compare_and_swap"),
                     rank,
                     disp,
                     want,
-                    e.compare_and_swap(2u64, 1u64, rank, disp),
-                    &mut stray_pending,
+                    e.compare_and_swap(&cas_origin, &cas_compare, cas_result, rank, disp),
                 );
             }
         }
@@ -234,14 +217,25 @@ fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i
         }
     }
 
-    // Red-run only: an unexpected `Ok` request/pending result is completed
-    // here, after the fence epoch has closed.
+    if world.rank() == 0 {
+        if fetch_results != [CANARY; 4] {
+            eprintln!(
+                "FAIL: {name}/fetch_and_op: a rejected call wrote into its result cell: {fetch_results:x?}"
+            );
+            ok = false;
+        }
+        if cas_results != [CANARY; 4] {
+            eprintln!(
+                "FAIL: {name}/compare_and_swap: a rejected call wrote into its result cell: {cas_results:x?}"
+            );
+            ok = false;
+        }
+    }
+
+    // Red-run only: an unexpected `Ok` request result is completed here, after
+    // the fence epoch has closed.
     for req in stray_requests {
         let _ = req.wait();
-    }
-    for p in stray_pending {
-        // SAFETY: the fence epoch has closed.
-        let _ = unsafe { p.resolve() };
     }
 
     // The rejected calls left nothing pending: the window still takes an epoch.
