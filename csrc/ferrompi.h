@@ -96,7 +96,7 @@ extern "C" {
 
 int ferrompi_init_thread(int required, int* provided);
 
-int ferrompi_finalize(int32_t* active_requests);
+int ferrompi_finalize(void);
 
 int ferrompi_initialized(int* flag);
 
@@ -618,6 +618,9 @@ int ferrompi_win_sync(int32_t win);
 int ferrompi_win_post(int32_t group, int32_t assert_val, int32_t win);
 
 int ferrompi_win_start(int32_t group, int32_t assert_val, int32_t win);
+
+/* Allocates a group-table slot for a duplicate of the group of the communicator that created the window and writes its handle to *group_handle; the caller frees it with ferrompi_group_free. Returns FERROMPI_ERR_GROUPS_FULL when the table is full. */
+int ferrompi_win_get_group(int32_t win, int32_t* group_handle);
 
 int ferrompi_win_complete(int32_t win);
 

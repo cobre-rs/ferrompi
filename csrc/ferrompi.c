@@ -830,39 +830,33 @@ int ferrompi_init_thread(int required, int* provided) {
     return ret;
 }
 
-int ferrompi_finalize(int32_t* active_requests) {
+int ferrompi_finalize(void) {
     // Clean up requests first (they may reference communicators).
     // Acquire/release here is defensive: MPI_Finalize is called after all
     // concurrent MPI operations are complete, but the consistent access
     // pattern avoids spurious TSan warnings in the finalizer check.
     //
-    // Only an inactive persistent request is freed here. Freeing an active
-    // point-to-point request, persistent included, is legal, but this table
-    // does not distinguish point-to-point from collective requests: freeing
-    // a nonblocking-collective request or an active persistent collective is
-    // erroneous (Open MPI returns MPI_ERR_REQUEST). Leaving a request
-    // pending at MPI_Finalize is itself non-conforming but tolerated by
-    // MPICH and Open MPI, which progress it inside MPI_Finalize, so the
-    // sweep takes that as the lesser error: every other occupied slot is
-    // left for MPI to tear down and counted instead, so the caller can
-    // report it.
-    int32_t active = 0;
+    // Only an inactive persistent request is freed here. This table does not
+    // distinguish point-to-point from collective requests, and freeing a
+    // nonblocking-collective request or an active persistent collective is
+    // erroneous (Open MPI returns MPI_ERR_REQUEST). No other request can be
+    // pending when this runs, because the Rust side never finalizes with one
+    // (MPI-4.1 11.2.2): a scope completes its requests before it returns, a
+    // passive epoch before it unlocks, an epoch still open when Mpi drops keeps
+    // its window alive, which skips MPI_Finalize, and an active persistent
+    // request skips it through its token.
     for (int i = 0; i < MAX_REQUESTS; i++) {
         unsigned widx = (unsigned)(i / 64);
         uint64_t mask = (uint64_t)1 << (i % 64);
         if ((atomic_load_explicit(&request_bits[widx], memory_order_acquire) & mask) &&
-                request_table[i] != MPI_REQUEST_NULL) {
-            if (request_state[i] == REQUEST_PERSISTENT) {
-                MPI_Request_free(&request_table[i]);
-            } else {
-                active++;
-            }
+                request_table[i] != MPI_REQUEST_NULL &&
+                request_state[i] == REQUEST_PERSISTENT) {
+            MPI_Request_free(&request_table[i]);
         }
     }
     for (int w = 0; w < REQUEST_BITS_WORDS; w++) {
         atomic_store_explicit(&request_bits[w], (uint64_t)0, memory_order_release);
     }
-    *active_requests = active;
 
     // Free every live user op: frees the MPI op and drops the Rust closure
     // through the same path as OpRegistration's Drop; a failed MPI_Op_free keeps both.
@@ -4169,6 +4163,21 @@ int ferrompi_win_start(int32_t group_handle, int32_t assert_val, int32_t win_han
     MPI_Group group = get_group(group_handle);
     if (group == MPI_GROUP_NULL) return MPI_ERR_GROUP;
     return MPI_Win_start(group, assert_val, win);
+}
+
+int ferrompi_win_get_group(int32_t win_handle, int32_t* group_handle) {
+    MPI_Win win = get_win(win_handle);
+    if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
+    MPI_Group g;
+    int ret = MPI_Win_get_group(win, &g);
+    if (ret == MPI_SUCCESS) {
+        *group_handle = alloc_group(g);
+        if (*group_handle < 0) {
+            MPI_Group_free(&g);
+            return FERROMPI_ERR_GROUPS_FULL;
+        }
+    }
+    return ret;
 }
 
 int ferrompi_win_complete(int32_t win_handle) {

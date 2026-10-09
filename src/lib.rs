@@ -279,8 +279,7 @@ pub enum ThreadLevel {
 /// while tearing down internal state that still tracks a live window;
 /// window memory stays valid until the process exits. Launchers can report
 /// such an exit differently from a clean one; see
-/// [`doc::mpi_compatibility`]. Debug builds print a note to stderr when
-/// finalize still leaves MPI requests unfreed.
+/// [`doc::mpi_compatibility`].
 ///
 /// `MPI_Finalize` is also skipped, with a stderr warning, if any
 /// [`PersistentRequest`] is active, whatever thread holds it: finalizing with a
@@ -298,10 +297,9 @@ pub enum ThreadLevel {
 /// are leaked without an MPI call.
 ///
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
-/// whose `Drop` calls MPI — an uncompleted request from the RMA request calls
-/// (feature `rma`), a [`PersistentRequest`], a communicator other than the
-/// world, a window or window lock guard, a datatype, group, info object or user
-/// op — on a thread other than the one that called
+/// whose `Drop` calls MPI — a [`PersistentRequest`], a communicator other than
+/// the world, a window or window lock guard, a datatype, group, info object or
+/// user op — on a thread other than the one that called
 /// [`Mpi::init`]/[`Mpi::init_thread`] prints
 /// `ferrompi: <Type> dropped on thread <name or id>` to stderr and aborts
 /// the process.
@@ -709,19 +707,11 @@ impl Drop for Mpi {
             return;
         }
         rt::end_finalize();
-        let mut active: i32 = 0;
-        // SAFETY: `active` is a valid local out-parameter that
-        // ferrompi_finalize writes the unfreed-active-request count
-        // into. rt::begin_finalize() just returned true, so state was Active —
+        // SAFETY: rt::begin_finalize() just returned true, so state was Active —
         // MPI_Init(_thread) succeeded and MPI_Finalize has not yet been
         // called for this process.
         unsafe {
-            ffi::ferrompi_finalize(&mut active);
-        }
-        if cfg!(debug_assertions) && active > 0 {
-            // A single write so concurrent ranks' output cannot interleave mid-line.
-            let msg = format!("ferrompi: MPI_Finalize leaves {active} active request(s) unfreed\n");
-            let _ = std::io::stderr().write_all(msg.as_bytes());
+            ffi::ferrompi_finalize();
         }
     }
 }

@@ -1,14 +1,15 @@
-//! Integration test for `Win::rget` — request-returning one-sided read.
+//! Integration test for `PassiveEpoch::rget` — request-returning one-sided read.
 //!
 //! Verifies that:
 //!
 //! 1. Rank 1 initializes its local window to `[100, 200, 300, 400]`; a
 //!    fence with `no_succeed` and a barrier make the write visible before
 //!    rank 0 locks.
-//! 2. Rank 0 locks rank 1 with a shared passive-target lock, calls `Win::rget`
-//!    inside the closure to post a read, waits on the returned `Request` (local
-//!    completion), then the closure ends and the window is unlocked. After
-//!    `req.wait()` returns, the local buffer already contains the fetched data.
+//! 2. Rank 0 locks rank 1 with a shared passive-target lock, calls
+//!    `PassiveEpoch::rget` inside the closure to post a read, waits on the
+//!    returned `Request` (local completion), then the closure ends and the
+//!    window is unlocked. The local buffer stays borrowed until then, so rank 0
+//!    reads the fetched data after the closure returns.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_rget
 // mpi-test: np=2
@@ -67,16 +68,16 @@ fn main() {
             // Shared passive-target lock on rank 1's window.
             let locked = win.lock(LockType::Shared, 1, |e| {
                 // Post the rget — request completes when local buffer contains data.
-                let count = local_buf.len() as i64;
-                let req = match e.rget(&mut local_buf, 1, 0, count) {
+                let req = match e.rget(&mut local_buf, 1, 0) {
                     Ok(r) => r,
                     Err(err) => {
-                        eprintln!("rank 0: FAIL: Win::rget returned error: {err}");
+                        eprintln!("rank 0: FAIL: PassiveEpoch::rget returned error: {err}");
                         world.abort(1);
                     }
                 };
 
-                // Wait for local completion — data is in local_buf after this.
+                // Wait for local completion — the data is in local_buf after
+                // this, which stays borrowed until the unlock.
                 if let Err(err) = req.wait() {
                     eprintln!("rank 0: FAIL: Request::wait after rget failed: {err}");
                     local_ok = false;
@@ -103,7 +104,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 1 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::rget with local completion");
+        println!("PASS: PassiveEpoch::rget with local completion");
     }
 
     common::check(&world, local_ok, "test_rma_rget");

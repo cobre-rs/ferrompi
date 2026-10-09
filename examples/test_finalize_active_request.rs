@@ -3,9 +3,9 @@
 //!
 //! Each rank creates:
 //! - an idle persistent send (`send_init`, never started): inactive, freed
-//!   by the sweep, not counted;
+//!   by the sweep;
 //! - a nonblocking collective (`iallreduce`) in a scope: the scope completes
-//!   it before `Mpi` is dropped, so it is not counted;
+//!   it before `Mpi` is dropped;
 //! - three matched `send_init`/`recv_init` pairs with its peer rank, one pair
 //!   per completion path, each using distinct tags:
 //!   - `start` then `wait` on each side individually;
@@ -19,11 +19,10 @@
 //! `Mpi` is then dropped with every request handle still alive. Completing a
 //! request releases the token it holds, so no persistent request is active,
 //! and the drop finalizes MPI: the runner fails the example if it prints the
-//! skip marker. The finalize sweep frees every inactive persistent request
-//! without counting it, so the debug note about unfreed active requests is not
-//! printed either. A request left active at the drop skips `MPI_Finalize`
-//! instead; `test_persistent_finalize` covers that. Dropping the remaining
-//! request handles after `Mpi` makes no further MPI call.
+//! skip marker. The finalize sweep frees every inactive persistent request. A
+//! request left active at the drop skips `MPI_Finalize` instead;
+//! `test_persistent_finalize` covers that. Dropping the remaining request
+//! handles after `Mpi` makes no further MPI call.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_finalize_active_request
 // mpi-test: np=2

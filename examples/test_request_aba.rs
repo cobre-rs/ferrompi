@@ -226,9 +226,9 @@ fn part4_failed_test(world: &Communicator, rank: i32) {
             let b = world.irecv(s, &mut b_buf, 1, 22).expect("part4: irecv b");
             world.barrier().expect("part4: barrier after posting b");
 
-            #[allow(
+            #[expect(
                 clippy::drop_non_drop,
-                reason = "Request has no Drop impl in the default build; the drop marks the early release"
+                reason = "Request has no Drop impl; the drop marks the early release"
             )]
             drop(a);
             scope_ok &= b.wait().is_ok();

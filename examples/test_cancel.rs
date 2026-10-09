@@ -74,7 +74,7 @@ fn main() -> Result<()> {
         let mut win = Win::<i32>::allocate(&world, 1)?;
         let origin = [7i32];
         win.lock(LockType::Shared, rank, |e| {
-            let mut req = e.rput(&origin, rank, 0, 1)?;
+            let mut req = e.rput(&origin, rank, 0)?;
             let cancel_ok = matches!(req.cancel(), Err(Error::NotSupported(_)));
             common::check(&world, cancel_ok, "cancel on rput returns NotSupported");
             let status = req.wait()?;

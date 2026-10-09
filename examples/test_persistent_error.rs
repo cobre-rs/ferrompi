@@ -31,8 +31,7 @@
 //! two failed persistent requests alive (never dropped) and drops `Mpi` while
 //! both are still alive. `MPI_Finalize` must run: the runner fails the example
 //! if it prints the skip marker, which it does when a request still holds its
-//! token. The sweep then frees both without counting them, so no note about
-//! unfreed active requests is printed either.
+//! token. The sweep then frees both.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_error
 // mpi-test: np=2 valgrind
@@ -265,7 +264,7 @@ fn part4_partial_start_all(world: &Communicator, mpi: &Mpi, rank: i32, mpich: bo
 // `wait`, one through `test`) alive across `drop(mpi)`, then finalizes while
 // both are still registered. Neither may hold a token or be counted active:
 // `MPI_Finalize` must run, which the runner checks by the absence of the skip
-// marker, and the sweep must not report an unfreed active request.
+// marker.
 fn part5_finalize_accounting(mpi: Mpi, world: &Communicator, rank: i32) {
     if rank == 0 {
         let mut req_a = world

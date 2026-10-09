@@ -40,7 +40,7 @@ pub const FERROMPI_LOCK_SHARED: int32_t = 1;
 // it during or after `MPI_Finalize`.
 extern "C" {
     pub fn ferrompi_init_thread(required: c_int, provided: *mut c_int) -> c_int;
-    pub fn ferrompi_finalize(active_requests: *mut int32_t) -> c_int;
+    pub fn ferrompi_finalize() -> c_int;
     pub fn ferrompi_initialized(flag: *mut c_int) -> c_int;
     pub fn ferrompi_finalized(flag: *mut c_int) -> c_int;
     pub fn ferrompi_comm_free(comm: int32_t) -> c_int;
@@ -1119,6 +1119,12 @@ guarded_extern! {
 
     #[cfg(feature = "rma")]
     pub fn ferrompi_win_start(group: int32_t, assert_val: int32_t, win: int32_t) -> c_int;
+
+    /// Allocate a group-table slot for a duplicate of the group of the
+    /// communicator that created `win`, and write its handle to `*group_handle`.
+    /// The caller owns the slot and frees it with `ferrompi_group_free`.
+    #[cfg(feature = "rma")]
+    pub fn ferrompi_win_get_group(win: int32_t, group_handle: *mut int32_t) -> c_int;
 
     #[cfg(feature = "rma")]
     pub fn ferrompi_put(

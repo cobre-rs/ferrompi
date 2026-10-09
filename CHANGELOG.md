@@ -189,6 +189,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `result: &mut T`, borrowed until the epoch closes, and return `Result<()>`.
   `PendingFetchResult` is removed. Migration: declare the result before the
   epoch closure and read it after the closure returns.
+- **Request-based RMA is passive-epoch only:** `rput`, `rget` and `raccumulate`
+  are `PassiveEpoch` methods that take their count from the slice and return a
+  `Request` the epoch completes before it unlocks; `Win::rput`, `Win::rget` and
+  `Win::raccumulate` are removed. Migration: call them on the `lock`/`lock_all`
+  closure's argument and drop the `target_count` argument.
+- **A transfer's target must be in its epoch's access set:** `put`, `get`,
+  `accumulate`, `get_accumulate`, `fetch_and_op`, `compare_and_swap` and the
+  request calls return `Error::InvalidArgument` with `arg: "target_rank"`,
+  before any MPI call, for a rank the epoch does not give access to: any rank
+  but the locked one in `Win::lock`, any rank outside the `group` of
+  `Win::start`. A fence and `Win::lock_all` epoch cover every rank, and
+  `flush` and `flush_local` still take any rank of the window's communicator.
+  `Win::start` translates its group into window ranks once, takes one
+  group-table slot for that call, and returns `Error::InvalidArgument` with
+  `arg: "group"`, before opening the epoch, for a member outside the window's
+  communicator. Migration: open the epoch on the ranks the closure targets.
 
 ### Added
 
@@ -223,9 +239,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MPI error code N`. An error converted on a worker thread could previously
   overlap `MPI_Finalize`, which MPI 3.1 libraries need not allow (Open MPI 4.1
   crashes).
-- **Dropping a request from a `scope` does not wait for it; the scope completes
-  it.** Only the RMA request calls (`rput`, `rget`, `raccumulate`) still return
-  a request that waits when dropped.
+- **Dropping a request does not wait for it; its `scope`, or the passive epoch
+  that returned it from `rput`, `rget` or `raccumulate`, completes it.**
 - **Dropping `Mpi` while a `PersistentRequest` is active skips
   `MPI_Finalize`**, on whatever thread the request is, with a stderr warning,
   instead of finalizing with the request pending. The request can still be
@@ -240,6 +255,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Error::BufferSize`, `Error::InvalidArgument` or `Error::InvalidState`;
   each names the argument or state.
 - `PendingFetchResult`.
+- **The debug-build note `MPI_Finalize leaves N active request(s) unfreed`**:
+  no request can be left pending at finalize any more.
 
 ### Fixed
 

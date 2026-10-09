@@ -356,7 +356,7 @@ pub fn scope<'env, R>(f: impl for<'s> FnOnce(&'s Scope<'s, 'env>) -> Result<R>) 
         env: PhantomData,
     };
     let result = catch_unwind(AssertUnwindSafe(|| f(&scope)));
-    let end = scope.registry.complete_all();
+    let end = scope.registry.complete_all("scope");
     drop(token);
     match result {
         Err(payload) => resume_unwind(payload),
@@ -368,8 +368,7 @@ pub fn scope<'env, R>(f: impl for<'s> FnOnce(&'s Scope<'s, 'env>) -> Result<R>) 
 impl<'s> Scope<'s, '_> {
     #[inline]
     pub(crate) fn request(&'s self, handle: i64, kind: RequestKind) -> Request<'s> {
-        let slot = self.registry.register(handle);
-        Request::scoped(handle, kind, &self.registry, slot)
+        self.registry.request(handle, kind)
     }
 }
 
@@ -394,6 +393,14 @@ impl Registry {
             used: Cell::new(0),
             spill: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Registers `handle` and returns the request that completes it through
+    /// this registry.
+    #[inline]
+    pub(crate) fn request<'s>(&'s self, handle: i64, kind: RequestKind) -> Request<'s> {
+        let slot = self.register(handle);
+        Request::scoped(handle, kind, self, slot)
     }
 
     fn register(&self, handle: i64) -> u32 {
@@ -481,7 +488,8 @@ impl Registry {
         (ret, progress)
     }
 
-    /// Waits until no slot is pending, and returns the first error.
+    /// Waits until no slot is pending, and returns the first error, labelled
+    /// `op`: the call whose end does the waiting, `"scope"` for [`scope`].
     ///
     /// A failed pass that completed some slots is repeated for the rest, which
     /// MPI reports as `MPI_ERR_PENDING` (Open MPI returns at the first failure
@@ -489,15 +497,15 @@ impl Registry {
     /// with them complete but unprocessed). A pass that completed no slot was
     /// refused or left the state of every request unknown, so the process
     /// aborts.
-    pub(crate) fn complete_all(&self) -> Result<()> {
+    pub(crate) fn complete_all(&self, op: &'static str) -> Result<()> {
         if self.used.get() == 0 && self.spill.borrow().is_empty() {
             return Ok(());
         }
-        self.complete_pending()
+        self.complete_pending(op)
     }
 
     #[cold]
-    fn complete_pending(&self) -> Result<()> {
+    fn complete_pending(&self, op: &'static str) -> Result<()> {
         let mut first = Ok(());
         loop {
             let live = self.live();
@@ -518,25 +526,37 @@ impl Registry {
                 if ret == FERROMPI_ERR_THREAD_LEVEL {
                     // Only the Serialized overlap check returns this sentinel
                     // for a request this thread created.
-                    let _ = std::io::stderr().write_all(
-                        b"ferrompi: a nonblocking scope's final wait overlapped another thread's MPI call at ThreadLevel::Serialized; aborting\n",
+                    let msg = format!(
+                        "ferrompi: {}'s final wait overlapped another thread's MPI call at ThreadLevel::Serialized; aborting\n",
+                        owner(op)
                     );
+                    let _ = std::io::stderr().write_all(msg.as_bytes());
                     std::process::abort();
                 }
-                scope_abort(ret);
+                scope_abort(op, ret);
             }
             if ret != 0 && first.is_ok() {
-                first = Error::check_with_op(ret, "scope");
+                first = Error::check_with_op(ret, op);
             }
         }
     }
 }
 
+/// What a message calls the owner of a registry whose wait is labelled `op`.
+fn owner(op: &str) -> &'static str {
+    if op == "scope" {
+        "a nonblocking scope"
+    } else {
+        "a passive-target epoch"
+    }
+}
+
 #[cold]
 #[inline(never)]
-fn scope_abort(ret: c_int) -> ! {
+fn scope_abort(op: &str, ret: c_int) -> ! {
     let msg = format!(
-        "ferrompi: a nonblocking scope could not complete its requests (MPI_Waitall returned {ret}); aborting\n"
+        "ferrompi: {} could not complete its requests (MPI_Waitall returned {ret}); aborting\n",
+        owner(op)
     );
     let _ = std::io::stderr().write_all(msg.as_bytes());
     std::process::abort();
@@ -605,7 +625,7 @@ mod tests {
     #[test]
     fn scope_without_requests_makes_no_mpi_call() {
         assert_eq!(Registry::new().live(), 0);
-        assert!(Registry::new().complete_all().is_ok());
+        assert!(Registry::new().complete_all("scope").is_ok());
         assert_eq!(scope(|_| Ok(41)).expect("an empty scope returns Ok"), 41);
     }
 

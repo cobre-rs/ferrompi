@@ -1,14 +1,15 @@
-//! Integration test for `Win::raccumulate` — request-returning one-sided
-//! accumulate with local-completion semantics.
+//! Integration test for `PassiveEpoch::raccumulate` — request-returning
+//! one-sided accumulate with local-completion semantics.
 //!
 //! Verifies that:
 //!
 //! 1. Rank 1 initializes its local window to `[1, 2, 3, 4]`; a fence with
 //!    `no_succeed` and a barrier make the write visible before rank 0 locks.
-//! 2. Rank 0 locks rank 1 exclusively and calls `Win::raccumulate` with
-//!    `ReduceOp::Sum` inside the closure, waits on the returned `Request`
-//!    (local completion — origin buffer safe to reuse), then the closure ends
-//!    and the unlock gives remote completion — accumulation visible at rank 1.
+//! 2. Rank 0 locks rank 1 exclusively and calls `PassiveEpoch::raccumulate`
+//!    with `ReduceOp::Sum` inside the closure, waits on the returned `Request`
+//!    (local completion — MPI no longer reads the origin buffer), then the
+//!    closure ends and the unlock gives remote completion — accumulation
+//!    visible at rank 1.
 //! 3. After a barrier, rank 1 locks its own window, and once the lock is
 //!    released it reads the window and asserts it equals `[11, 22, 33, 44]`.
 //!
@@ -43,8 +44,8 @@ fn main() {
     //   Rank 1: initialize window to [1, 2, 3, 4]
     //   All:    fence(no_succeed) + barrier (rank 1's init visible before the lock)
     //   Rank 0: lock(Exclusive, rank=1, |e|
-    //             raccumulate(&[10, 20, 30, 40], 1, 0, 4, ReduceOp::Sum)
-    //             → req.wait()  (local completion — origin buffer safe to reuse))
+    //             raccumulate(&[10, 20, 30, 40], 1, 0, ReduceOp::Sum)
+    //             → req.wait()  (local completion — MPI no longer reads the origin))
     //           → unlock  (remote completion — visible at rank 1)
     //   All:    barrier
     //   Rank 1: lock(Shared, 1, |_| Ok(())) → assert local window == [11, 22, 33, 44]
@@ -74,17 +75,16 @@ fn main() {
         // visible at rank 1.
         let locked = win.lock(LockType::Exclusive, 1, |e| {
             // Post raccumulate — returns a Request signaling local completion.
-            let count = buf.len() as i64;
-            let req = match e.raccumulate(&buf, 1, 0, count, ReduceOp::Sum) {
+            let req = match e.raccumulate(&buf, 1, 0, ReduceOp::Sum) {
                 Ok(r) => r,
                 Err(err) => {
-                    eprintln!("rank 0: FAIL: Win::raccumulate returned error: {err}");
+                    eprintln!("rank 0: FAIL: PassiveEpoch::raccumulate returned error: {err}");
                     world.abort(1);
                 }
             };
 
-            // Wait for local completion — origin buffer (`buf`) is safe to
-            // reuse after this point. Remote visibility requires the unlock.
+            // Wait for local completion — MPI no longer reads the origin buffer
+            // (`buf`) after this point. Remote visibility requires the unlock.
             if let Err(err) = req.wait() {
                 eprintln!("rank 0: FAIL: Request::wait after raccumulate failed: {err}");
                 local_ok = false;
@@ -117,7 +117,7 @@ fn main() {
     }
 
     if rank == 0 && local_ok {
-        println!("PASS: Win::raccumulate Sum with local completion");
+        println!("PASS: PassiveEpoch::raccumulate Sum with local completion");
     }
 
     common::check(&world, local_ok, "test_rma_raccumulate");

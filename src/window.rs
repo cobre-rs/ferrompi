@@ -54,7 +54,7 @@
 
 use std::io::Write;
 use std::marker::PhantomData;
-use std::ops::{BitOr, BitOrAssign, Deref};
+use std::ops::{BitOr, BitOrAssign};
 use std::os::raw::c_int;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
@@ -68,6 +68,7 @@ use crate::group::Group;
 use crate::persistent::vec_buf_mut;
 use crate::request::{Request, RequestKind};
 use crate::rt;
+use crate::scope::Registry;
 use crate::Communicator;
 use crate::MpiDatatype;
 use crate::{AccumulateOp, FetchOp};
@@ -549,34 +550,51 @@ fn check_rank(group_size: usize, arg: &'static str, rank: i32) -> Result<()> {
     Ok(())
 }
 
-/// Validates an RMA target against `words` (see [`window_word`]): rejects a
-/// `target_rank` outside `0..words.len()`, a negative `target_count`, a
-/// `buffer_lens` entry unequal to it (reported under that entry's name), a
-/// negative `target_disp`, and an access
-/// `target_disp * disp_unit(target_rank) + target_count * elem_size` that
-/// overflows `u64` or exceeds the target's exposed byte length.
+/// The ranks an epoch may issue transfers to: every rank of the window's
+/// communicator, the one rank a `lock` epoch locks, or the members of a `start`
+/// epoch's group, indexed by window rank.
+enum Access {
+    All,
+    Rank(i32),
+    Ranks(Box<[bool]>),
+}
+
+impl Access {
+    fn contains(&self, rank: i32) -> bool {
+        match self {
+            Access::All => true,
+            Access::Rank(locked) => *locked == rank,
+            Access::Ranks(members) => members.get(rank as usize) == Some(&true),
+        }
+    }
+}
+
+/// Validates an RMA target against `words` (see [`window_word`]) and the
+/// epoch's `access` set: rejects a `target_rank` outside `0..words.len()` or
+/// outside `access`, a `buffer_lens` entry unequal to `count` (reported under
+/// that entry's name), a negative `target_disp`, and an access
+/// `target_disp * disp_unit(target_rank) + count * elem_size` that overflows
+/// `u64` or exceeds the target's exposed byte length.
 fn check_rma_target(
     words: &[u64],
+    access: &Access,
     elem_size: usize,
     target_rank: i32,
     target_disp: i64,
-    target_count: i64,
+    count: usize,
     buffer_lens: &[(&'static str, usize)],
 ) -> Result<()> {
     check_rank(words.len(), "target_rank", target_rank)?;
-    if target_count < 0 {
+    if !access.contains(target_rank) {
         return Err(Error::InvalidArgument {
-            arg: "target_count",
-            reason: "negative count",
+            arg: "target_rank",
+            reason: "rank outside the epoch's access set",
         });
     }
-    if let Some(&(arg, actual)) = buffer_lens
-        .iter()
-        .find(|&&(_, len)| len as i64 != target_count)
-    {
+    if let Some(&(arg, actual)) = buffer_lens.iter().find(|&&(_, len)| len != count) {
         return Err(Error::BufferSize {
             arg,
-            required: target_count as usize,
+            required: count,
             actual,
         });
     }
@@ -596,7 +614,7 @@ fn check_rma_target(
     let disp_bytes = (target_disp as u64)
         .checked_mul(disp_unit)
         .ok_or_else(past_window)?;
-    let count_bytes = (target_count as u64)
+    let count_bytes = (count as u64)
         .checked_mul(elem_size as u64)
         .ok_or_else(past_window)?;
     let total = disp_bytes
@@ -1074,25 +1092,24 @@ pub struct Win<T: MpiDatatype> {
 /// methods reject a buffer declared inside the closure, because it is freed
 /// before then. Declare buffers before the call to `fence` or `start`.
 ///
+/// # Access set
+///
+/// A transfer's `target_rank` must be a rank the epoch gives access to: every
+/// rank of the window's communicator for [`Win::fence`], the members of the
+/// `group` for [`Win::start`]. Any other rank returns
+/// [`Error::InvalidArgument`] with `arg: "target_rank"` and makes no MPI call,
+/// because MPI-4.1 §12.5 makes such a transfer erroneous and its closing call
+/// would not complete it.
+///
 /// # Thread safety
 ///
 /// `ActiveEpoch` is neither `Send` nor `Sync`: it borrows a [`Win`], which is
 /// neither.
 pub struct ActiveEpoch<'s, 'env: 's, T: MpiDatatype> {
     win: &'s Win<T>,
+    access: Access,
     scope: PhantomData<&'s mut &'s ()>,
     env: PhantomData<&'env mut &'env ()>,
-}
-
-// Transitional: the request-based RMA operations still live on `Win`, so the
-// handle reaches them by dereferencing. The impl goes away when they move onto
-// the handle.
-impl<T: MpiDatatype> Deref for ActiveEpoch<'_, '_, T> {
-    type Target = Win<T>;
-
-    fn deref(&self) -> &Win<T> {
-        self.win
-    }
 }
 
 impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
@@ -1117,9 +1134,9 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// # Errors
     ///
     /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, or
-    ///   the access does not fit in the target rank's window; no MPI call is
-    ///   made.
+    ///   window's communicator (including -1) or of the epoch's access set
+    ///   (`arg: "target_rank"`), `target_disp` is negative, or the access does
+    ///   not fit in the target rank's window; no MPI call is made.
     /// * [`Error::Finalized`] — once [`Mpi`](crate::Mpi) is being dropped.
     /// * [`Error::Mpi`] — if `MPI_Put` fails; on MPI before 4.0 this includes
     ///   class `Count` for an `origin` of more than `i32::MAX` elements.
@@ -1147,8 +1164,12 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// ```
     pub fn put(&self, origin: &'s [T], target_rank: i32, target_disp: i64) -> Result<()> {
         // SAFETY: `origin` is borrowed for `'s`, which ends only after the epoch's
-        // closing call; see `Win::rma_put`.
-        unsafe { self.win.rma_put(origin, target_rank, target_disp) }
+        // closing call, and `self.access` is this epoch's access set; see
+        // `Win::rma_put`.
+        unsafe {
+            self.win
+                .rma_put(&self.access, origin, target_rank, target_disp)
+        }
     }
 
     /// One-sided read: copy data from a remote rank's window memory into
@@ -1172,9 +1193,9 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// # Errors
     ///
     /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, or
-    ///   the access does not fit in the target rank's window; no MPI call is
-    ///   made.
+    ///   window's communicator (including -1) or of the epoch's access set
+    ///   (`arg: "target_rank"`), `target_disp` is negative, or the access does
+    ///   not fit in the target rank's window; no MPI call is made.
     /// * [`Error::Finalized`] — once [`Mpi`](crate::Mpi) is being dropped.
     /// * [`Error::Mpi`] — if `MPI_Get` fails; on MPI before 4.0 this includes
     ///   class `Count` for an `origin` of more than `i32::MAX` elements.
@@ -1207,8 +1228,12 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// ```
     pub fn get(&self, origin: &'s mut [T], target_rank: i32, target_disp: i64) -> Result<()> {
         // SAFETY: `origin` is borrowed for `'s`, which ends only after the epoch's
-        // closing call; see `Win::rma_put`.
-        unsafe { self.win.rma_get(origin, target_rank, target_disp) }
+        // closing call, and `self.access` is this epoch's access set; see
+        // `Win::rma_put`.
+        unsafe {
+            self.win
+                .rma_get(&self.access, origin, target_rank, target_disp)
+        }
     }
 
     /// One-sided reduce-accumulate: combine data from a local origin buffer
@@ -1246,9 +1271,9 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     ///   op MPI does not define on `T` (a bitwise or logical op on
     ///   `f32`/`f64`); no MPI call is made.
     /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, or
-    ///   the access does not fit in the target rank's window; no MPI call is
-    ///   made.
+    ///   window's communicator (including -1) or of the epoch's access set
+    ///   (`arg: "target_rank"`), `target_disp` is negative, or the access does
+    ///   not fit in the target rank's window; no MPI call is made.
     /// * [`Error::Finalized`] — once [`Mpi`](crate::Mpi) is being dropped.
     /// * [`Error::Mpi`] — if `MPI_Accumulate` fails for any other reason; on
     ///   MPI before 4.0 this includes class `Count` for an `origin` of more
@@ -1289,10 +1314,11 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
         op: impl Into<AccumulateOp>,
     ) -> Result<()> {
         // SAFETY: `origin` is borrowed for `'s`, which ends only after the epoch's
-        // closing call; see `Win::rma_put`.
+        // closing call, and `self.access` is this epoch's access set; see
+        // `Win::rma_put`.
         unsafe {
             self.win
-                .rma_accumulate(origin, target_rank, target_disp, op)
+                .rma_accumulate(&self.access, origin, target_rank, target_disp, op)
         }
     }
 
@@ -1341,9 +1367,9 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     ///   op MPI does not define on `T` (a bitwise or logical op on
     ///   `f32`/`f64`); no MPI call is made.
     /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, or
-    ///   the access does not fit in the target rank's window; no MPI call is
-    ///   made.
+    ///   window's communicator (including -1) or of the epoch's access set
+    ///   (`arg: "target_rank"`), `target_disp` is negative, or the access does
+    ///   not fit in the target rank's window; no MPI call is made.
     /// * [`Error::BufferSize`] with `arg: "result"` — if `result` is not as
     ///   long as `origin`; no MPI call is made.
     /// * [`Error::Finalized`] — once [`Mpi`](crate::Mpi) is being dropped.
@@ -1393,10 +1419,11 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
         op: impl Into<FetchOp>,
     ) -> Result<()> {
         // SAFETY: `origin` and `result` are borrowed for `'s`, which ends only after
-        // the epoch's closing call; see `Win::rma_put`.
+        // the epoch's closing call, and `self.access` is this epoch's access set;
+        // see `Win::rma_put`.
         unsafe {
             self.win
-                .rma_get_accumulate(origin, result, target_rank, target_disp, op)
+                .rma_get_accumulate(&self.access, origin, result, target_rank, target_disp, op)
         }
     }
 
@@ -1440,9 +1467,9 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     ///   op MPI does not define on `T` (a bitwise or logical op on
     ///   `f32`/`f64`); no MPI call is made.
     /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, or
-    ///   the access does not fit in the target rank's window; no MPI call is
-    ///   made.
+    ///   window's communicator (including -1) or of the epoch's access set
+    ///   (`arg: "target_rank"`), `target_disp` is negative, or the access does
+    ///   not fit in the target rank's window; no MPI call is made.
     /// * [`Error::Finalized`] — once [`Mpi`](crate::Mpi) is being dropped.
     /// * [`Error::Mpi`] — if `MPI_Fetch_and_op` fails for any other reason.
     ///
@@ -1491,10 +1518,11 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
         op: impl Into<FetchOp>,
     ) -> Result<()> {
         // SAFETY: `origin` and `result` are borrowed for `'s`, which ends only after
-        // the epoch's closing call, when MPI has written `result`; see `Win::rma_put`.
+        // the epoch's closing call, when MPI has written `result`, and
+        // `self.access` is this epoch's access set; see `Win::rma_put`.
         unsafe {
             self.win
-                .rma_fetch_and_op(origin, result, target_rank, target_disp, op)
+                .rma_fetch_and_op(&self.access, origin, result, target_rank, target_disp, op)
         }
     }
 }
@@ -1536,9 +1564,9 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// # Errors
     ///
     /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_disp` is negative, or
-    ///   the access does not fit in the target rank's window; no MPI call is
-    ///   made.
+    ///   window's communicator (including -1) or of the epoch's access set
+    ///   (`arg: "target_rank"`), `target_disp` is negative, or the access does
+    ///   not fit in the target rank's window; no MPI call is made.
     /// * [`Error::Finalized`] — once [`Mpi`](crate::Mpi) is being dropped.
     /// * [`Error::Mpi`] — if `MPI_Compare_and_swap` fails (for example, the MPI
     ///   version is below 3).
@@ -1591,11 +1619,17 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> ActiveEpoch<'s, '_, T> {
         target_disp: i64,
     ) -> Result<()> {
         // SAFETY: `origin`, `compare` and `result` are borrowed for `'s`, which ends
-        // only after the epoch's closing call, when MPI has written `result`; see
-        // `Win::rma_put`.
+        // only after the epoch's closing call, when MPI has written `result`, and
+        // `self.access` is this epoch's access set; see `Win::rma_put`.
         unsafe {
-            self.win
-                .rma_compare_and_swap(origin, compare, result, target_rank, target_disp)
+            self.win.rma_compare_and_swap(
+                &self.access,
+                origin,
+                compare,
+                result,
+                target_rank,
+                target_disp,
+            )
         }
     }
 }
@@ -1608,10 +1642,14 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> ActiveEpoch<'s, '_, T> {
 /// panics. The epoch is open exactly while the closure runs, and the window is
 /// mutably borrowed for that time.
 ///
-/// The handle carries the synchronization calls MPI allows only inside a
-/// passive-target epoch: [`flush`](Self::flush), [`flush_all`](Self::flush_all),
-/// [`flush_local`](Self::flush_local),
-/// [`flush_local_all`](Self::flush_local_all) and [`sync`](Self::sync).
+/// The handle carries the calls MPI allows only inside a passive-target epoch:
+/// the synchronization calls [`flush`](Self::flush),
+/// [`flush_all`](Self::flush_all), [`flush_local`](Self::flush_local),
+/// [`flush_local_all`](Self::flush_local_all) and [`sync`](Self::sync), and the
+/// request-based transfers [`rput`](Self::rput), [`rget`](Self::rget) and
+/// [`raccumulate`](Self::raccumulate) (MPI-4.1 §12.3.5). The epoch owns the
+/// requests those return: before it unlocks it completes every one still
+/// pending, also when the closure returned an error or panicked.
 ///
 /// # Lifetimes
 ///
@@ -1619,14 +1657,25 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> ActiveEpoch<'s, '_, T> {
 /// is the epoch, and `'env` outlives it. [`put`](Self::put),
 /// [`get`](Self::get), [`accumulate`](Self::accumulate),
 /// [`get_accumulate`](Self::get_accumulate),
-/// [`fetch_and_op`](Self::fetch_and_op) and
-/// [`compare_and_swap`](Self::compare_and_swap) borrow their buffers for `'s`,
-/// so a buffer outlives the unlock, which is when MPI stops using it, and
-/// cannot be dropped or written before then, even after a flush. A buffer MPI
-/// writes (a `get` destination or a `result`) cannot be read before then
-/// either. These six methods reject a buffer declared inside the closure,
-/// because it is freed before then. Declare buffers before the call to `lock`
-/// or `lock_all`.
+/// [`fetch_and_op`](Self::fetch_and_op),
+/// [`compare_and_swap`](Self::compare_and_swap), [`rput`](Self::rput),
+/// [`rget`](Self::rget) and [`raccumulate`](Self::raccumulate) borrow their
+/// buffers for `'s`, so a buffer outlives the unlock, which is when MPI stops
+/// using it, and cannot be dropped or written before then, even after a flush
+/// or after a request completed. A buffer MPI writes (a `get` or `rget`
+/// destination or a `result`) cannot be read before then either. These nine
+/// methods reject a buffer declared inside the closure, because it is freed
+/// before then. Declare buffers before the call to `lock` or `lock_all`.
+///
+/// # Access set
+///
+/// A transfer's `target_rank` must be a rank the epoch gives access to: the
+/// locked rank for [`Win::lock`], any rank of the window's communicator for
+/// [`Win::lock_all`]. Any other rank returns [`Error::InvalidArgument`] with
+/// `arg: "target_rank"` and makes no MPI call, because MPI-4.1 §12.5 makes such
+/// a transfer erroneous and the unlock would not complete it.
+/// [`flush`](Self::flush) and [`flush_local`](Self::flush_local) accept any
+/// rank of the window's communicator.
 ///
 /// # Thread safety
 ///
@@ -1634,19 +1683,10 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> ActiveEpoch<'s, '_, T> {
 /// neither.
 pub struct PassiveEpoch<'s, 'env: 's, T: MpiDatatype> {
     win: &'s Win<T>,
+    access: Access,
+    registry: Registry,
     scope: PhantomData<&'s mut &'s ()>,
     env: PhantomData<&'env mut &'env ()>,
-}
-
-// Transitional: the request-based RMA operations still live on `Win`, so the
-// handle reaches them by dereferencing. The impl goes away when they move onto
-// the handle.
-impl<T: MpiDatatype> Deref for PassiveEpoch<'_, '_, T> {
-    type Target = Win<T>;
-
-    fn deref(&self) -> &Win<T> {
-        self.win
-    }
 }
 
 impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
@@ -1655,11 +1695,15 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// The write is complete at the origin and the target when
     /// [`flush`](Self::flush) returns for `target_rank`, and at the latest when
     /// the epoch's unlock returns. `origin` stays borrowed until the unlock
-    /// returns.
+    /// returns. A `target_rank` outside the epoch's access set returns
+    /// [`Error::InvalidArgument`], as there.
     pub fn put(&self, origin: &'s [T], target_rank: i32, target_disp: i64) -> Result<()> {
-        // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock;
-        // see `Win::rma_put`.
-        unsafe { self.win.rma_put(origin, target_rank, target_disp) }
+        // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock,
+        // and `self.access` is this epoch's access set; see `Win::rma_put`.
+        unsafe {
+            self.win
+                .rma_put(&self.access, origin, target_rank, target_disp)
+        }
     }
 
     /// One-sided read, as [`ActiveEpoch::get`], in a passive-target epoch.
@@ -1669,11 +1713,15 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// [`flush_local`](Self::flush_local) or
     /// [`flush_local_all`](Self::flush_local_all)), and at the latest when the
     /// epoch's unlock returns. `origin` stays borrowed until the unlock returns,
-    /// so it cannot be read earlier.
+    /// so it cannot be read earlier. A `target_rank` outside the epoch's access
+    /// set returns [`Error::InvalidArgument`], as there.
     pub fn get(&self, origin: &'s mut [T], target_rank: i32, target_disp: i64) -> Result<()> {
-        // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock;
-        // see `Win::rma_put`.
-        unsafe { self.win.rma_get(origin, target_rank, target_disp) }
+        // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock,
+        // and `self.access` is this epoch's access set; see `Win::rma_put`.
+        unsafe {
+            self.win
+                .rma_get(&self.access, origin, target_rank, target_disp)
+        }
     }
 
     /// One-sided reduce-accumulate, as [`ActiveEpoch::accumulate`], in a
@@ -1683,7 +1731,8 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// [`flush`](Self::flush) returns for `target_rank`, and at the latest when
     /// the epoch's unlock returns. `origin` stays borrowed until the unlock
     /// returns. Concurrent accumulates to one target location must use the same
-    /// op or `MPI_NO_OP`, as there.
+    /// op or `MPI_NO_OP`, as there. A `target_rank` outside the epoch's access
+    /// set returns [`Error::InvalidArgument`], as there.
     pub fn accumulate(
         &self,
         origin: &'s [T],
@@ -1691,11 +1740,11 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
         target_disp: i64,
         op: impl Into<AccumulateOp>,
     ) -> Result<()> {
-        // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock;
-        // see `Win::rma_put`.
+        // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock,
+        // and `self.access` is this epoch's access set; see `Win::rma_put`.
         unsafe {
             self.win
-                .rma_accumulate(origin, target_rank, target_disp, op)
+                .rma_accumulate(&self.access, origin, target_rank, target_disp, op)
         }
     }
 
@@ -1711,7 +1760,8 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// `origin` and `result` stay borrowed until the unlock returns, so `result`
     /// cannot be read earlier.
     /// Concurrent accumulates to one target location must use the same op or
-    /// `MPI_NO_OP`, as there.
+    /// `MPI_NO_OP`, as there. A `target_rank` outside the epoch's access set
+    /// returns [`Error::InvalidArgument`], as there.
     pub fn get_accumulate(
         &self,
         origin: &'s [T],
@@ -1721,10 +1771,11 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
         op: impl Into<FetchOp>,
     ) -> Result<()> {
         // SAFETY: `origin` and `result` are borrowed for `'s`, which ends only after
-        // the unlock; see `Win::rma_put`.
+        // the unlock, and `self.access` is this epoch's access set; see
+        // `Win::rma_put`.
         unsafe {
             self.win
-                .rma_get_accumulate(origin, result, target_rank, target_disp, op)
+                .rma_get_accumulate(&self.access, origin, result, target_rank, target_disp, op)
         }
     }
 
@@ -1739,8 +1790,10 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// returns; both are complete at the latest when the epoch's unlock returns.
     /// `origin` and `result` stay borrowed until the unlock returns, so read
     /// `result` after the closure. Concurrent accumulates to one target location
-    /// must use the same op or `MPI_NO_OP`, as there. Errors are as there; after
-    /// [`Error::Mpi`], `result` holds an unspecified value (MPI-4.1 §9.4).
+    /// must use the same op or `MPI_NO_OP`, as there. Errors are as there,
+    /// including [`Error::InvalidArgument`] for a `target_rank` outside the
+    /// epoch's access set; after [`Error::Mpi`], `result` holds an unspecified
+    /// value (MPI-4.1 §9.4).
     pub fn fetch_and_op(
         &self,
         origin: &'s T,
@@ -1750,11 +1803,252 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
         op: impl Into<FetchOp>,
     ) -> Result<()> {
         // SAFETY: `origin` and `result` are borrowed for `'s`, which ends only after
-        // the unlock, when MPI has written `result`; see `Win::rma_put`.
+        // the unlock, when MPI has written `result`, and `self.access` is this
+        // epoch's access set; see `Win::rma_put`.
         unsafe {
             self.win
-                .rma_fetch_and_op(origin, result, target_rank, target_disp, op)
+                .rma_fetch_and_op(&self.access, origin, result, target_rank, target_disp, op)
         }
+    }
+
+    /// Request-returning one-sided write, as [`put`](Self::put), with a
+    /// [`Request`] for its local completion.
+    ///
+    /// Wraps `MPI_Rput`. The request completes locally (MPI-4.1 §12.3.5): once
+    /// [`Request::wait`], [`Request::test`] or a batch call reports it complete,
+    /// MPI no longer reads `origin`. The target holds the data only when
+    /// [`flush`](Self::flush) or [`flush_all`](Self::flush_all) returns for
+    /// `target_rank`, or at the latest when the unlock returns. A request that
+    /// was not waited is completed by the epoch before it unlocks, so dropping
+    /// or forgetting it makes no MPI call. `origin` stays borrowed until the
+    /// unlock returns, even after the request completed.
+    ///
+    /// [`Request::cancel`] on the returned request returns
+    /// [`Error::NotSupported`] without calling MPI: `MPI_Cancel` is defined only
+    /// for point-to-point requests, and MPICH and Open MPI reject it for RMA
+    /// requests. The request stays pending; complete it with
+    /// [`wait`](Request::wait) as usual.
+    ///
+    /// The count is `origin.len()`; pass a sub-slice for a shorter transfer.
+    ///
+    /// # Arguments
+    ///
+    /// * `origin`      — Local source buffer (read-only).
+    /// * `target_rank` — Destination rank, in the epoch's access set.
+    /// * `target_disp` — Displacement at the target, measured in units of
+    ///   `disp_unit` (i.e., multiples of `size_of::<T>()`).
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1) or of the epoch's access set
+    ///   (`arg: "target_rank"`), `target_disp` is negative, or the access does
+    ///   not fit in the target rank's window; no MPI call is made.
+    /// * [`Error::Finalized`] — once [`Mpi`](crate::Mpi) is being dropped.
+    /// * [`Error::ResourceExhausted`] with resource
+    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
+    ///   internal request table is full.
+    /// * [`Error::Mpi`] — if `MPI_Rput` fails; on MPI before 4.0 this includes
+    ///   class `Count` for an `origin` of more than `i32::MAX` elements.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::{LockType, Mpi, Win};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let mut win = Win::<i32>::allocate(&world, 4).unwrap();
+    /// let buf = [10i32, 20, 30, 40];
+    ///
+    /// if world.rank() == 0 {
+    ///     // `buf` is declared before the epoch: it stays borrowed until the
+    ///     // unlock, which is when rank 1 holds the data
+    ///     win.lock(LockType::Exclusive, 1, |e| {
+    ///         let req = e.rput(&buf, 1, 0)?;
+    ///         req.wait()?; // MPI no longer reads `buf`
+    ///         Ok(())
+    ///     })
+    ///     .unwrap();
+    /// }
+    /// ```
+    pub fn rput(
+        &'s self,
+        origin: &'s [T],
+        target_rank: i32,
+        target_disp: i64,
+    ) -> Result<Request<'s>> {
+        // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock;
+        // the registry that owns the request completes it before the unlock; and
+        // `self.access` is this epoch's access set; see `Win::rma_put`.
+        let handle = unsafe {
+            self.win
+                .rma_rput(&self.access, origin, target_rank, target_disp)?
+        };
+        Ok(self.registry.request(handle, RequestKind::Rma))
+    }
+
+    /// Request-returning one-sided read, as [`get`](Self::get), with a
+    /// [`Request`] for its local completion.
+    ///
+    /// Wraps `MPI_Rget`. When [`Request::wait`], [`Request::test`] or a batch
+    /// call reports the request complete, `origin` holds the data read from
+    /// `target_rank` (MPI-4.1 §12.3.5). A request that was not waited is
+    /// completed by the epoch before it unlocks. `origin` stays mutably
+    /// borrowed until the unlock returns, even after the request completed, so
+    /// read it after the closure returns.
+    ///
+    /// [`Request::cancel`] on the returned request returns
+    /// [`Error::NotSupported`] without calling MPI, as for
+    /// [`rput`](Self::rput).
+    ///
+    /// The count is `origin.len()`; pass a sub-slice for a shorter transfer.
+    ///
+    /// # Arguments
+    ///
+    /// * `origin`      — Local destination buffer filled by the remote read.
+    /// * `target_rank` — Source rank, in the epoch's access set.
+    /// * `target_disp` — Displacement at the target, measured in units of
+    ///   `disp_unit` (i.e., multiples of `size_of::<T>()`).
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1) or of the epoch's access set
+    ///   (`arg: "target_rank"`), `target_disp` is negative, or the access does
+    ///   not fit in the target rank's window; no MPI call is made.
+    /// * [`Error::Finalized`] — once [`Mpi`](crate::Mpi) is being dropped.
+    /// * [`Error::ResourceExhausted`] with resource
+    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
+    ///   internal request table is full.
+    /// * [`Error::Mpi`] — if `MPI_Rget` fails; on MPI before 4.0 this includes
+    ///   class `Count` for an `origin` of more than `i32::MAX` elements.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::{LockType, Mpi, Win};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let mut win = Win::<i32>::allocate(&world, 4).unwrap();
+    /// let mut buf = [0i32; 4];
+    ///
+    /// if world.rank() == 0 {
+    ///     // `buf` is declared before the epoch and read after it
+    ///     win.lock(LockType::Shared, 1, |e| {
+    ///         let req = e.rget(&mut buf, 1, 0)?;
+    ///         req.wait()?; // `buf` holds the data, and stays borrowed
+    ///         Ok(())
+    ///     })
+    ///     .unwrap();
+    ///     println!("{buf:?}");
+    /// }
+    /// ```
+    pub fn rget(
+        &'s self,
+        origin: &'s mut [T],
+        target_rank: i32,
+        target_disp: i64,
+    ) -> Result<Request<'s>> {
+        // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock;
+        // the registry that owns the request completes it before the unlock; and
+        // `self.access` is this epoch's access set; see `Win::rma_put`.
+        let handle = unsafe {
+            self.win
+                .rma_rget(&self.access, origin, target_rank, target_disp)?
+        };
+        Ok(self.registry.request(handle, RequestKind::Rma))
+    }
+
+    /// Request-returning one-sided reduce-accumulate, as
+    /// [`accumulate`](Self::accumulate), with a [`Request`] for its local
+    /// completion.
+    ///
+    /// Wraps `MPI_Raccumulate`. The request completes locally: once
+    /// [`Request::wait`], [`Request::test`] or a batch call reports it complete,
+    /// MPI no longer reads `origin`. The update is visible at the target only
+    /// when [`flush`](Self::flush) or [`flush_all`](Self::flush_all) returns for
+    /// `target_rank`, or at the latest when the unlock returns. A request that
+    /// was not waited is completed by the epoch before it unlocks. `origin`
+    /// stays borrowed until the unlock returns, even after the request
+    /// completed.
+    ///
+    /// `op` is a [`ReduceOp`](crate::ReduceOp) or [`AccumulateOp::REPLACE`]
+    /// (semantically `MPI_Rput`); a user op is not accepted (MPI-4.1 §12.3.4).
+    /// Under the default `accumulate_ops` window info value, `same_op_no_op`
+    /// (MPI-4.1 §12.2.1), concurrent accumulates to one target location must
+    /// use the same op or `MPI_NO_OP`, so mixing [`AccumulateOp::REPLACE`] and
+    /// [`ReduceOp::Sum`](crate::ReduceOp::Sum) on one location is erroneous,
+    /// and no type prevents it.
+    ///
+    /// [`Request::cancel`] on the returned request returns
+    /// [`Error::NotSupported`] without calling MPI, as for
+    /// [`rput`](Self::rput).
+    ///
+    /// The count is `origin.len()`; pass a sub-slice for a shorter transfer.
+    ///
+    /// # Arguments
+    ///
+    /// * `origin`      — Local source buffer (read-only).
+    /// * `target_rank` — Destination rank, in the epoch's access set.
+    /// * `target_disp` — Displacement at the target, measured in units of
+    ///   `disp_unit` (i.e., multiples of `size_of::<T>()`).
+    /// * `op`          — Reduction operation to apply.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::InvalidArgument`] with `arg: "op"` — if `op` is a predefined
+    ///   op MPI does not define on `T` (a bitwise or logical op on
+    ///   `f32`/`f64`); no MPI call is made.
+    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
+    ///   window's communicator (including -1) or of the epoch's access set
+    ///   (`arg: "target_rank"`), `target_disp` is negative, or the access does
+    ///   not fit in the target rank's window; no MPI call is made.
+    /// * [`Error::Finalized`] — once [`Mpi`](crate::Mpi) is being dropped.
+    /// * [`Error::ResourceExhausted`] with resource
+    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
+    ///   internal request table is full.
+    /// * [`Error::Mpi`] — if `MPI_Raccumulate` fails for any other reason; on
+    ///   MPI before 4.0 this includes class `Count` for an `origin` of more
+    ///   than `i32::MAX` elements.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::{LockType, Mpi, ReduceOp, Win};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let mut win = Win::<i32>::allocate(&world, 4).unwrap();
+    /// let buf = [10i32, 20, 30, 40];
+    ///
+    /// if world.rank() == 0 {
+    ///     // `buf` is declared before the epoch: it stays borrowed until the
+    ///     // unlock, which is when the update is complete at rank 1
+    ///     win.lock(LockType::Exclusive, 1, |e| {
+    ///         let req = e.raccumulate(&buf, 1, 0, ReduceOp::Sum)?;
+    ///         req.wait()?; // MPI no longer reads `buf`
+    ///         Ok(())
+    ///     })
+    ///     .unwrap();
+    /// }
+    /// ```
+    pub fn raccumulate(
+        &'s self,
+        origin: &'s [T],
+        target_rank: i32,
+        target_disp: i64,
+        op: impl Into<AccumulateOp>,
+    ) -> Result<Request<'s>> {
+        // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock;
+        // the registry that owns the request completes it before the unlock; and
+        // `self.access` is this epoch's access set; see `Win::rma_put`.
+        let handle = unsafe {
+            self.win
+                .rma_raccumulate(&self.access, origin, target_rank, target_disp, op)?
+        };
+        Ok(self.registry.request(handle, RequestKind::Rma))
     }
 
     /// Complete the epoch's pending RMA operations to `rank`, at the origin
@@ -1767,8 +2061,9 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// # Arguments
     ///
     /// * `rank` - The target rank to flush (0-based, within the window's
-    ///   communicator). In a [`Win::lock`] epoch only the locked rank has
-    ///   operations to complete.
+    ///   communicator). It need not be in the epoch's access set: in a
+    ///   [`Win::lock`] epoch only the locked rank has operations to complete,
+    ///   and a flush of another rank completes nothing.
     ///
     /// # Errors
     ///
@@ -1814,8 +2109,10 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// # Arguments
     ///
     /// * `rank` - The target rank whose pending operations are locally
-    ///   completed (0-based, within the window's communicator). In a
-    ///   [`Win::lock`] epoch only the locked rank has operations to complete.
+    ///   completed (0-based, within the window's communicator). It need not be
+    ///   in the epoch's access set: in a [`Win::lock`] epoch only the locked
+    ///   rank has operations to complete, and a flush of another rank completes
+    ///   nothing.
     ///
     /// # Errors
     ///
@@ -1886,8 +2183,9 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// `origin`, `compare` and `result` stay borrowed until the unlock returns,
     /// so read `result` after the closure. It exists only for the types of
     /// [`AtomicMpiDatatype`](crate::AtomicMpiDatatype), as there. Errors are as
-    /// there; after [`Error::Mpi`], `result` holds an unspecified value
-    /// (MPI-4.1 §9.4).
+    /// there, including [`Error::InvalidArgument`] for a `target_rank` outside
+    /// the epoch's access set; after [`Error::Mpi`], `result` holds an
+    /// unspecified value (MPI-4.1 §9.4).
     pub fn compare_and_swap(
         &self,
         origin: &'s T,
@@ -1897,10 +2195,17 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> PassiveEpoch<'s, '_, T> {
         target_disp: i64,
     ) -> Result<()> {
         // SAFETY: `origin`, `compare` and `result` are borrowed for `'s`, which ends
-        // only after the unlock, when MPI has written `result`; see `Win::rma_put`.
+        // only after the unlock, when MPI has written `result`, and `self.access`
+        // is this epoch's access set; see `Win::rma_put`.
         unsafe {
-            self.win
-                .rma_compare_and_swap(origin, compare, result, target_rank, target_disp)
+            self.win.rma_compare_and_swap(
+                &self.access,
+                origin,
+                compare,
+                result,
+                target_rank,
+                target_disp,
+            )
         }
     }
 }
@@ -1914,6 +2219,17 @@ fn epoch_abort(reason: &str) -> ! {
     let msg = format!("ferrompi: {reason}; aborting\n");
     let _ = std::io::stderr().write_all(msg.as_bytes());
     std::process::abort();
+}
+
+/// The outcome of an epoch whose closing call returned `ret`: `result`'s error
+/// first, then the closing call's. A closing call refused before MPI ran it
+/// aborts the process.
+fn closing_result<R>(ret: c_int, close_op: &'static str, result: Result<R>) -> Result<R> {
+    if ret == FERROMPI_ERR_FINALIZED || ret == FERROMPI_ERR_THREAD_LEVEL {
+        epoch_abort("an RMA epoch's closing call was refused");
+    }
+    let value = result?;
+    Error::check_with_op(ret, close_op).map(|()| value)
 }
 
 impl<T: MpiDatatype> Win<T> {
@@ -2288,22 +2604,26 @@ impl<T: MpiDatatype> Win<T> {
             // SAFETY: as for the opening fence; the closing fence takes the
             // same arguments.
             |win_handle| unsafe { ffi::ferrompi_win_fence_close(close.bits(), win_handle) },
+            Access::All,
             f,
         )
     }
 
-    /// Runs `f` in the epoch the caller just opened, then makes the closing
-    /// call `close`, whatever `f` returned. A panic in `f` aborts before the
-    /// closing call, and so does a closing call refused before MPI ran it.
-    /// Otherwise `f`'s error is returned first, then the closing call's.
+    /// Runs `f` in the epoch the caller just opened, with `access` as its access
+    /// set, then makes the closing call `close`, whatever `f` returned. A panic
+    /// in `f` aborts before the closing call, and so does a closing call refused
+    /// before MPI ran it. Otherwise `f`'s error is returned first, then the
+    /// closing call's.
     fn run_epoch<'env, R>(
         &mut self,
         close_op: &'static str,
         close: impl FnOnce(i32) -> c_int,
+        access: Access,
         f: impl for<'s> FnOnce(&'s ActiveEpoch<'s, 'env, T>) -> Result<R>,
     ) -> Result<R> {
         let epoch = ActiveEpoch {
             win: &*self,
+            access,
             scope: PhantomData,
             env: PhantomData,
         };
@@ -2311,12 +2631,7 @@ impl<T: MpiDatatype> Win<T> {
             Ok(result) => result,
             Err(_) => epoch_abort("a fence or PSCW epoch was still open during unwind"),
         };
-        let ret = close(self.win_handle);
-        if ret == FERROMPI_ERR_FINALIZED || ret == FERROMPI_ERR_THREAD_LEVEL {
-            epoch_abort("an RMA epoch's closing call was refused");
-        }
-        let value = result?;
-        Error::check_with_op(ret, close_op).map(|()| value)
+        closing_result(close(self.win_handle), close_op, result)
     }
 
     /// Start an exposure epoch (active-target PSCW synchronization).
@@ -2366,11 +2681,13 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// Wraps `MPI_Win_start` and `MPI_Win_complete`. This rank will issue RMA
     /// operations against the ranks in `group`, which must have called (or will
-    /// call) [`Win::post`]. The call opens the epoch, runs `f` with the epoch's
-    /// [`ActiveEpoch`], and closes it with `MPI_Win_complete`, whether `f`
-    /// returned `Ok` or `Err`, so the target ranks' [`Win::wait_exposure`]
-    /// never waits on an epoch left open. When it returns, the RMA operations
-    /// `f` issued are complete at the origin.
+    /// call) [`Win::post`]. The call translates `group` into ranks of the
+    /// window's communicator, once, as the epoch's access set: a transfer to any
+    /// other rank returns an error (see [`ActiveEpoch`]). It then opens the
+    /// epoch, runs `f` with the epoch's [`ActiveEpoch`], and closes it with
+    /// `MPI_Win_complete`, whether `f` returned `Ok` or `Err`, so the target
+    /// ranks' [`Win::wait_exposure`] never waits on an epoch left open. When it
+    /// returns, the RMA operations `f` issued are complete at the origin.
     ///
     /// # Arguments
     ///
@@ -2384,6 +2701,16 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped: the
     ///   epoch is not opened and `f` does not run.
+    /// - `Error::InvalidArgument` with `arg: "group"` if a member of `group` is
+    ///   not a rank of the window's communicator; no MPI call opens the epoch
+    ///   and `f` does not run.
+    /// - `Error::ResourceExhausted` with resource
+    ///   [`ResourceKind::Group`](crate::ResourceKind::Group) if the group table
+    ///   has no slot for the window's group, which the translation needs
+    ///   briefly (`f` does not run).
+    /// - `Error::Mpi` with `operation: Some("win_get_group")`,
+    ///   `Some("group_size")` or `Some("group_translate_ranks")` if translating
+    ///   `group` fails (`f` does not run).
     /// - `Error::Mpi` with `operation: Some("win_start")` if opening the epoch
     ///   fails (`f` does not run).
     /// - `Error::Mpi` with `operation: Some("win_complete")` if closing it
@@ -2426,6 +2753,7 @@ impl<T: MpiDatatype> Win<T> {
         assert: WinPscwAssert,
         f: impl for<'s> FnOnce(&'s ActiveEpoch<'s, 'env, T>) -> Result<R>,
     ) -> Result<R> {
+        let access = self.group_access(group)?;
         // SAFETY: `win_handle` is a valid MPI window handle. `group.handle`
         // returns a valid group handle from the C-layer group table.
         // `assert.bits()` is either 0 or a combination of MPI_MODE_* constants.
@@ -2436,6 +2764,7 @@ impl<T: MpiDatatype> Win<T> {
             // SAFETY: `win_handle` is a valid MPI window handle, and the
             // `MPI_Win_start` above opened the access epoch this call closes.
             |win_handle| unsafe { ffi::ferrompi_win_complete(win_handle) },
+            access,
             f,
         )
     }
@@ -2513,9 +2842,11 @@ impl<T: MpiDatatype> Win<T> {
     /// window, which gives one-sided access to that rank's memory without its
     /// active participation, runs `f` with the epoch's [`PassiveEpoch`], and
     /// unlocks the window, whether `f` returned `Ok`, returned `Err` or
-    /// panicked. When it returns, the RMA operations `f` issued are complete at
-    /// this rank and at `rank` (MPI-4.1 §12.5.3), so the origin buffers
-    /// they borrowed stay borrowed until the unlock has returned.
+    /// panicked. Before it unlocks, it completes every request `f` left pending.
+    /// When it returns, the RMA operations `f` issued are complete at this rank
+    /// and at `rank` (MPI-4.1 §12.5.3), so the origin buffers they borrowed stay
+    /// borrowed until the unlock has returned. `rank` is the epoch's access set:
+    /// a transfer to another rank returns an error (see [`PassiveEpoch`]).
     ///
     /// # Arguments
     ///
@@ -2532,29 +2863,33 @@ impl<T: MpiDatatype> Win<T> {
     ///   epoch is not opened and `f` does not run.
     /// - `Error::Mpi` with `operation: Some("win_lock")` if the lock fails,
     ///   for example when MPI rejects `rank` (`f` does not run).
+    /// - `Error::Mpi` with `operation: Some("lock")` if a request `f` left
+    ///   pending fails when the epoch completes it; the unlock still runs.
     /// - `Error::Mpi` with `operation: Some("win_unlock")` if the unlock
     ///   fails.
     ///
-    /// When `f` returns an error, that error is returned in place of the
-    /// unlock's. MPI ran the unlock, and the crate trusts that it completed or
-    /// failed the epoch's operations, as MPICH and Open MPI do; MPI-4.1 §9.4
-    /// (p.460) does not promise it.
+    /// When `f` returns an error, that error is returned in place of a
+    /// request's and the unlock's. MPI ran the unlock, and the crate trusts that
+    /// it completed or failed the epoch's operations, as MPICH and Open MPI do;
+    /// MPI-4.1 §9.4 (p.460) does not promise it.
     ///
     /// # Panics
     ///
     /// A passive-target epoch is not collective: `MPI_Win_unlock` completes this
     /// rank's operations and needs no matching call at any other rank, though it
     /// can wait until the target makes MPI progress (MPI-4.1 §12.7.3). A panic in
-    /// `f` therefore unlocks the window and then continues unwinding, as
-    /// [`scope`](crate::scope) does; an open fence or PSCW epoch aborts instead.
-    /// An error from that unlock is dropped.
+    /// `f` therefore completes the pending requests, unlocks the window and then
+    /// continues unwinding, as [`scope`](crate::scope) does; an open fence or
+    /// PSCW epoch aborts instead. An error from completing the requests or from
+    /// that unlock is dropped.
     ///
     /// # Aborts
     ///
     /// An `MPI_Win_unlock` refused before MPI ran it aborts the process, since
-    /// the epoch's origin buffers are still in MPI's hands; in a debug build at
+    /// the epoch's origin buffers are still in MPI's hands; so does a wait for
+    /// the pending requests that completes none of them. In a debug build at
     /// [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized), an overlap
-    /// with another thread's MPI call is the one way to reach that.
+    /// with another thread's MPI call is the one way to reach either.
     ///
     /// # Example
     ///
@@ -2590,10 +2925,12 @@ impl<T: MpiDatatype> Win<T> {
         let ret = unsafe { ffi::ferrompi_win_lock(lt, rank, 0, self.win_handle) };
         Error::check_with_op(ret, "win_lock")?;
         self.run_passive_epoch(
+            "lock",
             "win_unlock",
             // SAFETY: `win_handle` is a valid MPI window handle, and the
             // `MPI_Win_lock` above opened the epoch on `rank` this call ends.
             |win_handle| unsafe { ffi::ferrompi_win_unlock(rank, win_handle) },
+            Access::Rank(rank),
             f,
         )
     }
@@ -2603,11 +2940,13 @@ impl<T: MpiDatatype> Win<T> {
     /// Wraps `MPI_Win_lock_all` and `MPI_Win_unlock_all`. The call acquires
     /// shared locks on all ranks in the window's communicator, runs `f` with
     /// the epoch's [`PassiveEpoch`], and releases them, whether `f` returned
-    /// `Ok`, returned `Err` or panicked. It gives concurrent access to every
-    /// rank's window memory in one epoch, without a `lock` and an unlock per
-    /// rank. When it returns, the RMA operations `f` issued are complete at
-    /// this rank and at their targets (MPI-4.1 §12.5.3), so the origin
-    /// buffers they borrowed stay borrowed until the unlock has returned.
+    /// `Ok`, returned `Err` or panicked. Before it unlocks, it completes every
+    /// request `f` left pending. It gives concurrent access to every rank's
+    /// window memory in one epoch, without a `lock` and an unlock per rank, and
+    /// every rank is in the epoch's access set. When it returns, the RMA
+    /// operations `f` issued are complete at this rank and at their targets
+    /// (MPI-4.1 §12.5.3), so the origin buffers they borrowed stay borrowed
+    /// until the unlock has returned.
     ///
     /// # Arguments
     ///
@@ -2619,11 +2958,13 @@ impl<T: MpiDatatype> Win<T> {
     ///   epoch is not opened and `f` does not run.
     /// - `Error::Mpi` with `operation: Some("win_lock_all")` if the lock
     ///   fails (`f` does not run).
+    /// - `Error::Mpi` with `operation: Some("lock_all")` if a request `f` left
+    ///   pending fails when the epoch completes it; the unlock still runs.
     /// - `Error::Mpi` with `operation: Some("win_unlock_all")` if the unlock
     ///   fails.
     ///
-    /// When `f` returns an error, that error is returned in place of the
-    /// unlock's, as for [`Win::lock`].
+    /// When `f` returns an error, that error is returned in place of a
+    /// request's and the unlock's, as for [`Win::lock`].
     ///
     /// # Panics
     ///
@@ -2632,8 +2973,9 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// # Aborts
     ///
-    /// An `MPI_Win_unlock_all` refused before MPI ran it aborts the process,
-    /// as for [`Win::lock`].
+    /// An `MPI_Win_unlock_all` refused before MPI ran it, and a wait for the
+    /// pending requests that completes none of them, abort the process, as for
+    /// [`Win::lock`].
     ///
     /// # Example
     ///
@@ -2661,193 +3003,163 @@ impl<T: MpiDatatype> Win<T> {
         let ret = unsafe { ffi::ferrompi_win_lock_all(0, self.win_handle) };
         Error::check_with_op(ret, "win_lock_all")?;
         self.run_passive_epoch(
+            "lock_all",
             "win_unlock_all",
             // SAFETY: `win_handle` is a valid MPI window handle, and the
             // `MPI_Win_lock_all` above opened the epoch this call ends.
             |win_handle| unsafe { ffi::ferrompi_win_unlock_all(win_handle) },
+            Access::All,
             f,
         )
     }
 
-    /// Runs `f` in the epoch the caller just opened, then makes the closing
-    /// call `close`, whatever `f` did. A closing call refused before MPI ran
-    /// it aborts. Otherwise a panic in `f` resumes after the closing call, and
-    /// `f`'s error is returned before the closing call's.
+    /// Runs `f` in the epoch the caller just opened, with `access` as its access
+    /// set, then completes the epoch's pending requests (`wait_op` labels their
+    /// errors) and makes the closing call `close`, whatever `f` did. A closing
+    /// call refused before MPI ran it aborts. Otherwise a panic in `f` resumes
+    /// after the closing call, and `f`'s error is returned before the requests'
+    /// and the closing call's.
     fn run_passive_epoch<'env, R>(
         &mut self,
+        wait_op: &'static str,
         close_op: &'static str,
         close: impl FnOnce(i32) -> c_int,
+        access: Access,
         f: impl for<'s> FnOnce(&'s PassiveEpoch<'s, 'env, T>) -> Result<R>,
     ) -> Result<R> {
         let epoch = PassiveEpoch {
             win: &*self,
+            access,
+            registry: Registry::new(),
             scope: PhantomData,
             env: PhantomData,
         };
         let outcome = catch_unwind(AssertUnwindSafe(|| f(&epoch)));
+        let completed = epoch.registry.complete_all(wait_op);
         let ret = close(self.win_handle);
-        if ret == FERROMPI_ERR_FINALIZED || ret == FERROMPI_ERR_THREAD_LEVEL {
-            epoch_abort("an RMA epoch's closing call was refused");
-        }
         match outcome {
-            Err(payload) => resume_unwind(payload),
-            Ok(result) => {
-                let value = result?;
-                Error::check_with_op(ret, close_op).map(|()| value)
+            Err(payload) => {
+                let _ = closing_result(ret, close_op, Ok(()));
+                resume_unwind(payload)
             }
+            Ok(result) => closing_result(
+                ret,
+                close_op,
+                result.and_then(|value| completed.map(|()| value)),
+            ),
         }
     }
-}
 
-impl<T: MpiDatatype> Win<T> {
+    /// The access set of a `start` epoch to `group`: its members' ranks in this
+    /// window's communicator. A member outside that communicator makes the
+    /// group erroneous for `MPI_Win_start` (MPI-4.1 §12.5.2), so it is refused.
+    fn group_access(&self, group: &Group) -> Result<Access> {
+        let mut win_group = -1;
+        // SAFETY: `win_handle` is a valid MPI window handle, and `win_group` is
+        // a valid out-parameter.
+        let ret = unsafe { ffi::ferrompi_win_get_group(self.win_handle, &mut win_group) };
+        Error::check_with_op(ret, "win_get_group")?;
+        // The window's group owns the slot the call allocated, and frees it.
+        let win_group = Group { handle: win_group };
+        let members: Vec<i32> = (0..group.size()?).collect();
+        let mut access = vec![false; self.words.len()];
+        for rank in group.translate_ranks(&members, &win_group)? {
+            let Some(rank) = rank else {
+                return Err(Error::InvalidArgument {
+                    arg: "group",
+                    reason: "member outside the window's communicator",
+                });
+            };
+            access[rank as usize] = true;
+        }
+        Ok(Access::Ranks(access.into()))
+    }
+
     /// Forwards to [`check_rma_target`] with this window's exchanged words
     /// and `size_of::<T>()`.
     fn check_target(
         &self,
+        access: &Access,
         target_rank: i32,
         target_disp: i64,
-        target_count: i64,
+        count: usize,
         buffer_lens: &[(&'static str, usize)],
     ) -> Result<()> {
         check_rma_target(
             &self.words,
+            access,
             std::mem::size_of::<T>(),
             target_rank,
             target_disp,
-            target_count,
+            count,
             buffer_lens,
         )
     }
 
-    /// One-sided write: validates the target and calls `MPI_Put` with a count of
-    /// `origin.len()`.
+    /// One-sided write: validates the target against `access` and the window,
+    /// and calls `MPI_Put` with a count of `origin.len()`.
     ///
     /// The transfer helpers (`rma_put`, `rma_get`, `rma_accumulate`,
-    /// `rma_get_accumulate`, `rma_fetch_and_op` and `rma_compare_and_swap`) hand
-    /// MPI a pointer into a caller buffer that MPI keeps using after they
-    /// return, until the epoch's closing call (the closing fence,
-    /// `MPI_Win_complete` or the unlock) returns. Only the epoch handles call
-    /// them, and each handle method takes its buffers as `&'s [T]`,
-    /// `&'s mut [T]`, `&'s T` or `&'s mut T`, where `'s` is the handle's
-    /// invariant lifetime. `'s` ends only after the closing call, so the buffer
-    /// cannot be dropped, moved, written, or for a buffer MPI writes read,
-    /// before MPI is done with it, and a handle exists only while its epoch is
-    /// open.
+    /// `rma_get_accumulate`, `rma_fetch_and_op`, `rma_compare_and_swap`,
+    /// `rma_rput`, `rma_rget` and `rma_raccumulate`) hand MPI a pointer into a
+    /// caller buffer that MPI keeps using after they return, until the epoch's
+    /// closing call (the closing fence, `MPI_Win_complete` or the unlock)
+    /// returns; for the request-returning ones, until the request completes,
+    /// which the passive epoch's registry guarantees before the unlock. Only the
+    /// epoch handles call them, each with its own access set, and each handle
+    /// method takes its buffers as `&'s [T]`, `&'s mut [T]`, `&'s T` or
+    /// `&'s mut T`, where `'s` is the handle's invariant lifetime. `'s` ends
+    /// only after the closing call, so the buffer cannot be dropped, moved,
+    /// written, or for a buffer MPI writes read, before MPI is done with it, and
+    /// a handle exists only while its epoch is open.
     ///
     /// # Safety
     ///
-    /// An access epoch to `target_rank` is open on this window, and `origin`
-    /// must stay valid and unmodified until that epoch's closing call returns.
-    unsafe fn rma_put(&self, origin: &[T], target_rank: i32, target_disp: i64) -> Result<()> {
+    /// `access` is the access set of an epoch that is open on this window, and
+    /// `origin` must stay valid and unmodified until that epoch's closing call
+    /// returns. MPI requires an access epoch to `target_rank`; `check_target`
+    /// refuses a `target_rank` outside `access`, so one exists for every call
+    /// that reaches MPI.
+    unsafe fn rma_put(
+        &self,
+        access: &Access,
+        origin: &[T],
+        target_rank: i32,
+        target_disp: i64,
+    ) -> Result<()> {
         let (p, n, dt) = buf(origin);
-        self.check_target(target_rank, target_disp, n, &[])?;
+        self.check_target(access, target_rank, target_disp, n as usize, &[])?;
         // SAFETY: the caller upholds this function's contract (`'s`, see above).
-        // `target_rank` and `target_disp` were checked above against the target
-        // rank's exposed window for `n` elements, so MPI accesses only memory the
-        // target exposed.
+        // `target_rank` was checked above against the epoch's access set, so an
+        // access epoch to it is open, and `target_disp` against the target
+        // rank's exposed window for `n` elements, so MPI accesses only memory
+        // the target exposed.
         let ret = unsafe { ffi::ferrompi_put(p, n, dt, target_rank, target_disp, self.win_handle) };
         Error::check_with_op(ret, "put")
     }
 
-    /// Request-returning one-sided write: post a put and return a [`Request`]
-    /// that completes when the **local** origin buffer is safe to reuse.
+    /// Request-returning write: as [`rma_put`](Self::rma_put) with `MPI_Rput`.
+    /// Returns the request's handle.
     ///
-    /// Wraps `MPI_Rput`. This is the request-returning variant of [`PassiveEpoch::put`].
-    /// The returned `Request` signals **local** buffer completion — once
-    /// `request.wait()` returns, the `origin` slice can be safely overwritten
-    /// or dropped. **Remote completion is not guaranteed by the request**: the
-    /// remote rank does not observe the written data until the surrounding epoch
-    /// is flushed or closed ([`PassiveEpoch::flush`], or the unlock that ends the
-    /// epoch).
+    /// # Safety
     ///
-    /// # Local vs. Remote completion
-    ///
-    /// - `request.wait()` → local buffer is free to reuse.
-    /// - Flush or unlock → remote rank observes the write.
-    ///
-    /// Both are required for the full operation to be visible end-to-end.
-    ///
-    /// # Arguments
-    ///
-    /// * `origin`       — Local source buffer (read-only during the operation).
-    ///   The buffer must remain valid and unmodified until the returned
-    ///   `Request` is waited on.
-    /// * `target_rank`  — Destination rank (0-based, within this window's
-    ///   communicator).
-    /// * `target_disp`  — Displacement at the target, measured in units of
-    ///   `disp_unit` (i.e., multiples of `size_of::<T>()`).
-    /// * `target_count` — Number of `T` elements to write at the target.
-    ///
-    /// # Returns
-    ///
-    /// A [`Request`] handle that completes when the local origin buffer is safe
-    /// to reuse. Call [`Request::wait`] to block until local completion.
-    ///
-    /// # Errors
-    ///
-    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_count` or
-    ///   `target_disp` is negative, or the access does not fit in the target
-    ///   rank's window.
-    /// * [`Error::BufferSize`] — if `origin`'s length differs from
-    ///   `target_count`.
-    /// * [`Error::Mpi`] — if `MPI_Rput` fails.
-    /// * [`Error::ResourceExhausted`] with resource
-    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
-    ///   internal request table is full.
-    ///
-    /// # Epoch Requirement
-    ///
-    /// `rput` must be called inside a passive-target epoch, that is inside the
-    /// closure of [`Win::lock`] or [`Win::lock_all`]. MPI does not allow
-    /// request-based RMA in fence or PSCW epochs; calling it anywhere else is
-    /// erroneous.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{LockType, Mpi, Win};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let mut win = Win::<i32>::allocate(&world, 4).unwrap();
-    ///
-    /// if world.rank() == 0 {
-    ///     let buf = [10i32, 20, 30, 40];
-    ///     // Open a passive-target epoch on rank 1
-    ///     win.lock(LockType::Exclusive, 1, |e| {
-    ///         // Post the put; local buf is safe to reuse once req.wait() returns
-    ///         let req = e.rput(&buf, 1, 0, buf.len() as i64)?;
-    ///         req.wait()?; // local buffer safe to reuse after this
-    ///         Ok(())
-    ///     })
-    ///     .unwrap();
-    ///     // The remote write completed when the closure ended (MPI_Win_unlock)
-    /// }
-    /// // Rank 1 can read its local memory after a barrier and a lock on its
-    /// // own window
-    /// ```
-    pub fn rput(
+    /// As [`rma_put`](Self::rma_put), and the caller must register the returned
+    /// handle with the registry that completes it before the epoch's unlock:
+    /// until then MPI may still read `origin`.
+    unsafe fn rma_rput(
         &self,
+        access: &Access,
         origin: &[T],
         target_rank: i32,
         target_disp: i64,
-        target_count: i64,
-    ) -> Result<Request<'_>> {
-        self.check_target(
-            target_rank,
-            target_disp,
-            target_count,
-            &[("origin", origin.len())],
-        )?;
+    ) -> Result<i64> {
         let (p, n, dt) = buf(origin);
+        self.check_target(access, target_rank, target_disp, n as usize, &[])?;
         let mut request_handle: i64 = 0;
-        // SAFETY: the call must be inside an active access epoch, which the caller must
-        // ensure. `origin` is read by MPI until the returned `Request` completes; the
-        // signature does not tie the buffer to the `Request`, so keeping it alive and
-        // unmodified until then is the caller's documented obligation. `target_rank`,
-        // `target_disp`, and `target_count` were checked above against the target rank's
-        // exposed window, so MPI accesses only memory the target exposed.
+        // SAFETY: the caller upholds this function's contract (see `rma_put`).
+        // `target_rank` and `target_disp` were checked above against the epoch's
+        // access set and the target rank's exposed window for `n` elements, so
+        // MPI accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_rput(
                 p,
@@ -2860,125 +3172,54 @@ impl<T: MpiDatatype> Win<T> {
             )
         };
         Error::check_with_op(ret, "rput")?;
-        Ok(Request::new(request_handle, RequestKind::Rma))
+        Ok(request_handle)
     }
 
-    /// One-sided read: validates the target and calls `MPI_Get` with a count of
-    /// `origin.len()`.
+    /// One-sided read: validates the target against `access` and the window,
+    /// and calls `MPI_Get` with a count of `origin.len()`.
     ///
     /// # Safety
     ///
     /// As [`rma_put`](Self::rma_put), and `origin` must also stay unread until
     /// the epoch's closing call returns.
-    unsafe fn rma_get(&self, origin: &mut [T], target_rank: i32, target_disp: i64) -> Result<()> {
+    unsafe fn rma_get(
+        &self,
+        access: &Access,
+        origin: &mut [T],
+        target_rank: i32,
+        target_disp: i64,
+    ) -> Result<()> {
         let (p, n, dt) = buf_mut(origin);
-        self.check_target(target_rank, target_disp, n, &[])?;
+        self.check_target(access, target_rank, target_disp, n as usize, &[])?;
         // SAFETY: the caller upholds this function's contract (see `rma_put`).
-        // `target_rank` and `target_disp` were checked above against the target
-        // rank's exposed window for `n` elements, so MPI accesses only memory the
-        // target exposed.
+        // `target_rank` and `target_disp` were checked above against the epoch's
+        // access set and the target rank's exposed window for `n` elements, so
+        // MPI accesses only memory the target exposed.
         let ret = unsafe { ffi::ferrompi_get(p, n, dt, target_rank, target_disp, self.win_handle) };
         Error::check_with_op(ret, "get")
     }
 
-    /// Request-returning one-sided read: copy data from a remote rank's window
-    /// memory into `origin` and return a [`Request`] that completes when the
-    /// local buffer is ready to be read.
+    /// Request-returning read: as [`rma_get`](Self::rma_get) with `MPI_Rget`.
+    /// Returns the request's handle.
     ///
-    /// Wraps `MPI_Rget`. Unlike [`PassiveEpoch::get`], the caller does **not** need to
-    /// close the epoch to observe the data locally — when `request.wait()`
-    /// returns, `origin` already contains the fetched values. Remote-side
-    /// completion is implicit because this is a read operation.
+    /// # Safety
     ///
-    /// # Arguments
-    ///
-    /// * `origin`       — Local destination buffer filled by the remote read.
-    ///   The buffer must remain valid until the returned `Request` is waited on.
-    /// * `target_rank`  — Source rank (0-based, within this window's
-    ///   communicator).
-    /// * `target_disp`  — Displacement at the target, measured in units of
-    ///   `disp_unit` (i.e., multiples of `size_of::<T>()`).
-    /// * `target_count` — Number of `T` elements to read from the target.
-    ///
-    /// # Returns
-    ///
-    /// A [`Request`] handle. When [`Request::wait`] returns, `origin` contains
-    /// the data fetched from the remote rank. This is the key difference from
-    /// [`Win::rput`]: local completion here means the *data is already in
-    /// `origin`*, not merely that the local buffer is safe to reuse.
-    ///
-    /// # Errors
-    ///
-    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_count` or
-    ///   `target_disp` is negative, or the access does not fit in the target
-    ///   rank's window.
-    /// * [`Error::BufferSize`] — if `origin`'s length differs from
-    ///   `target_count`.
-    /// * [`Error::Mpi`] — if `MPI_Rget` fails.
-    /// * [`Error::ResourceExhausted`] with resource
-    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
-    ///   internal request table is full.
-    ///
-    /// # Epoch Requirement
-    ///
-    /// `rget` must be called inside a passive-target epoch, that is inside the
-    /// closure of [`Win::lock`] or [`Win::lock_all`]. MPI does not allow
-    /// request-based RMA in fence or PSCW epochs; calling it anywhere else is
-    /// erroneous.
-    ///
-    /// # Cancellation
-    ///
-    /// Calling [`Request::cancel`] on the returned request returns
-    /// [`Error::NotSupported`] without calling into MPI: `MPI_Cancel` is
-    /// defined by the standard only for point-to-point requests, and both
-    /// MPICH and Open MPI reject it for RMA requests. The request is left
-    /// pending; follow up with [`Request::wait`] as usual.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{LockType, Mpi, Win};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let mut win = Win::<i32>::allocate(&world, 4).unwrap();
-    ///
-    /// if world.rank() == 0 {
-    ///     let mut buf = [0i32; 4];
-    ///     // Open a shared passive-target epoch on rank 1
-    ///     win.lock(LockType::Shared, 1, |e| {
-    ///         // Post the get; buf contains the data once req.wait() returns
-    ///         let count = buf.len() as i64;
-    ///         let req = e.rget(&mut buf, 1, 0, count)?;
-    ///         req.wait()?; // buf is valid and ready to read after this
-    ///         Ok(())
-    ///     })
-    ///     .unwrap();
-    ///     assert_eq!(buf, [0i32; 4]);
-    /// }
-    /// ```
-    pub fn rget(
+    /// As [`rma_rput`](Self::rma_rput), and `origin` must also stay unread until
+    /// the epoch's unlock returns.
+    unsafe fn rma_rget(
         &self,
+        access: &Access,
         origin: &mut [T],
         target_rank: i32,
         target_disp: i64,
-        target_count: i64,
-    ) -> Result<Request<'_>> {
-        self.check_target(
-            target_rank,
-            target_disp,
-            target_count,
-            &[("origin", origin.len())],
-        )?;
+    ) -> Result<i64> {
         let (p, n, dt) = buf_mut(origin);
+        self.check_target(access, target_rank, target_disp, n as usize, &[])?;
         let mut request_handle: i64 = 0;
-        // SAFETY: the call must be inside an active access epoch, which the caller must
-        // ensure. `origin` is written by MPI until the returned `Request` completes; the
-        // signature does not tie the buffer to the `Request`, so keeping it alive and
-        // untouched until then is the caller's documented obligation. `target_rank`,
-        // `target_disp`, and `target_count` were checked above against the target rank's
-        // exposed window, so MPI accesses only memory the target exposed.
+        // SAFETY: the caller upholds this function's contract (see `rma_put`).
+        // `target_rank` and `target_disp` were checked above against the epoch's
+        // access set and the target rank's exposed window for `n` elements, so
+        // MPI accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_rget(
                 p,
@@ -2991,17 +3232,19 @@ impl<T: MpiDatatype> Win<T> {
             )
         };
         Error::check_with_op(ret, "rget")?;
-        Ok(Request::new(request_handle, RequestKind::Rma))
+        Ok(request_handle)
     }
 
-    /// One-sided reduce-accumulate: validates the op and the target and calls
-    /// `MPI_Accumulate` with a count of `origin.len()`.
+    /// One-sided reduce-accumulate: validates the op, then the target against
+    /// `access` and the window, and calls `MPI_Accumulate` with a count of
+    /// `origin.len()`.
     ///
     /// # Safety
     ///
     /// As [`rma_put`](Self::rma_put).
     unsafe fn rma_accumulate(
         &self,
+        access: &Access,
         origin: &[T],
         target_rank: i32,
         target_disp: i64,
@@ -3009,135 +3252,42 @@ impl<T: MpiDatatype> Win<T> {
     ) -> Result<()> {
         let op = op.into().code(T::TAG)?;
         let (p, n, dt) = buf(origin);
-        self.check_target(target_rank, target_disp, n, &[])?;
+        self.check_target(access, target_rank, target_disp, n as usize, &[])?;
         // SAFETY: the caller upholds this function's contract (see `rma_put`).
-        // `target_rank` and `target_disp` were checked above against the target
-        // rank's exposed window for `n` elements, so MPI accesses only memory the
-        // target exposed. `op` is a predefined op code that the shim maps to an
-        // `MPI_Op`.
+        // `target_rank` and `target_disp` were checked above against the epoch's
+        // access set and the target rank's exposed window for `n` elements, so
+        // MPI accesses only memory the target exposed. `op` is a predefined op
+        // code that the shim maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_accumulate(p, n, dt, target_rank, target_disp, op, self.win_handle)
         };
         Error::check_with_op(ret, "accumulate")
     }
 
-    /// Request-returning one-sided reduce: combine data from a local origin
-    /// buffer with a remote rank's window memory using a reduction operation,
-    /// returning a [`Request`] that completes when the local `origin` buffer is
-    /// safe to reuse.
+    /// Request-returning reduce-accumulate: as
+    /// [`rma_accumulate`](Self::rma_accumulate) with `MPI_Raccumulate`. Returns
+    /// the request's handle.
     ///
-    /// Wraps `MPI_Raccumulate`. Unlike [`PassiveEpoch::accumulate`], local completion
-    /// (i.e., the `origin` buffer being safe to reuse) is signaled by the
-    /// returned [`Request`] rather than the epoch boundary. **Remote-side
-    /// completion** (visibility at the target) still requires a flush or the
-    /// unlock that closes the passive-target epoch. This is the same
-    /// local-completion contract as [`Win::rput`].
+    /// # Safety
     ///
-    /// `op` is a [`ReduceOp`](crate::ReduceOp) or [`AccumulateOp::REPLACE`]
-    /// (semantically `MPI_Rput`); a user op is not accepted (MPI-4.1 §12.3.4).
-    ///
-    /// # Arguments
-    ///
-    /// * `origin`       — Local source buffer (read-only). The buffer must
-    ///   remain valid until the returned [`Request`] is waited on.
-    /// * `target_rank`  — Destination rank (0-based, within this window's
-    ///   communicator).
-    /// * `target_disp`  — Displacement at the target, measured in units of
-    ///   `disp_unit` (i.e., multiples of `size_of::<T>()`).
-    /// * `target_count` — Number of `T` elements to accumulate at the target.
-    /// * `op`           — Reduction operation to apply.
-    ///
-    /// # Returns
-    ///
-    /// A [`Request`] handle. When [`Request::wait`] returns, the local
-    /// `origin` buffer is safe to reuse or drop. The accumulation may not
-    /// yet be visible at the target — close the epoch to guarantee remote
-    /// visibility.
-    ///
-    /// # Errors
-    ///
-    /// * [`Error::InvalidArgument`] — if `target_rank` is not a rank of the
-    ///   window's communicator (including -1), `target_count` or
-    ///   `target_disp` is negative, or the access does not fit in the target
-    ///   rank's window.
-    /// * [`Error::BufferSize`] — if `origin`'s length differs from
-    ///   `target_count`.
-    /// * [`Error::InvalidArgument`] with `arg: "op"` — if `op` is a predefined op
-    ///   MPI does not define on `T` (a bitwise or logical op on `f32`/`f64`).
-    /// * [`Error::ResourceExhausted`] with resource
-    ///   [`ResourceKind::Request`](crate::ResourceKind::Request) — if the
-    ///   internal request table is full.
-    /// * [`Error::Mpi`] — if `MPI_Raccumulate` fails for any other reason.
-    ///
-    /// # Epoch Requirement
-    ///
-    /// `raccumulate` must be called inside a passive-target epoch, that is
-    /// inside the closure of [`Win::lock`] or [`Win::lock_all`]. MPI does not
-    /// allow request-based RMA in fence or PSCW epochs; calling it anywhere
-    /// else is erroneous.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{LockType, Mpi, ReduceOp, Win, WinFenceAssert};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let mut win = Win::<i32>::allocate(&world, 4).unwrap();
-    ///
-    /// if world.rank() == 1 {
-    ///     win.local_slice_mut().copy_from_slice(&[1, 2, 3, 4]);
-    /// }
-    ///
-    /// // Make rank 1's store visible in its window; `no_succeed` says no fence
-    /// // epoch follows. The barrier orders the store before rank 0's lock.
-    /// win.fence(WinFenceAssert::none(), WinFenceAssert::no_succeed(), |_| Ok(()))
-    ///     .unwrap();
-    /// world.barrier().unwrap();
-    ///
-    /// // Request-based RMA is valid only in a passive-target epoch
-    /// if world.rank() == 0 {
-    ///     let buf = [10i32, 20, 30, 40];
-    ///     win.lock(LockType::Exclusive, 1, |e| {
-    ///         let req = e.raccumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum)?;
-    ///         req.wait()?; // origin buffer safe to reuse after this
-    ///         Ok(())
-    ///     })
-    ///     .unwrap();
-    ///     // The closure ended with MPI_Win_unlock: the update completed at rank 1
-    /// }
-    ///
-    /// world.barrier().unwrap();
-    /// if world.rank() == 1 {
-    ///     // Locking its own window makes the update visible to rank 1's loads
-    ///     win.lock(LockType::Shared, 1, |_| Ok(())).unwrap();
-    ///     assert_eq!(win.local_slice(), &[11, 22, 33, 44]);
-    /// }
-    /// ```
-    pub fn raccumulate(
+    /// As [`rma_rput`](Self::rma_rput).
+    unsafe fn rma_raccumulate(
         &self,
+        access: &Access,
         origin: &[T],
         target_rank: i32,
         target_disp: i64,
-        target_count: i64,
         op: impl Into<AccumulateOp>,
-    ) -> Result<Request<'_>> {
+    ) -> Result<i64> {
         let op = op.into().code(T::TAG)?;
-        self.check_target(
-            target_rank,
-            target_disp,
-            target_count,
-            &[("origin", origin.len())],
-        )?;
         let (p, n, dt) = buf(origin);
+        self.check_target(access, target_rank, target_disp, n as usize, &[])?;
         let mut request_handle: i64 = 0;
-        // SAFETY: the call must be inside an active access epoch, which the caller must
-        // ensure. `origin` is read by MPI until the returned `Request` completes; the
-        // signature does not tie the buffer to the `Request`, so keeping it alive and
-        // unmodified until then is the caller's documented obligation. `target_rank`,
-        // `target_disp`, and `target_count` were checked above against the target rank's
-        // exposed window, so MPI accesses only memory the target exposed. `op` is a
-        // predefined op code that the shim maps to an `MPI_Op`.
+        // SAFETY: the caller upholds this function's contract (see `rma_put`).
+        // `target_rank` and `target_disp` were checked above against the epoch's
+        // access set and the target rank's exposed window for `n` elements, so
+        // MPI accesses only memory the target exposed. `op` is a predefined op
+        // code that the shim maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_raccumulate(
                 p,
@@ -3151,11 +3301,12 @@ impl<T: MpiDatatype> Win<T> {
             )
         };
         Error::check_with_op(ret, "raccumulate")?;
-        Ok(Request::new(request_handle, RequestKind::Rma))
+        Ok(request_handle)
     }
 
-    /// Atomic read-modify-write: validates the op, the target and `result`'s
-    /// length, and calls `MPI_Get_accumulate` with a count of `origin.len()`.
+    /// Atomic read-modify-write: validates the op, the target against `access`
+    /// and the window, and `result`'s length, and calls `MPI_Get_accumulate` with
+    /// a count of `origin.len()`.
     ///
     /// # Safety
     ///
@@ -3164,6 +3315,7 @@ impl<T: MpiDatatype> Win<T> {
     /// they are a `&[T]` and a `&mut [T]`.
     unsafe fn rma_get_accumulate(
         &self,
+        access: &Access,
         origin: &[T],
         result: &mut [T],
         target_rank: i32,
@@ -3173,12 +3325,19 @@ impl<T: MpiDatatype> Win<T> {
         let op = op.into().code(T::TAG)?;
         let (o_ptr, n, dt) = buf(origin);
         let (r_ptr, r_n, _) = buf_mut(result);
-        self.check_target(target_rank, target_disp, n, &[("result", r_n as usize)])?;
+        self.check_target(
+            access,
+            target_rank,
+            target_disp,
+            n as usize,
+            &[("result", r_n as usize)],
+        )?;
         // SAFETY: the caller upholds this function's contract (see `rma_put`).
-        // `target_rank` and `target_disp` were checked above against the target
-        // rank's exposed window for `n` elements, and `result` holds `n`
-        // elements, so MPI accesses only memory the target exposed and writes only
-        // `result`. `op` is a predefined op code that the shim maps to an `MPI_Op`.
+        // `target_rank` and `target_disp` were checked above against the epoch's
+        // access set and the target rank's exposed window for `n` elements, and
+        // `result` holds `n` elements, so MPI accesses only memory the target
+        // exposed and writes only `result`. `op` is a predefined op code that the
+        // shim maps to an `MPI_Op`.
         let ret = unsafe {
             ffi::ferrompi_get_accumulate(
                 o_ptr,
@@ -3195,7 +3354,7 @@ impl<T: MpiDatatype> Win<T> {
     }
 
     /// Single-element atomic fetch-and-update: validates the op and the target
-    /// and calls `MPI_Fetch_and_op`.
+    /// against `access` and the window, and calls `MPI_Fetch_and_op`.
     ///
     /// # Safety
     ///
@@ -3205,6 +3364,7 @@ impl<T: MpiDatatype> Win<T> {
     /// are a `&T` and a `&mut T`.
     unsafe fn rma_fetch_and_op(
         &self,
+        access: &Access,
         origin: &T,
         result: &mut T,
         target_rank: i32,
@@ -3212,16 +3372,17 @@ impl<T: MpiDatatype> Win<T> {
         op: impl Into<FetchOp>,
     ) -> Result<()> {
         let op = op.into().code(T::TAG)?;
-        self.check_target(target_rank, target_disp, 1, &[])?;
+        self.check_target(access, target_rank, target_disp, 1, &[])?;
         // SAFETY: the caller upholds this function's contract (see `rma_put`).
         // `T::TAG` matches `T`'s memory layout per the `MpiDatatype` invariant, and
         // MPI reads one `T` from `origin` and writes one `T` to `result`, both
         // pointers taken from the references themselves (`result` from the
         // `&mut T`, never from a shared borrow), and only MPI writes `result`
         // while it is borrowed. `op` is a predefined op code that the shim maps
-        // to an `MPI_Op`. `target_rank` and `target_disp` were checked above (with
-        // a count of 1) against the target rank's exposed window, so MPI accesses
-        // only memory the target exposed.
+        // to an `MPI_Op`. `target_rank` was checked above against the epoch's
+        // access set, so an access epoch to it is open, and `target_disp` (with
+        // a count of 1) against the target rank's exposed window, so MPI
+        // accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_fetch_and_op(
                 (origin as *const T).cast(),
@@ -3236,8 +3397,8 @@ impl<T: MpiDatatype> Win<T> {
         Error::check_with_op(ret, "fetch_and_op")
     }
 
-    /// Single-element atomic compare-and-swap: validates the target and calls
-    /// `MPI_Compare_and_swap`.
+    /// Single-element atomic compare-and-swap: validates the target against
+    /// `access` and the window, and calls `MPI_Compare_and_swap`.
     ///
     /// # Safety
     ///
@@ -3245,6 +3406,7 @@ impl<T: MpiDatatype> Win<T> {
     /// stay valid and unmodified until the epoch's closing call returns.
     unsafe fn rma_compare_and_swap(
         &self,
+        access: &Access,
         origin: &T,
         compare: &T,
         result: &mut T,
@@ -3254,7 +3416,7 @@ impl<T: MpiDatatype> Win<T> {
     where
         T: crate::AtomicMpiDatatype,
     {
-        self.check_target(target_rank, target_disp, 1, &[])?;
+        self.check_target(access, target_rank, target_disp, 1, &[])?;
         // SAFETY: the caller upholds this function's contract (see `rma_put`).
         // `T::TAG` matches `T`'s memory layout per the `MpiDatatype` invariant, and
         // `AtomicMpiDatatype` restricts `T` to the types MPI-4.1 §12.3.4 allows in
@@ -3262,9 +3424,10 @@ impl<T: MpiDatatype> Win<T> {
         // `origin` and from `compare` and writes one `T` to `result`, all three
         // pointers taken from the references themselves (`result` from the
         // `&mut T`, never from a shared borrow), and only MPI writes `result`
-        // while it is borrowed. `target_rank` and `target_disp` were checked above
-        // (with a count of 1) against the target rank's exposed window, so MPI
-        // accesses only memory the target exposed.
+        // while it is borrowed. `target_rank` was checked above against the
+        // epoch's access set, so an access epoch to it is open, and
+        // `target_disp` (with a count of 1) against the target rank's exposed
+        // window, so MPI accesses only memory the target exposed.
         let ret = unsafe {
             ffi::ferrompi_compare_and_swap(
                 (origin as *const T).cast(),
@@ -3452,7 +3615,7 @@ impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_fence_asserts, check_rma_target, window_word, Error, Win, WinFenceAssert,
+        check_fence_asserts, check_rma_target, window_word, Access, Error, Win, WinFenceAssert,
         WinPscwAssert, WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT, WIN_FREED,
     };
     use crate::persistent::vec_buf_mut;
@@ -3482,10 +3645,13 @@ mod tests {
     #[test]
     fn check_rma_target_boundaries() {
         let words = [window_word::<u64>(4), window_word::<u8>(3)];
-        let run =
-            |elem_size: usize, rank: i32, disp: i64, count: i64, lens: &[(&'static str, usize)]| {
-                check_rma_target(&words, elem_size, rank, disp, count, lens)
-            };
+        let run = |elem_size: usize,
+                   rank: i32,
+                   disp: i64,
+                   count: usize,
+                   lens: &[(&'static str, usize)]| {
+            check_rma_target(&words, &Access::All, elem_size, rank, disp, count, lens)
+        };
 
         assert!(run(8, 0, 0, 4, &[("origin", 4)]).is_ok());
         assert!(run(8, 0, 3, 1, &[("origin", 1)]).is_ok());
@@ -3510,7 +3676,6 @@ mod tests {
                 "target_disp",
                 "negative displacement",
             ),
-            (run(8, 0, 0, -1, &[]), "target_count", "negative count"),
             (
                 run(8, 2, 0, 1, &[("origin", 1)]),
                 "target_rank",
@@ -3548,6 +3713,43 @@ mod tests {
                 ),
                 "expected BufferSize {{ arg: {arg}, required: {required}, actual: {actual} }}, got {result:?}"
             );
+        }
+    }
+
+    #[test]
+    fn check_rma_target_rejects_a_rank_outside_the_access_set() {
+        let words = [window_word::<u64>(4), window_word::<u64>(4)];
+        let outside = "rank outside the epoch's access set";
+        let bad_rank = "rank outside the window's communicator";
+        let run = |access: &Access, rank: i32| check_rma_target(&words, access, 8, rank, 0, 1, &[]);
+
+        let locked = Access::Rank(1);
+        let group = Access::Ranks(vec![false, true].into());
+        let empty = Access::Ranks(Box::new([]));
+        for (access, rank, reason) in [
+            (&locked, 0, Some(outside)),
+            (&locked, 1, None),
+            (&group, 0, Some(outside)),
+            (&group, 1, None),
+            (&empty, 1, Some(outside)),
+            (&Access::All, 0, None),
+            (&Access::All, 1, None),
+            // A rank outside the communicator is a bad rank before it is an
+            // access-set fault, whatever the set holds.
+            (&Access::Rank(2), 2, Some(bad_rank)),
+            (&Access::Rank(-1), -1, Some(bad_rank)),
+        ] {
+            let result = run(access, rank);
+            match reason {
+                None => assert!(result.is_ok(), "rank {rank}: {result:?}"),
+                Some(reason) => assert!(
+                    matches!(
+                        &result,
+                        Err(Error::InvalidArgument { arg: "target_rank", reason: r }) if *r == reason
+                    ),
+                    "rank {rank}: expected InvalidArgument {{ arg: target_rank, reason: {reason} }}, got {result:?}"
+                ),
+            }
         }
     }
 
@@ -3609,10 +3811,32 @@ mod tests {
         let mut float_result = 7.5f64;
         // SAFETY: every call below is refused before any MPI call, so MPI never
         // sees the pointers and no epoch is needed.
-        let (bad_op, bad_rank) = unsafe {
+        let (bad_op, bad_rank, outside_access) = unsafe {
             (
-                float_win.rma_fetch_and_op(&1.0, &mut float_result, 2, 0, ReduceOp::BitwiseOr),
-                float_win.rma_fetch_and_op(&1.0, &mut float_result, 2, 0, ReduceOp::Sum),
+                float_win.rma_fetch_and_op(
+                    &Access::All,
+                    &1.0,
+                    &mut float_result,
+                    2,
+                    0,
+                    ReduceOp::BitwiseOr,
+                ),
+                float_win.rma_fetch_and_op(
+                    &Access::All,
+                    &1.0,
+                    &mut float_result,
+                    2,
+                    0,
+                    ReduceOp::Sum,
+                ),
+                float_win.rma_fetch_and_op(
+                    &Access::Rank(1),
+                    &1.0,
+                    &mut float_result,
+                    0,
+                    0,
+                    ReduceOp::Sum,
+                ),
             )
         };
         assert!(
@@ -3629,11 +3853,22 @@ mod tests {
             ),
             "{bad_rank:?}"
         );
+        assert!(
+            matches!(
+                outside_access,
+                Err(Error::InvalidArgument {
+                    arg: "target_rank",
+                    reason: "rank outside the epoch's access set"
+                })
+            ),
+            "{outside_access:?}"
+        );
 
         let int_win = window::<i32>();
         let mut int_result = 7i32;
         // SAFETY: refused before any MPI call, as above.
-        let past_window = unsafe { int_win.rma_compare_and_swap(&1, &2, &mut int_result, 1, 1) };
+        let past_window =
+            unsafe { int_win.rma_compare_and_swap(&Access::All, &1, &2, &mut int_result, 1, 1) };
         assert!(
             matches!(
                 past_window,

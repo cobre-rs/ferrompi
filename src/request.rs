@@ -140,19 +140,18 @@ pub(crate) enum RequestKind {
 
 /// A handle to a nonblocking MPI operation.
 ///
-/// A request is created inside a [`scope`](crate::scope) and borrows its
-/// buffers until the scope returns, even after the request has completed. It is
-/// completed by [`wait`](Request::wait), [`test`](Request::test) or a batch call
-/// such as [`wait_all`](Request::wait_all) or, at the latest, by the scope,
-/// which waits for every request still pending before it returns or unwinds.
-/// Dropping or forgetting a request does not complete it early, and the scope
-/// still waits.
+/// A request is created inside a [`scope`](crate::scope), or with the `rma`
+/// feature inside a passive epoch, and borrows its buffers until the scope
+/// returns (the epoch, until its unlock), even after the request has completed.
+/// It is completed by [`wait`](Request::wait), [`test`](Request::test) or a
+/// batch call such as [`wait_all`](Request::wait_all) or, at the latest, by its
+/// scope or epoch, which waits for every request still pending before it
+/// returns or unwinds (the epoch, before it unlocks). Dropping or forgetting a
+/// request does not complete it early, and the scope or epoch still waits.
 ///
-/// With the `rma` feature, `Win::rput`, `Win::rget` and `Win::raccumulate`
-/// return a request that no scope owns: it does not borrow its origin buffer,
-/// which must stay valid and untouched until the request completes (through
-/// `wait`, `test` or a batch call), and dropping it before completion waits for
-/// it (`MPI_Wait`).
+/// With the `rma` feature, `PassiveEpoch::rput`, `rget` and `raccumulate`
+/// return a request owned by the passive epoch, which completes it before the
+/// unlock.
 ///
 /// A request is not `Send`, so it cannot be moved to another thread:
 ///
@@ -223,35 +222,15 @@ pub struct Request<'s> {
     handle: i64,
     completed: bool,
     kind: RequestKind,
-    owner: Owner<'s>,
-}
-
-/// Who completes a request that was not waited for: the scope whose registry
-/// holds its slot or, with the `rma` feature, the request itself when it is
-/// dropped (the RMA request calls).
-#[derive(Clone, Copy)]
-enum Owner<'s> {
-    Scoped(&'s Registry, u32),
-    #[cfg(feature = "rma")]
-    Unscoped,
-}
-
-#[cfg(feature = "rma")]
-impl Request<'static> {
-    /// Create a request that no scope owns, from a raw handle, for the RMA
-    /// request calls.
-    pub(crate) fn new(handle: i64, kind: RequestKind) -> Self {
-        Request {
-            handle,
-            completed: false,
-            kind,
-            owner: Owner::Unscoped,
-        }
-    }
+    registry: &'s Registry,
+    // PERF: `usize`, not `u32`. With a `u32` the request is 24 bytes, its last
+    // word (slot, `completed`, `kind`) is stored in pieces and loaded whole, and
+    // ffi_overhead's `isend+irecv+wait` reads 7 ns slower.
+    slot: usize,
 }
 
 impl<'s> Request<'s> {
-    /// Create a request owned by the scope whose registry holds `slot`.
+    /// Create a request owned by `registry`, which holds its handle in `slot`.
     pub(crate) fn scoped(
         handle: i64,
         kind: RequestKind,
@@ -262,7 +241,8 @@ impl<'s> Request<'s> {
             handle,
             completed: false,
             kind,
-            owner: Owner::Scoped(registry, slot),
+            registry,
+            slot: slot as usize,
         }
     }
 }
@@ -270,11 +250,7 @@ impl<'s> Request<'s> {
 impl Request<'_> {
     /// Frees this request's registry slot, once MPI completed the request.
     fn release(&self) {
-        match self.owner {
-            Owner::Scoped(registry, slot) => registry.release(slot),
-            #[cfg(feature = "rma")]
-            Owner::Unscoped => {}
-        }
+        self.registry.release(self.slot as u32);
     }
 
     /// Get the raw request handle (for advanced use).
@@ -294,8 +270,8 @@ impl Request<'_> {
     /// Wait for this operation to complete.
     ///
     /// Blocks until the operation is finished. After this returns successfully,
-    /// MPI no longer uses the request's buffers; a scoped request keeps them
-    /// borrowed until its scope returns.
+    /// MPI no longer uses the request's buffers; a request keeps them borrowed
+    /// until its scope returns (an epoch's, until its unlock).
     ///
     /// For a receive the returned [`Status`] holds the matched source, tag and
     /// element count. For a send, collective or RMA request the `Status` is the
@@ -304,13 +280,9 @@ impl Request<'_> {
     /// completed it, say); only `error` has meaning, and this single-request
     /// call leaves it `None`.
     ///
-    /// On a thread the active thread level does not allow, the wait is
-    /// rejected: a scoped request is left to its scope and the call returns
-    /// `Err(`[`Error::ThreadLevelViolation`]`)`. A request from the RMA request
-    /// calls (feature `rma`), which no scope owns, is dropped before the call
-    /// returns, and that drop aborts the process, except while `Mpi` is
-    /// dropping or after it skipped `MPI_Finalize`: the call then returns the
-    /// error and the request is leaked.
+    /// A request cannot leave the thread that created it, so the thread-level
+    /// check cannot refuse its wait from safe code. Once `Mpi` is finalized the
+    /// call returns `Err(`[`Error::Finalized`]`)`.
     ///
     /// In a debug build at `Serialized`, a wait that overlaps another
     /// thread's MPI call can neither run nor hand the request back, so it
@@ -329,7 +301,7 @@ impl Request<'_> {
     /// completed, out of line so that the inline wrapper decodes `status` only
     /// when its caller uses the result.
     #[inline(never)]
-    fn wait_raw(mut self, status: &mut ffi::FerrompiStatus) -> Result<()> {
+    fn wait_raw(self, status: &mut ffi::FerrompiStatus) -> Result<()> {
         Error::check_with_op(rt::check_completion(), "wait")?;
         // SAFETY: self.handle is a valid MPI request handle registered in the
         // C-side request table by the nonblocking constructor that produced
@@ -343,17 +315,16 @@ impl Request<'_> {
             // for a call from a non-init thread below Serialized, and
             // propagates it via `?` before reaching here; so this can only be
             // the Serialized overlap check rejecting the call before MPI saw
-            // it. `self` cannot be handed back, and letting Drop wait would
-            // overlap the other thread's MPI call.
+            // it. `self` cannot be handed back, and the final wait of the
+            // scope or epoch that owns it would overlap the other thread's MPI
+            // call.
             let _ = std::io::stderr().write_all(
                 b"ferrompi: Request::wait overlapped another thread's MPI call at ThreadLevel::Serialized\n",
             );
             std::process::abort();
         }
-        // MPI consumed the request whatever it returned; Drop must not wait on it again.
-        self.completed = true;
         // A refused call leaves the request pending, so its slot stays live
-        // for the scope end.
+        // for the final wait of the scope or epoch that owns it.
         if ret != FERROMPI_ERR_FINALIZED && ret != FERROMPI_ERR_THREAD_LEVEL {
             self.release();
         }
@@ -401,8 +372,9 @@ impl Request<'_> {
         let ret = unsafe { ffi::ferrompi_test(self.handle, &mut flag, status) };
         // Set completed from flag BEFORE the `?` below: ferrompi_test frees
         // the slot and reports flag=1 whenever MPI completed the request,
-        // even when it returns an error (e.g. MPI_ERR_TRUNCATE), so Drop must
-        // not re-wait on that now-freed handle.
+        // even when it returns an error (e.g. MPI_ERR_TRUNCATE), so a later
+        // `wait`, or the final wait of the scope or epoch that owns the
+        // request, must not wait on that now-freed handle.
         if flag != 0 {
             self.completed = true;
             self.release();
@@ -473,9 +445,10 @@ impl Request<'_> {
     ///
     /// For a receive the `Status` holds the matched source, tag and element
     /// count. For an entry with `error: Some(_)` they are as MPI reported them,
-    /// defined when the receive matched (a `Truncate`, say). For a send,
-    /// collective or RMA request it is the empty status, and so is a cancelled
-    /// receive; only `error` has meaning.
+    /// defined when the receive matched (a `Truncate`, say); a failed receive
+    /// whose source MPI left at `MPI_ANY_SOURCE` reads `Source::ProcNull`. For a
+    /// send, collective or RMA request it is the empty status, and so is a
+    /// cancelled receive; only `error` has meaning.
     ///
     /// Completed entries are skipped. The completed `Request`s are marked
     /// completed in place. Removing them from the vector is optional, not
@@ -582,9 +555,10 @@ impl Request<'_> {
     ///
     /// For a receive the `Status` holds the matched source, tag and element
     /// count. For an entry with `error: Some(_)` they are as MPI reported them,
-    /// defined when the receive matched (a `Truncate`, say). For a send,
-    /// collective or RMA request it is the empty status, and so is a cancelled
-    /// receive; only `error` has meaning.
+    /// defined when the receive matched (a `Truncate`, say); a failed receive
+    /// whose source MPI left at `MPI_ANY_SOURCE` reads `Source::ProcNull`. For a
+    /// send, collective or RMA request it is the empty status, and so is a
+    /// cancelled receive; only `error` has meaning.
     ///
     /// Completed entries are skipped. The completed `Request`s are marked
     /// completed in place. Removing them from the vector is optional, not
@@ -742,41 +716,10 @@ impl Request<'_> {
     }
 }
 
-#[cfg(feature = "rma")]
-impl Drop for Request<'_> {
-    /// Completes a request from the RMA request calls that was dropped before
-    /// it completed, with `MPI_Wait` on its handle. A scoped request does
-    /// nothing here: its scope completes it.
-    ///
-    /// Maintainers: the `self.completed = true` assignment in
-    /// `Request::wait_raw` is the only guard that prevents a double-wait here.
-    /// Any refactoring of `wait()` must preserve that assignment, or this
-    /// `Drop` impl becomes unsound (double-freeing the request handle).
-    ///
-    /// After `Mpi` is dropped this does nothing; below `Serialized` on a
-    /// non-init thread it aborts the process.
-    fn drop(&mut self) {
-        if !self.completed && matches!(self.owner, Owner::Unscoped) {
-            let Some(_call) = rt::drop_guard("Request") else {
-                return;
-            };
-            // SAFETY: self.handle is a valid MPI request handle registered in the
-            // C-side request table by the nonblocking constructor (e.g., iallreduce).
-            // The handle has not been freed because self.completed is false, meaning
-            // wait() was never called. ferrompi_wait calls MPI_Wait which frees the
-            // handle on success; the completed flag guards against a double-free.
-            // Calls the unguarded raw wrapper (not the lifecycle-guarded one):
-            // rt::drop_guard above already handles the FFI lifecycle check, so
-            // this call must still attempt the wait once reached.
-            unsafe { ffi::raw::ferrompi_wait(self.handle, std::ptr::null_mut()) };
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        some_results, with_handles, with_index_buf, Owner, Request, RequestKind, HANDLE_STACK_CAP,
+        some_results, with_handles, with_index_buf, Request, RequestKind, HANDLE_STACK_CAP,
     };
     use crate::error::Error;
     use crate::ffi::FerrompiStatus;
@@ -788,7 +731,8 @@ mod tests {
             handle: 0,
             completed,
             kind,
-            owner: Owner::Scoped(Box::leak(Box::new(Registry::new())), 0),
+            registry: Box::leak(Box::new(Registry::new())),
+            slot: 0,
         }
     }
 
