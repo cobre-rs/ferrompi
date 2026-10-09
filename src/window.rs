@@ -1041,6 +1041,586 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 /// `Win` is intentionally **not** `Send` or `Sync`. MPI windows have
 /// specific thread-safety rules that depend on the MPI thread level.
 ///
+/// # Compile-time guarantees
+///
+/// [`Win::fence`], [`Win::start`], [`Win::lock`] and [`Win::lock_all`] borrow the
+/// window mutably for as long as their closure runs, and give it a handle with the
+/// invariant lifetimes of [`Scope`](crate::Scope): `'s` is the epoch, and every
+/// buffer an operation names is borrowed for `'s`, which ends only after the closing
+/// call that completes the operation. Each program below does not compile, and is
+/// followed by the same program made correct. Each is the body of a function that
+/// takes the window by `&mut`, or the communicator when the program must own the
+/// window.
+///
+/// ## Buffers
+///
+/// A buffer declared inside the closure would be freed before the closing call, so
+/// the first program is rejected. The rejection also shows that `'s` is invariant:
+/// were it covariant, the compiler could shorten `'s` to the buffer's lifetime and
+/// accept the program.
+///
+/// ```compile_fail,E0597
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |e| {
+///     let origin = [1u64; 4];
+///     e.put(&origin, 1, 0)
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let origin = [1u64; 4];
+/// win.fence(none, none, |e| {
+///     e.put(&origin, 1, 0)
+/// })
+/// # }
+/// ```
+///
+/// A buffer cannot be dropped while the epoch borrows it:
+///
+/// ```compile_fail,E0505
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let origin = vec![1u64; 4];
+/// win.fence(none, none, |e| {
+///     e.put(&origin, 1, 0)?;
+///     drop(origin);
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let origin = vec![1u64; 4];
+/// win.fence(none, none, |e| {
+///     e.put(&origin, 1, 0)?;
+///     Ok(())
+/// })?;
+/// drop(origin);
+/// Ok(())
+/// # }
+/// ```
+///
+/// Nor can it be written, because MPI may still be reading it:
+///
+/// ```compile_fail,E0502
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let mut origin = vec![1u64; 4];
+/// win.fence(none, none, |e| {
+///     e.put(&origin, 1, 0)?;
+///     origin[0] = 2;
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let mut origin = vec![1u64; 4];
+/// win.fence(none, none, |e| {
+///     e.put(&origin, 1, 0)?;
+///     Ok(())
+/// })?;
+/// origin[0] = 2;
+/// Ok(())
+/// # }
+/// ```
+///
+/// ## Results MPI writes
+///
+/// A `get` destination, a `get_accumulate` result and a `fetch_and_op` or
+/// `compare_and_swap` result are written when the closing call returns, and stay
+/// borrowed until then. Reading one inside the epoch, which would see a value
+/// MPI has not written yet, is rejected:
+///
+/// ```compile_fail,E0503
+/// # use ferrompi::{Win, WinFenceAssert, ReduceOp};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<u64> {
+/// let none = WinFenceAssert::none();
+/// let origin = 1u64;
+/// let mut old = 0u64;
+/// win.fence(none, none, |e| {
+///     e.fetch_and_op(&origin, &mut old, 1, 0, ReduceOp::Sum)?;
+///     Ok(old)
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert, ReduceOp};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<u64> {
+/// let none = WinFenceAssert::none();
+/// let origin = 1u64;
+/// let mut old = 0u64;
+/// win.fence(none, none, |e| {
+///     e.fetch_and_op(&origin, &mut old, 1, 0, ReduceOp::Sum)
+/// })?;
+/// Ok(old)
+/// # }
+/// ```
+///
+/// The storage of a result cannot be dropped inside the epoch either:
+///
+/// ```compile_fail,E0505
+/// # use ferrompi::{Win, WinFenceAssert, ReduceOp};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let origin = 1u64;
+/// let mut old = Box::new(0u64);
+/// win.fence(none, none, |e| {
+///     e.fetch_and_op(&origin, &mut *old, 1, 0, ReduceOp::Sum)?;
+///     drop(old);
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert, ReduceOp};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let origin = 1u64;
+/// let mut old = Box::new(0u64);
+/// win.fence(none, none, |e| {
+///     e.fetch_and_op(&origin, &mut *old, 1, 0, ReduceOp::Sum)?;
+///     Ok(())
+/// })?;
+/// drop(old);
+/// Ok(())
+/// # }
+/// ```
+///
+/// ## The handle
+///
+/// The handle is borrowed for `'s`, so it cannot leave the closure, whether it is
+/// stored outside:
+///
+/// ```compile_fail,E0521
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let mut keep = None;
+/// win.fence(none, none, |e| {
+///     keep = Some(e);
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |e| {
+///     let mut keep = None;
+///     keep = Some(e);
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// or returned, which the compiler reports without an error code:
+///
+/// ```compile_fail
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let _kept = win.fence(none, none, |e| Ok(e))?;
+/// Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let _kept = win.fence(none, none, |e| Ok(()))?;
+/// Ok(())
+/// # }
+/// ```
+///
+/// ## The window itself
+///
+/// The epoch borrows the window mutably, so epochs cannot nest on one window. An
+/// owned window nests the same way, with error E0499 in place of E0500:
+///
+/// ```compile_fail,E0500
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |_| {
+///     win.fence(none, none, |_| Ok(()))
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |_| Ok(()))?;
+/// win.fence(none, none, |_| Ok(()))
+/// # }
+/// ```
+///
+/// The window's memory cannot be read inside the epoch either, while a peer may be
+/// writing it:
+///
+/// ```compile_fail,E0502
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |_| {
+///     let _local = win.local_slice();
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |_| Ok(()))?;
+/// let _local = win.local_slice();
+/// Ok(())
+/// # }
+/// ```
+///
+/// The handle has no `local_slice` or `local_slice_mut` either, so it offers no
+/// other path to the memory. This holds for a fence or `start` epoch:
+///
+/// ```compile_fail,E0599
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |e| {
+///     let _local = e.local_slice();
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |_| Ok(()))?;
+/// let _local = win.local_slice();
+/// Ok(())
+/// # }
+/// ```
+///
+/// and for a `lock` or `lock_all` epoch:
+///
+/// ```compile_fail,E0599
+/// # use ferrompi::{Win};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// win.lock_all(|e| {
+///     let _local = e.local_slice();
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// win.lock_all(|_| Ok(()))?;
+/// let _local = win.local_slice();
+/// Ok(())
+/// # }
+/// ```
+///
+/// ## Freeing a window inside an epoch
+///
+/// `MPI_Win_free` is only valid once the caller has completed its RMA involvement
+/// (MPI-4.1 §12.2.5), so a window cannot be dropped inside its own epoch:
+///
+/// ```compile_fail,E0505
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let mut win = Win::<u64>::allocate(world, 4)?;
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |_| {
+///     drop(win);
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let mut win = Win::<u64>::allocate(world, 4)?;
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |_| Ok(()))?;
+/// drop(win);
+/// Ok(())
+/// # }
+/// ```
+///
+/// and so cannot [`into_buffer`](Win::into_buffer), which takes the window by
+/// value:
+///
+/// ```compile_fail,E0505
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let mut win = Win::<u64>::allocate(world, 4)?;
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |_| {
+///     let _buf = win.into_buffer()?;
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let mut win = Win::<u64>::allocate(world, 4)?;
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |_| Ok(()))?;
+/// let _buf = win.into_buffer()?;
+/// Ok(())
+/// # }
+/// ```
+///
+/// `post` opens an exposure epoch with no closure, so no borrow keeps the window
+/// alive through it. The window remembers the open epoch instead: until
+/// `wait_exposure`, or a `test_exposure` that returns `true`, closes it,
+/// [`into_buffer`](Win::into_buffer) returns
+/// [`Error::InvalidState`](crate::Error::InvalidState), and dropping the window
+/// leaks it, so `Mpi` skips `MPI_Finalize`. The `test_rma_free_exposed_window`
+/// example checks both. The epoch's `&mut` borrow also keeps `post` out of a
+/// `lock` or `lock_all` closure, where MPI-4.1 §12.5.3 makes it erroneous:
+///
+/// ```compile_fail,E0502
+/// # use ferrompi::{Win, WinPscwAssert, Group};
+/// # fn f(win: &mut Win<u64>, group: &Group) -> ferrompi::Result<()> {
+/// win.lock_all(|_| {
+///     win.post(group, WinPscwAssert::none())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinPscwAssert, Group};
+/// # fn f(win: &mut Win<u64>, group: &Group) -> ferrompi::Result<()> {
+/// win.lock_all(|_| Ok(()))?;
+/// win.post(group, WinPscwAssert::none())
+/// # }
+/// ```
+///
+/// ## Creating a window
+///
+/// A buffer lent to `Win::create` could be dropped while MPI still exposes it, so
+/// `create` takes the `Vec` by value and `into_buffer` gives it back:
+///
+/// ```compile_fail,E0308
+/// # use ferrompi::{Win};
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let mut buf = vec![0u64; 4];
+/// let _win = Win::create(world, &mut buf)?;
+/// Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win};
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let win = Win::create(world, vec![0u64; 4])?;
+/// let _buf = win.into_buffer()?;
+/// Ok(())
+/// # }
+/// ```
+///
+/// ## Request-based operations
+///
+/// `rput`, `rget` and `raccumulate` exist only on the passive-target handle. A
+/// request borrows the origin for `'s` and its epoch's registry, which completes
+/// every request before the unlock, so the origin cannot be a closure-local:
+///
+/// ```compile_fail,E0597
+/// # use ferrompi::{Win, LockType};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// win.lock(LockType::Shared, 1, |e| {
+///     let origin = [1u64; 4];
+///     e.rput(&origin, 1, 0)?.wait()?;
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, LockType};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let origin = [1u64; 4];
+/// win.lock(LockType::Shared, 1, |e| {
+///     e.rput(&origin, 1, 0)?.wait()?;
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```compile_fail,E0597
+/// # use ferrompi::{Win, LockType};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// win.lock(LockType::Shared, 1, |e| {
+///     let mut origin = [0u64; 4];
+///     e.rget(&mut origin, 1, 0)?.wait()?;
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, LockType};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let mut origin = [0u64; 4];
+/// win.lock(LockType::Shared, 1, |e| {
+///     e.rget(&mut origin, 1, 0)?.wait()?;
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```compile_fail,E0597
+/// # use ferrompi::{Win, LockType, ReduceOp};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// win.lock(LockType::Shared, 1, |e| {
+///     let origin = [1u64; 4];
+///     e.raccumulate(&origin, 1, 0, ReduceOp::Sum)?.wait()?;
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, LockType, ReduceOp};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let origin = [1u64; 4];
+/// win.lock(LockType::Shared, 1, |e| {
+///     e.raccumulate(&origin, 1, 0, ReduceOp::Sum)?.wait()?;
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// A request cannot leave the closure either, stored outside:
+///
+/// ```compile_fail,E0521
+/// # use ferrompi::{Win, LockType};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let origin = [1u64; 4];
+/// let mut keep = None;
+/// win.lock(LockType::Shared, 1, |e| {
+///     keep = Some(e.rput(&origin, 1, 0)?);
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, LockType};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let origin = [1u64; 4];
+/// win.lock(LockType::Shared, 1, |e| {
+///     let mut keep = None;
+///     keep = Some(e.rput(&origin, 1, 0)?);
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// or returned:
+///
+/// ```compile_fail
+/// # use ferrompi::{Win, LockType};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let origin = [1u64; 4];
+/// let _kept = win.lock(LockType::Shared, 1, |e| e.rput(&origin, 1, 0))?;
+/// Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, LockType};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let origin = [1u64; 4];
+/// let _done = win.lock(LockType::Shared, 1, |e| e.rput(&origin, 1, 0)?.wait())?;
+/// Ok(())
+/// # }
+/// ```
+///
+/// A fence or `start` epoch has no request-based operations at all:
+///
+/// ```compile_fail,E0599
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let origin = [1u64; 4];
+/// win.fence(none, none, |e| {
+///     e.rput(&origin, 1, 0)?;
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let origin = [1u64; 4];
+/// win.fence(none, none, |e| {
+///     e.put(&origin, 1, 0)?;
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// `compare_and_swap` is rejected on a window of floats, where
+/// [`AtomicMpiDatatype`](crate::AtomicMpiDatatype) documents it.
+///
+/// ## What the compiler does not check
+///
+/// - A `Win` that is forgotten leaks its buffer instead of freeing it, and so
+///   does one dropped after `Mpi` skipped `MPI_Finalize` (the
+///   `test_rma_forget_window` example). `Mpi` dropped inside an epoch still lets
+///   the epoch complete and close (the `test_rma_epoch_drop_mpi` example).
+/// - A peer's collective free waits for every rank, so it can block until the job
+///   ends when a rank leaks its window instead of freeing it, whether by
+///   forgetting it, through a refused or failed free, or through an open
+///   exposure epoch. Likewise an origin's unlock or `complete` can wait for a
+///   target that has stopped calling MPI (MPI-4.1 §12.7.3).
+/// - The `NOPUT`, `NOSTORE` and `NOCHECK` assertions are the caller's contract
+///   (MPI-4.1 §12.5.5). A broken `NOPUT` can let a peer's write land after the
+///   target's closing call, possibly in a buffer `into_buffer` has already
+///   handed back; a broken `NOCHECK` can let an access land before the epoch
+///   opens; a broken `NOSTORE` can let a peer read stale data.
+/// - A window locked and exposed at once, by `post` before `lock` or `lock_all`
+///   or by a peer's lock during an exposure epoch, is erroneous (MPI-4.1 §12.5.3).
+///   The open exposure epoch still keeps the window from being freed.
+/// - A panic in a fence or `start` closure aborts the process, because the
+///   closing call is collective, and one in a `lock` or `lock_all` closure
+///   unwinds after the unlock. Both rely on unwinding: under `panic = "abort"`
+///   the process stops at the panic itself, before any closing call, but with
+///   Rust's message instead of the crate's, and the `test_rma_epoch_panic`
+///   example, which checks that message, needs the default `panic = "unwind"`.
+///
 /// # Example
 ///
 /// ```no_run
@@ -1154,23 +1734,7 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{Mpi, Win, WinFenceAssert};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let mut win = Win::<f64>::allocate(&world, 4).unwrap();
-    /// let buf = [1.0f64, 2.0, 3.0, 4.0];
-    ///
-    /// // `buf` is declared before the epoch: MPI may read it until the
-    /// // closing fence returns
-    /// win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
-    ///     // Rank 0 puts four elements into rank 1's window at displacement 0
-    ///     if world.rank() == 0 {
-    ///         e.put(&buf, 1, 0)?;
-    ///     }
-    ///     Ok(())
-    /// })
-    /// .unwrap();
+    #[doc = include_str!("../examples/rma_put.rs")]
     /// ```
     pub fn put(&self, origin: &'s [T], target_rank: i32, target_disp: i64) -> Result<()> {
         // SAFETY: `origin` is borrowed for `'s`, which ends only after the epoch's
@@ -1213,28 +1777,7 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{Mpi, Win, WinFenceAssert};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let mut win = Win::<f64>::allocate(&world, 4).unwrap();
-    /// let mut buf = [0.0f64; 4];
-    ///
-    /// // `buf` is declared before the epoch: MPI may write it until the
-    /// // closing fence returns
-    /// win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
-    ///     // Rank 0 reads four elements from rank 1's window at displacement 0
-    ///     if world.rank() == 0 {
-    ///         e.get(&mut buf, 1, 0)?;
-    ///     }
-    ///     Ok(())
-    /// })
-    /// .unwrap();
-    ///
-    /// // The epoch is closed: buf is now valid
-    /// if world.rank() == 0 {
-    ///     println!("{:?}", buf);
-    /// }
+    #[doc = include_str!("../examples/rma_get.rs")]
     /// ```
     pub fn get(&self, origin: &'s mut [T], target_rank: i32, target_disp: i64) -> Result<()> {
         // SAFETY: `origin` is borrowed for `'s`, which ends only after the epoch's
@@ -1292,29 +1835,7 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let mut win = Win::<f64>::allocate(&world, 4).unwrap();
-    /// let buf = [10.0f64, 20.0, 30.0, 40.0];
-    ///
-    /// // Rank 1 initialises its window
-    /// if world.rank() == 1 {
-    ///     win.local_slice_mut().copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
-    /// }
-    ///
-    /// // `buf` is declared before the epoch: MPI may read it until the
-    /// // closing fence returns
-    /// win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
-    ///     // Rank 0 adds [10, 20, 30, 40] to rank 1's window
-    ///     if world.rank() == 0 {
-    ///         e.accumulate(&buf, 1, 0, ReduceOp::Sum)?;
-    ///     }
-    ///     Ok(())
-    /// })
-    /// .unwrap();
-    /// // Rank 1's window is now [11.0, 22.0, 33.0, 44.0]
+    #[doc = include_str!("../examples/rma_accumulate.rs")]
     /// ```
     pub fn accumulate(
         &self,
@@ -1390,35 +1911,7 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let mut win = Win::<i32>::allocate(&world, 4).unwrap();
-    /// let origin = [1i32, 2, 3, 4];
-    /// let mut result = [0i32; 4];
-    ///
-    /// // Rank 1 initialises its window
-    /// if world.rank() == 1 {
-    ///     win.local_slice_mut().copy_from_slice(&[10, 20, 30, 40]);
-    /// }
-    ///
-    /// // `origin` and `result` are declared before the epoch: MPI uses them
-    /// // until the closing fence returns
-    /// win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
-    ///     // Rank 0 atomically fetches rank 1's values and adds [1, 2, 3, 4]
-    ///     if world.rank() == 0 {
-    ///         e.get_accumulate(&origin, &mut result, 1, 0, ReduceOp::Sum)?;
-    ///     }
-    ///     Ok(())
-    /// })
-    /// .unwrap();
-    ///
-    /// if world.rank() == 0 {
-    ///     println!("{:?}", result);
-    /// }
-    /// // Rank 0's result == [10, 20, 30, 40] (pre-update)
-    /// // Rank 1's window == [11, 22, 33, 44] (post-update)
+    #[doc = include_str!("../examples/rma_get_accumulate.rs")]
     /// ```
     pub fn get_accumulate(
         &self,

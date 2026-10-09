@@ -61,7 +61,31 @@ name = "test_rma_epoch_panic"
 required-features = ["rma"]
 
 [[example]]
+name = "test_rma_epoch_drop_mpi"
+required-features = ["rma"]
+
+[[example]]
+name = "test_rma_forget_window"
+required-features = ["rma"]
+
+[[example]]
 name = "test_rma_free_exposed_window"
+required-features = ["rma"]
+
+[[example]]
+name = "rma_put"
+required-features = ["rma"]
+
+[[example]]
+name = "rma_get"
+required-features = ["rma"]
+
+[[example]]
+name = "rma_accumulate"
+required-features = ["rma"]
+
+[[example]]
+name = "rma_get_accumulate"
 required-features = ["rma"]
 
 [[example]]
