@@ -169,7 +169,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | COR-10 | `cancel()` allowed on collective/RMA requests | minor | repro | 0.5.x | fixed (4947bc4) |
 | COR-11 | `LongDoubleInt`/`LongInt` layout wrong on macOS arm64 / Windows | minor | reading | 0.5.x | fixed (3a01966): target gating; per-target layouts wont-fix (D-32) |
 | COR-12 | Pre-MPI-4 stubs never yield `NotSupported`; 3 contradicting docs | minor | reading | 0.5.x | fixed (58f8fdc, 134bfed, 98236f8): stub mapping, ADR-0004, docs/mpi-compatibility.md |
-| COR-13 | `Win::sync` rustdoc wrong; example fails on MPICH | minor | repro | 0.5.x docs / 0.7.0 API | fixed (3f50248, 98236f8): rustdoc, docs/mpi-compatibility.md; sync on lock guards planned (ferrompi-0.7.0) |
+| COR-13 | `Win::sync` rustdoc wrong; example fails on MPICH | minor | repro | 0.5.x docs / 0.7.0 API | fixed (3f50248, 98236f8, ed3f133): rustdoc, docs/mpi-compatibility.md |
 | COR-14 | `MPI_UNDEFINED` from `MPI_Get_count` leaks; rc ignored | nit | reading | 0.5.x | fixed (e918274) |
 | COR-15 | `op_set_closure` no bounds check; `op_create_user` no `op_used` check | nit | reading | 0.5.x | fixed (2d53b18) |
 | COR-16 | `type_create_struct` maybe-uninitialised arrays at count 0 | nit | compiler | 0.5.x | fixed (34a748c) |
