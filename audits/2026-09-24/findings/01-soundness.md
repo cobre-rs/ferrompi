@@ -40,7 +40,7 @@ Severity legend: **critical** = safe code → UB / memory corruption / data race
 - **Severity:** critical · **Verified:** repro · **Target:** 0.6 (ARC-06)
 - **Locations:** `src/window.rs:741` (`PendingFetchResult`), `:773` (`unsafe fn resolve`), `:2318` (`fetch_and_op`), compare-and-swap path.
 - **Defect:** the boxed result buffers are only safe while the value is kept alive until the closing synchronisation; `let _ = win.fetch_and_op(…)` frees the box immediately.
-- **Evidence:** `repros/soundness/src/bin/r6b_fetch_drop_create.rs` (window from `Win::create`) — victim `Vec<i64>` reusing the chunk reads **`0x1111111111111112`** (the remote fetched value) after the fence. `r6_fetch_drop.rs` (`Win::allocate`) did not manifest because MPICH completed eagerly — same bug, timing-dependent.
+- **Evidence:** `repros/soundness/src/bin/r6b_fetch_drop_create.rs` (historical: deleted when SND-04 was marked fixed, as was `r6_fetch_drop.rs`) (window from `Win::create`) — victim `Vec<i64>` reusing the chunk reads **`0x1111111111111112`** (the remote fetched value) after the fence. `r6_fetch_drop.rs` (`Win::allocate`) did not manifest because MPICH completed eagerly — same bug, timing-dependent. Current evidence: the `compile_fail` catalogue on `Win` (`src/window.rs`, `# Compile-time guarantees`) rejects reading a fetch result inside its epoch (E0503) and dropping its storage there (E0505); a result is written into caller storage borrowed for the epoch, and `PendingFetchResult` no longer exists.
 - **Fix direction:** fold into the epoch scope (SND-03): pending results are owned by the epoch object and resolved when the scope closes.
 - **Acceptance:** r6b cannot be expressed; results obtainable only after epoch close.
 
@@ -49,7 +49,7 @@ Severity legend: **critical** = safe code → UB / memory corruption / data race
 - **Severity:** critical · **Verified:** repro · **Target:** 0.6 (ARC-06)
 - **Locations:** `src/window.rs:900` (`Win::create(buf: &'a mut [T])`), `Drop` at `:2516`.
 - **Defect:** `Win<'a, T>` does carry the buffer lifetime, but `forget` skips `MPI_Win_free` and ends the borrow; remote ranks keep writing into memory the caller has freed. This also refutes "a lifetime parameter fixes it" for SND-01/02.
-- **Evidence:** `repros/soundness/src/bin/r8_forget_win.rs` — `forget(win)`, `drop(buf)`, victim reuses the chunk, rank 1 `put`s: **victim[0..4] = `0x5555555555555555`**.
+- **Evidence:** `repros/soundness/src/bin/r8_forget_win.rs` (historical: deleted when SND-05 was marked fixed) — `forget(win)`, `drop(buf)`, victim reuses the chunk, rank 1 `put`s: **victim[0..4] = `0x5555555555555555`**. Current evidence: the `compile_fail` catalogue on `Win` rejects a borrowed buffer in `Win::create` (E0308), and `examples/test_rma_forget_window.rs` shows that a forgotten window leaks its buffer: a peer's `put` lands in it, never in a later allocation that reuses the address.
 - **Fix direction (accepted, D-1):** `Win::create` takes ownership of the buffer (`Vec<T>`/`Box<[T]>`), mirroring `Win::allocate` which owns MPI-allocated memory.
 - **Acceptance:** r8 cannot be expressed.
 

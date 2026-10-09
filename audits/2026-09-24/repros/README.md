@@ -31,7 +31,7 @@ mpiexec -n <N> target/release/<program>
 ```
 
 - `soundness`, `c-shim` and `perf` enable `ferrompi/rma`.
-- Some fixes will make a repro stop compiling on purpose. The SND-05 and SND-08 (case B) repros rely on APIs that the fix removes. A compile error is then the expected "after fix" result, and the repro should be replaced by a `compile_fail` doctest.
+- Some fixes will make a repro stop compiling on purpose. The SND-08 (case B) repro relies on an API that the fix removes. A compile error is then the expected "after fix" result, and the repro should be replaced by a `compile_fail` doctest.
 
 Building the C programs:
 
@@ -59,9 +59,6 @@ Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mp
 
 | Program | Finding | What it does | How to run | Observed on v0.5.0 | Expected after fix |
 |---|---|---|---|---|---|
-| `soundness/src/bin/r6_fetch_drop.rs` | SND-04 | Drops a `PendingFetchResult` before the closing fence on a `Win::allocate` window, plus a `get` into a buffer dropped mid-epoch | np=2 | **Did not manifest**: MPICH completes allocate-window RMA eagerly. Kept as the negative control for r6b | Same (no corruption) |
-| `soundness/src/bin/r6b_fetch_drop_create.rs` | SND-04 | Same as r6, over a `Win::create` window (MPICH defers the operation to the fence) | np=2 | `unrelated Vec after get() completes = 0x1111111111111112 (expected 0x3333333333333333)`: the fetched value lands in freed and reused memory | Does not compile, or the result is kept alive until the epoch closes |
-| `soundness/src/bin/r8_forget_win.rs` | SND-05 | `mem::forget(Win::create(&mut buf))`, `drop(buf)`, victim `Vec` reuses the memory, then rank 1 does a locked `put` | np=2 | `victim[0..4] = 0x5555555555555555…`: the remote `put` writes into the freed and reused allocation | Does not compile, or `Win::create` owns the buffer so forgetting it leaks the buffer instead of freeing it |
 | `soundness/src/bin/r11_shm_race.rs` | SND-13 | Rank 1 spins on `remote_slice(0)[0]` (a `&[u64]`) while rank 0 sets the flag through its own slice | np=2 (same node) | `evidence/r11.out`: rank 0 printed `flag set`/`exiting` 3 s apart; rank 1 never printed `observed flag`. The release build hoisted the load out of the loop: the disassembly is a single `cmpq $0x0,(%rcx)` followed by a jump to itself, so the loop never ends. The miscompilation is observed, not just theoretical | No plain `&[T]` over memory another process writes; the access API forces an atomic or volatile read, and the loop sees the flag |
 
 ### c-shim/: C-layer correctness (`src/bin/t*.rs`) and C baselines (`c/`)

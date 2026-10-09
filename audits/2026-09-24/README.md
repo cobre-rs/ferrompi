@@ -132,9 +132,9 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 |---|---|---|---|---|---|
 | SND-01 | Nonblocking `Request` not tied to its buffer | critical | repro | 0.7.0 (D-1) | fixed (ec16bde, 40d42ed, aa71f36, 2cd64e8, e221cf2, c34c4ca) |
 | SND-02 | `PersistentRequest` not tied to its buffer | critical | repro | 0.7.0 (D-1) | fixed (0f2a746, 7e1611d, e0dfdfc, 1bc9f15, 92c0e06) |
-| SND-03 | RMA origin buffers not tied to the epoch; 4 rustdoc examples are UB | critical | reading | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
-| SND-04 | `PendingFetchResult` dropped before epoch close → write into freed heap | critical | repro | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
-| SND-05 | `mem::forget(Win::create)` leaves MPI aliasing a released buffer | critical | repro | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
+| SND-03 | RMA origin buffers not tied to the epoch; 4 rustdoc examples are UB | critical | reading | 0.7.0 (D-1) | fixed (d692bd6, ed3f133, 6db08bf, 93582d9, f5a5c55, ea665b6) |
+| SND-04 | `PendingFetchResult` dropped before epoch close → write into freed heap | critical | repro | 0.7.0 (D-1) | fixed (93582d9, ea665b6) |
+| SND-05 | `mem::forget(Win::create)` leaves MPI aliasing a released buffer | critical | repro | 0.7.0 (D-1) | fixed (8926a7f, ea665b6) |
 | SND-06 | gather/allgather/scatter never validate buffer sizes (9 methods) | critical | repro | 0.5.x | fixed (3637ae5) |
 | SND-07 | V-collectives don't validate counts/displs vs size and buffer | critical | repro | 0.5.x | fixed (9c23425) |
 | SND-08 | `*_custom` p2p: unbounded `T`, unchecked extent | critical | repro | 0.5.x (D-7) | fixed (ceada55) |
@@ -207,7 +207,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | ARC-14 | `numa` feature has no NUMA code, implies `rma` | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
 | ARC-15 | Naming/coverage asymmetries | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
 | ARC-16 | Magic `-1` sentinels; no typed source/tag | minor | one-way | 0.7.0 | fixed (7ebb70f, c894c2e, 73a8c06, 3784942, 9fc0266) |
-| ARC-17 | RMA redundant `target_count`, duplicate tags | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
+| ARC-17 | RMA redundant `target_count`, duplicate tags | minor | one-way | 0.7.0 | fixed (6db08bf, f5a5c55) |
 | ARC-18 | Open MPI 5 capabilities unused (persistent collectives, `create_from_group` gated on `MPI_VERSION >= 4`; OMPI 5 reports 3.1) | minor | two-way | 0.5.x | fixed (213cfd0, d555791, c58cd05) |
 
 ### MPI-5 ABI — [04](findings/04-mpi5-abi.md)
