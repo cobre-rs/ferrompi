@@ -34,9 +34,8 @@
 //! - **User-defined reduction operations**: [`UserOp`] wraps `MPI_Op_create`
 //!   with safe closure storage and trampoline.
 //! - **Distributed RMA windows** (feature `rma`): `Win<T>` with
-//!   `WinFenceAssert`, `WinPscwAssert`,
-//!   `WinLockGuard`, and `WinLockAllGuard`
-//!   RAII guards.
+//!   `WinFenceAssert`, `WinPscwAssert`, and closure epochs over
+//!   `ActiveEpoch` and `PassiveEpoch`.
 //! - **Shared memory windows** (feature `rma`): `SharedWindow<T>`
 //!   with RAII lock guards for intra-node shared memory (distinct from the
 //!   distributed `Win<T>` windows above).
@@ -82,7 +81,7 @@
 //!
 //! | Feature | Description | Dependencies |
 //! |---------|-------------|--------------|
-//! | `rma`   | RMA and shared-memory windows (`Win`, `SharedWindow`, lock guards, RMA operations) | — |
+//! | `rma`   | RMA and shared-memory windows (`Win`, `SharedWindow`, epoch handles, lock guards, RMA operations) | — |
 //! | `numa`  | The `slurm` module and `SlurmInfo` | `rma` |
 //!
 //! `numa` needs no system library: it implies `rma` and adds only the SLURM
@@ -92,7 +91,8 @@
 //!
 //! [`Communicator`], [`Group`], [`Request`], [`PersistentRequest`], [`Status`],
 //! [`CustomDatatype`], [`Info`], and [`UserOp`] are `Send + Sync`; [`Mpi`],
-//! `Win<T>`, `SharedWindow<T>` (feature `rma`), and their RAII lock guards are not.
+//! `Win<T>`, its epoch handles, `SharedWindow<T>` (feature `rma`), and its RAII lock
+//! guards are not.
 //!
 //! Which thread may call MPI is set by the provided [`ThreadLevel`]; see its
 //! documentation for the per-level rules.
@@ -201,8 +201,8 @@ pub use topology::SlurmInfo;
 pub use topology::{HostEntry, TopologyInfo};
 #[cfg(feature = "rma")]
 pub use window::{
-    ActiveEpoch, LockAllGuard, LockGuard, LockType, PendingFetchResult, SharedWindow, Win,
-    WinFenceAssert, WinLockAllGuard, WinLockGuard, WinPscwAssert,
+    ActiveEpoch, LockAllGuard, LockGuard, LockType, PassiveEpoch, PendingFetchResult, SharedWindow,
+    Win, WinFenceAssert, WinPscwAssert,
 };
 
 #[cfg(doctest)]
@@ -291,8 +291,11 @@ pub enum ThreadLevel {
 ///
 /// When `MPI_Finalize` is skipped, MPI stays initialized: a `wait` or `test`
 /// on a request still pending completes it, a `cancel` on one still reaches
-/// MPI, every other call returns `Err(`[`Error::Finalized`]`)`, and handles
-/// dropped afterwards are leaked without an MPI call.
+/// MPI, an open RMA epoch still issues its closing call (fence,
+/// `MPI_Win_complete`, unlock; it can wait for a peer that no longer calls
+/// MPI), and an exposure epoch can still be waited for or tested; every other
+/// call returns `Err(`[`Error::Finalized`]`)`, and handles dropped afterwards
+/// are leaked without an MPI call.
 ///
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
 /// whose `Drop` calls MPI — an uncompleted request from the RMA request calls
@@ -310,13 +313,13 @@ pub enum ThreadLevel {
 /// completion, test or cancel call on a request that a scope open on another
 /// thread still holds, which the drop waits for. A `wait` or `test` on an
 /// active [`PersistentRequest`] is admitted too, and the drop does not wait for
-/// the request: it skips `MPI_Finalize` instead. The closing call of a fence or
-/// PSCW access epoch, `Win::wait_exposure` and `Win::test_exposure` (feature
-/// `rma`) are admitted too: their window is alive, so the drop skips
-/// `MPI_Finalize` instead of waiting for the epoch. A thread blocked forever
-/// inside an MPI call, for example in a collective its peers never enter,
-/// blocks the drop; MPI requires every thread's MPI calls to complete before
-/// `MPI_Finalize`.
+/// the request: it skips `MPI_Finalize` instead. The closing call of a fence,
+/// PSCW access or passive-target epoch (the unlock), `Win::wait_exposure` and
+/// `Win::test_exposure` (feature `rma`) are admitted too: the drop does not
+/// wait for an epoch, because the epoch's window keeps it on the skip path. A
+/// thread blocked forever inside an MPI call, for example in a collective its
+/// peers never enter, blocks the drop; MPI requires every thread's MPI calls to
+/// complete before `MPI_Finalize`.
 ///
 /// A call that would fail one of the checks above (finalized, wrong
 /// thread) and is also given invalid arguments may return the argument

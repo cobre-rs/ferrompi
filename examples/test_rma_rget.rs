@@ -5,10 +5,10 @@
 //! 1. Rank 1 initializes its local window to `[100, 200, 300, 400]`; a
 //!    fence with `no_succeed` and a barrier make the write visible before
 //!    rank 0 locks.
-//! 2. Rank 0 acquires a shared passive-target lock on rank 1, calls
-//!    `Win::rget` to post a read, waits on the returned `Request` (local
-//!    completion), then drops the lock guard. After `req.wait()` returns,
-//!    the local buffer already contains the fetched data.
+//! 2. Rank 0 locks rank 1 with a shared passive-target lock, calls `Win::rget`
+//!    inside the closure to post a read, waits on the returned `Request` (local
+//!    completion), then the closure ends and the window is unlocked. After
+//!    `req.wait()` returns, the local buffer already contains the fetched data.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_rget
 // mpi-test: np=2
@@ -36,9 +36,8 @@ fn main() {
     // Protocol:
     //   Rank 1: initialize window to [100, 200, 300, 400]
     //   All:    fence(no_succeed) + barrier (rank 1's init visible before the lock)
-    //   Rank 0: lock(Shared, rank=1) → rget(&mut buf, 1, 0, 4)
-    //           → req.wait() → assert buf == [100, 200, 300, 400]
-    //           → drop guard (unlock)
+    //   Rank 0: lock(Shared, rank=1, |e| rget(&mut buf, 1, 0, 4) → req.wait())
+    //           → unlock → assert buf == [100, 200, 300, 400]
     //   All:    `common::check` verdict
     // ========================================================================
     {
@@ -65,30 +64,28 @@ fn main() {
         if rank == 0 {
             let mut local_buf = [0i32; N];
 
-            // Acquire shared passive-target lock on rank 1's window.
-            let guard = match win.lock(LockType::Shared, 1) {
-                Ok(g) => g,
-                Err(e) => {
-                    eprintln!("rank 0: FAIL: Win::lock(Shared, 1) failed: {e}");
-                    world.abort(1);
-                }
-            };
+            // Shared passive-target lock on rank 1's window.
+            let locked = win.lock(LockType::Shared, 1, |e| {
+                // Post the rget — request completes when local buffer contains data.
+                let count = local_buf.len() as i64;
+                let req = match e.rget(&mut local_buf, 1, 0, count) {
+                    Ok(r) => r,
+                    Err(err) => {
+                        eprintln!("rank 0: FAIL: Win::rget returned error: {err}");
+                        world.abort(1);
+                    }
+                };
 
-            // Post the rget — request completes when local buffer contains data.
-            let count = local_buf.len() as i64;
-            let req = match win.rget(&mut local_buf, 1, 0, count) {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("rank 0: FAIL: Win::rget returned error: {e}");
-                    drop(guard);
-                    world.abort(1);
+                // Wait for local completion — data is in local_buf after this.
+                if let Err(err) = req.wait() {
+                    eprintln!("rank 0: FAIL: Request::wait after rget failed: {err}");
+                    local_ok = false;
                 }
-            };
-
-            // Wait for local completion — data is in local_buf after this.
-            if let Err(e) = req.wait() {
-                eprintln!("rank 0: FAIL: Request::wait after rget failed: {e}");
-                local_ok = false;
+                Ok(())
+            });
+            if let Err(e) = locked {
+                eprintln!("rank 0: FAIL: Win::lock(Shared, 1) failed: {e}");
+                world.abort(1);
             }
 
             // Verify the fetched data.
@@ -101,9 +98,6 @@ fn main() {
                     local_ok = false;
                 }
             }
-
-            // Drop guard issues MPI_Win_unlock.
-            drop(guard);
         }
     }
 

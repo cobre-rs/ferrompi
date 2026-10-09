@@ -1,25 +1,36 @@
-//! Integration test for Win::flush_local / flush_local_all / sync helpers.
+//! Integration test for PassiveEpoch::flush_local / flush_local_all / sync.
 //!
 //! Verifies that the three local-completion helpers compile and run
-//! correctly without issuing any RMA data operations.
+//! correctly without issuing any RMA data operations, and that `flush` and
+//! `flush_local` reject a rank outside the window's communicator before any
+//! MPI call.
 //!
 //! Test matrix (all on a 2-rank world):
 //!
-//! 1. **flush_local inside a shared lock epoch** — every rank acquires
-//!    `LockType::Shared` on rank 0, calls `win.flush_local(0)`, then drops
-//!    the guard (→ unlock).
+//! 1. **flush_local inside a shared lock epoch** — every rank locks rank 0 with
+//!    `LockType::Shared`, calls `e.flush_local(0)`, then the closure ends
+//!    (→ unlock).
 //! 2. **flush_local_all and sync inside a lock_all epoch** — all ranks call
-//!    `lock_all()`, invoke `win.flush_local_all()` and `win.sync()`, then drop
-//!    the guard (→ unlock_all).
+//!    `lock_all`, invoke `e.flush_local_all()` and `e.sync()`, then the closure
+//!    ends (→ unlock_all).
 //!    Note: the MPI standard allows `MPI_Win_sync` only within a passive-target
 //!    epoch, so the test calls `sync` inside `lock_all`.
+//! 3. **A rank outside the communicator** — inside `lock_all`, `e.flush` and
+//!    `e.flush_local` return `Error::InvalidArgument { arg: "rank" }` for the
+//!    communicator size and for -1, and the epoch still works afterwards.
+//!    Open MPI accepts such a rank, and with the pt2pt component reads past its
+//!    peer table; MPICH returns `MPI_ERR_RANK`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_flush_sync
 // mpi-test: np=2
 
-use ferrompi::{LockType, Mpi, ReduceOp, Win, WinFenceAssert};
+use ferrompi::{Error, LockType, Mpi, ReduceOp, Win, WinFenceAssert};
 
 mod common;
+
+fn is_rank_rejected(result: &ferrompi::Result<()>) -> bool {
+    matches!(result, Err(Error::InvalidArgument { arg: "rank", .. }))
+}
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -67,61 +78,94 @@ fn main() {
     // ranks execute the block simultaneously.
     // ========================================================================
     {
-        let guard = match win.lock(LockType::Shared, 0) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL: Win::lock(Shared, 0) failed: {e}");
-                world.abort(1);
+        let locked = win.lock(LockType::Shared, 0, |e| {
+            if let Err(err) = e.flush_local(0) {
+                eprintln!("rank {rank}: FAIL: PassiveEpoch::flush_local(0) failed: {err}");
+                local_ok = false;
             }
-        };
-
-        if let Err(e) = win.flush_local(0) {
-            eprintln!("rank {rank}: FAIL: Win::flush_local(0) failed: {e}");
-            local_ok = false;
+            Ok(())
+        });
+        if let Err(e) = locked {
+            eprintln!("rank {rank}: FAIL: Win::lock(Shared, 0) failed: {e}");
+            world.abort(1);
         }
-        // guard drops here → MPI_Win_unlock(0, win)
-        drop(guard);
+        // the closure ended → MPI_Win_unlock(0, win)
     }
 
     world.barrier().expect("barrier after test 1 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::flush_local inside shared lock epoch");
+        println!("PASS: PassiveEpoch::flush_local inside shared lock epoch");
     }
 
     // ========================================================================
     // Test 2: flush_local_all and sync inside a lock_all epoch.
     //
-    // All ranks call lock_all(), invoke flush_local_all() and sync(), then
-    // drop the guard (→ unlock_all).
+    // All ranks call lock_all, invoke flush_local_all() and sync(), then the
+    // closure ends (→ unlock_all).
     //
     // Note: the MPI standard allows MPI_Win_sync only within a passive-target
     // epoch, so the test calls sync() inside the lock_all epoch.
     // ========================================================================
     {
-        let guard = match win.lock_all() {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL: Win::lock_all failed: {e}");
-                world.abort(1);
+        let locked = win.lock_all(|e| {
+            if let Err(err) = e.flush_local_all() {
+                eprintln!("rank {rank}: FAIL: PassiveEpoch::flush_local_all failed: {err}");
+                local_ok = false;
             }
-        };
 
-        if let Err(e) = win.flush_local_all() {
-            eprintln!("rank {rank}: FAIL: Win::flush_local_all failed: {e}");
-            local_ok = false;
+            if let Err(err) = e.sync() {
+                eprintln!("rank {rank}: FAIL: PassiveEpoch::sync failed: {err}");
+                local_ok = false;
+            }
+            Ok(())
+        });
+        if let Err(e) = locked {
+            eprintln!("rank {rank}: FAIL: Win::lock_all failed: {e}");
+            world.abort(1);
         }
-
-        if let Err(e) = win.sync() {
-            eprintln!("rank {rank}: FAIL: Win::sync failed: {e}");
-            local_ok = false;
-        }
-        // guard drops here → MPI_Win_unlock_all(win)
-        drop(guard);
+        // the closure ended → MPI_Win_unlock_all(win)
     }
 
     world.barrier().expect("barrier after test 2 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::flush_local_all and Win::sync inside lock_all epoch");
+        println!("PASS: PassiveEpoch::flush_local_all and sync inside lock_all epoch");
+    }
+
+    // ========================================================================
+    // Test 3: a rank outside the window's communicator is rejected before any
+    // MPI call, so the epoch is unchanged and still flushes.
+    // ========================================================================
+    {
+        let locked = win.lock_all(|e| {
+            for bad in [size, -1] {
+                let flushed = e.flush(bad);
+                if !is_rank_rejected(&flushed) {
+                    eprintln!("rank {rank}: FAIL: PassiveEpoch::flush({bad}) returned {flushed:?}");
+                    local_ok = false;
+                }
+                let flushed = e.flush_local(bad);
+                if !is_rank_rejected(&flushed) {
+                    eprintln!(
+                        "rank {rank}: FAIL: PassiveEpoch::flush_local({bad}) returned {flushed:?}"
+                    );
+                    local_ok = false;
+                }
+            }
+            if let Err(err) = e.flush(0) {
+                eprintln!("rank {rank}: FAIL: PassiveEpoch::flush(0) after a rejected rank: {err}");
+                local_ok = false;
+            }
+            Ok(())
+        });
+        if let Err(e) = locked {
+            eprintln!("rank {rank}: FAIL: Win::lock_all [test 3] failed: {e}");
+            world.abort(1);
+        }
+    }
+
+    world.barrier().expect("barrier after test 3 failed");
+    if rank == 0 && local_ok {
+        println!("PASS: PassiveEpoch::flush and flush_local reject a rank outside the group");
     }
 
     common::check(&world, local_ok, "test_rma_win_flush_sync");

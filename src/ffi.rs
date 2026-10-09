@@ -72,9 +72,8 @@ extern "C" {
 }
 
 // RMA counterpart of the block above: a non-status return with no MPI call
-// (mode-value constants), or called only from a `Drop` impl or under an
-// in-flight token its caller holds (the window constructors and
-// `Win::into_buffer`).
+// (mode-value constants), or called from a `Drop` impl or under an in-flight
+// token its caller holds (`ferrompi_win_free` and the window constructors).
 #[cfg(feature = "rma")]
 extern "C" {
     pub fn ferrompi_win_allocate_shared(
@@ -103,8 +102,6 @@ extern "C" {
     ) -> c_int;
     pub fn ferrompi_win_free(win: int32_t) -> c_int;
     pub fn ferrompi_win_fence_mode_values(out: *mut int32_t);
-    pub fn ferrompi_win_unlock(rank: int32_t, win: int32_t) -> c_int;
-    pub fn ferrompi_win_unlock_all(win: int32_t) -> c_int;
     pub fn ferrompi_win_pscw_mode_values(out: *mut int32_t);
 }
 
@@ -1300,8 +1297,8 @@ guarded_extern! {
 
     // ============================================================
     // RMA / Epoch Closing
-    // Close an access or exposure epoch that is already open: admitted while
-    // finalizing, unlike the calls that open one.
+    // Close an access, exposure or passive-target epoch that is already open:
+    // admitted while finalizing, unlike the calls that open one.
     // ============================================================
     #[cfg(feature = "rma")]
     pub fn ferrompi_win_complete(win: int32_t) -> c_int;
@@ -1311,4 +1308,10 @@ guarded_extern! {
 
     #[cfg(feature = "rma")]
     pub fn ferrompi_win_test(win: int32_t, flag: *mut int32_t) -> c_int;
+
+    #[cfg(feature = "rma")]
+    pub fn ferrompi_win_unlock(rank: int32_t, win: int32_t) -> c_int;
+
+    #[cfg(feature = "rma")]
+    pub fn ferrompi_win_unlock_all(win: int32_t) -> c_int;
 }

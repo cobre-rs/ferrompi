@@ -56,7 +56,7 @@ use std::io::Write;
 use std::marker::PhantomData;
 use std::ops::{BitOr, BitOrAssign, Deref};
 use std::os::raw::c_int;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
@@ -537,6 +537,18 @@ fn exchange_window_words(comm: &Communicator, word: u64) -> Result<Box<[u64]>> {
     Ok(words.into_boxed_slice())
 }
 
+/// Rejects a `rank` outside `0..group_size`, reported under the argument name
+/// `arg`.
+fn check_rank(group_size: usize, arg: &'static str, rank: i32) -> Result<()> {
+    if rank < 0 || rank as usize >= group_size {
+        return Err(Error::InvalidArgument {
+            arg,
+            reason: "rank outside the window's communicator",
+        });
+    }
+    Ok(())
+}
+
 /// Validates an RMA target against `words` (see [`window_word`]): rejects a
 /// `target_rank` outside `0..words.len()`, a negative `target_count`, a
 /// `buffer_lens` entry unequal to it (reported under that entry's name), a
@@ -551,12 +563,7 @@ fn check_rma_target(
     target_count: i64,
     buffer_lens: &[(&'static str, usize)],
 ) -> Result<()> {
-    if target_rank < 0 || target_rank as usize >= words.len() {
-        return Err(Error::InvalidArgument {
-            arg: "target_rank",
-            reason: "rank outside the window's communicator",
-        });
-    }
+    check_rank(words.len(), "target_rank", target_rank)?;
     if target_count < 0 {
         return Err(Error::InvalidArgument {
             arg: "target_count",
@@ -1190,6 +1197,165 @@ impl<T: MpiDatatype> Deref for ActiveEpoch<'_, '_, T> {
     }
 }
 
+/// The handle a passive-target epoch gives its closure.
+///
+/// [`Win::lock`] and [`Win::lock_all`] open an epoch, run a closure with this
+/// handle, and end the epoch with `MPI_Win_unlock` or `MPI_Win_unlock_all` when
+/// the closure returns, whether it returned `Ok` or `Err`, and also when it
+/// panics. The epoch is open exactly while the closure runs, and the window is
+/// mutably borrowed for that time.
+///
+/// The handle carries the synchronization calls MPI allows only inside a
+/// passive-target epoch: [`flush`](Self::flush), [`flush_all`](Self::flush_all),
+/// [`flush_local`](Self::flush_local),
+/// [`flush_local_all`](Self::flush_local_all) and [`sync`](Self::sync).
+///
+/// # Lifetimes
+///
+/// The handle carries the invariant lifetimes of [`Scope`](crate::Scope): `'s`
+/// is the epoch, and `'env` outlives it. MPI may read an origin buffer until the
+/// unlock returns, so declare the buffers of the epoch's operations before the
+/// call to `lock` or `lock_all`, not inside the closure, where they are freed
+/// before then.
+///
+/// # Thread safety
+///
+/// `PassiveEpoch` is neither `Send` nor `Sync`: it borrows a [`Win`], which is
+/// neither.
+pub struct PassiveEpoch<'s, 'env: 's, T: MpiDatatype> {
+    win: &'s Win<T>,
+    scope: PhantomData<&'s mut &'s ()>,
+    env: PhantomData<&'env mut &'env ()>,
+}
+
+// Transitional: the RMA operations still live on `Win`, so the handle reaches
+// them by dereferencing. The impl goes away when the operations move onto the
+// handle.
+impl<T: MpiDatatype> Deref for PassiveEpoch<'_, '_, T> {
+    type Target = Win<T>;
+
+    fn deref(&self) -> &Win<T> {
+        self.win
+    }
+}
+
+impl<T: MpiDatatype> PassiveEpoch<'_, '_, T> {
+    /// Complete the epoch's pending RMA operations to `rank`, at the origin
+    /// and at the target.
+    ///
+    /// Wraps `MPI_Win_flush`. When it returns, every operation this rank
+    /// issued to `rank` in the epoch is complete at both ends, and the epoch
+    /// stays open.
+    ///
+    /// # Arguments
+    ///
+    /// * `rank` - The target rank to flush (0-based, within the window's
+    ///   communicator). In a [`Win::lock`] epoch only the locked rank has
+    ///   operations to complete.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidArgument` with `arg: "rank"` if `rank` is outside the
+    ///   window's communicator; no MPI call is made.
+    /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped.
+    /// - `Error::Mpi` with `operation: Some("win_flush")` if MPI reports an
+    ///   error.
+    pub fn flush(&self, rank: i32) -> Result<()> {
+        check_rank(self.win.words.len(), "rank", rank)?;
+        // SAFETY: `win` is a valid MPI window handle, a passive-target epoch is
+        // open on this window, which MPI-4.1 §12.5.4 requires, and `rank` was
+        // checked against the window's group above.
+        let ret = unsafe { ffi::ferrompi_win_flush(rank, self.win.win_handle) };
+        Error::check_with_op(ret, "win_flush")
+    }
+
+    /// Complete the epoch's pending RMA operations to every rank, at the
+    /// origin and at the targets.
+    ///
+    /// Wraps `MPI_Win_flush_all`. When it returns, every operation this rank
+    /// issued in the epoch is complete at both ends, and the epoch stays open.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped.
+    /// - `Error::Mpi` with `operation: Some("win_flush_all")` if MPI reports
+    ///   an error.
+    pub fn flush_all(&self) -> Result<()> {
+        // SAFETY: `win` is a valid MPI window handle, and a passive-target
+        // epoch is open on this window, which MPI-4.1 §12.5.4 requires.
+        let ret = unsafe { ffi::ferrompi_win_flush_all(self.win.win_handle) };
+        Error::check_with_op(ret, "win_flush_all")
+    }
+
+    /// Complete the epoch's pending RMA operations to `rank` at the origin
+    /// only.
+    ///
+    /// Wraps `MPI_Win_flush_local`. When it returns, the origin buffers of
+    /// every operation this rank issued to `rank` in the epoch are safe to
+    /// reuse, but the target may not have observed the writes yet.
+    ///
+    /// # Arguments
+    ///
+    /// * `rank` - The target rank whose pending operations are locally
+    ///   completed (0-based, within the window's communicator). In a
+    ///   [`Win::lock`] epoch only the locked rank has operations to complete.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::InvalidArgument` with `arg: "rank"` if `rank` is outside the
+    ///   window's communicator; no MPI call is made.
+    /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped.
+    /// - `Error::Mpi` with `operation: Some("win_flush_local")` if MPI reports
+    ///   an error.
+    pub fn flush_local(&self, rank: i32) -> Result<()> {
+        check_rank(self.win.words.len(), "rank", rank)?;
+        // SAFETY: `win` is a valid MPI window handle, a passive-target epoch is
+        // open on this window, which MPI-4.1 §12.5.4 requires, and `rank` was
+        // checked against the window's group above.
+        let ret = unsafe { ffi::ferrompi_win_flush_local(rank, self.win.win_handle) };
+        Error::check_with_op(ret, "win_flush_local")
+    }
+
+    /// Complete the epoch's pending RMA operations to every rank at the origin
+    /// only.
+    ///
+    /// Wraps `MPI_Win_flush_local_all`. When it returns, the origin buffers of
+    /// every operation this rank issued in the epoch are safe to reuse, but the
+    /// targets may not have observed the writes yet.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped.
+    /// - `Error::Mpi` with `operation: Some("win_flush_local_all")` if MPI
+    ///   reports an error.
+    pub fn flush_local_all(&self) -> Result<()> {
+        // SAFETY: `win` is a valid MPI window handle, and a passive-target
+        // epoch is open on this window, which MPI-4.1 §12.5.4 requires.
+        let ret = unsafe { ffi::ferrompi_win_flush_local_all(self.win.win_handle) };
+        Error::check_with_op(ret, "win_flush_local_all")
+    }
+
+    /// Synchronize the public and private copies of this window's local memory.
+    ///
+    /// Wraps `MPI_Win_sync`, a local memory barrier: it does not communicate
+    /// and does not complete pending RMA operations. MPI allows it only inside
+    /// a passive-target epoch (MPI-4.1 §12.5.4), which this handle
+    /// guarantees; MPICH rejects it elsewhere.
+    ///
+    /// # Errors
+    ///
+    /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped.
+    /// - `Error::Mpi` with `operation: Some("win_sync")` if MPI reports an
+    ///   error.
+    pub fn sync(&self) -> Result<()> {
+        // SAFETY: `win` is a valid MPI window handle, and a passive-target
+        // epoch is open on this window, the only place `MPI_Win_sync` is
+        // allowed (MPI-4.1 §12.5.4).
+        let ret = unsafe { ffi::ferrompi_win_sync(self.win.win_handle) };
+        Error::check_with_op(ret, "win_sync")
+    }
+}
+
 /// Reports why an epoch could not be closed cleanly and aborts the process:
 /// its origin buffers are still in MPI's hands, so there is no way to hand
 /// them back.
@@ -1791,15 +1957,16 @@ impl<T: MpiDatatype> Win<T> {
         Error::check_with_op(ret, "win_test")?;
         Ok(flag != 0)
     }
-}
 
-impl<T: MpiDatatype> Win<T> {
-    /// Lock a specific rank's window (passive-target synchronization).
+    /// Run a closure in a passive-target epoch on one rank's window.
     ///
-    /// Acquires a lock on the specified rank's window, allowing one-sided
-    /// access to that rank's memory without requiring the target rank's active
-    /// participation. Returns a [`WinLockGuard`] that automatically unlocks
-    /// the window when dropped.
+    /// Wraps `MPI_Win_lock` and `MPI_Win_unlock`. The call locks `rank`'s
+    /// window, which gives one-sided access to that rank's memory without its
+    /// active participation, runs `f` with the epoch's [`PassiveEpoch`], and
+    /// unlocks the window, whether `f` returned `Ok`, returned `Err` or
+    /// panicked. When it returns, the RMA operations `f` issued are complete at
+    /// this rank and at `rank` (MPI-4.1 §12.5.3), so the origin buffers
+    /// they borrowed stay borrowed until the unlock has returned.
     ///
     /// # Arguments
     ///
@@ -1808,28 +1975,60 @@ impl<T: MpiDatatype> Win<T> {
     ///   shared lockers.
     /// * `rank` - The target rank to lock (0-based, within the window's
     ///   communicator).
+    /// * `f` - The closure that issues the epoch's RMA operations.
     ///
     /// # Errors
     ///
-    /// Returns `Error::Mpi { operation: Some("win_lock"), .. }` if the MPI
-    /// lock call fails.
+    /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped: the
+    ///   epoch is not opened and `f` does not run.
+    /// - `Error::Mpi` with `operation: Some("win_lock")` if the lock fails,
+    ///   for example when MPI rejects `rank` (`f` does not run).
+    /// - `Error::Mpi` with `operation: Some("win_unlock")` if the unlock
+    ///   fails.
+    ///
+    /// When `f` returns an error, that error is returned in place of the
+    /// unlock's. MPI ran the unlock, and the crate trusts that it completed or
+    /// failed the epoch's operations, as MPICH and Open MPI do; MPI-4.1 §9.4
+    /// (p.460) does not promise it.
+    ///
+    /// # Panics
+    ///
+    /// A passive-target epoch is not collective: `MPI_Win_unlock` completes this
+    /// rank's operations and needs no matching call at any other rank, though it
+    /// can wait until the target makes MPI progress (MPI-4.1 §12.7.3). A panic in
+    /// `f` therefore unlocks the window and then continues unwinding, as
+    /// [`scope`](crate::scope) does; an open fence or PSCW epoch aborts instead.
+    /// An error from that unlock is dropped.
+    ///
+    /// # Aborts
+    ///
+    /// An `MPI_Win_unlock` refused before MPI ran it aborts the process, since
+    /// the epoch's origin buffers are still in MPI's hands; in a debug build at
+    /// [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized), an overlap
+    /// with another thread's MPI call is the one way to reach that.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{Mpi, Win, LockType};
+    /// use ferrompi::{LockType, Mpi, Win};
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let win = Win::<f64>::allocate(&world, 8).unwrap();
+    /// let mut win = Win::<f64>::allocate(&world, 8).unwrap();
     ///
-    /// {
-    ///     let guard = win.lock(LockType::Shared, 0).unwrap();
-    ///     guard.flush().unwrap();
-    ///     // Lock released when `guard` is dropped
-    /// }
+    /// win.lock(LockType::Shared, 0, |e| {
+    ///     e.flush(0)?;
+    ///     e.flush_local(0)?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn lock(&self, lock_type: LockType, rank: i32) -> Result<WinLockGuard<'_, T>> {
+    pub fn lock<'env, R>(
+        &mut self,
+        lock_type: LockType,
+        rank: i32,
+        f: impl for<'s> FnOnce(&'s PassiveEpoch<'s, 'env, T>) -> Result<R>,
+    ) -> Result<R> {
         let lt = match lock_type {
             LockType::Exclusive => ffi::FERROMPI_LOCK_EXCLUSIVE,
             LockType::Shared => ffi::FERROMPI_LOCK_SHARED,
@@ -1841,23 +2040,51 @@ impl<T: MpiDatatype> Win<T> {
         // communicator.
         let ret = unsafe { ffi::ferrompi_win_lock(lt, rank, 0, self.win_handle) };
         Error::check_with_op(ret, "win_lock")?;
-        Ok(WinLockGuard { window: self, rank })
+        self.run_passive_epoch(
+            "win_unlock",
+            // SAFETY: `win_handle` is a valid MPI window handle, and the
+            // `MPI_Win_lock` above opened the epoch on `rank` this call ends.
+            |win_handle| unsafe { ffi::ferrompi_win_unlock(rank, win_handle) },
+            f,
+        )
     }
 
-    /// Lock all ranks' windows (passive-target synchronization).
+    /// Run a closure in a passive-target epoch on every rank's window.
     ///
-    /// Acquires shared locks on all ranks in the window's communicator.
-    /// Returns a [`WinLockAllGuard`] that automatically releases all locks
-    /// when dropped.
+    /// Wraps `MPI_Win_lock_all` and `MPI_Win_unlock_all`. The call acquires
+    /// shared locks on all ranks in the window's communicator, runs `f` with
+    /// the epoch's [`PassiveEpoch`], and releases them, whether `f` returned
+    /// `Ok`, returned `Err` or panicked. It gives concurrent access to every
+    /// rank's window memory in one epoch, without a `lock` and an unlock per
+    /// rank. When it returns, the RMA operations `f` issued are complete at
+    /// this rank and at their targets (MPI-4.1 §12.5.3), so the origin
+    /// buffers they borrowed stay borrowed until the unlock has returned.
     ///
-    /// Useful for algorithms that need concurrent access to every rank's
-    /// window memory in a single epoch without the overhead of individual
-    /// `lock` / `unlock` calls per rank.
+    /// # Arguments
+    ///
+    /// * `f` - The closure that issues the epoch's RMA operations.
     ///
     /// # Errors
     ///
-    /// Returns `Error::Mpi { operation: Some("win_lock_all"), .. }` if the
-    /// MPI lock_all call fails.
+    /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped: the
+    ///   epoch is not opened and `f` does not run.
+    /// - `Error::Mpi` with `operation: Some("win_lock_all")` if the lock
+    ///   fails (`f` does not run).
+    /// - `Error::Mpi` with `operation: Some("win_unlock_all")` if the unlock
+    ///   fails.
+    ///
+    /// When `f` returns an error, that error is returned in place of the
+    /// unlock's, as for [`Win::lock`].
+    ///
+    /// # Panics
+    ///
+    /// A panic in `f` unlocks the window and then continues unwinding, as for
+    /// [`Win::lock`].
+    ///
+    /// # Aborts
+    ///
+    /// An `MPI_Win_unlock_all` refused before MPI ran it aborts the process,
+    /// as for [`Win::lock`].
     ///
     /// # Example
     ///
@@ -1866,144 +2093,60 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let win = Win::<f64>::allocate(&world, 8).unwrap();
+    /// let mut win = Win::<f64>::allocate(&world, 8).unwrap();
     ///
-    /// {
-    ///     let guard = win.lock_all().unwrap();
-    ///     guard.flush_all().unwrap();
-    ///     // All locks released when `guard` is dropped
-    /// }
+    /// win.lock_all(|e| {
+    ///     e.flush_all()?;
+    ///     e.flush_local_all()?;
+    ///     e.sync()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn lock_all(&self) -> Result<WinLockAllGuard<'_, T>> {
+    pub fn lock_all<'env, R>(
+        &mut self,
+        f: impl for<'s> FnOnce(&'s PassiveEpoch<'s, 'env, T>) -> Result<R>,
+    ) -> Result<R> {
         // SAFETY: `win_handle` is a valid MPI window handle. Passing `0` for
         // the assert value is always valid (no optimization hints).
         let ret = unsafe { ffi::ferrompi_win_lock_all(0, self.win_handle) };
         Error::check_with_op(ret, "win_lock_all")?;
-        Ok(WinLockAllGuard { window: self })
-    }
-}
-
-impl<T: MpiDatatype> Win<T> {
-    /// Locally complete pending RMA operations to a specific target rank.
-    ///
-    /// Ensures that all preceding RMA operations issued to `rank` have
-    /// completed locally: the origin buffer is safe to reuse, but the remote
-    /// process may not yet have observed the writes.
-    ///
-    /// # Safety (MPI contract)
-    ///
-    /// This function **must** be called inside an active passive-target epoch
-    /// (i.e., between [`Win::lock`] / [`Win::lock_all`] and the corresponding
-    /// unlock). Calling it outside a passive-target epoch is undefined behavior
-    /// per the MPI standard.
-    ///
-    /// # Arguments
-    ///
-    /// * `rank` - The target rank whose pending operations are to be locally
-    ///   completed (0-based, within the window's communicator).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::Mpi { operation: Some("win_flush_local"), .. }` if the
-    /// MPI call fails.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{Mpi, Win, LockType};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let win = Win::<f64>::allocate(&world, 8).unwrap();
-    ///
-    /// {
-    ///     let _guard = win.lock(LockType::Shared, 0).unwrap();
-    ///     win.flush_local(0).unwrap();
-    ///     // Lock released when `_guard` is dropped
-    /// }
-    /// ```
-    pub fn flush_local(&self, rank: i32) -> Result<()> {
-        // SAFETY: `win_handle` is a valid MPI window handle. `rank` is
-        // caller-supplied; MPI validates it against the window's communicator.
-        // The caller is responsible for ensuring this is called within a
-        // passive-target epoch.
-        let ret = unsafe { ffi::ferrompi_win_flush_local(rank, self.win_handle) };
-        Error::check_with_op(ret, "win_flush_local")
+        self.run_passive_epoch(
+            "win_unlock_all",
+            // SAFETY: `win_handle` is a valid MPI window handle, and the
+            // `MPI_Win_lock_all` above opened the epoch this call ends.
+            |win_handle| unsafe { ffi::ferrompi_win_unlock_all(win_handle) },
+            f,
+        )
     }
 
-    /// Locally complete pending RMA operations to all target ranks.
-    ///
-    /// Ensures that all preceding RMA operations issued to any target have
-    /// completed locally. The origin buffers are safe to reuse, but remote
-    /// processes may not yet have observed the writes.
-    ///
-    /// # Safety (MPI contract)
-    ///
-    /// This function **must** be called inside an active passive-target epoch.
-    /// Calling it outside a passive-target epoch is undefined behavior per the
-    /// MPI standard.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::Mpi { operation: Some("win_flush_local_all"), .. }` if
-    /// the MPI call fails.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{Mpi, Win};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let win = Win::<f64>::allocate(&world, 8).unwrap();
-    ///
-    /// {
-    ///     let _guard = win.lock_all().unwrap();
-    ///     win.flush_local_all().unwrap();
-    ///     // Locks released when `_guard` is dropped
-    /// }
-    /// ```
-    pub fn flush_local_all(&self) -> Result<()> {
-        // SAFETY: `win_handle` is a valid MPI window handle. The caller is
-        // responsible for ensuring this is called within a passive-target epoch.
-        let ret = unsafe { ffi::ferrompi_win_flush_local_all(self.win_handle) };
-        Error::check_with_op(ret, "win_flush_local_all")
-    }
-
-    /// Synchronize the public and private copies of this window's local memory.
-    ///
-    /// Wraps `MPI_Win_sync`, a local memory barrier: it does not communicate
-    /// and does not complete pending RMA operations. MPI allows it only inside
-    /// a passive-target epoch (MPI-4.0 section 12.5.4), that is between
-    /// [`Win::lock`] or [`Win::lock_all`] and the matching unlock; outside one,
-    /// MPICH returns an error.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::Mpi { operation: Some("win_sync"), .. }` if the MPI
-    /// call fails, including when no passive-target epoch is open.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{Mpi, Win};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let win = Win::<f64>::allocate(&world, 8).unwrap();
-    ///
-    /// {
-    ///     let _guard = win.lock_all().unwrap();
-    ///     win.sync().unwrap();
-    ///     // The epoch ends when `_guard` is dropped
-    /// }
-    /// ```
-    pub fn sync(&self) -> Result<()> {
-        // SAFETY: `win_handle` is a valid MPI window handle. `MPI_Win_sync` is
-        // valid only inside a passive-target epoch, which the caller must open;
-        // outside one MPI returns an error rather than touching memory.
-        let ret = unsafe { ffi::ferrompi_win_sync(self.win_handle) };
-        Error::check_with_op(ret, "win_sync")
+    /// Runs `f` in the epoch the caller just opened, then makes the closing
+    /// call `close`, whatever `f` did. A closing call refused before MPI ran
+    /// it aborts. Otherwise a panic in `f` resumes after the closing call, and
+    /// `f`'s error is returned before the closing call's.
+    fn run_passive_epoch<'env, R>(
+        &mut self,
+        close_op: &'static str,
+        close: impl FnOnce(i32) -> c_int,
+        f: impl for<'s> FnOnce(&'s PassiveEpoch<'s, 'env, T>) -> Result<R>,
+    ) -> Result<R> {
+        let epoch = PassiveEpoch {
+            win: &*self,
+            scope: PhantomData,
+            env: PhantomData,
+        };
+        let outcome = catch_unwind(AssertUnwindSafe(|| f(&epoch)));
+        let ret = close(self.win_handle);
+        if ret == FERROMPI_ERR_FINALIZED || ret == FERROMPI_ERR_THREAD_LEVEL {
+            epoch_abort("an RMA epoch's closing call was refused");
+        }
+        match outcome {
+            Err(payload) => resume_unwind(payload),
+            Ok(result) => {
+                let value = result?;
+                Error::check_with_op(ret, close_op).map(|()| value)
+            }
+        }
     }
 }
 
@@ -2133,14 +2276,13 @@ impl<T: MpiDatatype> Win<T> {
     /// `request.wait()` returns, the `origin` slice can be safely overwritten
     /// or dropped. **Remote completion is not guaranteed by the request**: the
     /// remote rank does not observe the written data until the surrounding epoch
-    /// is flushed or closed (a lock guard's `flush`, or the unlock when the guard
-    /// drops).
+    /// is flushed or closed ([`PassiveEpoch::flush`], or the unlock that ends the
+    /// epoch).
     ///
     /// # Local vs. Remote completion
     ///
     /// - `request.wait()` → local buffer is free to reuse.
-    /// - Flush or unlock (guard drop) → remote rank observes the
-    ///   write.
+    /// - Flush or unlock → remote rank observes the write.
     ///
     /// Both are required for the full operation to be visible end-to-end.
     ///
@@ -2175,10 +2317,10 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// # Epoch Requirement
     ///
-    /// `rput` must be called inside a passive-target epoch, that is between
-    /// [`Win::lock`] or [`Win::lock_all`] and the unlock when the guard
-    /// drops. MPI does not allow request-based RMA in fence or PSCW epochs;
-    /// calling it anywhere else is erroneous.
+    /// `rput` must be called inside a passive-target epoch, that is inside the
+    /// closure of [`Win::lock`] or [`Win::lock_all`]. MPI does not allow
+    /// request-based RMA in fence or PSCW epochs; calling it anywhere else is
+    /// erroneous.
     ///
     /// # Example
     ///
@@ -2187,19 +2329,22 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let win = Win::<i32>::allocate(&world, 4).unwrap();
+    /// let mut win = Win::<i32>::allocate(&world, 4).unwrap();
     ///
     /// if world.rank() == 0 {
-    ///     // Open a passive-target epoch on rank 1
-    ///     let _guard = win.lock(LockType::Exclusive, 1).unwrap();
     ///     let buf = [10i32, 20, 30, 40];
-    ///     // Post the put; local buf is safe to reuse once req.wait() returns
-    ///     let req = win.rput(&buf, 1, 0, buf.len() as i64).unwrap();
-    ///     req.wait().unwrap(); // local buffer safe to reuse after this
-    ///     // Remote write completes when _guard drops (MPI_Win_unlock)
+    ///     // Open a passive-target epoch on rank 1
+    ///     win.lock(LockType::Exclusive, 1, |e| {
+    ///         // Post the put; local buf is safe to reuse once req.wait() returns
+    ///         let req = e.rput(&buf, 1, 0, buf.len() as i64)?;
+    ///         req.wait()?; // local buffer safe to reuse after this
+    ///         Ok(())
+    ///     })
+    ///     .unwrap();
+    ///     // The remote write completed when the closure ended (MPI_Win_unlock)
     /// }
-    /// // Rank 1 can read its local memory after a barrier and a lock (or
-    /// // `sync`) on its own window
+    /// // Rank 1 can read its local memory after a barrier and a lock on its
+    /// // own window
     /// ```
     pub fn rput(
         &self,
@@ -2384,10 +2529,10 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// # Epoch Requirement
     ///
-    /// `rget` must be called inside a passive-target epoch, that is between
-    /// [`Win::lock`] or [`Win::lock_all`] and the unlock when the guard
-    /// drops. MPI does not allow request-based RMA in fence or PSCW epochs;
-    /// calling it anywhere else is erroneous.
+    /// `rget` must be called inside a passive-target epoch, that is inside the
+    /// closure of [`Win::lock`] or [`Win::lock_all`]. MPI does not allow
+    /// request-based RMA in fence or PSCW epochs; calling it anywhere else is
+    /// erroneous.
     ///
     /// # Cancellation
     ///
@@ -2404,18 +2549,20 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let win = Win::<i32>::allocate(&world, 4).unwrap();
+    /// let mut win = Win::<i32>::allocate(&world, 4).unwrap();
     ///
     /// if world.rank() == 0 {
-    ///     // Open a shared passive-target epoch on rank 1
-    ///     let _guard = win.lock(LockType::Shared, 1).unwrap();
     ///     let mut buf = [0i32; 4];
-    ///     // Post the get; buf contains the data once req.wait() returns
-    ///     let count = buf.len() as i64;
-    ///     let req = win.rget(&mut buf, 1, 0, count).unwrap();
-    ///     req.wait().unwrap(); // buf is valid and ready to read after this
+    ///     // Open a shared passive-target epoch on rank 1
+    ///     win.lock(LockType::Shared, 1, |e| {
+    ///         // Post the get; buf contains the data once req.wait() returns
+    ///         let count = buf.len() as i64;
+    ///         let req = e.rget(&mut buf, 1, 0, count)?;
+    ///         req.wait()?; // buf is valid and ready to read after this
+    ///         Ok(())
+    ///     })
+    ///     .unwrap();
     ///     assert_eq!(buf, [0i32; 4]);
-    ///     // _guard drops here (MPI_Win_unlock)
     /// }
     /// ```
     pub fn rget(
@@ -2620,9 +2767,9 @@ impl<T: MpiDatatype> Win<T> {
     /// # Epoch Requirement
     ///
     /// `raccumulate` must be called inside a passive-target epoch, that is
-    /// between [`Win::lock`] or [`Win::lock_all`] and the unlock when the
-    /// guard drops. MPI does not allow request-based RMA in fence or PSCW
-    /// epochs; calling it anywhere else is erroneous.
+    /// inside the closure of [`Win::lock`] or [`Win::lock_all`]. MPI does not
+    /// allow request-based RMA in fence or PSCW epochs; calling it anywhere
+    /// else is erroneous.
     ///
     /// # Example
     ///
@@ -2645,17 +2792,20 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// // Request-based RMA is valid only in a passive-target epoch
     /// if world.rank() == 0 {
-    ///     let _guard = win.lock(LockType::Exclusive, 1).unwrap();
     ///     let buf = [10i32, 20, 30, 40];
-    ///     let req = win.raccumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum).unwrap();
-    ///     req.wait().unwrap(); // origin buffer safe to reuse after this
-    ///     // _guard drops here (MPI_Win_unlock): the update completes at rank 1
+    ///     win.lock(LockType::Exclusive, 1, |e| {
+    ///         let req = e.raccumulate(&buf, 1, 0, buf.len() as i64, ReduceOp::Sum)?;
+    ///         req.wait()?; // origin buffer safe to reuse after this
+    ///         Ok(())
+    ///     })
+    ///     .unwrap();
+    ///     // The closure ended with MPI_Win_unlock: the update completed at rank 1
     /// }
     ///
     /// world.barrier().unwrap();
     /// if world.rank() == 1 {
     ///     // Locking its own window makes the update visible to rank 1's loads
-    ///     let _guard = win.lock(LockType::Shared, 1).unwrap();
+    ///     win.lock(LockType::Shared, 1, |_| Ok(())).unwrap();
     ///     assert_eq!(win.local_slice(), &[11, 22, 33, 44]);
     /// }
     /// ```
@@ -3249,8 +3399,9 @@ impl<T: MpiDatatype> Drop for LockGuard<'_, T> {
         };
         // SAFETY: The window handle is valid (borrowed from SharedWindow)
         // and the rank was locked in the constructor. This unlock matches
-        // the lock call that created this guard.
-        unsafe { ffi::ferrompi_win_unlock(self.rank, self.window.win_handle) };
+        // the lock call that created this guard. It calls the raw declaration
+        // because `drop_guard` above is this call's lifecycle check.
+        unsafe { ffi::raw::ferrompi_win_unlock(self.rank, self.window.win_handle) };
     }
 }
 
@@ -3319,153 +3470,9 @@ impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
         };
         // SAFETY: The window handle is valid (borrowed from SharedWindow)
         // and all ranks were locked in the constructor. This unlock_all
-        // matches the lock_all call that created this guard.
-        unsafe { ffi::ferrompi_win_unlock_all(self.window.win_handle) };
-    }
-}
-
-// ============================================================================
-// WinLockGuard — RAII single-rank lock guard for Win<T>
-// ============================================================================
-
-/// RAII guard for a single-rank passive-target lock on a [`Win`].
-///
-/// Created by [`Win::lock()`]. When dropped, the lock on the specified rank
-/// is automatically released via `MPI_Win_unlock`.
-///
-/// The `'g` lifetime tracks the borrow of the parent `Win<T>`. The guard
-/// cannot outlive the window it was created from.
-///
-/// # Example
-///
-/// ```no_run
-/// use ferrompi::{Mpi, Win, LockType};
-///
-/// let mpi = Mpi::init().unwrap();
-/// let world = mpi.world();
-/// let win = Win::<f64>::allocate(&world, 8).unwrap();
-///
-/// {
-///     let guard = win.lock(LockType::Shared, 0).unwrap();
-///     guard.flush().unwrap();
-/// } // MPI_Win_unlock called here
-/// ```
-pub struct WinLockGuard<'g, T: MpiDatatype> {
-    window: &'g Win<T>,
-    rank: i32,
-}
-
-impl<T: MpiDatatype> WinLockGuard<'_, T> {
-    /// Flush pending RMA operations to the locked rank.
-    ///
-    /// Ensures that all preceding RMA operations (put, get, accumulate)
-    /// issued to the locked rank are completed at the target before this
-    /// call returns.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::Mpi { operation: Some("win_flush"), .. }` if the MPI
-    /// flush operation fails.
-    pub fn flush(&self) -> Result<()> {
-        // SAFETY: `window.win_handle` is valid — it is borrowed from a live
-        // `Win`. `self.rank` was locked in `Win::lock`, so a flush to that
-        // rank is legal within this epoch.
-        let ret = unsafe { ffi::ferrompi_win_flush(self.rank, self.window.win_handle) };
-        Error::check_with_op(ret, "win_flush")
-    }
-}
-
-impl<T: MpiDatatype> Drop for WinLockGuard<'_, T> {
-    fn drop(&mut self) {
-        let Some(_call) = rt::drop_guard("WinLockGuard") else {
-            return;
-        };
-        // SAFETY: `window.win_handle` is valid — it is borrowed from a live
-        // `Win`. The rank was locked in `Win::lock`; this unlock matches that
-        // lock call. Drop is only called once.
-        unsafe { ffi::ferrompi_win_unlock(self.rank, self.window.win_handle) };
-    }
-}
-
-// ============================================================================
-// WinLockAllGuard — RAII lock-all guard for Win<T>
-// ============================================================================
-
-/// RAII guard for a lock-all passive-target epoch on a [`Win`].
-///
-/// Created by [`Win::lock_all()`]. When dropped, all shared locks are
-/// automatically released via `MPI_Win_unlock_all`.
-///
-/// The `'g` lifetime tracks the borrow of the parent `Win<T>`. The guard
-/// cannot outlive the window it was created from.
-///
-/// # Example
-///
-/// ```no_run
-/// use ferrompi::{Mpi, Win};
-///
-/// let mpi = Mpi::init().unwrap();
-/// let world = mpi.world();
-/// let win = Win::<f64>::allocate(&world, 8).unwrap();
-///
-/// {
-///     let guard = win.lock_all().unwrap();
-///     guard.flush_all().unwrap();
-/// } // MPI_Win_unlock_all called here
-/// ```
-pub struct WinLockAllGuard<'g, T: MpiDatatype> {
-    window: &'g Win<T>,
-}
-
-impl<T: MpiDatatype> WinLockAllGuard<'_, T> {
-    /// Flush all pending RMA operations to all ranks.
-    ///
-    /// Ensures that all preceding RMA operations issued to any rank in the
-    /// window are completed at their respective targets.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::Mpi { operation: Some("win_flush_all"), .. }` if the
-    /// MPI flush_all operation fails.
-    pub fn flush_all(&self) -> Result<()> {
-        // SAFETY: `window.win_handle` is valid — it is borrowed from a live
-        // `Win`. All ranks were locked in `Win::lock_all`, so a flush_all is
-        // legal within this epoch.
-        let ret = unsafe { ffi::ferrompi_win_flush_all(self.window.win_handle) };
-        Error::check_with_op(ret, "win_flush_all")
-    }
-
-    /// Flush pending RMA operations to a specific rank.
-    ///
-    /// Ensures that all preceding RMA operations issued to `rank` are
-    /// completed at the target.
-    ///
-    /// # Arguments
-    ///
-    /// * `rank` - The target rank to flush (0-based).
-    ///
-    /// # Errors
-    ///
-    /// Returns `Error::Mpi { operation: Some("win_flush"), .. }` if the MPI
-    /// flush operation fails.
-    pub fn flush(&self, rank: i32) -> Result<()> {
-        // SAFETY: `window.win_handle` is valid — it is borrowed from a live
-        // `Win`. All ranks were locked in `Win::lock_all`, so flushing any
-        // individual rank is legal within this epoch.
-        let ret = unsafe { ffi::ferrompi_win_flush(rank, self.window.win_handle) };
-        Error::check_with_op(ret, "win_flush")
-    }
-}
-
-impl<T: MpiDatatype> Drop for WinLockAllGuard<'_, T> {
-    fn drop(&mut self) {
-        let Some(_call) = rt::drop_guard("WinLockAllGuard") else {
-            return;
-        };
-        // SAFETY: `window.win_handle` is valid — it is borrowed from a live
-        // `Win`. All ranks were locked in `Win::lock_all`; this unlock_all
-        // matches that call. Drop is only called once.
-        unsafe { ffi::ferrompi_win_unlock_all(self.window.win_handle) };
+        // matches the lock_all call that created this guard. It calls the raw
+        // declaration because `drop_guard` above is this call's lifecycle check.
+        unsafe { ffi::raw::ferrompi_win_unlock_all(self.window.win_handle) };
     }
 }
 

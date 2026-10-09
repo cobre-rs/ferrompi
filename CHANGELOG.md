@@ -171,6 +171,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `no_precede()` on the closing one with `Error::InvalidArgument`. Migration:
   put the operations of each epoch in one closure and declare their buffers
   before it.
+- **Passive-target epochs are closures:** `Win::lock(kind, rank, |e| ..)` and
+  `Win::lock_all(|e| ..)` run the closure with a `PassiveEpoch` and always
+  unlock, also when the closure panics. `flush`, `flush_all`, `flush_local`,
+  `flush_local_all` and `sync` are `PassiveEpoch` methods; `Win::flush_local`,
+  `Win::flush_local_all`, `Win::sync`, `WinLockGuard` and `WinLockAllGuard` are
+  removed. Migration: move the guard's scope into the closure and call the
+  flushes on its argument.
 
 ### Added
 

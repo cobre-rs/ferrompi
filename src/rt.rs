@@ -26,13 +26,13 @@
 //!
 //! [`enter_completion`] and [`check_completion`] are the entry for the calls
 //! that complete, test or cancel a request that is already pending, or close an
-//! RMA epoch that is already open (the closing fence, `MPI_Win_complete`, and
-//! `MPI_Win_wait`/`MPI_Win_test` of an exposure epoch). They differ
-//! from [`enter`] and [`check`] only in admitting `Finalizing`, under the
-//! thread rule of the granted level, including a counted call that read an
-//! active state just before the `Finalizing` store. The error-code lookup
-//! behind `Error::from_code` takes the same entry, so it never overlaps
-//! `MPI_Finalize`.
+//! RMA epoch that is already open (the closing fence, `MPI_Win_complete`,
+//! `MPI_Win_unlock`/`MPI_Win_unlock_all`, and `MPI_Win_wait`/`MPI_Win_test` of
+//! an exposure epoch). They differ from [`enter`] and [`check`] only in
+//! admitting `Finalizing`, under the thread rule of the granted level,
+//! including a counted call that read an active state just before the
+//! `Finalizing` store. The error-code lookup behind `Error::from_code` takes the
+//! same entry, so it never overlaps `MPI_Finalize`.
 //!
 //! A nonblocking scope holds a [`ScopeToken`] for its whole extent, at every
 //! thread level: [`open_scope`] refuses once `Finalizing` is stored, and
@@ -574,13 +574,13 @@ fn enter_other(state: u8) -> std::result::Result<InFlight, c_int> {
 
 /// [`enter`] for the calls that complete, test or cancel a request that is
 /// already pending, or close an RMA epoch that is already open (the closing
-/// fence, `MPI_Win_complete`, and `MPI_Win_wait`/`MPI_Win_test` of an exposure
-/// epoch). It differs only in `Finalizing`, which it admits under the
-/// thread rule of the granted level: the init-thread check at
-/// `Single`/`Funneled`, the counted path at `Serialized`/`Multiple`. That
-/// includes a call that read an active state just before the `Finalizing`
-/// store. `Finalized` is still refused. Also the entry of the error-code
-/// lookup.
+/// fence, `MPI_Win_complete`, `MPI_Win_unlock`/`MPI_Win_unlock_all`, and
+/// `MPI_Win_wait`/`MPI_Win_test` of an exposure epoch). It differs only in
+/// `Finalizing`, which it admits under the thread rule of the granted level:
+/// the init-thread check at `Single`/`Funneled`, the counted path at
+/// `Serialized`/`Multiple`. That includes a call that read an active state just
+/// before the `Finalizing` store. `Finalized` is still refused. Also the entry
+/// of the error-code lookup.
 #[inline(always)]
 pub(crate) fn enter_completion() -> std::result::Result<InFlight, c_int> {
     // Relaxed: see `enter`'s comment.

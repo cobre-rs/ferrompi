@@ -6,8 +6,8 @@
 //! 2. Every rank posts an `iallreduce`; `cancel()` on it must return
 //!    `Err(NotSupported)`, and the still-pending request then completes
 //!    normally via `wait()`, reporting the empty status.
-//! 3. (with the `rma` feature) every rank `rput`s into its own window under
-//!    a shared lock; `cancel()` on the returned request must return
+//! 3. (with the `rma` feature) every rank `rput`s into its own window inside a
+//!    shared-lock closure; `cancel()` on the returned request must return
 //!    `Err(NotSupported)`, and it then completes normally via `wait()`,
 //!    reporting the empty status.
 // mpi-test: np=2
@@ -71,18 +71,20 @@ fn main() -> Result<()> {
     // Test 3: cancel of an RMA request is refused.
     #[cfg(feature = "rma")]
     {
-        let win = Win::<i32>::allocate(&world, 1)?;
-        let guard = win.lock(LockType::Shared, rank)?;
-        let mut req = win.rput(&[7], rank, 0, 1)?;
-        let cancel_ok = matches!(req.cancel(), Err(Error::NotSupported(_)));
-        common::check(&world, cancel_ok, "cancel on rput returns NotSupported");
-        let status = req.wait()?;
-        common::check(
-            &world,
-            common::is_empty_status(&status),
-            "rput waits to the empty status",
-        );
-        drop(guard);
+        let mut win = Win::<i32>::allocate(&world, 1)?;
+        let origin = [7i32];
+        win.lock(LockType::Shared, rank, |e| {
+            let mut req = e.rput(&origin, rank, 0, 1)?;
+            let cancel_ok = matches!(req.cancel(), Err(Error::NotSupported(_)));
+            common::check(&world, cancel_ok, "cancel on rput returns NotSupported");
+            let status = req.wait()?;
+            common::check(
+                &world,
+                common::is_empty_status(&status),
+                "rput waits to the empty status",
+            );
+            Ok(())
+        })?;
     }
 
     Ok(())
