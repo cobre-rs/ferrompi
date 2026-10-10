@@ -232,7 +232,7 @@ fn fmt_mpi(
 /// failures on those objects return `Err` instead of aborting through MPI's
 /// default handler.
 ///
-/// Nine paths end the process instead of returning `Err`:
+/// These paths end the process instead of returning `Err`:
 /// - an error inside `MPI_Init_thread` itself, before any error handler is
 ///   installed: MPI's default handler is `MPI_ERRORS_ARE_FATAL`, so
 ///   [`Mpi::init`](crate::Mpi::init)/[`Mpi::init_thread`](crate::Mpi::init_thread)
@@ -261,8 +261,13 @@ fn fmt_mpi(
 ///   since it then waits for the receive before returning;
 /// - in a debug build at
 ///   [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized), a
-///   [`Request::wait`](crate::Request::wait) that overlaps another thread's MPI
-///   call aborts the process, since it can neither run nor hand the request back;
+///   [`Request::wait`](crate::Request::wait), the final wait of a nonblocking
+///   [`scope`](crate::scope) or of a passive-target epoch, or an RMA epoch's
+///   closing call, that overlaps another thread's MPI call aborts the process,
+///   since it can neither run nor hand the request or epoch back;
+/// - the final wait of a nonblocking [`scope`](crate::scope) or of a
+///   passive-target epoch that completes none of its pending requests aborts
+///   the process, since the borrowed buffers cannot be released;
 /// - [`Communicator::abort`](crate::Communicator::abort) aborts the process
 ///   by design.
 ///

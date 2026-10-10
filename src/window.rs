@@ -4439,6 +4439,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "calls the C layer")]
     fn check_fence_asserts_rejects_no_succeed_open_and_no_precede_close() {
         let none = WinFenceAssert::none();
         let no_succeed = WinFenceAssert::no_succeed();
