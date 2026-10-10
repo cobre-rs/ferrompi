@@ -2703,6 +2703,12 @@ fn closing_result<R>(ret: c_int, close_op: &'static str, result: Result<R>) -> R
     Error::check_with_op(ret, close_op).map(|()| value)
 }
 
+/// Whether a `ferrompi_win_post` that returned `ret` ran MPI: every return but
+/// the lifecycle guard's two refusals, which come before MPI sees the call.
+fn post_ran_mpi(ret: c_int) -> bool {
+    ret != FERROMPI_ERR_FINALIZED && ret != FERROMPI_ERR_THREAD_LEVEL
+}
+
 impl<T: MpiDatatype> Win<T> {
     /// Create an RMA window over a buffer the window then owns.
     ///
@@ -3166,9 +3172,9 @@ impl<T: MpiDatatype> Win<T> {
         // `assert.bits()` is either 0 or a combination of MPI_MODE_* constants
         // returned by the MPI implementation.
         let ret = unsafe { ffi::ferrompi_win_post(group.handle, assert.bits(), self.win_handle) };
-        // Any other return means MPI ran the call, and a post that failed may
-        // still have opened the epoch (MPI-4.1 §9.4), so the window leaks.
-        if ret != FERROMPI_ERR_FINALIZED && ret != FERROMPI_ERR_THREAD_LEVEL {
+        // A post that failed may still have opened the epoch (MPI-4.1 §9.4),
+        // so the window leaks.
+        if post_ran_mpi(ret) {
             self.exposure_open.set(true);
         }
         Error::check_with_op(ret, "win_post")
@@ -4108,10 +4114,10 @@ impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_fence_asserts, check_rma_target, window_word, Access, Error, Win, WinFenceAssert,
-        WinPscwAssert, WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT, WIN_FREED,
+        check_fence_asserts, check_rma_target, post_ran_mpi, window_word, Access, Error, Win,
+        WinFenceAssert, WinPscwAssert, WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT, WIN_FREED,
     };
-    use crate::group::Group;
+    use crate::error::{FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL};
     use crate::persistent::vec_buf_mut;
     use crate::{MpiDatatype, ReduceOp};
     use std::cell::Cell;
@@ -4305,25 +4311,19 @@ mod tests {
         assert!(matches!(win.into_buffer(), Err(Error::InvalidState { .. })));
     }
 
-    /// A `post` that was not refused before MPI could run it counts as opened,
-    /// even when it returns an error (MPI-4.1 §9.4). The sentinel window makes
-    /// the C shim return `MPI_ERR_WIN` without calling MPI, which stands in for
-    /// a call that failed.
+    /// A `post` counts as opened whenever MPI ran it, whatever it returned
+    /// (MPI-4.1 §9.4); only the guard's refusals leave the epoch closed. The
+    /// decision is a pure function of the return code: a sentinel window makes
+    /// the C shim return an error without calling MPI, but `post` then converts
+    /// it with MPI calls that Open MPI aborts on before initialization.
     #[test]
-    #[cfg_attr(miri, ignore = "calls the C layer")]
-    fn post_that_returned_an_mpi_error_counts_as_open() {
-        let win = Win::<u64> {
-            win_handle: WIN_FREED,
-            local_ptr: NonNull::dangling(),
-            local_len: 0,
-            words: Box::new([]),
-            buffer: Some(Vec::new()),
-            exposure_open: Cell::new(false),
-        };
-        assert!(win
-            .post(&Group { handle: -1 }, WinPscwAssert::none())
-            .is_err());
-        assert!(win.exposure_open.get());
+    fn post_counts_as_open_whenever_mpi_ran() {
+        assert!(post_ran_mpi(0));
+        // MPI error codes are positive; the guard's refusals are negative, so
+        // any positive code stands for a failed call that ran MPI.
+        assert!(post_ran_mpi(1));
+        assert!(!post_ran_mpi(FERROMPI_ERR_FINALIZED));
+        assert!(!post_ran_mpi(FERROMPI_ERR_THREAD_LEVEL));
     }
 
     /// The fetch helpers validate the op before the target and refuse before any
