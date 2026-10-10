@@ -73,10 +73,11 @@ extern "C" {
 
 // RMA counterpart of the block above: a non-status return with no MPI call
 // (mode-value constants), or called from a `Drop` impl or under an in-flight
-// token its caller holds (`ferrompi_win_free` and the window constructors).
-// `Win::into_buffer` and the constructors also take the debug `Serialized`
-// overlap check; `Drop for Win` cannot report a refusal, so its free is not
-// checked.
+// token its caller holds (`ferrompi_win_free`, the window constructors, and
+// `ferrompi_win_shared_query`, which `Win::allocate_shared` calls inside its
+// creating call's span). `Win::into_buffer` and the constructors also take the
+// debug `Serialized` overlap check; `Drop for Win` cannot report a refusal, so
+// its free is not checked.
 #[cfg(feature = "rma")]
 extern "C" {
     pub fn ferrompi_win_allocate_shared(
@@ -103,6 +104,13 @@ extern "C" {
         comm: int32_t,
         baseptr: *mut *mut c_void,
         win: *mut int32_t,
+    ) -> c_int;
+    pub fn ferrompi_win_shared_query(
+        win: int32_t,
+        rank: int32_t,
+        size: *mut int64_t,
+        disp_unit: *mut int32_t,
+        baseptr: *mut *mut c_void,
     ) -> c_int;
     pub fn ferrompi_win_free(win: int32_t) -> c_int;
     pub fn ferrompi_win_fence_mode_values(out: *mut int32_t);
@@ -1072,18 +1080,6 @@ guarded_extern! {
         slot: int32_t,
         commute: int32_t,
         out_handle: *mut int32_t,
-    ) -> c_int;
-
-    // ============================================================
-    // RMA / Window
-    // ============================================================
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_shared_query(
-        win: int32_t,
-        rank: int32_t,
-        size: *mut int64_t,
-        disp_unit: *mut int32_t,
-        baseptr: *mut *mut c_void,
     ) -> c_int;
 
     // ============================================================

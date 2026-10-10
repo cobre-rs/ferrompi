@@ -3229,6 +3229,7 @@ impl<T: MpiDatatype> Win<T> {
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut win_handle: i32 = -1;
         let mut unified: i32 = 0;
+        let mut shared = Ok(None);
 
         counted_window_call("win_allocate_shared", &mut win_handle, |handle| {
             // SAFETY: We pass valid out-parameter pointers to the C shim, which
@@ -3236,7 +3237,7 @@ impl<T: MpiDatatype> Win<T> {
             // model. The C shim validates the comm handle. The returned baseptr
             // is either a valid MPI-allocated pointer or null (only valid if
             // local_count == 0).
-            unsafe {
+            let ret = unsafe {
                 ffi::ferrompi_win_allocate_shared(
                     size,
                     disp_unit,
@@ -3246,7 +3247,49 @@ impl<T: MpiDatatype> Win<T> {
                     handle,
                     &mut unified,
                 )
+            };
+            if ret == 0 && unified != 0 {
+                // The queries run inside the creating call's in-flight span, so
+                // `rt` cannot refuse this constructor after MPI created the
+                // window. A failed query leaves the creating call's zero return
+                // unchanged, so the window stays counted.
+                shared = (0..words.len() as i32)
+                    .map(|rank| {
+                        let mut region_size: i64 = 0;
+                        let mut region_disp_unit: i32 = 0;
+                        let mut region_base: *mut std::ffi::c_void = std::ptr::null_mut();
+                        // SAFETY: We pass valid out-parameter pointers. The shim
+                        // returned zero, so `*handle` is the handle of the window
+                        // it created, which stays alive and counted on every path
+                        // out of this function.
+                        let ret = unsafe {
+                            ffi::ferrompi_win_shared_query(
+                                *handle,
+                                rank,
+                                &mut region_size,
+                                &mut region_disp_unit,
+                                &mut region_base,
+                            )
+                        };
+                        Error::check_with_op(ret, "win_shared_query")?;
+                        let count = region_size as usize / size_of::<T>();
+                        let base = if count == 0 {
+                            // MPI returns null on some stacks and a non-null pointer on
+                            // others for an empty segment: either way it is no region.
+                            NonNull::<T>::dangling()
+                        } else {
+                            NonNull::new(region_base.cast::<T>()).ok_or_else(|| {
+                                Error::Internal(
+                                    "MPI_Win_shared_query returned null for non-zero size".into(),
+                                )
+                            })?
+                        };
+                        Ok((base, count))
+                    })
+                    .collect::<Result<Box<[_]>>>()
+                    .map(Some);
             }
+            ret
         })?;
 
         let local_ptr = if local_count == 0 {
@@ -3259,44 +3302,6 @@ impl<T: MpiDatatype> Win<T> {
             })?
         };
 
-        let shared = if unified != 0 {
-            let mut regions = Vec::with_capacity(words.len());
-            for rank in 0..words.len() as i32 {
-                let mut region_size: i64 = 0;
-                let mut region_disp_unit: i32 = 0;
-                let mut region_base: *mut std::ffi::c_void = std::ptr::null_mut();
-                // SAFETY: We pass valid out-parameter pointers, and `win_handle`
-                // is the handle of the window created above, which stays alive
-                // and counted on every path out of this function.
-                let ret = unsafe {
-                    ffi::ferrompi_win_shared_query(
-                        win_handle,
-                        rank,
-                        &mut region_size,
-                        &mut region_disp_unit,
-                        &mut region_base,
-                    )
-                };
-                Error::check_with_op(ret, "win_shared_query")?;
-                let count = region_size as usize / size_of::<T>();
-                let base = if count == 0 {
-                    // MPI returns null on some stacks and a non-null pointer on
-                    // others for an empty segment: either way it is no region.
-                    NonNull::<T>::dangling()
-                } else {
-                    NonNull::new(region_base.cast::<T>()).ok_or_else(|| {
-                        Error::Internal(
-                            "MPI_Win_shared_query returned null for non-zero size".into(),
-                        )
-                    })?
-                };
-                regions.push((base, count));
-            }
-            Some(regions.into_boxed_slice())
-        } else {
-            None
-        };
-
         Ok(Win {
             win_handle,
             local_ptr,
@@ -3304,7 +3309,7 @@ impl<T: MpiDatatype> Win<T> {
             words,
             buffer: None,
             exposure_open: Cell::new(false),
-            shared,
+            shared: shared?,
         })
     }
 
