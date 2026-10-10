@@ -348,15 +348,18 @@ pub enum Error {
         operation: Option<&'static str>,
     },
 
-    /// Operation not supported. Two sources:
+    /// Operation not supported. Three sources:
     /// - an MPI 4.0 operation (a persistent collective or
     ///   [`Mpi::create_from_group`](crate::Mpi::create_from_group)) when
     ///   ferrompi was built against an MPI older than 4.0 other than Open
     ///   MPI 5, which implements both;
     /// - [`Request::cancel`](crate::Request::cancel) on a nonblocking-collective
-    ///   or RMA request.
+    ///   or RMA request;
+    /// - `remote` on a window (feature `rma`) that is not from
+    ///   `Win::allocate_shared`, or whose memory model MPI does not report as
+    ///   `MPI_WIN_UNIFIED`.
     ///
-    /// The string names the operation.
+    /// The string names the operation or what it needs.
     #[error("Operation not supported: {0}")]
     NotSupported(String),
 

@@ -1559,9 +1559,10 @@ fn index_out_of_range(op: &str, index: usize, len: usize) -> ! {
 /// of this process's own region, and [`Win::remote`], [`ActiveEpoch::remote`]
 /// and [`PassiveEpoch::remote`] one of a peer's region of a shared window. The
 /// memory of a window can change while the view lives, because a peer's put or
-/// accumulate writes it, or a fence lands remote writes in it. A `&[T]` over it
-/// would promise the compiler that it does not, so the view hands out elements
-/// by value instead. The `unsafe` methods [`as_slice`](Self::as_slice) and
+/// accumulate writes it, a peer stores into it through a shared window, or a
+/// fence lands remote writes in it. A `&[T]` over it would promise the compiler
+/// that it does not, so the view hands out elements by value instead. The
+/// `unsafe` methods [`as_slice`](Self::as_slice) and
 /// [`as_mut_slice`](Self::as_mut_slice) give a slice to a caller that can meet
 /// the contract their `# Safety` sections state.
 ///
@@ -1717,8 +1718,9 @@ impl<T: MpiDatatype> WinView<'_, T> {
     /// A shared slice over the whole viewed region, for bulk reads that need no
     /// atomic access per element.
     ///
-    /// The slice borrows the view, so it cannot outlive it, nor be the origin of an
-    /// RMA call on its own window, which borrows its origin for the whole epoch.
+    /// The slice borrows the view, so it cannot outlive it. Taken from a view held
+    /// in a local variable, it cannot be the origin of an RMA call on its own
+    /// window either, which borrows its origin for the whole epoch.
     ///
     /// # Safety
     ///
@@ -3404,9 +3406,12 @@ impl<T: MpiDatatype> Win<T> {
     /// the view from the handle with [`ActiveEpoch::local`] or
     /// [`PassiveEpoch::local`].
     ///
-    /// Outside an epoch, a peer's completed update is guaranteed visible only
-    /// after this process locks its own window or calls `sync` inside a
-    /// passive-target epoch (MPI-4.1 §12.7 rule 6, p.606).
+    /// A put or accumulate that a fence or [`wait_exposure`](Self::wait_exposure)
+    /// at this process completed is visible when that call returns. One that a
+    /// peer completed by its unlock or flush is guaranteed visible only after
+    /// this process's next fence, `wait_exposure`, lock or `lock_all` on the
+    /// window, or `sync` inside a passive-target epoch (MPI-4.1 §12.7, rules 2
+    /// to 4 and 6, p.606).
     ///
     /// # Example
     ///

@@ -12,7 +12,7 @@
 //! valgrind alone cannot see once the memory has been written at least
 //! once.
 //!
-//! Also checks that a zero-count allocation on both window kinds returns
+//! Also checks that a zero-count allocation by both allocating constructors returns
 //! `Ok` with an empty local region, rather than leaking the registered
 //! window on every rank, and that a mixed-count allocation (rank 0 gets 0,
 //! every other rank gets N) still zeroes every nonzero segment.
@@ -73,8 +73,8 @@ fn main() {
         common::check(&world, ok, "reused Win::allocate_shared memory reads zero");
     }
 
-    // A zero-count allocation returns Ok with an empty local region on
-    // both window kinds, rather than leaking the registered window.
+    // A zero-count allocation returns Ok with an empty local region from
+    // both allocating constructors, rather than leaking the registered window.
     {
         let result = Win::<u64>::allocate(&world, 0);
         let ok = match &result {

@@ -159,10 +159,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Win::create` takes ownership of its buffer:** `Win<T>` has no lifetime
   parameter, `Win::create` takes a `Vec<T>`, and `Win::into_buffer`
   (collective) frees the window and returns the buffer (`None` for
-  `Win::allocate`). A dropped or forgotten window never frees a buffer MPI may
-  still use: the buffer is released only after a successful `MPI_Win_free`, and
-  is leaked otherwise. Migration: pass the `Vec` by value and take it back with
-  `into_buffer()`.
+  `Win::allocate` and `Win::allocate_shared`). A dropped or forgotten window
+  never frees a buffer MPI may still use: the buffer is released only after a
+  successful `MPI_Win_free`, and is leaked otherwise. Migration: pass the `Vec`
+  by value and take it back with `into_buffer()`.
 - **Fence and PSCW access epochs are closures:** `Win::fence(open, close,
   |e| ..)` and `Win::start(group, assert, |e| ..)` run the closure with an
   `ActiveEpoch` and always issue the closing fence or `MPI_Win_complete`;
@@ -229,7 +229,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordinary `Win`, with every rank's region cached at creation;
   `win.remote(rank)`, and `e.remote(rank)` on both epoch handles, return a
   `WinView` of that rank's region, or `Error::NotSupported` on a window that is
-  not shared or whose memory model is not `MPI_WIN_UNIFIED`.
+  not shared or whose memory model is not `MPI_WIN_UNIFIED`. Ranks that pass
+  element types of different sizes get `Error::InvalidArgument`.
 - `CollectiveOp<'a, T>`, the op type of the reducing collectives.
 - `AccumulateOp` and `FetchOp`, the op types of the RMA accumulate calls.
 - **`ferrompi::scope` and `Scope`**: nonblocking requests are created inside a
