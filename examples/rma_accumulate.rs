@@ -8,7 +8,7 @@ fn main() -> ferrompi::Result<()> {
 
     // Rank 1 initialises its window
     if world.rank() == 1 {
-        win.local_slice_mut().copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+        win.local().copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
     }
 
     // `buf` is declared before the epoch: MPI may read it until the
@@ -23,7 +23,9 @@ fn main() -> ferrompi::Result<()> {
 
     // The epoch is closed: rank 1's window holds the sums
     if world.rank() == 1 {
-        assert_eq!(win.local_slice(), [11.0, 22.0, 33.0, 44.0]);
+        let mut seen = [0.0f64; 4];
+        win.local().copy_to_slice(&mut seen);
+        assert_eq!(seen, [11.0, 22.0, 33.0, 44.0]);
     }
     Ok(())
 }

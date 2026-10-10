@@ -42,8 +42,7 @@ fn main() {
 
         // Rank 1 initialises its local window before the epoch opens.
         if rank == 1 {
-            win.local_slice_mut()
-                .copy_from_slice(&[1.0f64, 2.0, 3.0, 4.0]);
+            win.local().copy_from_slice(&[1.0f64, 2.0, 3.0, 4.0]);
         }
 
         let buf = [10.0f64, 20.0, 30.0, 40.0];
@@ -64,7 +63,8 @@ fn main() {
 
         if rank == 1 {
             let expected = [11.0f64, 22.0, 33.0, 44.0];
-            let local = win.local_slice();
+            let mut local = [0.0f64; N];
+            win.local().copy_to_slice(&mut local);
             if local != expected {
                 eprintln!("FAIL: rank 1 window after Sum: expected {expected:?}, got {local:?}");
                 local_ok = false;
@@ -88,8 +88,7 @@ fn main() {
 
         // Rank 1 initialises its local window before the epoch opens.
         if rank == 1 {
-            win.local_slice_mut()
-                .copy_from_slice(&[1.0f64, 2.0, 3.0, 4.0]);
+            win.local().copy_from_slice(&[1.0f64, 2.0, 3.0, 4.0]);
         }
 
         let buf = [100.0f64, 200.0, 300.0, 400.0];
@@ -112,7 +111,8 @@ fn main() {
 
         if rank == 1 {
             let expected = [100.0f64, 200.0, 300.0, 400.0];
-            let local = win.local_slice();
+            let mut local = [0.0f64; N];
+            win.local().copy_to_slice(&mut local);
             if local != expected {
                 eprintln!(
                     "FAIL: rank 1 window after Replace: expected {expected:?}, got {local:?}"
@@ -137,7 +137,7 @@ fn main() {
         const N: usize = 4;
         let initial = [1.0f64, 2.0, 3.0, 4.0];
         let mut win = Win::<f64>::allocate(&world, N).expect("Win::allocate (test 3) failed");
-        win.local_slice_mut().copy_from_slice(&initial);
+        win.local().copy_from_slice(&initial);
 
         let buf = [10.0f64, 20.0, 30.0, 40.0];
         let mut out = [0.0f64; N];
@@ -161,7 +161,8 @@ fn main() {
         })
         .expect("test 3 fence epoch failed");
 
-        let local = win.local_slice();
+        let mut local = [0.0f64; N];
+        win.local().copy_to_slice(&mut local);
         if local != initial {
             eprintln!(
                 "FAIL: rank {rank} window after rejected ops: expected {initial:?}, got {local:?}"

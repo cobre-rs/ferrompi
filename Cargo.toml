@@ -29,6 +29,10 @@ name = "test_rma_win_create"
 required-features = ["rma"]
 
 [[example]]
+name = "test_rma_window_view"
+required-features = ["rma"]
+
+[[example]]
 name = "test_window_create_at_finalize"
 required-features = ["rma"]
 

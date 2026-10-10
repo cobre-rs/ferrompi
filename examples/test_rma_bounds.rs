@@ -452,7 +452,7 @@ fn main() {
     // Window 1: 4-element MPI-allocated window, filled with 7 by rank 1.
     let mut win_a = Win::<u64>::allocate(&world, 4).expect("Win::allocate(4) failed");
     if rank == 1 {
-        win_a.local_slice_mut().fill(7);
+        win_a.local().copy_from_slice(&[7; 4]);
     }
     if !run_bounds_cases(&world, &mut win_a, "alloc4", 4) {
         local_ok = false;
@@ -563,19 +563,16 @@ fn main() {
     // window still read 7. Only rank 1's window is ever a valid RMA target
     // above, so only its copy matters.
     if rank == 1 {
-        if win_a.local_slice() != [7u64; 4] {
-            eprintln!(
-                "FAIL: alloc4 window mutated: expected [7, 7, 7, 7], got {:?}",
-                win_a.local_slice()
-            );
+        let mut seen = [0u64; 4];
+        win_a.local().copy_to_slice(&mut seen);
+        if seen != [7u64; 4] {
+            eprintln!("FAIL: alloc4 window mutated: expected [7, 7, 7, 7], got {seen:?}");
             local_ok = false;
         }
         if let Some(win_c) = &win_c {
-            if win_c.local_slice() != [7u64; 4] {
-                eprintln!(
-                    "FAIL: create window mutated: expected [7, 7, 7, 7], got {:?}",
-                    win_c.local_slice()
-                );
+            win_c.local().copy_to_slice(&mut seen);
+            if seen != [7u64; 4] {
+                eprintln!("FAIL: create window mutated: expected [7, 7, 7, 7], got {seen:?}");
                 local_ok = false;
             }
         }

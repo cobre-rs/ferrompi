@@ -44,7 +44,7 @@ fn main() {
         let mut result = [0i32; N];
 
         if rank == 1 {
-            win.local_slice_mut().copy_from_slice(&[10i32, 20, 30, 40]);
+            win.local().copy_from_slice(&[10i32, 20, 30, 40]);
         }
 
         let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
@@ -73,7 +73,8 @@ fn main() {
 
         if rank == 1 {
             let expected_win = [11i32, 22, 33, 44];
-            let local = win.local_slice();
+            let mut local = [0i32; N];
+            win.local().copy_to_slice(&mut local);
             if local != expected_win {
                 eprintln!(
                     "FAIL: rank 1 window after Sum: expected {expected_win:?}, got {local:?}"
@@ -102,7 +103,7 @@ fn main() {
         let mut result = [0i32; N];
 
         if rank == 1 {
-            win.local_slice_mut().copy_from_slice(&[99i32]);
+            win.local().copy_from_slice(&[99i32]);
         }
 
         let epoch = win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
@@ -131,7 +132,8 @@ fn main() {
 
         if rank == 1 {
             let expected_win = [99i32];
-            let local = win.local_slice();
+            let mut local = [0i32; N];
+            win.local().copy_to_slice(&mut local);
             if local != expected_win {
                 eprintln!(
                     "FAIL: rank 1 window after NoOp: expected {expected_win:?}, got {local:?}"

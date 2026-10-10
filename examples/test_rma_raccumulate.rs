@@ -56,7 +56,7 @@ fn main() {
 
     // Rank 1 initializes its local window slice.
     if rank == 1 {
-        win.local_slice_mut().copy_from_slice(&[1i32, 2, 3, 4]);
+        win.local().copy_from_slice(&[1i32, 2, 3, 4]);
     }
 
     // Make rank 1's stores visible in its window; `no_succeed` says no fence
@@ -106,7 +106,8 @@ fn main() {
         // loads, and nothing writes the window after the unlock.
         win.lock(LockType::Shared, 1, |_| Ok(()))
             .expect("lock(Shared, 1) failed");
-        let local = win.local_slice();
+        let mut local = [0i32; N];
+        win.local().copy_to_slice(&mut local);
         if local != expected {
             eprintln!(
                 "FAIL: rank 1 window after raccumulate Sum: expected {expected:?}, got {local:?}"

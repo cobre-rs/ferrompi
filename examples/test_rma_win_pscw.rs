@@ -232,11 +232,10 @@ fn main() {
             }
 
             let expected = [1.0f64, 2.0, 3.0, 4.0];
-            if win3.local_slice()[0..4] != expected {
-                eprintln!(
-                    "rank {rank}: FAIL: expected {expected:?}, got {:?}",
-                    &win3.local_slice()[0..4]
-                );
+            let mut local = [0.0f64; 4];
+            win3.local().copy_to_slice(&mut local);
+            if local != expected {
+                eprintln!("rank {rank}: FAIL: expected {expected:?}, got {local:?}");
                 local_ok = false;
             }
         } else {
@@ -302,11 +301,10 @@ fn main() {
             }
 
             let expected = [5.0f64, 6.0, 7.0, 8.0];
-            if win4.local_slice() != expected {
-                eprintln!(
-                    "rank {rank}: FAIL: [test 4] expected {expected:?}, got {:?}",
-                    win4.local_slice()
-                );
+            let mut local = [0.0f64; 4];
+            win4.local().copy_to_slice(&mut local);
+            if local != expected {
+                eprintln!("rank {rank}: FAIL: [test 4] expected {expected:?}, got {local:?}");
                 local_ok = false;
             }
         } else {

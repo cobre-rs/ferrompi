@@ -35,8 +35,8 @@ fn main() {
 
         // Rank 1 initialises its local window before the epoch opens.
         if rank == 1 {
-            let local = win.local_slice_mut();
-            local.copy_from_slice(&[100.0f64, 200.0, 300.0, 400.0]);
+            win.local()
+                .copy_from_slice(&[100.0f64, 200.0, 300.0, 400.0]);
         }
 
         let mut local_buf = [0.0f64; N];

@@ -27,7 +27,7 @@ fn main() {
     // ========================================================================
     // Test 1: rank 0 puts [10.0, 20.0, 30.0, 40.0] into rank 1's window at
     // displacement 0. Verified by rank 1 reading its local window memory after
-    // the closing fence (Option a: Win::local_slice).
+    // the closing fence (through Win::local).
     // ========================================================================
     {
         const N: usize = 4;
@@ -47,11 +47,12 @@ fn main() {
             local_ok = false;
         }
 
-        // Rank 1 inspects its local window memory via local_slice.
+        // Rank 1 inspects its local window memory through Win::local.
         // The closing fence guarantees the put from rank 0 is visible.
         if rank == 1 {
             let expected = [10.0f64, 20.0, 30.0, 40.0];
-            let local = win.local_slice();
+            let mut local = [0.0f64; N];
+            win.local().copy_to_slice(&mut local);
             if local != expected {
                 eprintln!(
                     "FAIL: rank 1 local window after put: expected {expected:?}, got {local:?}"

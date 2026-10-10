@@ -9,7 +9,7 @@ fn main() -> ferrompi::Result<()> {
 
     // Rank 1 initialises its window
     if world.rank() == 1 {
-        win.local_slice_mut().copy_from_slice(&[10, 20, 30, 40]);
+        win.local().copy_from_slice(&[10, 20, 30, 40]);
     }
 
     // `origin` and `result` are declared before the epoch: MPI uses them
@@ -28,7 +28,9 @@ fn main() -> ferrompi::Result<()> {
         assert_eq!(result, [10, 20, 30, 40]);
     }
     if world.rank() == 1 {
-        assert_eq!(win.local_slice(), [11, 22, 33, 44]);
+        let mut seen = [0i32; 4];
+        win.local().copy_to_slice(&mut seen);
+        assert_eq!(seen, [11, 22, 33, 44]);
     }
     Ok(())
 }

@@ -18,7 +18,9 @@ fn main() -> ferrompi::Result<()> {
 
     // The epoch is closed: rank 1's window holds the data
     if world.rank() == 1 {
-        assert_eq!(win.local_slice(), buf);
+        let mut seen = [0.0f64; 4];
+        win.local().copy_to_slice(&mut seen);
+        assert_eq!(seen, buf);
     }
     Ok(())
 }

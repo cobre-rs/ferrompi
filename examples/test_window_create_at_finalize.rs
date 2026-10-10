@@ -49,8 +49,10 @@ fn main() {
 
     drop(mpi);
 
+    let mut seen = [0.0f64; 64];
+    win.local().copy_to_slice(&mut seen);
     check(
-        win.local_slice().iter().all(|&x| x == 1.5),
+        seen.iter().all(|&x| x == 1.5),
         "buffer must be untouched: finalize must skip MPI_Win_free for the live window",
     );
     check(

@@ -131,11 +131,10 @@ fn main() {
 
         if rank == 1 {
             let expected = [1.0f64, 2.0, 3.0, 4.0];
-            if win.local_slice() != expected {
-                eprintln!(
-                    "rank {rank}: FAIL: expected {expected:?}, got {:?}",
-                    win.local_slice()
-                );
+            let mut local = [0.0f64; 4];
+            win.local().copy_to_slice(&mut local);
+            if local != expected {
+                eprintln!("rank {rank}: FAIL: expected {expected:?}, got {local:?}");
                 local_ok = false;
             }
         }

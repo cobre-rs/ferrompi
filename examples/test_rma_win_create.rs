@@ -35,7 +35,7 @@ fn main() {
     // supported.  Skip Test 1 gracefully when this OpenMPI-CI quirk fires.
     // ========================================================================
     let test1_skipped = match Win::create(&world, vec![0i32; 16]) {
-        Ok(mut win) => {
+        Ok(win) => {
             let handle = win.raw_handle();
             assert!(
                 handle >= 0,
@@ -44,23 +44,17 @@ fn main() {
 
             assert_eq!(win.comm_size(), size, "Win::create comm_size() mismatch");
 
-            // Verify local_slice / local_slice_mut round-trip
-            assert_eq!(
-                win.local_slice().len(),
-                16,
-                "Win::create local_slice len mismatch"
-            );
+            // Verify the view's length
+            assert_eq!(win.local().len(), 16, "Win::create local len mismatch");
 
             // Write through the window, then free it: the owned buffer comes
             // back holding what was written.
-            for (i, x) in win.local_slice_mut().iter_mut().enumerate() {
-                *x = rank * 100 + i as i32;
-            }
+            let expected: Vec<i32> = (0..16).map(|i| rank * 100 + i).collect();
+            win.local().copy_from_slice(&expected);
             let buf = win
                 .into_buffer()
                 .expect("Win::create into_buffer failed")
                 .expect("Win::create must return its buffer");
-            let expected: Vec<i32> = (0..16).map(|i| rank * 100 + i).collect();
             assert_eq!(buf, expected, "Win::create into_buffer data mismatch");
             false
         }
@@ -82,9 +76,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 1 failed");
     if rank == 0 && !test1_skipped {
-        println!(
-            "PASS: Win::create (i32, 16 elements, raw_handle, comm_size, local_slice, into_buffer)"
-        );
+        println!("PASS: Win::create (i32, 16 elements, raw_handle, comm_size, local, into_buffer)");
     }
 
     // ========================================================================
@@ -92,7 +84,7 @@ fn main() {
     // ========================================================================
     {
         let local_count: usize = 32;
-        let mut win = Win::<f64>::allocate(&world, local_count).expect("Win::allocate failed");
+        let win = Win::<f64>::allocate(&world, local_count).expect("Win::allocate failed");
 
         let handle = win.raw_handle();
         assert!(
@@ -102,27 +94,24 @@ fn main() {
 
         assert_eq!(win.comm_size(), size, "Win::allocate comm_size() mismatch");
 
-        // Verify local_slice_mut write-then-read round-trip
+        // Verify local write-then-read round-trip
         {
-            let slice = win.local_slice_mut();
-            assert_eq!(
-                slice.len(),
-                local_count,
-                "Win::allocate local_slice_mut len mismatch"
-            );
-            for (i, x) in slice.iter_mut().enumerate() {
-                *x = (rank as f64) * 100.0 + i as f64;
+            let local = win.local();
+            assert_eq!(local.len(), local_count, "Win::allocate local len mismatch");
+            for i in 0..local_count {
+                local.write(i, (rank as f64) * 100.0 + i as f64);
             }
         }
 
-        // Read back via local_slice
+        // Read back via local
         {
-            let slice = win.local_slice();
-            for (i, &x) in slice.iter().enumerate() {
+            let local = win.local();
+            for i in 0..local_count {
+                let x = local.read(i);
                 let expected = (rank as f64) * 100.0 + i as f64;
                 assert!(
                     (x - expected).abs() < f64::EPSILON,
-                    "Win::allocate local_slice[{i}] = {x}, expected {expected}"
+                    "Win::allocate local[{i}] = {x}, expected {expected}"
                 );
             }
         }
@@ -134,7 +123,9 @@ fn main() {
 
     world.barrier().expect("barrier after test 2 failed");
     if rank == 0 {
-        println!("PASS: Win::allocate (f64, 32 elements, raw_handle, comm_size, local_slice_mut, local_slice, into_buffer)");
+        println!(
+            "PASS: Win::allocate (f64, 32 elements, raw_handle, comm_size, local, into_buffer)"
+        );
     }
 
     world.barrier().expect("final barrier failed");

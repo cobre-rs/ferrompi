@@ -120,7 +120,14 @@ fn main() {
 
         if rank == 1 {
             let expected = [10i32, 20, 30, 40];
-            let local = win.local_slice();
+            let mut local = [0i32; 4];
+            // Locking its own window makes rank 0's update visible to this
+            // rank's loads, and nothing writes the window after the unlock.
+            win.lock(LockType::Shared, 1, |e| {
+                e.local().copy_to_slice(&mut local);
+                Ok(())
+            })
+            .expect("lock(Shared, 1) failed");
             if local != expected {
                 eprintln!(
                     "FAIL: rank 1 local window after rput: expected {expected:?}, got {local:?}"

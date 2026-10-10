@@ -205,9 +205,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   group-table slot for that call, and returns `Error::InvalidArgument` with
   `arg: "group"`, before opening the epoch, for a member outside the window's
   communicator. Migration: open the epoch on the ranks the closure targets.
+- **Window memory is reached through a view:** `Win::local_slice` and
+  `Win::local_slice_mut` are removed. `win.local()`, and `e.local()` on
+  `ActiveEpoch` and `PassiveEpoch`, return a `WinView` whose `read`, `write`,
+  `copy_to_slice` and `copy_from_slice` are Relaxed atomic accesses that stay
+  sound while peers write the window. Migration: replace
+  `win.local_slice()[i]` with `win.local().read(i)` and a slice copy with
+  `copy_to_slice`/`copy_from_slice`.
 
 ### Added
 
+- `WinView`, the view of a window's memory that `Win::local`,
+  `ActiveEpoch::local` and `PassiveEpoch::local` return.
 - `CollectiveOp<'a, T>`, the op type of the reducing collectives.
 - `AccumulateOp` and `FetchOp`, the op types of the RMA accumulate calls.
 - **`ferrompi::scope` and `Scope`**: nonblocking requests are created inside a

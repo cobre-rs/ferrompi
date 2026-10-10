@@ -18,8 +18,8 @@ fn main() {
     let world = mpi.world();
     let node = world.split_shared().expect("split_shared failed");
 
-    let mut win = Win::<f64>::allocate(&world, 1024).expect("Win::allocate failed");
-    win.local_slice_mut().fill(1.5);
+    let win = Win::<f64>::allocate(&world, 1024).expect("Win::allocate failed");
+    win.local().copy_from_slice(&[1.5; 1024]);
 
     let mut shared =
         SharedWindow::<f64>::allocate(&node, 1 << 16).expect("SharedWindow::allocate failed");
@@ -33,10 +33,12 @@ fn main() {
         "Mpi::is_finalized() must be true after a skipped MPI_Finalize"
     );
 
-    let sum: f64 = win.local_slice().iter().sum();
+    let mut seen = [0.0f64; 1024];
+    win.local().copy_to_slice(&mut seen);
+    let sum: f64 = seen.iter().sum();
     assert_eq!(
         sum, 1536.0,
-        "win.local_slice() must still be readable after the skipped MPI_Finalize"
+        "win.local() must still be readable after the skipped MPI_Finalize"
     );
 
     assert_eq!(

@@ -97,7 +97,11 @@ fn closed_epoch_frees(world: &Communicator, poll: bool, owned: bool) {
     } else {
         put_to_rank0(world, &mut win);
     }
-    let landed = rank != 0 || win.local_slice() == [SENT; 4];
+    let landed = rank != 0 || {
+        let mut seen = [0u64; 4];
+        win.local().copy_to_slice(&mut seen);
+        seen == [SENT; 4]
+    };
     let freed = match win.into_buffer() {
         Ok(Some(v)) => owned && (rank != 0 || v == [SENT; 4]),
         Ok(None) => !owned,

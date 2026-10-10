@@ -55,10 +55,19 @@
 use std::cell::Cell;
 use std::io::Write;
 use std::marker::PhantomData;
+use std::mem::transmute_copy;
 use std::ops::{BitOr, BitOrAssign};
 use std::os::raw::c_int;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::ptr::NonNull;
+#[cfg(target_has_atomic = "16")]
+use std::sync::atomic::AtomicU16;
+#[cfg(target_has_atomic = "32")]
+use std::sync::atomic::AtomicU32;
+#[cfg(target_has_atomic = "64")]
+use std::sync::atomic::AtomicU64;
+#[cfg(target_has_atomic = "8")]
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
@@ -1276,41 +1285,86 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 /// # }
 /// ```
 ///
-/// The window's memory cannot be read inside the epoch either, while a peer may be
-/// writing it:
+/// The window's view cannot be taken inside the epoch either: the epoch holds the
+/// window mutably, while a peer may be writing it. Take the handle's view instead:
 ///
 /// ```compile_fail,E0502
 /// # use ferrompi::{Win, WinFenceAssert};
 /// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
 /// let none = WinFenceAssert::none();
-/// win.fence(none, none, |_| {
-///     let _local = win.local_slice();
+/// win.fence(none, none, |e| {
+///     let _local = win.local();
 ///     Ok(())
 /// })
 /// # }
 /// ```
 ///
 /// ```no_run
-/// # use ferrompi::{Win, WinFenceAssert};
-/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
-/// let none = WinFenceAssert::none();
-/// win.fence(none, none, |_| Ok(()))?;
-/// let _local = win.local_slice();
-/// Ok(())
-/// # }
-/// ```
-///
-/// The handle has no `local_slice` or `local_slice_mut` either, so it offers no
-/// other path to the memory. This holds for a fence or `start` epoch:
-///
-/// ```compile_fail,E0599
 /// # use ferrompi::{Win, WinFenceAssert};
 /// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
 /// let none = WinFenceAssert::none();
 /// win.fence(none, none, |e| {
-///     let _local = e.local_slice();
+///     let _local = e.local();
 ///     Ok(())
 /// })
+/// # }
+/// ```
+///
+/// The window hands out no safe slice of its memory, so the call that used to
+/// return one no longer exists:
+///
+/// ```compile_fail,E0599
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) {
+/// let _local = win.local_slice();
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) {
+/// let _local = win.local();
+/// # }
+/// ```
+///
+/// ## Views
+///
+/// A [`WinView`] borrows what it came from. A handle's view cannot leave the
+/// closure, whether it is stored outside:
+///
+/// ```compile_fail,E0521
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let mut keep = None;
+/// win.lock_all(|e| {
+///     keep = Some(e.local());
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// win.lock_all(|e| {
+///     let mut keep = None;
+///     keep = Some(e.local());
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// A window's view cannot be held across an epoch, which borrows the window
+/// mutably while a peer may be writing it:
+///
+/// ```compile_fail,E0502
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let local = win.local();
+/// win.fence(none, none, |_| Ok(()))?;
+/// local.read(0);
+/// Ok(())
 /// # }
 /// ```
 ///
@@ -1319,28 +1373,77 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 /// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
 /// let none = WinFenceAssert::none();
 /// win.fence(none, none, |_| Ok(()))?;
-/// let _local = win.local_slice();
+/// let local = win.local();
+/// local.read(0);
 /// Ok(())
 /// # }
 /// ```
 ///
-/// and for a `lock` or `lock_all` epoch:
+/// A view stays on the thread that owns its window, so its accesses are ordered
+/// against that thread's MPI calls (a `Relaxed` access on another thread is not):
 ///
-/// ```compile_fail,E0599
-/// # use ferrompi::{Win};
-/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
-/// win.lock_all(|e| {
-///     let _local = e.local_slice();
-///     Ok(())
-/// })
+/// ```compile_fail,E0277
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) {
+/// let local = win.local();
+/// std::thread::scope(|s| {
+///     s.spawn(move || local.read(0));
+/// });
 /// # }
 /// ```
 ///
 /// ```no_run
-/// # use ferrompi::{Win};
-/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
-/// win.lock_all(|_| Ok(()))?;
-/// let _local = win.local_slice();
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) {
+/// let first = win.local().read(0);
+/// std::thread::scope(|s| {
+///     s.spawn(move || first);
+/// });
+/// # }
+/// ```
+///
+/// nor borrowed by one:
+///
+/// ```compile_fail,E0277
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) {
+/// let local = win.local();
+/// std::thread::scope(|s| {
+///     s.spawn(|| local.read(0));
+/// });
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) {
+/// let first = win.local().read(0);
+/// std::thread::scope(|s| {
+///     s.spawn(|| first);
+/// });
+/// # }
+/// ```
+///
+/// The window cannot be dropped while a view of it lives:
+///
+/// ```compile_fail,E0505
+/// # use ferrompi::Win;
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let win = Win::<u64>::allocate(world, 4)?;
+/// let local = win.local();
+/// drop(win);
+/// local.read(0);
+/// Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Win;
+/// # fn f(world: &ferrompi::Communicator) -> ferrompi::Result<()> {
+/// let win = Win::<u64>::allocate(world, 4)?;
+/// let local = win.local();
+/// local.read(0);
+/// drop(win);
 /// Ok(())
 /// # }
 /// ```
@@ -1651,7 +1754,7 @@ pub struct Win<T: MpiDatatype> {
     /// [`window_word`] and indexed by rank in the window's communicator.
     words: Box<[u64]>,
     /// The `Win::create` buffer, `None` for `Win::allocate`. Never read or
-    /// borrowed while the window lives, so every slice stays a child of
+    /// borrowed while the window lives, so every access goes through
     /// `local_ptr`; only `into_buffer` and `Drop` touch it, after the free.
     buffer: Option<Vec<T>>,
     /// Whether a [`post`](Win::post) exposure epoch is open: set by a
@@ -1659,6 +1762,244 @@ pub struct Win<T: MpiDatatype> {
     /// `test_exposure` that returned `true`. While it is set, a peer may still
     /// write into the window, so neither `into_buffer` nor `Drop` frees it.
     exposure_open: Cell<bool>,
+}
+
+// ============================================================================
+// WinView — Relaxed atomic access to window memory
+// ============================================================================
+
+/// Whether an element of `size` bytes aligned to `align` fits the atomic of its
+/// width on this target: the width is 1, 2, 4 or 8 bytes, the target has atomics
+/// of that width, and `align` is at least the atomic's alignment.
+const fn fits_atomic(size: usize, align: usize) -> bool {
+    match size {
+        #[cfg(target_has_atomic = "8")]
+        1 => align >= align_of::<AtomicU8>(),
+        #[cfg(target_has_atomic = "16")]
+        2 => align >= align_of::<AtomicU16>(),
+        #[cfg(target_has_atomic = "32")]
+        4 => align >= align_of::<AtomicU32>(),
+        #[cfg(target_has_atomic = "64")]
+        8 => align >= align_of::<AtomicU64>(),
+        _ => false,
+    }
+}
+
+/// Loads the element at `p` with one `Relaxed` atomic load of its width.
+///
+/// # Safety
+///
+/// `p` must be valid for one `T` and aligned for the atomic of `T`'s width, and
+/// `size_of::<T>()` must be a width [`fits_atomic`] accepts. `WinView::FITS`
+/// ensures the width and that `T`'s alignment suffices, and a window's memory is
+/// aligned for its elements: memory MPI allocates by MPI-4.1 §9.2 (p.447), which
+/// MPI-4.1 §12.2.2 (p.554) applies to `MPI_Win_allocate`, and `Win::create`
+/// memory because `Vec::as_mut_ptr` is. No non-atomic access to the location may
+/// overlap this one.
+unsafe fn atomic_load<T: MpiDatatype>(p: *mut T) -> T {
+    // SAFETY: the caller upholds this function's contract. The arm taken
+    // matches `size_of::<T>()`, so `transmute_copy` reads back exactly the bits
+    // loaded, and every bit pattern is a valid value of an `MpiDatatype`.
+    unsafe {
+        match size_of::<T>() {
+            #[cfg(target_has_atomic = "8")]
+            1 => transmute_copy(&AtomicU8::from_ptr(p.cast()).load(Ordering::Relaxed)),
+            #[cfg(target_has_atomic = "16")]
+            2 => transmute_copy(&AtomicU16::from_ptr(p.cast()).load(Ordering::Relaxed)),
+            #[cfg(target_has_atomic = "32")]
+            4 => transmute_copy(&AtomicU32::from_ptr(p.cast()).load(Ordering::Relaxed)),
+            #[cfg(target_has_atomic = "64")]
+            8 => transmute_copy(&AtomicU64::from_ptr(p.cast()).load(Ordering::Relaxed)),
+            _ => unreachable!("FITS rejects every other size"),
+        }
+    }
+}
+
+/// Stores `v` at `p` with one `Relaxed` atomic store of its width.
+///
+/// # Safety
+///
+/// As [`atomic_load`], with `p` valid for writes.
+unsafe fn atomic_store<T: MpiDatatype>(p: *mut T, v: T) {
+    // SAFETY: the caller upholds this function's contract. The arm taken
+    // matches `size_of::<T>()`, so `transmute_copy` reinterprets exactly the
+    // bytes of `v` as the atomic's integer.
+    unsafe {
+        match size_of::<T>() {
+            #[cfg(target_has_atomic = "8")]
+            1 => AtomicU8::from_ptr(p.cast()).store(transmute_copy(&v), Ordering::Relaxed),
+            #[cfg(target_has_atomic = "16")]
+            2 => AtomicU16::from_ptr(p.cast()).store(transmute_copy(&v), Ordering::Relaxed),
+            #[cfg(target_has_atomic = "32")]
+            4 => AtomicU32::from_ptr(p.cast()).store(transmute_copy(&v), Ordering::Relaxed),
+            #[cfg(target_has_atomic = "64")]
+            8 => AtomicU64::from_ptr(p.cast()).store(transmute_copy(&v), Ordering::Relaxed),
+            _ => unreachable!("FITS rejects every other size"),
+        }
+    }
+}
+
+// PERF: the panic is out of line, so the hot path of `read` and `write` is
+// one comparison and one atomic access, with no stack frame for the message.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn index_out_of_range(op: &str, index: usize, len: usize) -> ! {
+    panic!("WinView::{op}: index {index} is out of range for a view of length {len}")
+}
+
+/// A view of the local memory of an RMA window: a pointer and a length borrowed
+/// from a [`Win`] or from one of its epoch handles.
+///
+/// [`Win::local`], [`ActiveEpoch::local`] and [`PassiveEpoch::local`] return
+/// one. The memory of a window can change while the view lives, because a
+/// peer's put or accumulate writes it, or a fence lands remote writes in it. A
+/// `&[T]` over it would promise the compiler that it does not, so the view
+/// hands out elements by value instead.
+///
+/// # Access
+///
+/// Every access is one `Relaxed` atomic load or store of the element, so a
+/// concurrent write by a peer, by MPI or by another view in this process never
+/// makes an access undefined behaviour. The elements are those of
+/// [`MpiDatatype`]: each fits its atomic on every supported target, and the
+/// build fails on a target where one does not.
+///
+/// What a load returns is set by MPI's memory model (MPI-4.1 §12.7). In the
+/// unified model, a load of a location that a put or accumulate is updating is
+/// valid and returns an implementation-dependent value, and MPI gives no
+/// atomicity when the update writes more than one byte (rule U2, p.608): poll
+/// for a change from zero to nonzero or for a particular value, not for a
+/// relative magnitude. A store while a peer reads the location is valid (rule
+/// U3, p.609). A store while a put or accumulate to the same location is in
+/// progress leaves the location without a defined value (rule U5, p.609;
+/// MPI-4.1 §12.3, p.566). None of these is undefined behaviour in Rust,
+/// because every bit pattern is a valid element. A `Relaxed` access orders
+/// nothing against other locations: the epoch's synchronization calls do, as
+/// that section describes.
+///
+/// The view claims no exclusivity, so two views of one region coexist, and
+/// [`write`](Self::write) takes `&self`. The bulk copies,
+/// [`copy_to_slice`](Self::copy_to_slice) and
+/// [`copy_from_slice`](Self::copy_from_slice), go element by element: each
+/// element is one atomic access, so accesses through views never tear one
+/// another, and the copy as a whole is not atomic.
+///
+/// # Panics
+///
+/// The view is the one ferrompi API that panics on caller input: an
+/// out-of-range index or a length mismatch panics, as slice indexing and
+/// `<[T]>::copy_from_slice` do, while every other call returns an [`Error`].
+///
+/// # Lifetimes
+///
+/// A view from [`Win::local`] borrows the window, so it cannot be held across an
+/// epoch, which borrows the window mutably, and the window cannot be freed while
+/// the view lives. A view from an epoch handle borrows the handle, so it cannot
+/// leave the epoch's closure. The `# Compile-time guarantees` section of [`Win`]
+/// shows each as a program that does not compile.
+///
+/// # Thread safety
+///
+/// `WinView` is neither `Send` nor `Sync`. It follows its window, which is
+/// neither, so every access to the window's memory stays in the program order
+/// of the thread that issues the window's MPI calls. That order is what places
+/// a store before `sync` (see [`PassiveEpoch::local`]).
+pub struct WinView<'a, T: MpiDatatype> {
+    /// The first element: valid for reads and writes of `len` elements, and
+    /// aligned for `T`, for `'a`.
+    ptr: NonNull<T>,
+    len: usize,
+    window: PhantomData<&'a Win<T>>,
+}
+
+impl<T: MpiDatatype> WinView<'_, T> {
+    const FITS: () = assert!(
+        fits_atomic(size_of::<T>(), align_of::<T>()),
+        "window element type does not fit its atomic on this target"
+    );
+
+    /// The number of elements in the viewed region.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the viewed region has no elements.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Reads the element at `index` with one `Relaxed` atomic load.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= self.len()`.
+    #[track_caller]
+    pub fn read(&self, index: usize) -> T {
+        let () = Self::FITS;
+        if index >= self.len {
+            index_out_of_range("read", index, self.len);
+        }
+        // SAFETY: `index < self.len` was checked, so the element lies inside the
+        // region `ptr` and `len` describe as valid for reads and writes for
+        // `'a`; the other conditions are `atomic_load`'s, see its contract.
+        unsafe { atomic_load(self.ptr.as_ptr().add(index)) }
+    }
+
+    /// Writes `value` to the element at `index` with one `Relaxed` atomic store.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= self.len()`.
+    #[track_caller]
+    pub fn write(&self, index: usize, value: T) {
+        let () = Self::FITS;
+        if index >= self.len {
+            index_out_of_range("write", index, self.len);
+        }
+        // SAFETY: `index < self.len` was checked, so the element lies inside the
+        // region `ptr` and `len` describe as valid for reads and writes for
+        // `'a`; the other conditions are `atomic_load`'s, see its contract.
+        unsafe { atomic_store(self.ptr.as_ptr().add(index), value) }
+    }
+
+    /// Copies the whole region into `dst`, one `Relaxed` atomic load per
+    /// element.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `dst.len() != self.len()`.
+    #[track_caller]
+    pub fn copy_to_slice(&self, dst: &mut [T]) {
+        assert!(
+            dst.len() == self.len,
+            "WinView::copy_to_slice: the destination has length {} but the view has length {}",
+            dst.len(),
+            self.len
+        );
+        for (index, element) in dst.iter_mut().enumerate() {
+            *element = self.read(index);
+        }
+    }
+
+    /// Fills the whole region from `src`, one `Relaxed` atomic store per
+    /// element.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `src.len() != self.len()`.
+    #[track_caller]
+    pub fn copy_from_slice(&self, src: &[T]) {
+        assert!(
+            src.len() == self.len,
+            "WinView::copy_from_slice: the source has length {} but the view has length {}",
+            src.len(),
+            self.len
+        );
+        for (index, element) in src.iter().enumerate() {
+            self.write(index, *element);
+        }
+    }
 }
 
 /// The handle an active-target access epoch gives its closure.
@@ -1683,6 +2024,8 @@ pub struct Win<T: MpiDatatype> {
 /// destination or a `result`) cannot be read before then either. These six
 /// methods reject a buffer declared inside the closure, because it is freed
 /// before then. Declare buffers before the call to `fence` or `start`.
+/// [`local`](Self::local) returns a view that borrows the handle, so it cannot
+/// leave the closure.
 ///
 /// # Access set
 ///
@@ -1705,6 +2048,16 @@ pub struct ActiveEpoch<'s, 'env: 's, T: MpiDatatype> {
 }
 
 impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
+    /// A view of this process's window memory, as [`Win::local`], taken through
+    /// the handle: the window itself is borrowed mutably while the closure runs.
+    ///
+    /// The view borrows the handle, so it cannot leave the closure. An access
+    /// that conflicts with a peer's put or accumulate to the same location has
+    /// an unspecified result, as [`WinView`] describes.
+    pub fn local(&self) -> WinView<'_, T> {
+        self.win.local()
+    }
+
     /// One-sided write: copy `origin` into the remote rank's window memory.
     ///
     /// Wraps `MPI_Put`. The operation is posted at once, but it completes only
@@ -1976,7 +2329,7 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     ///
     /// // Rank 1 initialises its window slot 0 to 100
     /// if world.rank() == 1 {
-    ///     win.local_slice_mut()[0] = 100;
+    ///     win.local().write(0, 100);
     /// }
     ///
     /// // `origin` and `old` are declared before the epoch: MPI uses them until
@@ -2070,7 +2423,7 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> ActiveEpoch<'s, '_, T> {
     ///
     /// // Rank 1 initialises its window slot 0 to 100
     /// if world.rank() == 1 {
-    ///     win.local_slice_mut()[0] = 100;
+    ///     win.local().write(0, 100);
     /// }
     ///
     /// // `new_value`, `expected` and `old` are declared before the epoch: MPI
@@ -2150,6 +2503,8 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> ActiveEpoch<'s, '_, T> {
 /// destination or a `result`) cannot be read before then either. These nine
 /// methods reject a buffer declared inside the closure, because it is freed
 /// before then. Declare buffers before the call to `lock` or `lock_all`.
+/// [`local`](Self::local) returns a view that borrows the handle, so it cannot
+/// leave the closure.
 ///
 /// # Access set
 ///
@@ -2185,6 +2540,37 @@ pub struct PassiveEpoch<'s, 'env: 's, T: MpiDatatype> {
 }
 
 impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
+    /// A view of this process's window memory, as [`Win::local`], taken through
+    /// the handle: the window itself is borrowed mutably while the closure runs.
+    ///
+    /// The view borrows the handle, so it cannot leave the closure. Inside a
+    /// [`Win::lock_all`] closure it combines with [`sync`](Self::sync), which is
+    /// `MPI_Win_sync` (MPI-4.1 §12.5.4), into the shared-memory pattern: store
+    /// through the view, `sync`, synchronize the processes (for example with a
+    /// barrier), `sync`, load (MPI-4.1 §12.7, p.609; Example 12.23, p.622).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::{Mpi, Win};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let mut win = Win::<u64>::allocate(&world, 4).unwrap();
+    /// win.lock_all(|e| {
+    ///     e.local().write(0, 7);
+    ///     e.sync()?;
+    ///     world.barrier()?;
+    ///     e.sync()?;
+    ///     let _seen = e.local().read(0);
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// ```
+    pub fn local(&self) -> WinView<'_, T> {
+        self.win.local()
+    }
+
     /// One-sided write, as [`ActiveEpoch::put`], in a passive-target epoch.
     ///
     /// The write completes as the type's `# Completion` section describes, and
@@ -2716,8 +3102,7 @@ impl<T: MpiDatatype> Win<T> {
     /// resized nor borrowed, until `MPI_Win_free` has succeeded (see
     /// [`into_buffer`](Self::into_buffer) and the type's `# Dropping`
     /// section), so no safe call can free or reuse memory a peer may still
-    /// access. Reach it with [`local_slice`](Self::local_slice) and
-    /// [`local_slice_mut`](Self::local_slice_mut). `buf` is consumed on every
+    /// access. Reach it with [`local`](Self::local). `buf` is consumed on every
     /// return: dropped if MPI created no window, leaked if it did and the
     /// window cannot be returned.
     ///
@@ -2932,8 +3317,8 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let mut win = Win::create(&world, vec![0f64; 64]).unwrap();
-    /// win.local_slice_mut()[0] = 1.5;
+    /// let win = Win::create(&world, vec![0f64; 64]).unwrap();
+    /// win.local().write(0, 1.5);
     /// let buf = win.into_buffer().unwrap().expect("Win::create owns its buffer");
     /// assert_eq!(buf[0], 1.5);
     /// ```
@@ -2961,43 +3346,40 @@ impl<T: MpiDatatype> Win<T> {
         Err(Error::from_code_with_op(ret, "win_free"))
     }
 
-    /// Get a shared slice of this process's local window buffer.
+    /// A view of this process's window memory.
     ///
-    /// For `Win::create`, this returns a view into the buffer the window
-    /// owns. For `Win::allocate`, this returns a view into the MPI-managed
-    /// buffer.
+    /// The view reads and writes elements with `Relaxed` atomic accesses, which
+    /// stay sound while a peer's put or accumulate writes the same memory (see
+    /// [`WinView`]). No `&[T]` is offered, because the compiler may assume a
+    /// slice does not change while it is borrowed.
     ///
-    /// The borrow lifetime is tied to `&self`, so the slice cannot outlive the
-    /// window. Proper MPI epoch synchronization (fence, lock, or PSCW) must be
-    /// used before reading data written by remote processes.
-    pub fn local_slice(&self) -> &[T] {
-        // SAFETY: `local_ptr` was set in the constructor from either the
-        // pointer `Vec::as_mut_ptr` returned for the owned buffer
-        // (`Win::create`) or a valid MPI allocation (`Win::allocate`). Both
-        // are valid for `local_len` elements of type T until the window is
-        // freed, which needs `self` by value or a drop. The pointer is
-        // non-null (zero-length windows use NonNull::dangling()). We hold
-        // `&self` so no mutable alias exists.
-        unsafe { std::slice::from_raw_parts(self.local_ptr.as_ptr(), self.local_len) }
-    }
-
-    /// Get a mutable slice of this process's local window buffer.
+    /// The view borrows the window, so it cannot outlive it, and cannot be held
+    /// across an epoch, which borrows the window mutably. Inside an epoch, take
+    /// the view from the handle with [`ActiveEpoch::local`] or
+    /// [`PassiveEpoch::local`].
     ///
-    /// For `Win::create`, this returns a mutable view into the buffer the
-    /// window owns. For `Win::allocate`, this returns a mutable view into the
-    /// MPI-managed buffer.
+    /// Outside an epoch, a peer's completed update is guaranteed visible only
+    /// after this process locks its own window or calls `sync` inside a
+    /// passive-target epoch (MPI-4.1 §12.7 rule 6, p.606).
     ///
-    /// The borrow lifetime is tied to `&mut self`, ensuring exclusive access.
-    /// Proper MPI epoch synchronization must be used before writing data that
-    /// remote processes may read.
-    pub fn local_slice_mut(&mut self) -> &mut [T] {
-        // SAFETY: `local_ptr` was set in the constructor from either the
-        // pointer `Vec::as_mut_ptr` returned for the owned buffer
-        // (`Win::create`) or a valid MPI allocation (`Win::allocate`). Both
-        // are valid for `local_len` elements of type T until the window is
-        // freed. We hold `&mut self`, ensuring exclusive access and no
-        // concurrent shared references to the same memory.
-        unsafe { std::slice::from_raw_parts_mut(self.local_ptr.as_ptr(), self.local_len) }
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::{Mpi, Win};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let win = Win::<u64>::allocate(&world, 4).unwrap();
+    /// let local = win.local();
+    /// local.write(0, 7);
+    /// assert_eq!(local.read(0), 7);
+    /// ```
+    pub fn local(&self) -> WinView<'_, T> {
+        WinView {
+            ptr: self.local_ptr,
+            len: self.local_len,
+            window: PhantomData,
+        }
     }
 
     /// Get this window's raw handle.
@@ -4114,8 +4496,9 @@ impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_fence_asserts, check_rma_target, post_ran_mpi, window_word, Access, Error, Win,
-        WinFenceAssert, WinPscwAssert, WINDOW_WORD_LEN_MASK, WINDOW_WORD_REJECT, WIN_FREED,
+        check_fence_asserts, check_rma_target, fits_atomic, post_ran_mpi, window_word, Access,
+        Error, Win, WinFenceAssert, WinPscwAssert, WinView, WINDOW_WORD_LEN_MASK,
+        WINDOW_WORD_REJECT, WIN_FREED,
     };
     use crate::error::{FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL};
     use crate::persistent::vec_buf_mut;
@@ -4258,14 +4641,29 @@ mod tests {
     // Win<T> unit tests — exercise the type without an MPI runtime
     // -------------------------------------------------------------------------
 
-    /// Stands in for a peer's RMA write into the window between the slices
-    /// the window hands out: the pointer `vec_buf_mut` returned, which
+    /// A window over `buffer` with the sentinel handle, so its drop makes no MPI
+    /// call, and `local_ptr` the pointer `Vec::as_mut_ptr` returned.
+    fn sentinel_window<T: MpiDatatype>(mut buffer: Vec<T>) -> Win<T> {
+        let (p, n, _) = vec_buf_mut(&mut buffer);
+        Win {
+            win_handle: WIN_FREED,
+            // SAFETY: `Vec::as_mut_ptr` is never null.
+            local_ptr: unsafe { NonNull::new_unchecked(p.cast()) },
+            local_len: n as usize,
+            words: Box::new([]),
+            buffer: Some(buffer),
+            exposure_open: Cell::new(false),
+        }
+    }
+
+    /// Stands in for a peer's RMA write into the window between the views the
+    /// window hands out: the pointer `vec_buf_mut` returned, which
     /// `Win::create` hands to MPI and stores as `local_ptr`, must stay usable
     /// across them. The window carries the sentinel handle, so its drop makes
     /// no MPI call. Run under Miri, with and without `-Zmiri-tree-borrows`, to
     /// check its provenance.
     #[test]
-    fn recorded_window_pointer_survives_local_slices() {
+    fn recorded_window_pointer_survives_view_access() {
         let mut v = vec![0u64; 4];
         let (p, n, _) = vec_buf_mut(&mut v);
         let p = p.cast::<u64>();
@@ -4280,18 +4678,108 @@ mod tests {
             exposure_open: Cell::new(false),
         };
         for round in 1..=3u64 {
-            win.local_slice_mut().fill(round);
+            win.local().copy_from_slice(&[round; 4]);
             for i in 0..4 {
                 // SAFETY: `p` addresses the live allocation of four `u64`s that
-                // `vec_buf_mut` derived it from, and no slice is live while the
-                // write stands in for a peer's.
+                // `vec_buf_mut` derived it from, and no view is mid-access while
+                // the write stands in for a peer's.
                 unsafe { p.add(i).write(round * 10 + i as u64) };
             }
             let expected = [round * 10, round * 10 + 1, round * 10 + 2, round * 10 + 3];
-            assert_eq!(win.local_slice(), expected);
+            let mut seen = [0u64; 4];
+            win.local().copy_to_slice(&mut seen);
+            assert_eq!(seen, expected);
         }
         let buffer = win.buffer.take().expect("a create window owns its buffer");
         assert_eq!(buffer, [30, 31, 32, 33]);
+    }
+
+    /// Naming `WinView::<T>::FITS` makes the compiler evaluate it for `T`, so a
+    /// type that does not fit its atomic fails to build this test. The trait is
+    /// sealed, so the predicate's refusals are checked directly.
+    #[test]
+    fn every_window_element_type_fits_its_atomic() {
+        fn fits<T: MpiDatatype>() {
+            let () = WinView::<T>::FITS;
+        }
+        fits::<f32>();
+        fits::<f64>();
+        fits::<i32>();
+        fits::<i64>();
+        fits::<u8>();
+        fits::<u32>();
+        fits::<u64>();
+
+        assert!(fits_atomic(2, 2));
+        assert!(!fits_atomic(3, 1), "no atomic has three bytes");
+        assert!(!fits_atomic(16, 16), "no atomic has sixteen bytes");
+        assert!(
+            !fits_atomic(8, 1),
+            "a packed u64 is aligned below its atomic"
+        );
+    }
+
+    #[test]
+    fn view_reads_back_what_it_writes() {
+        fn round_trip<T: MpiDatatype + PartialEq + std::fmt::Debug>(zero: T, values: [T; 4]) {
+            let win = sentinel_window(vec![zero; 4]);
+            let view = win.local();
+            assert_eq!(view.len(), 4);
+            assert!(!view.is_empty());
+            for (i, value) in values.iter().enumerate() {
+                view.write(i, *value);
+            }
+            for (i, value) in values.iter().enumerate() {
+                assert_eq!(view.read(i), *value);
+            }
+            let mut copied = [zero; 4];
+            view.copy_to_slice(&mut copied);
+            assert_eq!(copied, values);
+            let reversed = [values[3], values[2], values[1], values[0]];
+            view.copy_from_slice(&reversed);
+            view.copy_to_slice(&mut copied);
+            assert_eq!(copied, reversed);
+        }
+        round_trip(0u8, [1, 2, 0xff, 0x80]);
+        round_trip(0u32, [1, 0x8000_0000, u32::MAX, 7]);
+        round_trip(0f64, [1.5, -2.25, f64::MAX, 1e-300]);
+
+        let empty = sentinel_window(Vec::<f64>::new());
+        assert!(empty.local().is_empty());
+        empty.local().copy_from_slice(&[]);
+        empty.local().copy_to_slice(&mut []);
+    }
+
+    #[test]
+    #[should_panic(expected = "WinView::read: index 4 is out of range for a view of length 4")]
+    fn view_read_panics_at_len() {
+        sentinel_window(vec![0u64; 4]).local().read(4);
+    }
+
+    #[test]
+    #[should_panic(expected = "WinView::write: index 4 is out of range for a view of length 4")]
+    fn view_write_panics_at_len() {
+        sentinel_window(vec![0u64; 4]).local().write(4, 1);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "WinView::copy_to_slice: the destination has length 3 but the view has length 4"
+    )]
+    fn view_copy_to_slice_panics_on_a_length_mismatch() {
+        sentinel_window(vec![0u64; 4])
+            .local()
+            .copy_to_slice(&mut [0; 3]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "WinView::copy_from_slice: the source has length 5 but the view has length 4"
+    )]
+    fn view_copy_from_slice_panics_on_a_length_mismatch() {
+        sentinel_window(vec![0u64; 4])
+            .local()
+            .copy_from_slice(&[0; 5]);
     }
 
     /// `into_buffer` refuses while an exposure epoch is open, before any MPI

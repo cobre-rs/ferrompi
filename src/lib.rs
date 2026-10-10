@@ -91,8 +91,8 @@
 //!
 //! [`Communicator`], [`Group`], [`Request`], [`PersistentRequest`], [`Status`],
 //! [`CustomDatatype`], [`Info`], and [`UserOp`] are `Send + Sync`; [`Mpi`],
-//! `Win<T>`, its epoch handles, `SharedWindow<T>` (feature `rma`), and its RAII lock
-//! guards are not.
+//! `Win<T>`, its epoch handles and views, `SharedWindow<T>` (feature `rma`), and
+//! its RAII lock guards are not.
 //!
 //! Which thread may call MPI is set by the provided [`ThreadLevel`]; see its
 //! documentation for the per-level rules.
@@ -202,7 +202,7 @@ pub use topology::{HostEntry, TopologyInfo};
 #[cfg(feature = "rma")]
 pub use window::{
     ActiveEpoch, LockAllGuard, LockGuard, LockType, PassiveEpoch, SharedWindow, Win,
-    WinFenceAssert, WinPscwAssert,
+    WinFenceAssert, WinPscwAssert, WinView,
 };
 
 #[cfg(doctest)]

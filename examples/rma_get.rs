@@ -8,7 +8,7 @@ fn main() -> ferrompi::Result<()> {
 
     // Rank 1 initialises its window
     if world.rank() == 1 {
-        win.local_slice_mut().copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+        win.local().copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
     }
 
     // `buf` is declared before the epoch: MPI may write it until the

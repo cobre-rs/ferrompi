@@ -41,7 +41,7 @@ fn main() {
         let mut win = Win::<i32>::allocate(&world, 1).expect("Win::allocate failed (test 1)");
 
         if rank == 1 {
-            win.local_slice_mut()[0] = 100;
+            win.local().write(0, 100);
         }
 
         // `origin`, `compare` and `old` are borrowed until the closing fence
@@ -68,7 +68,7 @@ fn main() {
         }
 
         if rank == 1 {
-            let got = win.local_slice()[0];
+            let got = win.local().read(0);
             if got != 200 {
                 eprintln!("FAIL: rank 1 window slot 0 after match CAS: expected 200, got {got}");
                 local_ok = false;
@@ -91,7 +91,7 @@ fn main() {
         let mut win = Win::<i32>::allocate(&world, 1).expect("Win::allocate failed (test 2)");
 
         if rank == 1 {
-            win.local_slice_mut()[0] = 100;
+            win.local().write(0, 100);
         }
 
         let origin = 200i32;
@@ -116,7 +116,7 @@ fn main() {
         }
 
         if rank == 1 {
-            let got = win.local_slice()[0];
+            let got = win.local().read(0);
             if got != 100 {
                 eprintln!("FAIL: rank 1 window slot 0 after no-match CAS: expected 100, got {got}");
                 local_ok = false;

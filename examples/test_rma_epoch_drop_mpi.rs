@@ -67,8 +67,10 @@ fn main() {
         matches!(r, Ok(Err(Error::Finalized))),
         "lock_all returns Ok, and a call that is not a completion is refused inside it",
     );
+    let mut seen = [0u64; 4];
+    win.local().copy_to_slice(&mut seen);
     check(
-        win.local_slice() == [7u64; 4],
+        seen == [7u64; 4],
         "the closing unlock completed the put after the drop",
     );
     check(

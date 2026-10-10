@@ -47,11 +47,7 @@ fn main() {
 
         // Rank 1 initializes its local window slice.
         if rank == 1 {
-            let local = win.local_slice_mut();
-            local[0] = 100;
-            local[1] = 200;
-            local[2] = 300;
-            local[3] = 400;
+            win.local().copy_from_slice(&[100, 200, 300, 400]);
         }
 
         // Make rank 1's stores visible in its window; `no_succeed` says no fence
