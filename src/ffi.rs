@@ -74,6 +74,9 @@ extern "C" {
 // RMA counterpart of the block above: a non-status return with no MPI call
 // (mode-value constants), or called from a `Drop` impl or under an in-flight
 // token its caller holds (`ferrompi_win_free` and the window constructors).
+// `Win::into_buffer` and the constructors also take the debug `Serialized`
+// overlap check; `Drop for Win` cannot report a refusal, so its free is not
+// checked.
 #[cfg(feature = "rma")]
 extern "C" {
     pub fn ferrompi_win_allocate_shared(

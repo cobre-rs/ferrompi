@@ -1584,6 +1584,11 @@ fn index_out_of_range(op: &str, index: usize, len: usize) -> ! {
 /// nothing against other locations: the epoch's synchronization calls do, as
 /// that section describes.
 ///
+/// A process that only polls makes no MPI progress: a peer's put or accumulate
+/// may not reach it until it calls MPI, and a peer that stores must do so
+/// before any MPI call that can wait for it (MPI-4.1 §12.7.3, p.615-616;
+/// Example 12.13, p.617).
+///
 /// The view claims no exclusivity, so two views of one region coexist, and
 /// [`write`](Self::write) takes `&self`. The bulk copies,
 /// [`copy_to_slice`](Self::copy_to_slice) and
@@ -3329,6 +3334,11 @@ impl<T: MpiDatatype> Win<T> {
     ///   [`test_exposure`](Self::test_exposure) that returns `true` first.
     /// - `Error::Finalized` once [`Mpi`](crate::Mpi) is being dropped: no MPI
     ///   call is made and the buffer is leaked.
+    /// - `Error::ThreadLevelViolation` in a debug build at
+    ///   [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized) when the
+    ///   call overlaps another thread's MPI call: no MPI call is made, and the
+    ///   window and its buffer are leaked and stay counted, so `Mpi` skips
+    ///   `MPI_Finalize`.
     /// - `Error::Mpi` with `operation: Some("win_free")` if the free fails:
     ///   the buffer is leaked and the window stays counted as alive, so `Mpi`
     ///   skips `MPI_Finalize`.
@@ -3352,10 +3362,21 @@ impl<T: MpiDatatype> Win<T> {
             });
         }
         let _call = rt::enter().map_err(|code| Error::from_code_with_op(code, "win_free"))?;
+        #[cfg(debug_assertions)]
+        let held = match rt::begin_call() {
+            Ok(held) => held,
+            Err(code) => {
+                // Leak the window, still counted: dropping it would run `Drop`'s unchecked free.
+                std::mem::forget(self);
+                return Err(Error::from_code_with_op(code, "win_free"));
+            }
+        };
         // SAFETY: `win_handle` is the live window's handle. Only this call
         // frees it: `WIN_FREED`, set right below, keeps `Drop` from freeing it
         // again.
         let ret = unsafe { ffi::ferrompi_win_free(self.win_handle) };
+        #[cfg(debug_assertions)]
+        rt::end_call(held);
         // The shim releases the table slot whatever MPI returned, so `Drop`
         // must not free again.
         self.win_handle = WIN_FREED;

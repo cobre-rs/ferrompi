@@ -893,11 +893,8 @@ int ferrompi_finalize(void) {
         atomic_store_explicit(&datatype_used[i], 0, memory_order_release);
     }
 
-    // Mpi skips MPI_Finalize while any window is alive, so this point is
-    // never reached with a live window; just reset the table.
-    for (int i = 0; i < MAX_WINDOWS; i++) {
-        atomic_store_explicit(&win_used[i], 0, memory_order_release);
-    }
+    // No window slot is occupied here: Mpi skips MPI_Finalize while any window
+    // is alive, and every occupied slot belongs to a window still counted.
 
     // Clean up any remaining communicators (skip slot 0, which is MPI_COMM_WORLD)
     for (int i = 1; i < MAX_COMMS; i++) {

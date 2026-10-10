@@ -49,6 +49,10 @@ name = "test_window_after_finalize"
 required-features = ["rma"]
 
 [[example]]
+name = "test_window_leak_paths"
+required-features = ["rma"]
+
+[[example]]
 name = "test_finalize_admits_completion"
 required-features = ["rma"]
 
