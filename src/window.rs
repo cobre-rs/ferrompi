@@ -599,7 +599,8 @@ fn check_rma_target(
 ///
 /// - The free succeeds: the window leaves the live-window count, and the
 ///   buffer of a `Win::create` window is dropped after the call. For
-///   `Win::allocate`, the free also releases the MPI-managed buffer.
+///   `Win::allocate` and `Win::allocate_shared`, the free also releases the
+///   MPI-managed buffer.
 /// - [`Mpi`](crate::Mpi) is being dropped, or was dropped and skipped
 ///   `MPI_Finalize` because this window was alive: no MPI call is made, the
 ///   window stays counted as alive (so `Mpi` skips `MPI_Finalize`), and the
@@ -1441,17 +1442,18 @@ pub struct Win<T: MpiDatatype> {
     /// Non-null pointer to this process's local window buffer.
     ///
     /// For `Win::create` this is the pointer `Vec::as_mut_ptr` returned for
-    /// `buffer`, the same one MPI holds. For `Win::allocate` this points into
-    /// the MPI-managed allocation.
+    /// `buffer`, the same one MPI holds. For `Win::allocate` and
+    /// `Win::allocate_shared` this points into the MPI-managed allocation.
     local_ptr: NonNull<T>,
     /// Number of `T` elements in the local buffer.
     local_len: usize,
     /// Every rank's displacement unit and exposed byte length, packed by
     /// [`window_word`] and indexed by rank in the window's communicator.
     words: Box<[u64]>,
-    /// The `Win::create` buffer, `None` for `Win::allocate`. Never read or
-    /// borrowed while the window lives, so every access goes through
-    /// `local_ptr`; only `into_buffer` and `Drop` touch it, after the free.
+    /// The `Win::create` buffer, `None` for `Win::allocate` and
+    /// `Win::allocate_shared`. Never read or borrowed while the window lives,
+    /// so every access goes through `local_ptr`; only `into_buffer` and `Drop`
+    /// touch it, after the free.
     buffer: Option<Vec<T>>,
     /// Whether a [`post`](Win::post) exposure epoch is open: set by a
     /// successful `post`, cleared by a successful `wait_exposure` or a
@@ -1556,12 +1558,12 @@ fn index_out_of_range(op: &str, index: usize, len: usize) -> ! {
 /// [`Win::local`], [`ActiveEpoch::local`] and [`PassiveEpoch::local`] return one
 /// of this process's own region, and [`Win::remote`], [`ActiveEpoch::remote`]
 /// and [`PassiveEpoch::remote`] one of a peer's region of a shared window. The
-/// memory of a window can change while the view lives, because a
-/// peer's put or accumulate writes it, or a fence lands remote writes in it. A
-/// `&[T]` over it would promise the compiler that it does not, so the view
-/// hands out elements by value instead. The `unsafe` methods
-/// [`as_slice`](Self::as_slice) and [`as_mut_slice`](Self::as_mut_slice) give a
-/// slice to a caller that can meet the contract their `# Safety` sections state.
+/// memory of a window can change while the view lives, because a peer's put or
+/// accumulate writes it, or a fence lands remote writes in it. A `&[T]` over it
+/// would promise the compiler that it does not, so the view hands out elements
+/// by value instead. The `unsafe` methods [`as_slice`](Self::as_slice) and
+/// [`as_mut_slice`](Self::as_mut_slice) give a slice to a caller that can meet
+/// the contract their `# Safety` sections state.
 ///
 /// # Access
 ///
@@ -1607,9 +1609,8 @@ fn index_out_of_range(op: &str, index: usize, len: usize) -> ! {
 /// A view from [`Win::local`] or [`Win::remote`] borrows the window, so it cannot
 /// be held across an epoch, which borrows the window mutably, and the window
 /// cannot be freed while the view lives. A view from an epoch handle borrows the
-/// handle, so it cannot
-/// leave the epoch's closure. The `# Compile-time guarantees` section of [`Win`]
-/// shows each as a program that does not compile.
+/// handle, so it cannot leave the epoch's closure. The `# Compile-time guarantees`
+/// section of [`Win`] shows each as a program that does not compile.
 ///
 /// # Thread safety
 ///
@@ -1794,11 +1795,8 @@ impl<T: MpiDatatype> WinView<'_, T> {
     /// enforces uniqueness only against the view it is taken from: another view of
     /// the region, or an RMA call that targets this process, is not stopped by it.
     pub unsafe fn as_mut_slice(&mut self) -> &mut [T] {
-        // SAFETY: `ptr` is non-null, aligned and valid for `len` initialized
-        // elements until the window is freed, which this view's borrow of the
-        // window excludes (a zero-length view holds a dangling pointer, which
-        // `len == 0` allows), and every bit pattern is a valid `T`. That the slice
-        // is the only access to the region while it lives is the caller's half,
+        // SAFETY: as in `as_slice` for `ptr` and `len`. That the slice is the
+        // only access to the region while it lives is the caller's half,
         // `# Safety` above.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
@@ -3107,7 +3105,6 @@ impl<T: MpiDatatype> Win<T> {
         })?;
 
         let local_ptr = if local_count == 0 {
-            // Zero-count: use a dangling aligned pointer.
             NonNull::<T>::dangling()
         } else {
             NonNull::new(baseptr.cast::<T>()).ok_or_else(|| {
@@ -3317,8 +3314,8 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// Calls `MPI_Win_free` and, once it has succeeded, returns the vector
     /// `Win::create` took, or `None` for a `Win::allocate` or
-    /// `Win::allocate_shared` window (MPI frees its memory with the window). Unlike `Drop`, it reports a failed or
-    /// refused free.
+    /// `Win::allocate_shared` window (MPI frees its memory with the window).
+    /// Unlike `Drop`, it reports a failed or refused free.
     ///
     /// The call is collective: it can block until every peer has called
     /// `MPI_Win_free`, because MPI-4.1 §12.2.5 requires it to wait until every
@@ -3588,9 +3585,9 @@ impl<T: MpiDatatype> Win<T> {
     ) -> Result<R> {
         check_fence_asserts(open, close)?;
         // SAFETY: `win_handle` is a valid MPI window handle allocated by one of
-        // the three `ferrompi_win_*` constructors. The assert value
-        // is a valid bitmask obtained from `WinFenceAssert`, which is either
-        // 0 (none) or a combination of values returned by the MPI implementation.
+        // the three `ferrompi_win_*` constructors. The assert value is a valid
+        // bitmask obtained from `WinFenceAssert`, which is either 0 (none) or a
+        // combination of values returned by the MPI implementation.
         let ret = unsafe { ffi::ferrompi_win_fence(open.bits(), self.win_handle) };
         Error::check_with_op(ret, "win_fence")?;
         self.run_epoch(
@@ -3933,10 +3930,9 @@ impl<T: MpiDatatype> Win<T> {
             LockType::Shared => ffi::FERROMPI_LOCK_SHARED,
         };
         // SAFETY: `win_handle` is a valid MPI window handle allocated by one of
-        // the three `ferrompi_win_*` constructors. `lt` is one of
-        // the two valid MPI lock-type constants obtained from the C layer.
-        // `rank` is caller-supplied; MPI validates it against the window's
-        // communicator.
+        // the three `ferrompi_win_*` constructors. `lt` is one of the two valid
+        // MPI lock-type constants obtained from the C layer. `rank` is
+        // caller-supplied; MPI validates it against the window's communicator.
         let ret = unsafe { ffi::ferrompi_win_lock(lt, rank, 0, self.win_handle) };
         Error::check_with_op(ret, "win_lock")?;
         self.run_passive_epoch(

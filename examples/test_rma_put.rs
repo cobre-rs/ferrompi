@@ -47,7 +47,6 @@ fn main() {
             local_ok = false;
         }
 
-        // Rank 1 inspects its local window memory through Win::local.
         // The closing fence guarantees the put from rank 0 is visible.
         if rank == 1 {
             let expected = [10.0f64, 20.0, 30.0, 40.0];

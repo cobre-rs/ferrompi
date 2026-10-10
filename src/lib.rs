@@ -295,10 +295,9 @@ pub enum ThreadLevel {
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
 /// whose `Drop` calls MPI — a [`PersistentRequest`], a communicator other than
 /// the world, a window, a datatype, group, info object or user op — on a
-/// thread other than the one that called
-/// [`Mpi::init`]/[`Mpi::init_thread`] prints
-/// `ferrompi: <Type> dropped on thread <name or id>` to stderr and aborts
-/// the process.
+/// thread other than the one that called [`Mpi::init`]/[`Mpi::init_thread`]
+/// prints `ferrompi: <Type> dropped on thread <name or id>` to stderr and
+/// aborts the process.
 ///
 /// At [`ThreadLevel::Serialized`]/[`ThreadLevel::Multiple`], dropping this
 /// handle waits for every MPI call that other threads have in progress

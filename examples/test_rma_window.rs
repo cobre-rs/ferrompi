@@ -5,10 +5,6 @@
 //! `lock_all` epochs with the passive handle's `flush`, `flush_all` and `sync`,
 //! and multi-type coverage (f64, i32, u64).
 //!
-//! A fence epoch is separated from a following lock by a closing fence that
-//! asserts `no_succeed` and a barrier, and the shared-memory pattern (store,
-//! `sync`, barrier, `sync`, load) runs inside one `lock_all` closure.
-//!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_rma_window
 // mpi-test: np=2.. release
 
@@ -25,7 +21,7 @@ fn main() {
         "test_rma_window requires at least 2 processes, got {size}"
     );
 
-    // All Win::allocate_shared operations require a shared-memory communicator.
+    // Win::allocate_shared requires a shared-memory communicator.
     let node = world.split_shared().expect("split_shared failed");
     let node_rank = node.rank();
     let node_size = node.size();
@@ -255,7 +251,6 @@ fn main() {
                 node.barrier()?;
                 e.sync()?;
 
-                // Read every rank's region
                 let mut regions = Vec::new();
                 for r in 0..node_size {
                     let view = e.remote(r)?;
@@ -264,10 +259,7 @@ fn main() {
                     regions.push(region);
                 }
 
-                // flush(0) — flush ops to rank 0
                 e.flush(0)?;
-
-                // flush_all — flush ops to all ranks
                 e.flush_all()?;
                 Ok(regions)
             })

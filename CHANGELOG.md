@@ -213,25 +213,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `win.local_slice()[i]` with `win.local().read(i)` and a slice copy with
   `copy_to_slice`/`copy_from_slice`.
 - **`SharedWindow`, `LockGuard` and `LockAllGuard` are removed:**
-  `Win::allocate_shared` creates a shared-memory window as an ordinary `Win`,
-  with `local()` and `remote(rank)` views and closure epochs. Migration:
-  replace `SharedWindow::allocate` with `Win::allocate_shared`, slices with
-  views, `remote_slice(r)` with `remote(r)`, a guard with a `lock`/`lock_all`
-  closure, and separate a fence from a following lock with
+  `Win::allocate_shared` creates a shared-memory window as an ordinary `Win`.
+  Migration: replace `SharedWindow::allocate` with `Win::allocate_shared`,
+  slices with views, `remote_slice(r)` with `remote(r)`, a guard with a
+  `lock`/`lock_all` closure, and separate a fence from a following lock with
   `WinFenceAssert::no_succeed()` and a barrier.
 
 ### Added
 
-- `WinView`, the view of a window's memory that `Win::local`,
-  `ActiveEpoch::local` and `PassiveEpoch::local` return.
+- `WinView`, the view of a window's memory.
 - **Zero-copy window slices:** `WinView::as_slice` and `WinView::as_mut_slice`
   (`unsafe`) give a `&[T]`/`&mut [T]` over a window region under the
   synchronization contract their documentation states.
 - **`Win::allocate_shared` and `remote(rank)`:** a shared-memory window as an
   ordinary `Win`, with every rank's region cached at creation;
-  `win.remote(rank)`, `e.remote(rank)` on both epoch handles, return a `WinView`
-  of that rank's region, or `Error::NotSupported` on a window that is not shared
-  or whose memory model is not `MPI_WIN_UNIFIED`.
+  `win.remote(rank)`, and `e.remote(rank)` on both epoch handles, return a
+  `WinView` of that rank's region, or `Error::NotSupported` on a window that is
+  not shared or whose memory model is not `MPI_WIN_UNIFIED`.
 - `CollectiveOp<'a, T>`, the op type of the reducing collectives.
 - `AccumulateOp` and `FetchOp`, the op types of the RMA accumulate calls.
 - **`ferrompi::scope` and `Scope`**: nonblocking requests are created inside a

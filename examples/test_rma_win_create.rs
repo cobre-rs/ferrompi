@@ -44,7 +44,6 @@ fn main() {
 
             assert_eq!(win.comm_size(), size, "Win::create comm_size() mismatch");
 
-            // Verify the view's length
             assert_eq!(win.local().len(), 16, "Win::create local len mismatch");
 
             // Write through the window, then free it: the owned buffer comes

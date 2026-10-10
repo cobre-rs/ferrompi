@@ -34,16 +34,14 @@ fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
     let rank = world.rank();
-    let size = world.size();
-
-    assert!(
-        size >= 2,
-        "test_rma_shared requires at least 2 processes, got {size}"
-    );
 
     let node = world.split_shared().expect("split_shared failed");
     let node_rank = node.rank();
     let node_size = node.size();
+    assert!(
+        node_size >= 2,
+        "test_rma_shared requires at least 2 processes on one node, got {node_size}"
+    );
     let ranks = node_size as usize;
 
     // ========================================================================
@@ -182,8 +180,7 @@ fn main() {
     }
 
     // ========================================================================
-    // Part 5: the two refusals. A rank outside the window's communicator is an
-    // invalid argument, and a window that is not shared has no remote views.
+    // Part 5: the two refusals.
     // ========================================================================
     {
         let win = Win::<u64>::allocate_shared(&node, N).expect("allocate_shared failed");
@@ -223,18 +220,17 @@ fn main() {
     {
         let count = if node_rank == 0 { 0 } else { N };
         let mut win = Win::<u64>::allocate_shared(&node, count).expect("allocate_shared failed");
-        let mut first = 0u64;
-        win.lock_all(|e| {
-            if node_rank == 1 {
-                e.local().write(0, 11);
-            }
-            e.sync()?;
-            node.barrier()?;
-            e.sync()?;
-            first = e.remote(1)?.read(0);
-            Ok(())
-        })
-        .expect("lock_all with an empty region failed");
+        let first = win
+            .lock_all(|e| {
+                if node_rank == 1 {
+                    e.local().write(0, 11);
+                }
+                e.sync()?;
+                node.barrier()?;
+                e.sync()?;
+                Ok(e.remote(1)?.read(0))
+            })
+            .expect("lock_all with an empty region failed");
 
         common::check(
             &world,
@@ -258,18 +254,14 @@ fn main() {
 
     // ========================================================================
     // Part 7: remote is a load/store path, not an RMA call, so an epoch's
-    // access set does not restrict it. A lock on one rank gives RMA access to
-    // that rank only, and remote still addresses another rank's region.
+    // access set does not restrict it.
     // ========================================================================
     {
         let mut win = Win::<u64>::allocate_shared(&node, N).expect("allocate_shared failed");
         let other = (node_rank + 1) % node_size;
-        let mut len = 0;
-        win.lock(LockType::Shared, node_rank, |e| {
-            len = e.remote(other)?.len();
-            Ok(())
-        })
-        .expect("lock(Shared, own rank) with remote(other) failed");
+        let len = win
+            .lock(LockType::Shared, node_rank, |e| Ok(e.remote(other)?.len()))
+            .expect("lock(Shared, own rank) with remote(other) failed");
         common::check(
             &world,
             len == N,

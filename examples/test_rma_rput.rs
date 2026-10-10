@@ -5,8 +5,8 @@
 //! 1. Rank 0 locks rank 1 exclusively, calls `PassiveEpoch::rput` inside the
 //!    closure to post a write of `[10, 20, 30, 40]` into rank 1's window, waits
 //!    on the returned `Request` (local completion), then the closure ends and
-//!    the unlock gives remote completion. After a barrier, rank 1 inspects its
-//!    local window memory and asserts the correct values.
+//!    the unlock gives remote completion. After a barrier, rank 1 locks its
+//!    own window, reads it and asserts the correct values.
 //! 2. A request the closure never waits is completed by the epoch before it
 //!    unlocks, whether the closure returns `Ok`, returns an error or panics.
 //!    Rank 0 runs many `lock` epochs per exit, each posting one `rput` it
@@ -80,7 +80,7 @@ fn main() {
     //
     // Protocol:
     //   Rank 0: lock(Exclusive, rank=1, |e| rput → req.wait()) → unlock
-    //   Rank 1: barrier → read local window → assert [10, 20, 30, 40]
+    //   Rank 1: barrier → lock(Shared, 1) → read local window → assert [10, 20, 30, 40]
     // ========================================================================
     {
         const N: usize = 4;
@@ -114,13 +114,13 @@ fn main() {
             }
         }
 
-        // All ranks synchronize here: rank 0's unlock has completed, so rank 1
-        // can now safely read its local window memory.
+        // All ranks synchronize here, so rank 1 reads after rank 0's unlock
+        // has completed.
         world.barrier().expect("barrier after rput failed");
 
         if rank == 1 {
             let expected = [10i32, 20, 30, 40];
-            let mut local = [0i32; 4];
+            let mut local = [0i32; N];
             // Locking its own window makes rank 0's update visible to this
             // rank's loads, and nothing writes the window after the unlock.
             win.lock(LockType::Shared, 1, |e| {
