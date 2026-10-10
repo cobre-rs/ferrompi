@@ -220,6 +220,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Zero-copy window slices:** `WinView::as_slice` and `WinView::as_mut_slice`
   (`unsafe`) give a `&[T]`/`&mut [T]` over a window region under the
   synchronization contract their documentation states.
+- **`Win::allocate_shared` and `remote(rank)`:** a shared-memory window as an
+  ordinary `Win`, with every rank's region cached at creation;
+  `win.remote(rank)`, `e.remote(rank)` on both epoch handles, return a `WinView`
+  of that rank's region, or `Error::NotSupported` on a window that is not shared
+  or whose memory model is not `MPI_WIN_UNIFIED`.
 - `CollectiveOp<'a, T>`, the op type of the reducing collectives.
 - `AccumulateOp` and `FetchOp`, the op types of the RMA accumulate calls.
 - **`ferrompi::scope` and `Scope`**: nonblocking requests are created inside a

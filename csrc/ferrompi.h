@@ -577,9 +577,9 @@ int ferrompi_startall(int64_t count, const int64_t* requests, uint8_t* started);
 #define FERROMPI_LOCK_EXCLUSIVE 0
 #define FERROMPI_LOCK_SHARED    1
 
-/* The three creating shims leave *win unchanged when MPI created no window, and set it to FERROMPI_WIN_LEAKED when MPI created the window but zeroing it failed or the handle table was full (that window is never freed). *win holds the real non-negative handle only on success. */
+/* The three creating shims leave *win unchanged when MPI created no window, and set it to FERROMPI_WIN_LEAKED when MPI created the window but zeroing it failed or the handle table was full (that window is never freed). *win holds the real non-negative handle only on success. ferrompi_win_allocate_shared also writes *unified: 0 on entry, then 1 only when MPI created the window and its MPI_WIN_MODEL attribute is MPI_WIN_UNIFIED, so it is 0 when no window was created or the query failed or found no attribute. */
 int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info,
-                                  int32_t comm, void** baseptr, int32_t* win);
+                                  int32_t comm, void** baseptr, int32_t* win, int32_t* unified);
 
 int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t info,
                          int32_t comm, int32_t* win);

@@ -136,8 +136,11 @@ impl WinFenceAssert {
         WinFenceAssert(0)
     }
 
-    /// Asserts that no stores to the window will occur in the following epoch
-    /// (`MPI_MODE_NOSTORE`).
+    /// Asserts that the local window was not updated by stores (or local get or
+    /// receive calls) since the last synchronization (`MPI_MODE_NOSTORE`;
+    /// MPI-4.1 §12.5.5, p.604). It describes what happened before the fence, not
+    /// what follows, and it lets MPI skip a cache synchronization, so it is
+    /// erroneous on a fence that follows stores into the window.
     #[inline]
     pub fn no_store() -> Self {
         WinFenceAssert(fence_mode_values()[0])
@@ -289,8 +292,11 @@ impl WinPscwAssert {
         WinPscwAssert(pscw_mode_values()[0])
     }
 
-    /// Asserts that no stores to the window will occur in the following epoch
-    /// (`MPI_MODE_NOSTORE`).
+    /// Asserts that the local window was not updated by stores (or local get or
+    /// receive calls) since the last synchronization (`MPI_MODE_NOSTORE`;
+    /// MPI-4.1 §12.5.5, p.604). It describes what happened before the call, not
+    /// what follows, and it lets MPI skip a cache synchronization, so it is
+    /// erroneous on a call that follows stores into the window.
     #[inline]
     pub fn no_store() -> Self {
         WinPscwAssert(pscw_mode_values()[1])
@@ -438,7 +444,7 @@ const FERROMPI_WIN_LEAKED: i32 = -2;
 const WIN_FREED: i32 = -1;
 
 /// Count of live windows of any kind (`Win::create`, `Win::allocate`,
-/// `SharedWindow::allocate`). `Mpi::drop` reads this through
+/// `Win::allocate_shared`, `SharedWindow::allocate`). `Mpi::drop` reads this through
 /// [`live_windows`] to decide whether `MPI_Finalize` is safe to call: some
 /// MPI implementations free MPI-allocated window memory inside
 /// `MPI_Finalize` itself, and some tear down internal state that still
@@ -454,8 +460,8 @@ pub(crate) fn live_windows() -> usize {
     LIVE_WINDOWS.load(Ordering::Acquire)
 }
 
-/// Counts a window being constructed (`SharedWindow::allocate`, `Win::create`
-/// or `Win::allocate`) in [`LIVE_WINDOWS`]. Only [`counted_window_call`]
+/// Counts a window being constructed (`SharedWindow::allocate`, `Win::create`,
+/// `Win::allocate` or `Win::allocate_shared`) in [`LIVE_WINDOWS`]. Only [`counted_window_call`]
 /// calls it, inside the in-flight span that call opens.
 fn mark_window_alive() {
     // Relaxed: the increment, and its undo in `mark_window_gone`, happen inside
@@ -680,6 +686,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
         let (size, disp_unit) = win_size_and_disp_unit::<T>(local_count)?;
         let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut win_handle: i32 = -1;
+        let mut unified: i32 = 0;
 
         counted_window_call("win_allocate_shared", &mut win_handle, |handle| {
             // SAFETY: We pass valid pointers for out-parameters. The C layer
@@ -692,6 +699,7 @@ impl<T: MpiDatatype> SharedWindow<T> {
                     comm.handle,
                     &mut baseptr,
                     handle,
+                    &mut unified,
                 )
             }
         })?;
@@ -1008,14 +1016,17 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 
 /// A general-purpose distributed RMA window.
 ///
-/// `Win<T>` wraps either:
+/// `Win<T>` wraps one of:
 ///
 /// - `MPI_Win_create` (`Win::create`) — the caller supplies a `Vec<T>` and
 ///   the window owns it; [`into_buffer`](Win::into_buffer) returns it.
 /// - `MPI_Win_allocate` (`Win::allocate`) — MPI allocates the buffer.
+/// - `MPI_Win_allocate_shared` (`Win::allocate_shared`) — MPI allocates memory
+///   that every process of a shared-memory communicator can access directly,
+///   and [`remote`](Win::remote) returns a view of each rank's region.
 ///
-/// Unlike [`SharedWindow`], which uses `MPI_Win_allocate_shared` and is
-/// restricted to intra-node communicators, `Win` works across nodes and is
+/// Unlike [`SharedWindow`], which is restricted to intra-node communicators,
+/// `Win` works across nodes (except for a `Win::allocate_shared` window) and is
 /// the foundation for all distributed RMA operations (Put, Get, Accumulate,
 /// etc.) in this library.
 ///
@@ -1354,6 +1365,55 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 /// # }
 /// ```
 ///
+/// A view of a peer's region of a shared window is borrowed the same way, from
+/// either handle:
+///
+/// ```compile_fail,E0521
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let mut keep = None;
+/// win.lock_all(|e| {
+///     keep = Some(e.remote(1)?);
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// win.lock_all(|e| {
+///     let mut keep = None;
+///     keep = Some(e.remote(1)?);
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```compile_fail,E0521
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let mut keep = None;
+/// win.fence(none, none, |e| {
+///     keep = Some(e.remote(1)?);
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |e| {
+///     let mut keep = None;
+///     keep = Some(e.remote(1)?);
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
 /// A window's view cannot be held across an epoch, which borrows the window
 /// mutably while a peer may be writing it:
 ///
@@ -1375,6 +1435,30 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 /// win.fence(none, none, |_| Ok(()))?;
 /// let local = win.local();
 /// local.read(0);
+/// Ok(())
+/// # }
+/// ```
+///
+/// Nor can a window's view of a peer's region:
+///
+/// ```compile_fail,E0502
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// let peer = win.remote(1)?;
+/// win.fence(none, none, |_| Ok(()))?;
+/// peer.read(0);
+/// Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::{Win, WinFenceAssert};
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let none = WinFenceAssert::none();
+/// win.fence(none, none, |_| Ok(()))?;
+/// let peer = win.remote(1)?;
+/// peer.read(0);
 /// Ok(())
 /// # }
 /// ```
@@ -1819,6 +1903,10 @@ pub struct Win<T: MpiDatatype> {
     /// `test_exposure` that returned `true`. While it is set, a peer may still
     /// write into the window, so neither `into_buffer` nor `Drop` frees it.
     exposure_open: Cell<bool>,
+    /// Every rank's region of a unified `allocate_shared` window, from
+    /// `MPI_Win_shared_query` at creation; `None` otherwise.
+    #[allow(clippy::type_complexity)] // one (base, length) pair per rank, used once
+    shared: Option<Box<[(NonNull<T>, usize)]>>,
 }
 
 // ============================================================================
@@ -1850,9 +1938,11 @@ const fn fits_atomic(size: usize, align: usize) -> bool {
 /// `size_of::<T>()` must be a width [`fits_atomic`] accepts. `WinView::FITS`
 /// ensures the width and that `T`'s alignment suffices, and a window's memory is
 /// aligned for its elements: memory MPI allocates by MPI-4.1 §9.2 (p.447), which
-/// MPI-4.1 §12.2.2 (p.554) applies to `MPI_Win_allocate`, and `Win::create`
-/// memory because `Vec::as_mut_ptr` is. No non-atomic access to the location may
-/// overlap this one.
+/// MPI-4.1 §12.2.2 (p.554) applies to `MPI_Win_allocate`, and §12.2.3 (p.556) to
+/// the regions of `MPI_Win_allocate_shared` whose element sizes
+/// `Win::allocate_shared` checks are equal on every rank, and `Win::create` memory
+/// because `Vec::as_mut_ptr` is. No non-atomic access to the location may overlap
+/// this one.
 unsafe fn atomic_load<T: MpiDatatype>(p: *mut T) -> T {
     // SAFETY: the caller upholds this function's contract. The arm taken
     // matches `size_of::<T>()`, so `transmute_copy` reads back exactly the bits
@@ -1905,11 +1995,13 @@ fn index_out_of_range(op: &str, index: usize, len: usize) -> ! {
     panic!("WinView::{op}: index {index} is out of range for a view of length {len}")
 }
 
-/// A view of the local memory of an RMA window: a pointer and a length borrowed
-/// from a [`Win`] or from one of its epoch handles.
+/// A view of a region of an RMA window: a pointer and a length borrowed from a
+/// [`Win`] or from one of its epoch handles.
 ///
-/// [`Win::local`], [`ActiveEpoch::local`] and [`PassiveEpoch::local`] return
-/// one. The memory of a window can change while the view lives, because a
+/// [`Win::local`], [`ActiveEpoch::local`] and [`PassiveEpoch::local`] return one
+/// of this process's own region, and [`Win::remote`], [`ActiveEpoch::remote`]
+/// and [`PassiveEpoch::remote`] one of a peer's region of a shared window. The
+/// memory of a window can change while the view lives, because a
 /// peer's put or accumulate writes it, or a fence lands remote writes in it. A
 /// `&[T]` over it would promise the compiler that it does not, so the view
 /// hands out elements by value instead. The `unsafe` methods
@@ -1952,9 +2044,10 @@ fn index_out_of_range(op: &str, index: usize, len: usize) -> ! {
 ///
 /// # Lifetimes
 ///
-/// A view from [`Win::local`] borrows the window, so it cannot be held across an
-/// epoch, which borrows the window mutably, and the window cannot be freed while
-/// the view lives. A view from an epoch handle borrows the handle, so it cannot
+/// A view from [`Win::local`] or [`Win::remote`] borrows the window, so it cannot
+/// be held across an epoch, which borrows the window mutably, and the window
+/// cannot be freed while the view lives. A view from an epoch handle borrows the
+/// handle, so it cannot
 /// leave the epoch's closure. The `# Compile-time guarantees` section of [`Win`]
 /// shows each as a program that does not compile.
 ///
@@ -2102,6 +2195,16 @@ impl<T: MpiDatatype> WinView<'_, T> {
     /// shows the sequence: lock_all; store; `MPI_Win_sync`; send and receive;
     /// `MPI_Win_sync`; load. MPI defines no semantics for direct access to shared
     /// window memory outside the unified memory model (MPI-4.1 §12.2.3, p.558).
+    ///
+    /// *A peer's region.* For a slice of a [`Win::remote`] view, `MPI_Win_wait` at
+    /// this process never applies: it completes the exposure epoch of this
+    /// process's own region. A fence publishes because it is collective and
+    /// completes the writes at the region's owner (MPI-4.1 §12.5.1, p.591): writes
+    /// made before the previous fence are visible once a fence without
+    /// `MPI_MODE_NOPRECEDE` returns here (p.592). Otherwise the passive-target
+    /// route above is the one a remote reader needs: the writer's `MPI_Win_sync`
+    /// after its stores, or its unlock or flush after its puts and accumulates,
+    /// then process synchronization, then `MPI_Win_sync` at this process.
     pub unsafe fn as_slice(&self) -> &[T] {
         // SAFETY: `ptr` is non-null, aligned and valid for `len` initialized
         // elements until the window is freed, which this view's borrow of the
@@ -2123,7 +2226,7 @@ impl<T: MpiDatatype> WinView<'_, T> {
     /// process inside a passive-target epoch. No other access to the region, read or
     /// write, happens while the slice lives: by any process, by MPI on this
     /// process's behalf, or by any other view or slice in this process, including
-    /// `remote(own rank)`, which aliases `local()`.
+    /// [`remote(own rank)`](Win::remote), which aliases `local()`.
     ///
     /// The reasons are those of [`as_slice`](Self::as_slice), and a `&mut [T]`
     /// must also be unique. Writes through the slice itself, including by an MPI
@@ -2163,8 +2266,8 @@ impl<T: MpiDatatype> WinView<'_, T> {
 /// destination or a `result`) cannot be read before then either. These six
 /// methods reject a buffer declared inside the closure, because it is freed
 /// before then. Declare buffers before the call to `fence` or `start`.
-/// [`local`](Self::local) returns a view that borrows the handle, so it cannot
-/// leave the closure.
+/// [`local`](Self::local) and [`remote`](Self::remote) return views that borrow
+/// the handle, so they cannot leave the closure.
 ///
 /// # Access set
 ///
@@ -2195,6 +2298,26 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// an unspecified result, as [`WinView`] describes.
     pub fn local(&self) -> WinView<'_, T> {
         self.win.local()
+    }
+
+    /// A view of `rank`'s region of a shared window, as [`Win::remote`], taken
+    /// through the handle: the window itself is borrowed mutably while the
+    /// closure runs.
+    ///
+    /// The view borrows the handle, so it cannot leave the closure. It makes no
+    /// MPI call, and the epoch's access set does not restrict it: loads and
+    /// stores of shared memory need no access epoch to that rank. What publishes a
+    /// peer's writes is described under [`Win::remote`]'s `# Publication`. Inside a
+    /// fence epoch, the view reads what was written before the fence that preceded
+    /// this epoch's opening fence (in an earlier fence epoch, say), provided the
+    /// opening fence does not carry `MPI_MODE_NOPRECEDE`. A peer's stores made
+    /// inside this epoch are not ordered with this process's loads.
+    ///
+    /// # Errors
+    ///
+    /// As [`Win::remote`].
+    pub fn remote(&self, rank: i32) -> Result<WinView<'_, T>> {
+        self.win.remote(rank)
     }
 
     /// One-sided write: copy `origin` into the remote rank's window memory.
@@ -2642,8 +2765,8 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> ActiveEpoch<'s, '_, T> {
 /// destination or a `result`) cannot be read before then either. These nine
 /// methods reject a buffer declared inside the closure, because it is freed
 /// before then. Declare buffers before the call to `lock` or `lock_all`.
-/// [`local`](Self::local) returns a view that borrows the handle, so it cannot
-/// leave the closure.
+/// [`local`](Self::local) and [`remote`](Self::remote) return views that borrow
+/// the handle, so they cannot leave the closure.
 ///
 /// # Access set
 ///
@@ -2708,6 +2831,29 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// ```
     pub fn local(&self) -> WinView<'_, T> {
         self.win.local()
+    }
+
+    /// A view of `rank`'s region of a shared window, as [`Win::remote`], taken
+    /// through the handle: the window itself is borrowed mutably while the
+    /// closure runs.
+    ///
+    /// The view borrows the handle, so it cannot leave the closure. It makes no
+    /// MPI call, and the epoch's access set does not restrict it: loads and
+    /// stores of shared memory need no access epoch to that rank. Inside a
+    /// [`Win::lock_all`] closure it completes the pattern of
+    /// [`local`](Self::local): the peer stores through its own view and calls
+    /// [`sync`](Self::sync), the processes synchronize, this process calls
+    /// `sync`, then loads through `remote`. That is the passive-target route
+    /// described under [`Win::remote`]'s `# Publication`, and
+    /// [`Win::allocate_shared`] shows the pattern. Under `lock(_, r)`, loads and
+    /// stores through `remote(r)` are lock-protected (MPI-4.1 §12.5.3, p.597);
+    /// `remote` of any other rank is not.
+    ///
+    /// # Errors
+    ///
+    /// As [`Win::remote`].
+    pub fn remote(&self, rank: i32) -> Result<WinView<'_, T>> {
+        self.win.remote(rank)
     }
 
     /// One-sided write, as [`ActiveEpoch::put`], in a passive-target epoch.
@@ -3323,6 +3469,7 @@ impl<T: MpiDatatype> Win<T> {
             words,
             buffer: Some(buf),
             exposure_open: Cell::new(false),
+            shared: None,
         })
     }
 
@@ -3416,14 +3563,197 @@ impl<T: MpiDatatype> Win<T> {
             words,
             buffer: None,
             exposure_open: Cell::new(false),
+            shared: None,
+        })
+    }
+
+    /// Allocate a shared-memory RMA window.
+    ///
+    /// Wraps `MPI_Win_allocate_shared`. MPI allocates `local_count` elements of
+    /// type `T` for this process, in memory every process of `comm` can load and
+    /// store directly. `comm` must be a shared-memory communicator, such as one
+    /// from [`Communicator::split_shared`], and the call is collective over it.
+    /// Every rank must pass an element type of one size: creation checks this with
+    /// the length exchange and refuses a mismatch on every rank. MPI aligns the
+    /// first non-empty segment for any predefined datatype and places the others
+    /// after it, so every base is then aligned for `T` (MPI-4.1 §9.2, p.447;
+    /// MPI-4.1 §12.2.3, p.555-556).
+    ///
+    /// `disp_unit` is set to `size_of::<T>()` and `size` to
+    /// `local_count * size_of::<T>()`. Creation first exchanges each rank's
+    /// displacement unit and exposed length with one allgather over `comm`, and
+    /// then queries every rank's region once with `MPI_Win_shared_query`, so
+    /// [`remote`](Self::remote) makes no MPI call.
+    ///
+    /// The local segment reads as zero when the call returns.
+    ///
+    /// The window is an ordinary `Win`: every epoch, view and transfer works on
+    /// it. [`remote`](Self::remote) returns [`Error::NotSupported`] unless MPI
+    /// reports the window's memory model as `MPI_WIN_UNIFIED`, because MPI does
+    /// not define the semantics of accessing shared window memory directly in
+    /// the separate memory model (MPI-4.1 §12.2.3, p.558). [`local`](Self::local)
+    /// works in either model.
+    ///
+    /// # Arguments
+    ///
+    /// * `comm`        - A shared-memory communicator; all processes must call
+    ///   this collectively.
+    /// * `local_count` - Number of `T` elements to allocate for this process.
+    ///   Zero is allowed: the region is then empty, whatever pointer MPI returns
+    ///   for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Ranks passed element types of different sizes (`Error::InvalidArgument`
+    ///   with `arg: "T"` on every rank, before any window is created).
+    /// - Any rank's `local_count` exposed byte length does not fit in 56 bits
+    ///   (`Error::InvalidArgument` on every rank).
+    /// - The length exchange fails (`Error::Mpi` with
+    ///   `operation: Some("allgather")`); this can happen on some ranks only,
+    ///   and the other ranks can then block creating the window.
+    /// - The MPI call fails (`Error::Mpi` with
+    ///   `operation: Some("win_allocate_shared")`); this can happen on some
+    ///   ranks only, and the other ranks can then block in the barrier after
+    ///   the new segment is zeroed.
+    /// - The window table is full (`Error::ResourceExhausted`; the window is
+    ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`).
+    /// - An error occurs while zeroing the new segment (`Error::Mpi` with
+    ///   `operation: Some("win_allocate_shared")`; the window is then leaked:
+    ///   never freed, and counted as alive so `Mpi` skips `MPI_Finalize`).
+    /// - MPI returns a null pointer for a non-zero count (`Error::Internal`;
+    ///   the window is then leaked: never freed, and counted as alive so `Mpi`
+    ///   skips `MPI_Finalize`).
+    /// - Querying a rank's region fails (`Error::Mpi` with
+    ///   `operation: Some("win_shared_query")`), or returns a null pointer for a
+    ///   non-zero size (`Error::Internal`); the window is then leaked, as above.
+    ///
+    /// In the last four cases, a peer whose own call succeeded blocks in its
+    /// collective `Drop` (`MPI_Win_free`) waiting for this rank.
+    ///
+    /// # Example
+    ///
+    /// Each rank stores through its own view and reads a peer's region through
+    /// [`remote`](PassiveEpoch::remote), inside one `lock_all` closure: store,
+    /// `sync`, synchronize the processes, `sync`, load (MPI-4.1 §12.7, p.609;
+    /// Example 12.23, p.622).
+    ///
+    /// ```no_run
+    /// use ferrompi::{Mpi, Win};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let node = mpi.world().split_shared().unwrap();
+    /// let mut win = Win::<u64>::allocate_shared(&node, 4).unwrap();
+    /// let peer = (node.rank() + 1) % node.size();
+    /// win.lock_all(|e| {
+    ///     e.local().write(0, node.rank() as u64 + 1);
+    ///     e.sync()?;
+    ///     node.barrier()?;
+    ///     e.sync()?;
+    ///     let _seen = e.remote(peer)?.read(0);
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// ```
+    pub fn allocate_shared(comm: &Communicator, local_count: usize) -> Result<Self> {
+        let words = exchange_window_words(comm, window_word::<T>(local_count))?;
+        if words
+            .iter()
+            .any(|&word| word >> WINDOW_WORD_DISP_SHIFT != size_of::<T>() as u64)
+        {
+            return Err(Error::InvalidArgument {
+                arg: "T",
+                reason: "every rank must pass an element type of one size",
+            });
+        }
+        let (size, disp_unit) = win_size_and_disp_unit::<T>(local_count)?;
+        let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut win_handle: i32 = -1;
+        let mut unified: i32 = 0;
+
+        counted_window_call("win_allocate_shared", &mut win_handle, |handle| {
+            // SAFETY: We pass valid out-parameter pointers to the C shim, which
+            // calls MPI_Win_allocate_shared and queries the window's memory
+            // model. The C shim validates the comm handle. The returned baseptr
+            // is either a valid MPI-allocated pointer or null (only valid if
+            // local_count == 0).
+            unsafe {
+                ffi::ferrompi_win_allocate_shared(
+                    size,
+                    disp_unit,
+                    -1, // MPI_INFO_NULL
+                    comm.handle,
+                    &mut baseptr,
+                    handle,
+                    &mut unified,
+                )
+            }
+        })?;
+
+        let local_ptr = if local_count == 0 {
+            NonNull::<T>::dangling()
+        } else {
+            NonNull::new(baseptr.cast::<T>()).ok_or_else(|| {
+                Error::Internal(
+                    "Win_allocate_shared returned null base pointer for non-zero count".into(),
+                )
+            })?
+        };
+
+        let shared = if unified != 0 {
+            let mut regions = Vec::with_capacity(words.len());
+            for rank in 0..words.len() as i32 {
+                let mut region_size: i64 = 0;
+                let mut region_disp_unit: i32 = 0;
+                let mut region_base: *mut std::ffi::c_void = std::ptr::null_mut();
+                // SAFETY: We pass valid out-parameter pointers, and `win_handle`
+                // is the handle of the window created above, which stays alive
+                // and counted on every path out of this function.
+                let ret = unsafe {
+                    ffi::ferrompi_win_shared_query(
+                        win_handle,
+                        rank,
+                        &mut region_size,
+                        &mut region_disp_unit,
+                        &mut region_base,
+                    )
+                };
+                Error::check_with_op(ret, "win_shared_query")?;
+                let count = region_size as usize / size_of::<T>();
+                let base = if count == 0 {
+                    // MPI returns null on some stacks and a non-null pointer on
+                    // others for an empty segment: either way it is no region.
+                    NonNull::<T>::dangling()
+                } else {
+                    NonNull::new(region_base.cast::<T>()).ok_or_else(|| {
+                        Error::Internal(
+                            "MPI_Win_shared_query returned null for non-zero size".into(),
+                        )
+                    })?
+                };
+                regions.push((base, count));
+            }
+            Some(regions.into_boxed_slice())
+        } else {
+            None
+        };
+
+        Ok(Win {
+            win_handle,
+            local_ptr,
+            local_len: local_count,
+            words,
+            buffer: None,
+            exposure_open: Cell::new(false),
+            shared,
         })
     }
 
     /// Free the window and return its buffer.
     ///
     /// Calls `MPI_Win_free` and, once it has succeeded, returns the vector
-    /// `Win::create` took, or `None` for a `Win::allocate` window (MPI frees
-    /// its memory with the window). Unlike `Drop`, it reports a failed or
+    /// `Win::create` took, or `None` for a `Win::allocate` or
+    /// `Win::allocate_shared` window (MPI frees its memory with the window). Unlike `Drop`, it reports a failed or
     /// refused free.
     ///
     /// The call is collective: it can block until every peer has called
@@ -3519,6 +3849,78 @@ impl<T: MpiDatatype> Win<T> {
             len: self.local_len,
             window: PhantomData,
         }
+    }
+
+    /// A view of `rank`'s region of this shared window.
+    ///
+    /// The regions of a [`Win::allocate_shared`] window were queried once at
+    /// creation, so this makes no MPI call: the view holds the address and
+    /// length of that rank's region in this process. Its accesses are the
+    /// `Relaxed` atomic ones of [`WinView`], and it borrows the window as
+    /// [`local`](Self::local)'s does. Inside an epoch, take the view from the
+    /// handle with [`ActiveEpoch::remote`] or [`PassiveEpoch::remote`].
+    ///
+    /// `remote(own rank)` addresses the same memory as [`local`](Self::local), so
+    /// the two views alias: a store through one is read through the other, and
+    /// the contract of [`WinView::as_mut_slice`] covers it.
+    ///
+    /// Every rank's `T` has one size, which [`Win::allocate_shared`] checks. A peer
+    /// that passed another type of that size (`f64` against `u64`, say) wrote bits
+    /// that read back as this rank's `T`, and every bit pattern is a valid element.
+    ///
+    /// # Publication
+    ///
+    /// A store, put or accumulate by another process is guaranteed to be visible to
+    /// this process's loads of the region only after MPI synchronization; on
+    /// coherent hardware it may be seen earlier. `MPI_Win_wait` at this process
+    /// never publishes a peer's region: it completes the exposure epoch of this
+    /// process's own region. A fence publishes what was written before the
+    /// previous fence. That fence completes puts and accumulates at the region's
+    /// owner, and makes stores to shared memory visible, before it returns there
+    /// (MPI-4.1 §12.5.1, p.591; §12.7, rule 2, p.606). The next fence synchronizes
+    /// unless it carries `MPI_MODE_NOPRECEDE` (p.592), so it returns at this
+    /// process only after the owner has entered it. Otherwise a reader needs the
+    /// passive-target route: the writer's `sync` after its stores, or its unlock
+    /// or flush after its puts and accumulates, then process synchronization, then
+    /// `sync` at this process inside a passive-target epoch (MPI-4.1 §12.5.4,
+    /// p.603; the advice to users after rule U5, MPI-4.1 §12.7, p.609; Example
+    /// 12.23, p.622). The same holds for a slice of the view,
+    /// [`WinView::as_slice`].
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::NotSupported`] if this window is not from
+    ///   [`Win::allocate_shared`], or MPI did not report its memory model as
+    ///   `MPI_WIN_UNIFIED`, which MPI requires for direct access to shared
+    ///   window memory (MPI-4.1 §12.2.3, p.558).
+    /// - [`Error::InvalidArgument`] with `arg: "rank"` if `rank` is not a rank of
+    ///   the window's communicator.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::{Mpi, Win};
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let node = mpi.world().split_shared().unwrap();
+    /// let win = Win::<u64>::allocate_shared(&node, 4).unwrap();
+    /// let own = win.remote(node.rank()).unwrap();
+    /// own.write(0, 7);
+    /// assert_eq!(win.local().read(0), 7);
+    /// ```
+    pub fn remote(&self, rank: i32) -> Result<WinView<'_, T>> {
+        let Some(regions) = &self.shared else {
+            return Err(Error::NotSupported(
+                "remote views need a window from Win::allocate_shared under MPI_WIN_UNIFIED".into(),
+            ));
+        };
+        check_rank(regions.len(), "rank", rank)?;
+        let (ptr, len) = regions[rank as usize];
+        Ok(WinView {
+            ptr,
+            len,
+            window: PhantomData,
+        })
     }
 
     /// Get this window's raw handle.
@@ -4792,6 +5194,7 @@ mod tests {
             words: Box::new([]),
             buffer: Some(buffer),
             exposure_open: Cell::new(false),
+            shared: None,
         }
     }
 
@@ -4815,6 +5218,7 @@ mod tests {
             words: Box::new([]),
             buffer: Some(v),
             exposure_open: Cell::new(false),
+            shared: None,
         };
         for round in 1..=3u64 {
             win.local().copy_from_slice(&[round; 4]);
@@ -4923,6 +5327,49 @@ mod tests {
         assert!(exclusive.is_empty());
     }
 
+    /// A sentinel window holding the cache of a shared window of two ranks: rank
+    /// 0's region is the window's own memory and rank 1's is empty. `remote` only
+    /// reads the cache, so no MPI call is made. Run under Miri, with and without
+    /// `-Zmiri-tree-borrows`, to check that the cached pointer is the recorded one.
+    fn sentinel_shared_window() -> Win<u64> {
+        let mut win = sentinel_window(vec![0u64; 4]);
+        win.shared = Some(Box::new([(win.local_ptr, 4), (NonNull::dangling(), 0)]));
+        win
+    }
+
+    #[test]
+    fn remote_returns_the_cached_region_and_aliases_local() {
+        let win = sentinel_shared_window();
+        let own = win.remote(0).unwrap();
+        assert_eq!(own.len(), 4);
+        win.local().write(1, 7);
+        assert_eq!(own.read(1), 7);
+        own.write(2, 9);
+        assert_eq!(win.local().read(2), 9);
+        let empty = win.remote(1).unwrap();
+        assert!(empty.is_empty());
+        empty.copy_to_slice(&mut []);
+    }
+
+    #[test]
+    fn remote_rank_outside_the_communicator_is_invalid_argument() {
+        let win = sentinel_shared_window();
+        for rank in [2, -1, i32::MAX, i32::MIN] {
+            assert!(matches!(
+                win.remote(rank),
+                Err(Error::InvalidArgument { arg: "rank", .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn remote_on_a_window_that_is_not_shared_is_not_supported() {
+        let win = sentinel_window(vec![0u64; 4]);
+        for rank in [0, 7, -1] {
+            assert!(matches!(win.remote(rank), Err(Error::NotSupported(_))));
+        }
+    }
+
     #[test]
     #[should_panic(expected = "WinView::read: index 4 is out of range for a view of length 4")]
     fn view_read_panics_at_len() {
@@ -4968,6 +5415,7 @@ mod tests {
             words: Box::new([]),
             buffer: Some(Vec::new()),
             exposure_open: Cell::new(true),
+            shared: None,
         };
         assert!(matches!(win.into_buffer(), Err(Error::InvalidState { .. })));
     }
@@ -5000,6 +5448,7 @@ mod tests {
                 words: Box::new([window_word::<T>(1), window_word::<T>(1)]),
                 buffer: None,
                 exposure_open: Cell::new(false),
+                shared: None,
             }
         }
 

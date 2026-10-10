@@ -83,6 +83,7 @@ extern "C" {
         comm: int32_t,
         baseptr: *mut *mut c_void,
         win: *mut int32_t,
+        unified: *mut int32_t,
     ) -> c_int;
     pub fn ferrompi_win_create(
         base: *mut c_void,

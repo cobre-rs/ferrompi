@@ -3996,7 +3996,9 @@ static int zero_own_segment(MPI_Win win, MPI_Comm comm, void* base, MPI_Aint siz
 }
 
 int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_handle,
-                                  int32_t comm_handle, void** baseptr, int32_t* win_handle) {
+                                  int32_t comm_handle, void** baseptr, int32_t* win_handle,
+                                  int32_t* unified) {
+    *unified = 0;
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
     MPI_Info info = (info_handle < 0) ? MPI_INFO_NULL : get_info(info_handle);
@@ -4004,6 +4006,12 @@ int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_h
     int ret = MPI_Win_allocate_shared((MPI_Aint)size, disp_unit, info, comm, baseptr, &win);
     if (ret == MPI_SUCCESS) {
         install_errors_return_win(win);
+        /* The attribute value is a pointer to an int (MPI-4.1 Table 12.1). A failed or
+         * empty query leaves *unified 0, so the query adds no error path. */
+        int* model = NULL;
+        int flag = 0;
+        int r = MPI_Win_get_attr(win, MPI_WIN_MODEL, &model, &flag);
+        *unified = (r == MPI_SUCCESS && flag && *model == MPI_WIN_UNIFIED);
         ret = zero_own_segment(win, comm, *baseptr, (MPI_Aint)size);
         if (ret != MPI_SUCCESS) {
             *win_handle = FERROMPI_WIN_LEAKED;
