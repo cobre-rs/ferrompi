@@ -50,6 +50,7 @@ bash tests/build_probe.sh
 MPI_NP_LIST="2 3 4" ./tests/run_mpi_tests.sh
 MPI_NP_LIST="2 3 4" ./tests/run_mpi_tests.sh rma
 ./tests/run_mpi_tests.sh --valgrind rma   # optional, needs valgrind
+MPI_NP_LIST="2 3 4" ./tests/run_mpi_tests.sh --release rma
 
 cargo +1.85 build --locked --all-features --lib --tests --examples
 ```
@@ -70,7 +71,7 @@ An MPI-exercising test is an `examples/test_*.rs` binary, discovered and run by
 `tests/run_mpi_tests.sh`. It carries one directive comment:
 
 ```
-// mpi-test: np=<N>|<N>.. [timeout=<s>] [skip-ok=<impl>[,<impl>]] [expect=abort|expect=unfinalized] [valgrind]
+// mpi-test: np=<N>|<N>.. [timeout=<s>] [skip-ok=<impl>[,<impl>]] [expect=abort|expect=unfinalized] [valgrind] [release]
 ```
 
 and at most one:
@@ -87,7 +88,9 @@ exit status of a failing rank can be lost, and only its `FAIL` line is reliable.
 
 Examples run in a build with debug assertions: an example may check debug-only
 diagnostics, and the runner refuses to run when cargo reports the `ferrompi`
-library built without them.
+library built without them. `--release` builds in release and runs only the
+examples whose directive has the `release` flag, at every `np` the directive
+expands to; those examples must not depend on debug-only diagnostics.
 
 Outcome rules:
 

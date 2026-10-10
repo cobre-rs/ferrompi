@@ -24,4 +24,4 @@ fn main() -> ferrompi::Result<()> {
     }
     Ok(())
 }
-// mpi-test: np=2
+// mpi-test: np=2 release

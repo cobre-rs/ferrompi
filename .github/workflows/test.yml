@@ -134,6 +134,10 @@ jobs:
           chmod +x tests/run_mpi_tests.sh
           MPI_NP_LIST="${{ matrix.np_list }}" ./tests/run_mpi_tests.sh "${{ matrix.features }}"
 
+      - name: MPI integration tests (release)
+        if: matrix.mpi == 'mpich' && matrix.features == 'rma'
+        run: MPI_NP_LIST="${{ matrix.np_list }}" ./tests/run_mpi_tests.sh --release rma
+
   test-openmpi5:
     name: Test (openmpi5, rma)
     runs-on: ubuntu-24.04

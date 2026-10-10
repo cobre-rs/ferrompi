@@ -72,4 +72,4 @@ fn main() -> Result<()> {
     // freed on drop; MPI is finalized when `mpi` is dropped.
     Ok(())
 }
-// mpi-test: np=2..
+// mpi-test: np=2.. release

@@ -10,7 +10,7 @@
 //! `sync`, barrier, `sync`, load) runs inside one `lock_all` closure.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_rma_window
-// mpi-test: np=2..
+// mpi-test: np=2.. release
 
 use ferrompi::{LockType, Mpi, Win, WinFenceAssert};
 

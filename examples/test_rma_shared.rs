@@ -302,4 +302,4 @@ fn main() {
         println!("PASS: mixed element sizes are refused");
     }
 }
-// mpi-test: np=2..
+// mpi-test: np=2.. release

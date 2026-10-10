@@ -4,8 +4,9 @@
 #
 # Sources the runner (its main guard keeps this side-effect free) and checks
 # parse_directive, expand_np, impl_id, feature_closure, classify,
-# artifact_outcome and discover against fixed fixtures. Needs no MPI, no
-# cargo and no network.
+# lib_debug_assertions, lib_opt_level, artifact_outcome, discover and the
+# mode-flag refusal of main against fixed fixtures. Needs no MPI, no cargo and
+# no network.
 #
 # Prints "ok <case>" or "not ok <case>: <got> != <want>" per case and exits
 # 1 if any case failed.
@@ -62,7 +63,7 @@ check_discover_rejects() {
 
 check "parse_directive: full directive" \
   "$(parse_directive "np=2.. timeout=30 skip-ok=mpich-4.2,openmpi")" \
-  "2..|30|mpich-4.2,openmpi||"
+  "2..|30|mpich-4.2,openmpi|||"
 
 rc=0
 parse_directive "np=2 frobnicate=1" >/dev/null 2>&1 || rc=$?
@@ -74,7 +75,15 @@ check "parse_directive: invalid expect rejected" "$rc" "1"
 
 check "parse_directive: valgrind flag" \
   "$(parse_directive "np=1 valgrind")" \
-  "1||||1"
+  "1||||1|"
+
+check "parse_directive: release flag" \
+  "$(parse_directive "np=2 release")" \
+  "2|||||1"
+
+check "parse_directive: release with valgrind" \
+  "$(parse_directive "np=1 valgrind release")" \
+  "1||||1|1"
 
 # --- discover: directive-level rejections ---------------------------------
 
@@ -101,6 +110,19 @@ EOF
 rc=0
 out=$( (discover "$d"; echo "${DIRECTIVE_NP[example_unfin_np2]}|${DIRECTIVE_EXPECT[example_unfin_np2]}") 2>&1 ) || rc=$?
 check "discover: expect=unfinalized accepted at np=2" "$rc|$out" "0|2|unfinalized"
+
+d=$(mk_dir)
+cat >"$d/example_release.rs" <<'EOF'
+// mpi-test: np=2.. timeout=30 release
+fn main() {}
+EOF
+cat >"$d/example_plain.rs" <<'EOF'
+// mpi-test: np=2
+fn main() {}
+EOF
+rc=0
+out=$( (discover "$d"; echo "${DIRECTIVE_RELEASE[example_release]}|${DIRECTIVE_RELEASE[example_plain]}") 2>&1 ) || rc=$?
+check "discover: release flag stored per example" "$rc|$out" "0|1|"
 
 # --- discover: file-grammar rejections ------------------------------------
 
@@ -343,6 +365,30 @@ check "lib_debug_assertions: debug assertions off" \
 f=$(mk_outfile '{"reason":"compiler-artifact","target":{"name":"hello_world","kind":["example"]},"profile":{"debug_assertions":true}}')
 check "lib_debug_assertions: no library artifact" \
   "$(lib_debug_assertions "$f")" ""
+
+# --- lib_opt_level ---------------------------------------------------------
+
+f=$(mk_outfile '{"reason":"compiler-artifact","target":{"name":"ferrompi","kind":["lib"]},"profile":{"opt_level":"3"}}')
+check "lib_opt_level: optimised" \
+  "$(lib_opt_level "$f")" "3"
+
+f=$(mk_outfile '{"reason":"compiler-artifact","target":{"name":"ferrompi","kind":["lib"]},"profile":{"opt_level":"0"}}')
+check "lib_opt_level: unoptimised" \
+  "$(lib_opt_level "$f")" "0"
+
+f=$(mk_outfile '{"reason":"compiler-artifact","target":{"name":"hello_world","kind":["example"]},"profile":{"opt_level":"3"}}')
+check "lib_opt_level: no library artifact" \
+  "$(lib_opt_level "$f")" ""
+
+# --- main: the mode flags are exclusive ------------------------------------
+
+rc=0
+out=$( (main --release --valgrind rma) 2>&1 >/dev/null ) || rc=$?
+check "main: --release --valgrind exits 2" "$rc|$out" "2|ERROR: --release and --valgrind cannot be combined"
+
+rc=0
+out=$( (main --valgrind --release rma) 2>&1 >/dev/null ) || rc=$?
+check "main: --valgrind --release exits 2" "$rc|$out" "2|ERROR: --release and --valgrind cannot be combined"
 
 # --- artifact_outcome (the missing-artifact replay) -----------------------
 

@@ -37,6 +37,10 @@ name = "test_rma_shared"
 required-features = ["rma"]
 
 [[example]]
+name = "test_window_flag_poll"
+required-features = ["rma"]
+
+[[example]]
 name = "test_window_create_at_finalize"
 required-features = ["rma"]
 
