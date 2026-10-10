@@ -25,12 +25,12 @@ They are meant to become regression tests during the 0.5.x plan. Once a finding 
 Every crate is a standalone Cargo package with its own empty `[workspace]`. Each depends on the ferrompi working tree through a relative path (`../../../..`), so it always builds against the current code.
 
 ```bash
-cd audits/2026-09-24/repros/<crate>      # soundness | c-shim | perf
+cd audits/2026-09-24/repros/<crate>      # c-shim | perf
 cargo build --release
 mpiexec -n <N> target/release/<program>
 ```
 
-- `soundness`, `c-shim` and `perf` enable `ferrompi/rma`.
+- `c-shim` and `perf` enable `ferrompi/rma`.
 - Some fixes will make a repro stop compiling on purpose. The SND-08 (case B) repro relies on an API that the fix removes. A compile error is then the expected "after fix" result, and the repro should be replaced by a `compile_fail` doctest.
 
 Building the C programs:
@@ -54,12 +54,6 @@ rustc --edition 2021 api-checks/main_ne.rs --extern lib_ne=/tmp/ne/liblib_ne.rli
 ## Program index
 
 Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mpiexec -n` value, and "valgrind" means the finding was confirmed by running `mpiexec -n <np> valgrind ./prog`.
-
-### soundness/: safe code that causes undefined behaviour
-
-| Program | Finding | What it does | How to run | Observed on v0.5.0 | Expected after fix |
-|---|---|---|---|---|---|
-| `soundness/src/bin/r11_shm_race.rs` | SND-13 | Rank 1 spins on `remote_slice(0)[0]` (a `&[u64]`) while rank 0 sets the flag through its own slice | np=2 (same node) | `evidence/r11.out`: rank 0 printed `flag set`/`exiting` 3 s apart; rank 1 never printed `observed flag`. The release build hoisted the load out of the loop: the disassembly is a single `cmpq $0x0,(%rcx)` followed by a jump to itself, so the loop never ends. The miscompilation is observed, not just theoretical | No plain `&[T]` over memory another process writes; the access API forces an atomic or volatile read, and the loop sees the flag |
 
 ### c-shim/: C-layer correctness (`src/bin/t*.rs`) and C baselines (`c/`)
 
@@ -105,7 +99,7 @@ All binaries run interleaved A/B rounds, timing raw MPI (called directly through
 
 | File | What it shows |
 |---|---|
-| `r11.out` | Output of `soundness` r11: rank 1 never observes the flag |
+| `r11.out` | Historical: output of the `soundness` r11 program, deleted when SND-13 was marked fixed. Rank 1 never observes the flag |
 | `bt.out` | VER: last iteration of a 300× stress run (`--test-threads=2`) of the `buffer_attach`/`buffer_detach` unit tests in `src/lib.rs`. 4 passed, 0 failures across all 300 iterations; the shared `ATTACHED_BUFFER` static does not race in practice |
 
 Not archived:

@@ -142,7 +142,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | SND-10 | Window memory used after finalize | critical | repro | 0.5.x (D-8) | fixed (90d9544) |
 | SND-11 | `Communicator` Send+Sync regardless of thread level | critical | repro | 0.5.x (D-3, D-9) | fixed (49cb30c) |
 | SND-12 | Uninitialised window memory exposed as `&[T]` | major | repro | 0.5.x | fixed (4747cd1) |
-| SND-13 | `SharedWindow` slices over concurrently-written memory (observed miscompile) | critical | repro | 0.7.0 (D-5); 0.5.x doc warning | fixed (31e6514): doc warning; API fix planned (ferrompi-0.7.0; design input: issue #28, per-region slice guards) |
+| SND-13 | `SharedWindow` slices over concurrently-written memory (observed miscompile) | critical | repro | 0.7.0 (D-5); 0.5.x doc warning | fixed (31e6514, 257a6fe, 3ed5faa, f1765b3, 2b965c3, 734323d) |
 | SND-14 | `UserOp` fat-pointer transmute relies on unspecified layout | minor | reading | 0.5.x† | fixed (2d53b18) |
 | SND-15 | `fetch_and_op`/`compare_and_swap` result pointer derived from a shared borrow | minor | reading | 0.5.x | fixed (9777b12) |
 | SND-16 | `Mpi` drop racing a concurrent guarded call at `Serialized`/`Multiple` reaches MPI after finalize | major | reading | 0.7.0 | fixed (dc2be52) |
