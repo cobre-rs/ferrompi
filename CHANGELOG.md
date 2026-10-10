@@ -217,6 +217,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `WinView`, the view of a window's memory that `Win::local`,
   `ActiveEpoch::local` and `PassiveEpoch::local` return.
+- **Zero-copy window slices:** `WinView::as_slice` and `WinView::as_mut_slice`
+  (`unsafe`) give a `&[T]`/`&mut [T]` over a window region under the
+  synchronization contract their documentation states.
 - `CollectiveOp<'a, T>`, the op type of the reducing collectives.
 - `AccumulateOp` and `FetchOp`, the op types of the RMA accumulate calls.
 - **`ferrompi::scope` and `Scope`**: nonblocking requests are created inside a

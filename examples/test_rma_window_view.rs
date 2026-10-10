@@ -11,6 +11,9 @@
 //!    inside rank 1's own `lock(Shared, 1)` epoch, after a barrier.
 //! 5. An `f64` and a `u8` window round-trip, which covers the 8-byte and
 //!    1-byte atomic accesses.
+//! 6. A put under `lock(Exclusive, 1)` is read through `as_slice` inside rank
+//!    1's `lock_all` epoch, published by a barrier and `sync`, and rank 1 then
+//!    writes through `as_mut_slice` and reads the value back through the view.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_window_view
 
@@ -158,6 +161,62 @@ fn main() {
     }
     if rank == 0 {
         println!("PASS: f64 and u8 windows round-trip");
+    }
+
+    // ========================================================================
+    // Part 6: the zero-copy slices. Rank 0 puts [7; N] into rank 1's window
+    // under an exclusive lock, and rank 1 reads it through `as_slice` inside
+    // its own `lock_all` epoch, then writes through `as_mut_slice`.
+    // ========================================================================
+    {
+        let mut win = Win::<u64>::allocate(&world, N).expect("Win::allocate failed");
+        let origin = [7u64; N];
+        if rank == 0 {
+            win.lock(LockType::Exclusive, 1, |e| e.put(&origin, 1, 0))
+                .expect("lock(Exclusive, 1) with put failed");
+        }
+        world.barrier().expect("barrier after the unlock failed");
+
+        let mut slice_read = false;
+        let mut slice_written = false;
+        if rank == 1 {
+            win.lock_all(|e| {
+                e.sync()?;
+                let mut view = e.local();
+                // SAFETY: rank 0's unlock completed the put at rank 1, the
+                // barrier is the process synchronization, and `e.sync()` is the
+                // `MPI_Win_sync` inside this passive-target epoch, so the put
+                // was published before the slice exists. No other rank writes
+                // before the barrier after this epoch, and rank 1's only write
+                // comes after the slice's last use.
+                let s = unsafe { view.as_slice() };
+                slice_read = s == [7; N];
+                // SAFETY: the put was published as above, `s` is dead, and this
+                // is the only view or slice of the region in use. No other rank
+                // accesses the region before the barrier after this epoch, and
+                // this epoch makes no RMA call.
+                let m = unsafe { view.as_mut_slice() };
+                m.copy_from_slice(&[8; N]);
+                slice_written = e.local().read(0) == 8;
+                Ok(())
+            })
+            .expect("lock_all with the zero-copy slices failed");
+        }
+        world.barrier().expect("barrier after the epoch failed");
+
+        common::check(
+            &world,
+            rank != 1 || slice_read,
+            "as_slice reads a put published by the barrier and sync",
+        );
+        common::check(
+            &world,
+            rank != 1 || slice_written,
+            "a write through as_mut_slice reads back through the view",
+        );
+        if rank == 0 {
+            println!("PASS: as_slice and as_mut_slice");
+        }
     }
 }
 // mpi-test: np=2..

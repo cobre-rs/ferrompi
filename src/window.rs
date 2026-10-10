@@ -1448,6 +1448,63 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 /// # }
 /// ```
 ///
+/// A slice borrows its view, so a handle's slice cannot leave the closure
+/// either:
+///
+/// ```compile_fail,E0521
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// let mut keep: Option<&[u64]> = None;
+/// win.lock_all(|e| {
+///     let view = e.local();
+///     // SAFETY: only the type system is under test, and it rejects this program.
+///     keep = Some(unsafe { view.as_slice() });
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) -> ferrompi::Result<()> {
+/// win.lock_all(|e| {
+///     let mut keep: Option<&[u64]> = None;
+///     let view = e.local();
+///     // SAFETY: nothing writes the window while the slice lives.
+///     keep = Some(unsafe { view.as_slice() });
+///     Ok(())
+/// })
+/// # }
+/// ```
+///
+/// One view hands out one `&mut [T]` at a time. The compiler checks only that
+/// view: the contract of [`WinView::as_mut_slice`] covers every other view,
+/// slice and RMA call that reaches the region.
+///
+/// ```compile_fail,E0499
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) {
+/// let mut view = win.local();
+/// // SAFETY: only the type system is under test, and it rejects this program.
+/// let first = unsafe { view.as_mut_slice() };
+/// let second = unsafe { view.as_mut_slice() };
+/// first[0] = 1;
+/// second[0] = 2;
+/// # }
+/// ```
+///
+/// ```no_run
+/// # use ferrompi::Win;
+/// # fn f(win: &mut Win<u64>) {
+/// let mut view = win.local();
+/// // SAFETY: nothing else accesses the window while a slice lives.
+/// let first = unsafe { view.as_mut_slice() };
+/// first[0] = 1;
+/// let second = unsafe { view.as_mut_slice() };
+/// second[0] = 2;
+/// # }
+/// ```
+///
 /// ## Freeing a window inside an epoch
 ///
 /// `MPI_Win_free` is only valid once the caller has completed its RMA involvement
@@ -1855,7 +1912,9 @@ fn index_out_of_range(op: &str, index: usize, len: usize) -> ! {
 /// one. The memory of a window can change while the view lives, because a
 /// peer's put or accumulate writes it, or a fence lands remote writes in it. A
 /// `&[T]` over it would promise the compiler that it does not, so the view
-/// hands out elements by value instead.
+/// hands out elements by value instead. The `unsafe` methods
+/// [`as_slice`](Self::as_slice) and [`as_mut_slice`](Self::as_mut_slice) give a
+/// slice to a caller that can meet the contract their `# Safety` sections state.
 ///
 /// # Access
 ///
@@ -1999,6 +2058,86 @@ impl<T: MpiDatatype> WinView<'_, T> {
         for (index, element) in src.iter().enumerate() {
             self.write(index, *element);
         }
+    }
+
+    /// A shared slice over the whole viewed region, for bulk reads that need no
+    /// atomic access per element.
+    ///
+    /// The slice borrows the view, so it cannot outlive it, nor be the origin of an
+    /// RMA call on its own window, which borrows its origin for the whole epoch.
+    ///
+    /// # Safety
+    ///
+    /// No process writes the region by store, put or accumulate while the slice
+    /// lives, and the writes it must observe were published before it was created,
+    /// either by a fence or `MPI_Win_wait` at this process that completed them, or
+    /// by process synchronization after they completed, then `MPI_Win_sync` at this
+    /// process inside a passive-target epoch.
+    ///
+    /// A store through any view of the region counts, this view's
+    /// [`write`](Self::write) and [`copy_from_slice`](Self::copy_from_slice)
+    /// included: the borrow checker does not stop them while the slice lives.
+    ///
+    /// *Why the obligation exists.* A slice lets the compiler keep a value in a
+    /// register for as long as it lives, so a write that lands in the region
+    /// meanwhile breaks what the compiler assumed, which is undefined behaviour in
+    /// Rust. In the unified model, MPI allows part of what the contract forbids: a
+    /// load that races a put or accumulate is valid but returns an
+    /// implementation-dependent value (MPI-4.1 §12.7, rule U2, p.608), which the
+    /// view's atomic reads tolerate and a slice cannot. Conflicting updates leave
+    /// MPI's behaviour undefined: a store against a put or accumulate, and one RMA
+    /// update against another except concurrent accumulates of one predefined
+    /// datatype (MPI-4.1 §12.7, rules U4 and U5, p.609).
+    ///
+    /// *What publication means.* A closing fence, or `MPI_Win_wait` at this
+    /// process, makes the writes it completed visible here
+    /// (MPI-4.1 §12.7, rules 2, 3 and 6, p.606; §12.5.1, p.591; §12.5.2, p.595).
+    /// A writer completes a put or accumulate by its unlock or flush
+    /// (MPI-4.1 §12.7, rule 4, p.606), and a store by its own `MPI_Win_sync`
+    /// (Example 12.23). This process's own earlier stores need no publication.
+    /// Under passive-target synchronization, `MPI_Win_sync` at this process after
+    /// the process synchronization orders its loads after the stores another
+    /// process made before that synchronization (MPI-4.1 §12.5.4, p.603; the
+    /// advice to users after rule U5, MPI-4.1 §12.7, p.609). Example 12.23 (p.622)
+    /// shows the sequence: lock_all; store; `MPI_Win_sync`; send and receive;
+    /// `MPI_Win_sync`; load. MPI defines no semantics for direct access to shared
+    /// window memory outside the unified memory model (MPI-4.1 §12.2.3, p.558).
+    pub unsafe fn as_slice(&self) -> &[T] {
+        // SAFETY: `ptr` is non-null, aligned and valid for `len` initialized
+        // elements until the window is freed, which this view's borrow of the
+        // window excludes (a zero-length view holds a dangling pointer, which
+        // `len == 0` allows), and every bit pattern is a valid `T`. That nothing
+        // writes the region while the slice lives is the caller's half, `# Safety`
+        // above.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
+    }
+
+    /// An exclusive slice over the whole viewed region.
+    ///
+    /// # Safety
+    ///
+    /// No process writes the region by store, put or accumulate while the slice
+    /// lives, and the writes it must observe were published before it was created,
+    /// either by a fence or `MPI_Win_wait` at this process that completed them, or
+    /// by process synchronization after they completed, then `MPI_Win_sync` at this
+    /// process inside a passive-target epoch. No other access to the region, read or
+    /// write, happens while the slice lives: by any process, by MPI on this
+    /// process's behalf, or by any other view or slice in this process, including
+    /// `remote(own rank)`, which aliases `local()`.
+    ///
+    /// The reasons are those of [`as_slice`](Self::as_slice), and a `&mut [T]`
+    /// must also be unique. Writes through the slice itself, including by an MPI
+    /// call it is lent to, are the one exception to the first sentence. `&mut self`
+    /// enforces uniqueness only against the view it is taken from: another view of
+    /// the region, or an RMA call that targets this process, is not stopped by it.
+    pub unsafe fn as_mut_slice(&mut self) -> &mut [T] {
+        // SAFETY: `ptr` is non-null, aligned and valid for `len` initialized
+        // elements until the window is freed, which this view's borrow of the
+        // window excludes (a zero-length view holds a dangling pointer, which
+        // `len == 0` allows), and every bit pattern is a valid `T`. That the slice
+        // is the only access to the region while it lives is the caller's half,
+        // `# Safety` above.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 }
 
@@ -3350,7 +3489,7 @@ impl<T: MpiDatatype> Win<T> {
     ///
     /// The view reads and writes elements with `Relaxed` atomic accesses, which
     /// stay sound while a peer's put or accumulate writes the same memory (see
-    /// [`WinView`]). No `&[T]` is offered, because the compiler may assume a
+    /// [`WinView`]). No safe `&[T]` is offered, because the compiler may assume a
     /// slice does not change while it is borrowed.
     ///
     /// The view borrows the window, so it cannot outlive it, and cannot be held
@@ -4748,6 +4887,40 @@ mod tests {
         assert!(empty.local().is_empty());
         empty.local().copy_from_slice(&[]);
         empty.local().copy_to_slice(&mut []);
+    }
+
+    /// Run under Miri, with and without `-Zmiri-tree-borrows`, to check that
+    /// both slices derive from the recorded pointer without invalidating it.
+    #[test]
+    fn view_slices_cover_the_region() {
+        let win = sentinel_window(vec![1u64, 2, 3, 4]);
+        let region = win.local_ptr.as_ptr().cast_const();
+        let mut view = win.local();
+
+        // SAFETY: nothing else accesses the sentinel window's memory.
+        let shared = unsafe { view.as_slice() };
+        assert_eq!(shared.as_ptr(), region);
+        assert_eq!(shared, [1, 2, 3, 4]);
+
+        // SAFETY: `shared` is dead, no other view or slice of the region lives,
+        // and nothing else accesses the sentinel window's memory.
+        let exclusive = unsafe { view.as_mut_slice() };
+        assert_eq!(exclusive.as_ptr(), region);
+        assert_eq!(exclusive.len(), 4);
+        exclusive[2] = 9;
+        assert_eq!(view.read(2), 9);
+        view.write(0, 7);
+        // SAFETY: `exclusive` is dead and nothing else accesses the memory.
+        assert_eq!(unsafe { view.as_slice() }, [7, 2, 9, 4]);
+
+        let empty = sentinel_window(Vec::<f64>::new());
+        let mut view = empty.local();
+        // SAFETY: nothing else accesses the sentinel window's memory.
+        let shared = unsafe { view.as_slice() };
+        assert!(shared.is_empty());
+        // SAFETY: `shared` is dead and nothing else accesses the memory.
+        let exclusive = unsafe { view.as_mut_slice() };
+        assert!(exclusive.is_empty());
     }
 
     #[test]
