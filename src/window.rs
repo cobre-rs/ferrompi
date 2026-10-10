@@ -1665,8 +1665,10 @@ pub struct Win<T: MpiDatatype> {
 ///
 /// [`Win::fence`] and [`Win::start`] open an epoch, run a closure with this
 /// handle, and close the epoch when the closure returns, whether it returned
-/// `Ok` or `Err`. The epoch is open exactly while the closure runs, and the
-/// window is mutably borrowed for that time.
+/// `Ok` or `Err`, with the epoch's closing call: the closing fence of
+/// [`Win::fence`], or `MPI_Win_complete` of [`Win::start`]. The epoch is open
+/// exactly while the closure runs, and the window is mutably borrowed for that
+/// time.
 ///
 /// # Lifetimes
 ///
@@ -1706,10 +1708,8 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// One-sided write: copy `origin` into the remote rank's window memory.
     ///
     /// Wraps `MPI_Put`. The operation is posted at once, but it completes only
-    /// when the epoch's closing call returns (the closing fence of
-    /// [`Win::fence`], or `MPI_Win_complete` of [`Win::start`]), and the data
-    /// is visible at the target once the target's own closing call returns.
-    /// `origin` stays borrowed until then, which is when MPI is done with it.
+    /// when the epoch's closing call returns, and the data is visible at the
+    /// target once the target's own closing call returns.
     ///
     /// The count is `origin.len()`; pass a sub-slice for a shorter transfer.
     ///
@@ -1750,9 +1750,8 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// `origin`.
     ///
     /// Wraps `MPI_Get`. The operation is posted at once, but `origin` holds
-    /// the data only after the epoch's closing call returns (the closing fence
-    /// of [`Win::fence`], or `MPI_Win_complete` of [`Win::start`]). `origin`
-    /// stays borrowed until then, so it cannot be read earlier.
+    /// the data only after the epoch's closing call returns, and stays borrowed
+    /// until then, so it cannot be read earlier.
     ///
     /// The count is `origin.len()`; pass a sub-slice for a shorter transfer.
     ///
@@ -1793,11 +1792,8 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// with a remote rank's window memory using a reduction operation.
     ///
     /// Wraps `MPI_Accumulate`. The operation is posted at once, but its effect
-    /// at the target is visible only after the epoch's closing call returns
-    /// (the closing fence of [`Win::fence`], or `MPI_Win_complete` of
-    /// [`Win::start`]) and the target's own closing call returns. `origin`
-    /// stays borrowed until the closing call returns, which is when MPI is done
-    /// with it.
+    /// at the target is visible only after the epoch's closing call returns and
+    /// the target's own closing call returns.
     ///
     /// `op` is a [`ReduceOp`](crate::ReduceOp) or [`AccumulateOp::REPLACE`]
     /// (semantically `MPI_Put`); a user op is not accepted (MPI-4.1 §12.3.4).
@@ -1859,11 +1855,9 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// (MPI-4.1 §12.7.1).
     ///
     /// Wraps `MPI_Get_accumulate`. The operation is posted at once, but `result`
-    /// holds the fetched values only after the epoch's closing call returns (the
-    /// closing fence of [`Win::fence`], or `MPI_Win_complete` of [`Win::start`]),
-    /// and the update is visible at the target once the target's own closing call
-    /// returns. `origin` and `result` stay borrowed until the closing call
-    /// returns, so `result` cannot be read earlier.
+    /// holds the fetched values only after the epoch's closing call returns, and
+    /// the update is visible at the target once the target's own closing call
+    /// returns. `result` stays borrowed until then, so it cannot be read earlier.
     ///
     /// `op` is a [`ReduceOp`](crate::ReduceOp), [`FetchOp::NO_OP`] or
     /// [`FetchOp::REPLACE`]; a user op is not accepted (MPI-4.1 §12.3.4).
@@ -1871,12 +1865,9 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// receives the target's current value and the target memory is left
     /// unchanged; `origin`'s contents are ignored, but its length is the
     /// count. [`FetchOp::REPLACE`] replaces the target value and also
-    /// returns the pre-update value in `result`. Under the default
-    /// `accumulate_ops` window info value, `same_op_no_op` (MPI-4.1 §12.2.1),
-    /// concurrent accumulates to one target location must use the same op or
-    /// `MPI_NO_OP`, so mixing [`FetchOp::REPLACE`] and
-    /// [`ReduceOp::Sum`](crate::ReduceOp::Sum) on one location is erroneous,
-    /// and no type prevents it.
+    /// returns the pre-update value in `result`. Concurrent accumulates to one
+    /// target location must use the same op or `MPI_NO_OP`, as for
+    /// [`accumulate`](Self::accumulate) (MPI-4.1 §12.2.1).
     ///
     /// The count is `origin.len()`, and `result` must be as long as `origin`;
     /// pass sub-slices for a shorter transfer.
@@ -1938,21 +1929,15 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// Wraps `MPI_Fetch_and_op`. Restricted to predefined MPI datatypes (no
     /// derived or custom datatypes); the `T: MpiDatatype` bound enforces this at
     /// compile time. The operation is posted at once, but `result` holds the
-    /// fetched value only after the epoch's closing call returns (the closing
-    /// fence of [`Win::fence`], or `MPI_Win_complete` of [`Win::start`]), and the
-    /// update is visible at the target once the target's own closing call
-    /// returns. `origin` and `result` stay borrowed until the closing call
-    /// returns, so `result` cannot be read earlier: read it after the closure
-    /// returns.
+    /// fetched value only after the epoch's closing call returns, and the update
+    /// is visible at the target once the target's own closing call returns.
+    /// `result` stays borrowed until then: read it after the closure returns.
     ///
     /// `op` is a [`ReduceOp`](crate::ReduceOp), [`FetchOp::NO_OP`] (an atomic
     /// get, which ignores `origin`'s value) or [`FetchOp::REPLACE`] (a swap); a
-    /// user op is not accepted (MPI-4.1 §12.3.4). Under the default
-    /// `accumulate_ops` window info value, `same_op_no_op` (MPI-4.1 §12.2.1),
-    /// concurrent accumulates to one target location must use the same op or
-    /// `MPI_NO_OP`, so mixing [`FetchOp::REPLACE`] and
-    /// [`ReduceOp::Sum`](crate::ReduceOp::Sum) on one location is erroneous,
-    /// and no type prevents it.
+    /// user op is not accepted (MPI-4.1 §12.3.4). Concurrent accumulates to one
+    /// target location must use the same op or `MPI_NO_OP`, as for
+    /// [`accumulate`](Self::accumulate) (MPI-4.1 §12.2.1).
     ///
     /// # Arguments
     ///
@@ -2038,17 +2023,13 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// Wraps `MPI_Compare_and_swap`. `result` is **always** the pre-swap remote
     /// value, whether or not the swap happened; the swap happened if `result`
     /// equals `compare`. The operation is posted at once, but `result` holds
-    /// that value only after the epoch's closing call returns (the closing fence
-    /// of [`Win::fence`], or `MPI_Win_complete` of [`Win::start`]), and the
-    /// update is visible at the target once the target's own closing call
-    /// returns. `origin`, `compare` and `result` stay borrowed until the closing
-    /// call returns, so `result` cannot be read earlier: read it after the
-    /// closure returns.
+    /// that value only after the epoch's closing call returns, and the update is
+    /// visible at the target once the target's own closing call returns.
+    /// `result` stays borrowed until then: read it after the closure returns.
     ///
-    /// This method exists only for types that implement [`AtomicMpiDatatype`].
-    /// MPI-4.1 §12.3.4 allows only integer, logical and byte datatypes; of
-    /// ferrompi's element types these are `i32`, `i64`, `u32`, `u64` and `u8`,
-    /// so `f32` and `f64` are excluded.
+    /// This method exists only for the integer and byte types of
+    /// [`AtomicMpiDatatype`], the ones MPI-4.1 §12.3.4 allows, so `f32` and
+    /// `f64` are excluded.
     ///
     /// [`AtomicMpiDatatype`]: crate::AtomicMpiDatatype
     ///
@@ -2180,6 +2161,17 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> ActiveEpoch<'s, '_, T> {
 /// [`flush`](Self::flush) and [`flush_local`](Self::flush_local) accept any
 /// rank of the window's communicator.
 ///
+/// # Completion
+///
+/// An operation is complete at the origin, where a `get` or `rget` destination
+/// or a `result` then holds its values, once a flush of its `target_rank`
+/// returns ([`flush`](Self::flush), [`flush_all`](Self::flush_all),
+/// [`flush_local`](Self::flush_local) or
+/// [`flush_local_all`](Self::flush_local_all)), and at the target once
+/// [`flush`](Self::flush) or [`flush_all`](Self::flush_all) returns for it.
+/// Every operation is complete at both ends at the latest when the unlock
+/// returns.
+///
 /// # Thread safety
 ///
 /// `PassiveEpoch` is neither `Send` nor `Sync`: it borrows a [`Win`], which is
@@ -2195,11 +2187,9 @@ pub struct PassiveEpoch<'s, 'env: 's, T: MpiDatatype> {
 impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// One-sided write, as [`ActiveEpoch::put`], in a passive-target epoch.
     ///
-    /// The write is complete at the origin and the target when
-    /// [`flush`](Self::flush) returns for `target_rank`, and at the latest when
-    /// the epoch's unlock returns. `origin` stays borrowed until the unlock
-    /// returns. A `target_rank` outside the epoch's access set returns
-    /// [`Error::InvalidArgument`], as there.
+    /// The write completes as the type's `# Completion` section describes, and
+    /// `origin` stays borrowed until the unlock returns. A `target_rank` outside
+    /// the epoch's access set returns [`Error::InvalidArgument`], as there.
     pub fn put(&self, origin: &'s [T], target_rank: i32, target_disp: i64) -> Result<()> {
         // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock,
         // and `self.access` is this epoch's access set; see `Win::rma_put`.
@@ -2211,13 +2201,10 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
 
     /// One-sided read, as [`ActiveEpoch::get`], in a passive-target epoch.
     ///
-    /// `origin` holds the data once a flush of `target_rank` returns
-    /// ([`flush`](Self::flush), [`flush_all`](Self::flush_all),
-    /// [`flush_local`](Self::flush_local) or
-    /// [`flush_local_all`](Self::flush_local_all)), and at the latest when the
-    /// epoch's unlock returns. `origin` stays borrowed until the unlock returns,
-    /// so it cannot be read earlier. A `target_rank` outside the epoch's access
-    /// set returns [`Error::InvalidArgument`], as there.
+    /// `origin` holds the data once the read is complete at the origin (see the
+    /// type's `# Completion` section), but stays borrowed until the unlock
+    /// returns, so it cannot be read earlier. A `target_rank` outside the
+    /// epoch's access set returns [`Error::InvalidArgument`], as there.
     pub fn get(&self, origin: &'s mut [T], target_rank: i32, target_disp: i64) -> Result<()> {
         // SAFETY: `origin` is borrowed for `'s`, which ends only after the unlock,
         // and `self.access` is this epoch's access set; see `Win::rma_put`.
@@ -2230,12 +2217,11 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// One-sided reduce-accumulate, as [`ActiveEpoch::accumulate`], in a
     /// passive-target epoch.
     ///
-    /// The update is complete at the origin and the target when
-    /// [`flush`](Self::flush) returns for `target_rank`, and at the latest when
-    /// the epoch's unlock returns. `origin` stays borrowed until the unlock
-    /// returns. Concurrent accumulates to one target location must use the same
-    /// op or `MPI_NO_OP`, as there. A `target_rank` outside the epoch's access
-    /// set returns [`Error::InvalidArgument`], as there.
+    /// The update completes as the type's `# Completion` section describes, and
+    /// `origin` stays borrowed until the unlock returns. Concurrent accumulates
+    /// to one target location must use the same op or `MPI_NO_OP`, as there. A
+    /// `target_rank` outside the epoch's access set returns
+    /// [`Error::InvalidArgument`], as there.
     pub fn accumulate(
         &self,
         origin: &'s [T],
@@ -2254,17 +2240,13 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// Atomic read-modify-write, as [`ActiveEpoch::get_accumulate`], in a
     /// passive-target epoch.
     ///
-    /// `result` holds the fetched values once a flush of `target_rank` returns
-    /// ([`flush`](Self::flush), [`flush_all`](Self::flush_all),
-    /// [`flush_local`](Self::flush_local) or
-    /// [`flush_local_all`](Self::flush_local_all)), and the target holds the
-    /// update once [`flush`](Self::flush) or [`flush_all`](Self::flush_all)
-    /// returns; both are complete at the latest when the epoch's unlock returns.
-    /// `origin` and `result` stay borrowed until the unlock returns, so `result`
-    /// cannot be read earlier.
-    /// Concurrent accumulates to one target location must use the same op or
-    /// `MPI_NO_OP`, as there. A `target_rank` outside the epoch's access set
-    /// returns [`Error::InvalidArgument`], as there.
+    /// `result` holds the fetched values once the operation is complete at the
+    /// origin, and the target holds the update once it is complete there (see
+    /// the type's `# Completion` section). `origin` and `result` stay borrowed
+    /// until the unlock returns, so `result` cannot be read earlier. Concurrent
+    /// accumulates to one target location must use the same op or `MPI_NO_OP`,
+    /// as there. A `target_rank` outside the epoch's access set returns
+    /// [`Error::InvalidArgument`], as there.
     pub fn get_accumulate(
         &self,
         origin: &'s [T],
@@ -2285,18 +2267,14 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// Single-element atomic fetch-and-update, as [`ActiveEpoch::fetch_and_op`],
     /// in a passive-target epoch.
     ///
-    /// `result` holds the fetched value once a flush of `target_rank` returns
-    /// ([`flush`](Self::flush), [`flush_all`](Self::flush_all),
-    /// [`flush_local`](Self::flush_local) or
-    /// [`flush_local_all`](Self::flush_local_all)), and the target holds the
-    /// update once [`flush`](Self::flush) or [`flush_all`](Self::flush_all)
-    /// returns; both are complete at the latest when the epoch's unlock returns.
-    /// `origin` and `result` stay borrowed until the unlock returns, so read
-    /// `result` after the closure. Concurrent accumulates to one target location
-    /// must use the same op or `MPI_NO_OP`, as there. Errors are as there,
-    /// including [`Error::InvalidArgument`] for a `target_rank` outside the
-    /// epoch's access set; after [`Error::Mpi`], `result` holds an unspecified
-    /// value (MPI-4.1 §9.4).
+    /// `result` holds the fetched value once the operation is complete at the
+    /// origin, and the target holds the update once it is complete there (see
+    /// the type's `# Completion` section). `origin` and `result` stay borrowed
+    /// until the unlock returns, so read `result` after the closure. Concurrent
+    /// accumulates to one target location must use the same op or `MPI_NO_OP`,
+    /// as there. Errors are as there, including [`Error::InvalidArgument`] for a
+    /// `target_rank` outside the epoch's access set; after [`Error::Mpi`],
+    /// `result` holds an unspecified value (MPI-4.1 §9.4).
     pub fn fetch_and_op(
         &self,
         origin: &'s T,
@@ -2319,9 +2297,8 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     ///
     /// Wraps `MPI_Rput`. The request completes locally (MPI-4.1 §12.3.5): once
     /// [`Request::wait`], [`Request::test`] or a batch call reports it complete,
-    /// MPI no longer reads `origin`. The target holds the data only when
-    /// [`flush`](Self::flush) or [`flush_all`](Self::flush_all) returns for
-    /// `target_rank`, or at the latest when the unlock returns. A request that
+    /// MPI no longer reads `origin`. The target holds the data once the write is
+    /// complete there (see the type's `# Completion` section). A request that
     /// was not waited is completed by the epoch before it unlocks, so dropping
     /// or forgetting it makes no MPI call. `origin` stays borrowed until the
     /// unlock returns, even after the request completed.
@@ -2470,20 +2447,16 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     ///
     /// Wraps `MPI_Raccumulate`. The request completes locally: once
     /// [`Request::wait`], [`Request::test`] or a batch call reports it complete,
-    /// MPI no longer reads `origin`. The update is visible at the target only
-    /// when [`flush`](Self::flush) or [`flush_all`](Self::flush_all) returns for
-    /// `target_rank`, or at the latest when the unlock returns. A request that
+    /// MPI no longer reads `origin`. The update is visible at the target once it
+    /// is complete there (see the type's `# Completion` section). A request that
     /// was not waited is completed by the epoch before it unlocks. `origin`
     /// stays borrowed until the unlock returns, even after the request
     /// completed.
     ///
-    /// `op` is a [`ReduceOp`](crate::ReduceOp) or [`AccumulateOp::REPLACE`]
-    /// (semantically `MPI_Rput`); a user op is not accepted (MPI-4.1 §12.3.4).
-    /// Under the default `accumulate_ops` window info value, `same_op_no_op`
-    /// (MPI-4.1 §12.2.1), concurrent accumulates to one target location must
-    /// use the same op or `MPI_NO_OP`, so mixing [`AccumulateOp::REPLACE`] and
-    /// [`ReduceOp::Sum`](crate::ReduceOp::Sum) on one location is erroneous,
-    /// and no type prevents it.
+    /// `op` is as for [`ActiveEpoch::accumulate`], with
+    /// [`AccumulateOp::REPLACE`] semantically `MPI_Rput`; a user op is not
+    /// accepted (MPI-4.1 §12.3.4). Concurrent accumulates to one target location
+    /// must use the same op or `MPI_NO_OP`, as there (MPI-4.1 §12.2.1).
     ///
     /// [`Request::cancel`] on the returned request returns
     /// [`Error::NotSupported`] without calling MPI, as for
@@ -2612,10 +2585,8 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// # Arguments
     ///
     /// * `rank` - The target rank whose pending operations are locally
-    ///   completed (0-based, within the window's communicator). It need not be
-    ///   in the epoch's access set: in a [`Win::lock`] epoch only the locked
-    ///   rank has operations to complete, and a flush of another rank completes
-    ///   nothing.
+    ///   completed (0-based, within the window's communicator). As for
+    ///   [`flush`](Self::flush), it need not be in the epoch's access set.
     ///
     /// # Errors
     ///
@@ -2677,14 +2648,11 @@ impl<'s, T: crate::AtomicMpiDatatype + MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// Single-element atomic compare-and-swap, as
     /// [`ActiveEpoch::compare_and_swap`], in a passive-target epoch.
     ///
-    /// `result` holds the pre-swap value once a flush of `target_rank` returns
-    /// ([`flush`](Self::flush), [`flush_all`](Self::flush_all),
-    /// [`flush_local`](Self::flush_local) or
-    /// [`flush_local_all`](Self::flush_local_all)), and the target holds the
-    /// update once [`flush`](Self::flush) or [`flush_all`](Self::flush_all)
-    /// returns; both are complete at the latest when the epoch's unlock returns.
-    /// `origin`, `compare` and `result` stay borrowed until the unlock returns,
-    /// so read `result` after the closure. It exists only for the types of
+    /// `result` holds the pre-swap value once the operation is complete at the
+    /// origin, and the target holds the update once it is complete there (see
+    /// the type's `# Completion` section). `origin`, `compare` and `result` stay
+    /// borrowed until the unlock returns, so read `result` after the closure. It
+    /// exists only for the types of
     /// [`AtomicMpiDatatype`](crate::AtomicMpiDatatype), as there. Errors are as
     /// there, including [`Error::InvalidArgument`] for a `target_rank` outside
     /// the epoch's access set; after [`Error::Mpi`], `result` holds an
@@ -3955,17 +3923,11 @@ impl<T: MpiDatatype> Win<T> {
         T: crate::AtomicMpiDatatype,
     {
         self.check_target(access, target_rank, target_disp, 1, &[])?;
-        // SAFETY: the caller upholds this function's contract (see `rma_put`).
-        // `T::TAG` matches `T`'s memory layout per the `MpiDatatype` invariant, and
-        // `AtomicMpiDatatype` restricts `T` to the types MPI-4.1 §12.3.4 allows in
-        // compare-and-swap (integer, logical and byte). MPI reads one `T` from
-        // `origin` and from `compare` and writes one `T` to `result`, all three
-        // pointers taken from the references themselves (`result` from the
-        // `&mut T`, never from a shared borrow), and only MPI writes `result`
-        // while it is borrowed. `target_rank` was checked above against the
-        // epoch's access set, so an access epoch to it is open, and
-        // `target_disp` (with a count of 1) against the target rank's exposed
-        // window, so MPI accesses only memory the target exposed.
+        // SAFETY: as in `rma_fetch_and_op`: the caller's contract, `T::TAG`, the
+        // pointers taken from the references (`compare` read like `origin`), and
+        // `check_target` above for a count of 1. `AtomicMpiDatatype` restricts
+        // `T` to the types MPI-4.1 §12.3.4 allows in compare-and-swap (integer,
+        // logical and byte).
         let ret = unsafe {
             ffi::ferrompi_compare_and_swap(
                 (origin as *const T).cast(),
@@ -3981,20 +3943,8 @@ impl<T: MpiDatatype> Win<T> {
     }
 }
 
-/// Frees the window with `MPI_Win_free`, which is collective.
-///
-/// # Dropping
-///
-/// - The free succeeds: the window leaves the live-window count, and the
-///   buffer of a `Win::create` window is dropped after the call.
-/// - [`Mpi`](crate::Mpi) is being dropped, or was dropped and skipped
-///   `MPI_Finalize` because this window was alive: no MPI call is made, the
-///   window stays counted as alive (so `Mpi` skips `MPI_Finalize`), and the
-///   buffer is leaked.
-/// - The free fails: the buffer is leaked and the window stays counted as
-///   alive.
-/// - An exposure epoch opened by [`Win::post`] is still open: no MPI call is
-///   made, the window stays counted as alive, and the buffer is leaked.
+/// Frees the window with `MPI_Win_free`, which is collective; the type's
+/// `# Dropping` section lists the four outcomes.
 impl<T: MpiDatatype> Drop for Win<T> {
     fn drop(&mut self) {
         if self.win_handle == WIN_FREED {
@@ -4029,10 +3979,6 @@ impl<T: MpiDatatype> Drop for Win<T> {
         }
     }
 }
-
-// Win<T> is intentionally NOT Send or Sync. MPI windows have specific
-// thread-safety rules that depend on the MPI thread level, and incorrect
-// cross-thread usage can cause data corruption or MPI errors.
 
 /// RAII guard for a single-rank window lock.
 ///

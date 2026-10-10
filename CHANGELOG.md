@@ -173,7 +173,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before it.
 - **Passive-target epochs are closures:** `Win::lock(kind, rank, |e| ..)` and
   `Win::lock_all(|e| ..)` run the closure with a `PassiveEpoch` and always
-  unlock, also when the closure panics. `flush`, `flush_all`, `flush_local`,
+  unlock, even when the closure panics. `flush`, `flush_all`, `flush_local`,
   `flush_local_all` and `sync` are `PassiveEpoch` methods; `Win::flush_local`,
   `Win::flush_local_all`, `Win::sync`, `WinLockGuard` and `WinLockAllGuard` are
   removed. Migration: move the guard's scope into the closure and call the
@@ -278,10 +278,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A window is not freed while its `post` exposure epoch is open.** A peer's
   `start` epoch could still write into it, yet Open MPI 5 freed the window and
   `Win::into_buffer` handed the buffer back. `into_buffer` now returns
-  `Error::InvalidState` without calling `MPI_Win_free` and drops the window,
-  which is leaked, and so is a window dropped in that state; `Mpi` then skips
-  `MPI_Finalize`. Close the epoch with `wait_exposure`, or a `test_exposure` that
-  returns `true`, first.
+  `Error::InvalidState` without calling `MPI_Win_free`; that window, like one
+  dropped in that state, is leaked, and `Mpi` then skips `MPI_Finalize`. Close
+  the epoch first with `wait_exposure` or a `test_exposure` that returns `true`.
 
 ## [0.6.0] - 2026-10-01
 

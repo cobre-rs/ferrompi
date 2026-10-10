@@ -23,10 +23,10 @@
 //!
 //! Parts 3 and 4 leave windows alive, so both ranks skip `MPI_Finalize` (rank 1
 //! never frees the two windows that rank 0 left exposed, because the free is
-//! collective and rank 0 never calls it). No check after the drop can use `common::check`, whose
-//! allreduce is refused by then. A failed check prints `FAIL:` and exits with
-//! status 2, which the runner reports as a failure; status 1 would be accepted
-//! under `expect=unfinalized`.
+//! collective and rank 0 never calls it). No check after the drop can use
+//! `common::check`, whose allreduce is refused by then. A failed check prints
+//! `FAIL:` and exits with status 2, which the runner reports as a failure;
+//! status 1 would be accepted under `expect=unfinalized`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_free_exposed_window
 // mpi-test: np=2 expect=unfinalized valgrind skip-ok=openmpi-4

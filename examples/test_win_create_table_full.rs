@@ -4,10 +4,9 @@
 //! `Win::create` over an owned buffer. The new window can be neither returned
 //! nor freed on this rank alone, but it no longer exposes memory the caller
 //! can reclaim, so the call returns `Error::ResourceExhausted`, as
-//! `Win::allocate` does, instead of aborting: the window is leaked, never freed
-//! and counted as alive, together with the buffer it exposes. Dropping every
-//! returned window then still leaves two windows, so `Mpi` skips
-//! `MPI_Finalize`.
+//! `Win::allocate` does, instead of aborting: the window and its buffer are
+//! leaked and the window counts as alive. Dropping every returned window then
+//! still leaves two windows, so `Mpi` skips `MPI_Finalize`.
 //!
 //! Run with: mpiexec -n 1 ./target/debug/examples/test_win_create_table_full
 // mpi-test: np=1 expect=unfinalized skip-ok=openmpi-4

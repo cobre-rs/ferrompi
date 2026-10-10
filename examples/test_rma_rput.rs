@@ -102,7 +102,6 @@ fn main() {
                     }
                 };
 
-                // Wait for local buffer completion.
                 if let Err(err) = req.wait() {
                     eprintln!("rank 0: FAIL: Request::wait after rput failed: {err}");
                     local_ok = false;

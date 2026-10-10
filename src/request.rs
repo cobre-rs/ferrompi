@@ -141,17 +141,14 @@ pub(crate) enum RequestKind {
 /// A handle to a nonblocking MPI operation.
 ///
 /// A request is created inside a [`scope`](crate::scope), or with the `rma`
-/// feature inside a passive epoch, and borrows its buffers until the scope
-/// returns (the epoch, until its unlock), even after the request has completed.
-/// It is completed by [`wait`](Request::wait), [`test`](Request::test) or a
-/// batch call such as [`wait_all`](Request::wait_all) or, at the latest, by its
-/// scope or epoch, which waits for every request still pending before it
-/// returns or unwinds (the epoch, before it unlocks). Dropping or forgetting a
-/// request does not complete it early, and the scope or epoch still waits.
-///
-/// With the `rma` feature, `PassiveEpoch::rput`, `rget` and `raccumulate`
-/// return a request owned by the passive epoch, which completes it before the
-/// unlock.
+/// feature inside a passive epoch (`PassiveEpoch::rput`, `rget` and
+/// `raccumulate`), and borrows its buffers until the scope returns (the epoch,
+/// until its unlock), even after the request has completed. It is completed by
+/// [`wait`](Request::wait), [`test`](Request::test) or a batch call such as
+/// [`wait_all`](Request::wait_all) or, at the latest, by its scope or epoch,
+/// which waits for every request still pending before it returns or unwinds
+/// (the epoch, before it unlocks). Dropping or forgetting a request does not
+/// complete it early, and the scope or epoch still waits.
 ///
 /// A request is not `Send`, so it cannot be moved to another thread:
 ///

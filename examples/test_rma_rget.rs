@@ -65,7 +65,6 @@ fn main() {
         if rank == 0 {
             let mut local_buf = [0i32; N];
 
-            // Shared passive-target lock on rank 1's window.
             let locked = win.lock(LockType::Shared, 1, |e| {
                 // Post the rget — request completes when local buffer contains data.
                 let req = match e.rget(&mut local_buf, 1, 0) {

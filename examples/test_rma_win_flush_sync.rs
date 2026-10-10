@@ -89,7 +89,6 @@ fn main() {
             eprintln!("rank {rank}: FAIL: Win::lock(Shared, 0) failed: {e}");
             world.abort(1);
         }
-        // the closure ended → MPI_Win_unlock(0, win)
     }
 
     world.barrier().expect("barrier after test 1 failed");
@@ -123,7 +122,6 @@ fn main() {
             eprintln!("rank {rank}: FAIL: Win::lock_all failed: {e}");
             world.abort(1);
         }
-        // the closure ended → MPI_Win_unlock_all(win)
     }
 
     world.barrier().expect("barrier after test 2 failed");

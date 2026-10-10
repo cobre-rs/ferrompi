@@ -104,6 +104,7 @@ fn check_rejected_req(
 fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i64) -> bool {
     let size = world.size();
     let mut ok = true;
+    let label = |op: &str| format!("{name}/{op}");
     let origin = [1u64, 2, 3, 4];
     // Each epoch call borrows its buffer until the epoch closes, so every case
     // gets its own `get` destination and `get_accumulate` result.
@@ -132,7 +133,6 @@ fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i
                 .iter()
                 .zip(epoch_get_bufs.iter_mut().zip(epoch_results.iter_mut()))
             {
-                let label = |op: &str| format!("{name}/{op}");
                 check_rejected(
                     &mut ok,
                     &label("put"),
@@ -171,7 +171,6 @@ fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i
                 .iter()
                 .zip(fetch_results.iter_mut().zip(cas_results.iter_mut()))
             {
-                let label = |op: &str| format!("{name}/{op}");
                 check_rejected(
                     &mut ok,
                     &label("fetch_and_op"),
@@ -199,7 +198,6 @@ fn run_bounds_cases(world: &Communicator, win: &mut Win<u64>, name: &str, len: i
             for (&(rank, disp, want), request_get_buf) in
                 bulk_cases.iter().zip(request_get_bufs.iter_mut())
             {
-                let label = |op: &str| format!("{name}/{op}");
                 check_rejected_req(
                     &mut ok,
                     &label("rput"),

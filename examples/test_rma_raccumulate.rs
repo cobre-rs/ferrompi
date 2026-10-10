@@ -74,7 +74,6 @@ fn main() {
         // closure ends completes the epoch and guarantees the accumulation is
         // visible at rank 1.
         let locked = win.lock(LockType::Exclusive, 1, |e| {
-            // Post raccumulate — returns a Request signaling local completion.
             let req = match e.raccumulate(&buf, 1, 0, ReduceOp::Sum) {
                 Ok(r) => r,
                 Err(err) => {
