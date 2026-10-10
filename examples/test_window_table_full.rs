@@ -1,7 +1,7 @@
 //! Regression for a window the table cannot hold when it is full.
 //!
 //! Fills the 256-slot window table with `Win::allocate` calls, then checks
-//! that `SharedWindow::allocate` sees the same table-full error. Each failed
+//! that `Win::allocate_shared` sees the same table-full error. Each failed
 //! call leaves one leaked window counted as alive, so dropping every
 //! returned window still leaves two and `Mpi` skips `MPI_Finalize`.
 //!
@@ -9,7 +9,7 @@
 // mpi-test: np=1 expect=unfinalized
 // mpi-test-stderr: ferrompi: MPI_Finalize skipped: 2 window(s) still alive
 
-use ferrompi::{Error, Mpi, ResourceKind, SharedWindow, Win};
+use ferrompi::{Error, Mpi, ResourceKind, Win};
 
 mod common;
 
@@ -40,7 +40,7 @@ fn main() {
     common::check(&world, !windows.is_empty(), "at least one window created");
 
     let node = world.split_shared().expect("split_shared failed");
-    let shared_err = SharedWindow::<f64>::allocate(&node, 1);
+    let shared_err = Win::<f64>::allocate_shared(&node, 1);
     common::check(
         &world,
         matches!(
@@ -50,7 +50,7 @@ fn main() {
                 ..
             })
         ),
-        "SharedWindow::allocate table-full error",
+        "Win::allocate_shared table-full error",
     );
 
     drop(windows);

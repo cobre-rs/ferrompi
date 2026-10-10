@@ -1,6 +1,6 @@
 //! Regression for zeroed window memory.
 //!
-//! `Win::allocate` and `SharedWindow::allocate` must never hand a caller a
+//! `Win::allocate` and `Win::allocate_shared` must never hand a caller a
 //! fresh window's memory before it has been zeroed: reading it is an
 //! uninitialised-memory read (undefined behaviour). The "fresh" checks
 //! below are the valgrind oracle for this — run under
@@ -20,7 +20,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_zeroed
 // mpi-test: np=1.. valgrind
 
-use ferrompi::{Mpi, SharedWindow, Win};
+use ferrompi::{Mpi, Win};
 
 mod common;
 
@@ -55,27 +55,22 @@ fn main() {
         common::check(&world, ok, "reused Win::allocate memory reads zero");
     }
 
-    // Fresh SharedWindow::allocate memory reads zero (valgrind oracle).
+    // Fresh Win::allocate_shared memory reads zero (valgrind oracle).
     {
-        let win = SharedWindow::<u64>::allocate(&node, N).expect("SharedWindow::allocate failed");
-        let ok = win.local_slice().iter().all(|&v| v == 0);
-        common::check(&world, ok, "fresh SharedWindow::allocate memory reads zero");
+        let win = Win::<u64>::allocate_shared(&node, N).expect("Win::allocate_shared failed");
+        let ok = reads_zero(&win);
+        common::check(&world, ok, "fresh Win::allocate_shared memory reads zero");
     }
 
-    // Reused SharedWindow::allocate memory reads zero (value oracle).
+    // Reused Win::allocate_shared memory reads zero (value oracle).
     {
         {
-            let mut win =
-                SharedWindow::<u64>::allocate(&node, N).expect("SharedWindow::allocate failed");
-            win.local_slice_mut().fill(u64::MAX);
+            let win = Win::<u64>::allocate_shared(&node, N).expect("Win::allocate_shared failed");
+            win.local().copy_from_slice(&[u64::MAX; N]);
         }
-        let win = SharedWindow::<u64>::allocate(&node, N).expect("SharedWindow::allocate failed");
-        let ok = win.local_slice().iter().all(|&v| v == 0);
-        common::check(
-            &world,
-            ok,
-            "reused SharedWindow::allocate memory reads zero",
-        );
+        let win = Win::<u64>::allocate_shared(&node, N).expect("Win::allocate_shared failed");
+        let ok = reads_zero(&win);
+        common::check(&world, ok, "reused Win::allocate_shared memory reads zero");
     }
 
     // A zero-count allocation returns Ok with an empty local region on
@@ -96,18 +91,18 @@ fn main() {
         );
     }
     {
-        let result = SharedWindow::<u64>::allocate(&node, 0);
+        let result = Win::<u64>::allocate_shared(&node, 0);
         let ok = match &result {
-            Ok(win) => win.local_slice().is_empty(),
+            Ok(win) => win.local().is_empty(),
             Err(e) => {
-                eprintln!("FAIL: SharedWindow::allocate(0) returned Err: {e}");
+                eprintln!("FAIL: Win::allocate_shared(0) returned Err: {e}");
                 false
             }
         };
         common::check(
             &world,
             ok,
-            "SharedWindow::allocate(0) returns Ok with empty local_slice",
+            "Win::allocate_shared(0) returns Ok with an empty local view",
         );
     }
 
@@ -122,13 +117,12 @@ fn main() {
     }
     {
         let count = if world.rank() == 0 { 0 } else { N };
-        let win =
-            SharedWindow::<u64>::allocate(&node, count).expect("SharedWindow::allocate failed");
-        let ok = win.local_slice().len() == count && win.local_slice().iter().all(|&v| v == 0);
+        let win = Win::<u64>::allocate_shared(&node, count).expect("Win::allocate_shared failed");
+        let ok = win.local().len() == count && reads_zero(&win);
         common::check(
             &world,
             ok,
-            "mixed-count SharedWindow::allocate memory reads zero",
+            "mixed-count Win::allocate_shared memory reads zero",
         );
     }
 

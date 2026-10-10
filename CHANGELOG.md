@@ -212,6 +212,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sound while peers write the window. Migration: replace
   `win.local_slice()[i]` with `win.local().read(i)` and a slice copy with
   `copy_to_slice`/`copy_from_slice`.
+- **`SharedWindow`, `LockGuard` and `LockAllGuard` are removed:**
+  `Win::allocate_shared` creates a shared-memory window as an ordinary `Win`,
+  with `local()` and `remote(rank)` views and closure epochs. Migration:
+  replace `SharedWindow::allocate` with `Win::allocate_shared`, slices with
+  views, `remote_slice(r)` with `remote(r)`, a guard with a `lock`/`lock_all`
+  closure, and separate a fence from a following lock with
+  `WinFenceAssert::no_succeed()` and a barrier.
 
 ### Added
 

@@ -1,24 +1,29 @@
-//! Shared memory windows for intra-node communication.
+//! RMA windows: [`Win<T>`], its epoch handles and its views.
 //!
-//! This module provides [`SharedWindow<T>`], a safe Rust wrapper around
-//! `MPI_Win_allocate_shared` with RAII lifecycle management. Shared memory
-//! windows allow processes on the same node to directly access each other's
-//! memory without explicit message passing, enabling high-performance
-//! intra-node communication.
-//!
-//! It also provides [`Win<T>`], the general RMA window created over a `Vec`
-//! it then owns (`Win::create`) or MPI-allocated memory (`Win::allocate`),
-//! with fence, PSCW and passive-target synchronization.
+//! A [`Win`] is created over a `Vec` it then owns ([`Win::create`]), over
+//! MPI-allocated memory ([`Win::allocate`]), or over memory that every process of
+//! a shared-memory communicator can load and store directly
+//! ([`Win::allocate_shared`]). Every window is used the same way: [`Win::fence`],
+//! [`Win::start`], [`Win::lock`] and [`Win::lock_all`] run a closure, which
+//! receives a handle for the operations and for [`WinView`]s of the window's
+//! memory, and make the closing call when the closure returns; an exposure epoch
+//! opened by [`Win::post`] is closed by [`Win::wait_exposure`] or
+//! [`Win::test_exposure`].
 //!
 //! # Synchronization
 //!
-//! MPI shared memory windows require explicit synchronization:
+//! - **Active target**: [`Win::fence`] for bulk-synchronous access, where all
+//!   processes synchronize, and [`Win::start`] with [`Win::post`] for access
+//!   limited to a group. The closure receives an [`ActiveEpoch`].
+//! - **Passive target**: [`Win::lock`] or [`Win::lock_all`] for fine-grained,
+//!   one-sided access. The closure receives a [`PassiveEpoch`], which also has
+//!   the flushes and [`PassiveEpoch::sync`].
 //!
-//! - **Active target**: Use [`SharedWindow::fence()`] for bulk-synchronous access
-//!   patterns where all processes participate in synchronization.
-//! - **Passive target**: Use [`SharedWindow::lock()`] or [`SharedWindow::lock_all()`]
-//!   for fine-grained, one-sided access patterns. These return RAII guards
-//!   ([`LockGuard`] / [`LockAllGuard`]) that automatically unlock on drop.
+//! A fence epoch and a lock epoch must not overlap at any process
+//! (MPI-4.1 §12.5.3, p.599). To move from fences to locks, close the last fence
+//! with [`WinFenceAssert::no_succeed`], which asserts that the fence opens no
+//! epoch, and put a barrier between that fence and the lock, as the example
+//! does. To move back, put a barrier between the unlock and the next fence.
 //!
 //! # Feature Gate
 //!
@@ -26,30 +31,12 @@
 //!
 //! # Example
 //!
+//! Each process of a node writes its own region of a shared window, reads
+//! another rank's region after a fence, and then runs the shared-memory pattern
+//! (store, `sync`, barrier, `sync`, load) inside one `lock_all` closure.
+//!
 //! ```no_run
-//! use ferrompi::{Mpi, SharedWindow, LockType};
-//!
-//! let mpi = Mpi::init().unwrap();
-//! let world = mpi.world();
-//! let node = world.split_shared().unwrap();
-//!
-//! // Each process allocates 100 f64s in shared memory
-//! let mut win = SharedWindow::<f64>::allocate(&node, 100).unwrap();
-//!
-//! // Write to local portion
-//! {
-//!     let local = win.local_slice_mut();
-//!     for (i, x) in local.iter_mut().enumerate() {
-//!         *x = (node.rank() * 100 + i as i32) as f64;
-//!     }
-//! }
-//!
-//! // Fence synchronization
-//! win.fence().unwrap();
-//!
-//! // Read from any rank's memory
-//! let remote = win.remote_slice(0).unwrap();
-//! println!("Rank 0's first value: {}", remote[0]);
+#![doc = include_str!("../examples/shared_memory.rs")]
 //! ```
 
 use std::cell::Cell;
@@ -164,11 +151,10 @@ impl WinFenceAssert {
         WinFenceAssert(fence_mode_values()[2])
     }
 
-    /// Asserts that no RMA operations will follow this fence
-    /// (`MPI_MODE_NOSUCCEED`).
-    ///
-    /// This hints that the fence closes the last access epoch, so the
-    /// implementation need not prepare for subsequent RMA operations.
+    /// Asserts that this fence starts no sequence of RMA operations by this
+    /// process, so it opens no epoch (`MPI_MODE_NOSUCCEED`; MPI-4.1 §12.5.5,
+    /// p.604). If one process passes it, every process must. A lock or lock_all
+    /// epoch may follow after a barrier; see the module's `# Synchronization`.
     /// [`Win::fence`] accepts it on the closing fence and rejects it on the
     /// opening one, whose epoch holds the closure's operations.
     #[inline]
@@ -359,68 +345,6 @@ pub enum LockType {
     Shared,
 }
 
-/// A shared memory window allocated across processes on the same node.
-///
-/// Created via [`SharedWindow::allocate()`] on a shared-memory communicator
-/// (typically obtained from [`Communicator::split_shared()`]).
-///
-/// Each process in the communicator contributes a local segment of `local_count`
-/// elements of type `T` to the shared memory region. All processes can then
-/// access any rank's segment via [`remote_slice()`](Self::remote_slice), provided
-/// proper synchronization is used.
-///
-/// # RAII Lifecycle
-///
-/// The underlying MPI window is freed automatically when the `SharedWindow`
-/// is dropped. The shared memory region becomes invalid after the window is freed.
-/// If a `SharedWindow` outlives the [`Mpi`](crate::Mpi) handle, `MPI_Finalize`
-/// is skipped instead: the shared memory stays valid until the process exits
-/// and is never freed.
-///
-/// # Thread Safety
-///
-/// `SharedWindow` is intentionally **not** `Send` or `Sync`. MPI windows have
-/// specific thread-safety rules that depend on the MPI thread level, and incorrect
-/// cross-thread usage can cause data corruption or MPI errors.
-///
-/// # Example
-///
-/// ```no_run
-/// use ferrompi::{Mpi, SharedWindow, LockType};
-///
-/// let mpi = Mpi::init().unwrap();
-/// let world = mpi.world();
-/// let node = world.split_shared().unwrap();
-///
-/// // Each process allocates 100 f64s in shared memory
-/// let mut win = SharedWindow::<f64>::allocate(&node, 100).unwrap();
-///
-/// // Write to local portion
-/// {
-///     let local = win.local_slice_mut();
-///     for (i, x) in local.iter_mut().enumerate() {
-///         *x = (node.rank() * 100 + i as i32) as f64;
-///     }
-/// }
-///
-/// // Fence synchronization
-/// win.fence().unwrap();
-///
-/// // Read from any rank's memory
-/// let remote = win.remote_slice(0).unwrap();
-/// println!("Rank 0's first value: {}", remote[0]);
-/// ```
-pub struct SharedWindow<T: MpiDatatype> {
-    /// The MPI window handle (index into the C-layer window table).
-    win_handle: i32,
-    /// Non-null pointer to this process's local shared memory segment.
-    local_ptr: NonNull<T>,
-    /// Number of `T` elements in the local segment.
-    local_len: usize,
-    /// Number of processes in the communicator that created this window.
-    comm_size: i32,
-}
-
 fn win_size_and_disp_unit<T>(count: usize) -> Result<(i64, i32)> {
     let overflow = || Error::InvalidArgument {
         arg: "count",
@@ -444,7 +368,7 @@ const FERROMPI_WIN_LEAKED: i32 = -2;
 const WIN_FREED: i32 = -1;
 
 /// Count of live windows of any kind (`Win::create`, `Win::allocate`,
-/// `Win::allocate_shared`, `SharedWindow::allocate`). `Mpi::drop` reads this through
+/// `Win::allocate_shared`). `Mpi::drop` reads this through
 /// [`live_windows`] to decide whether `MPI_Finalize` is safe to call: some
 /// MPI implementations free MPI-allocated window memory inside
 /// `MPI_Finalize` itself, and some tear down internal state that still
@@ -454,14 +378,14 @@ static LIVE_WINDOWS: AtomicUsize = AtomicUsize::new(0);
 
 /// Number of windows of any kind currently alive.
 pub(crate) fn live_windows() -> usize {
-    // Acquire: pairs with the Release decrement in `Drop for Win`/`Drop for
-    // SharedWindow`, in `Win::into_buffer` and in `mark_window_gone`, so a zero
-    // read here cannot precede a window's in-flight teardown.
+    // Acquire: pairs with the Release decrement in `Drop for Win`, in
+    // `Win::into_buffer` and in `mark_window_gone`, so a zero read here cannot
+    // precede a window's in-flight teardown.
     LIVE_WINDOWS.load(Ordering::Acquire)
 }
 
-/// Counts a window being constructed (`SharedWindow::allocate`, `Win::create`,
-/// `Win::allocate` or `Win::allocate_shared`) in [`LIVE_WINDOWS`]. Only [`counted_window_call`]
+/// Counts a window being constructed (`Win::create`, `Win::allocate` or
+/// `Win::allocate_shared`) in [`LIVE_WINDOWS`]. Only [`counted_window_call`]
 /// calls it, inside the in-flight span that call opens.
 fn mark_window_alive() {
     // Relaxed: the increment, and its undo in `mark_window_gone`, happen inside
@@ -642,379 +566,11 @@ fn check_rma_target(
     Ok(())
 }
 
-impl<T: MpiDatatype> SharedWindow<T> {
-    /// Allocate a shared memory window.
-    ///
-    /// Each process in `comm` allocates `local_count` elements of type `T`
-    /// in a shared memory segment accessible by all processes in the communicator.
-    /// The communicator should be a shared-memory communicator (e.g., from
-    /// [`Communicator::split_shared()`]).
-    ///
-    /// The local segment reads as zero when the call returns.
-    ///
-    /// # Arguments
-    ///
-    /// * `comm` - A shared-memory communicator (all processes must be on the same node)
-    /// * `local_count` - Number of elements of type `T` to allocate locally
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The MPI window allocation fails (e.g., insufficient shared memory);
-    ///   this can happen on some ranks only, and the other ranks can then
-    ///   block in the barrier after the new segment is zeroed
-    /// - The window table is full (`Error::ResourceExhausted`; the window is
-    ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
-    /// - An error occurs while zeroing the new segment (the window is
-    ///   then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
-    /// - The MPI implementation returns a null base pointer for a non-zero count
-    ///   (the window is then leaked: never freed, and counted as alive so `Mpi` skips `MPI_Finalize`)
-    ///
-    /// In the last three cases, a peer whose own call succeeded blocks in its
-    /// collective `Drop` (`MPI_Win_free`) waiting for this rank.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{Mpi, SharedWindow};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let node = mpi.world().split_shared().unwrap();
-    /// let win = SharedWindow::<f64>::allocate(&node, 1024).unwrap();
-    /// ```
-    pub fn allocate(comm: &Communicator, local_count: usize) -> Result<Self> {
-        let (size, disp_unit) = win_size_and_disp_unit::<T>(local_count)?;
-        let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
-        let mut win_handle: i32 = -1;
-        let mut unified: i32 = 0;
-
-        counted_window_call("win_allocate_shared", &mut win_handle, |handle| {
-            // SAFETY: We pass valid pointers for out-parameters. The C layer
-            // allocates shared memory and returns a window handle + base pointer.
-            unsafe {
-                ffi::ferrompi_win_allocate_shared(
-                    size,
-                    disp_unit,
-                    -1, // MPI_INFO_NULL
-                    comm.handle,
-                    &mut baseptr,
-                    handle,
-                    &mut unified,
-                )
-            }
-        })?;
-
-        let local_ptr = if local_count == 0 {
-            // Zero-count: MPI may return a null base pointer for an empty
-            // segment (mirrors Win::allocate's zero-count arm).
-            NonNull::<T>::dangling()
-        } else {
-            NonNull::new(baseptr.cast::<T>())
-                .ok_or_else(|| Error::Internal("Win_allocate_shared returned null".into()))?
-        };
-
-        Ok(SharedWindow {
-            win_handle,
-            local_ptr,
-            local_len: local_count,
-            comm_size: comm.size(),
-        })
-    }
-
-    /// Get a slice of this process's local shared memory segment.
-    ///
-    /// The returned slice provides read access to the `local_count` elements
-    /// that were allocated by this process in [`allocate()`](Self::allocate).
-    ///
-    /// # Safety Contract
-    ///
-    /// The caller must ensure proper MPI synchronization (fence or lock)
-    /// before reading data that may have been written by other processes.
-    ///
-    /// # Concurrent writes
-    ///
-    /// The slice aliases memory that other processes in the window can write
-    /// at any time, but a `&[T]` promises the compiler that its contents do
-    /// not change while it is borrowed. The compiler may therefore load a
-    /// value once and reuse it, so a loop that polls the slice for another
-    /// process's write can spin forever; this has been observed in optimised
-    /// builds. Polling through this slice is unsupported. Take a new slice
-    /// after each synchronising call (fence, lock or unlock) and read data
-    /// another process wrote only through that new slice.
-    pub fn local_slice(&self) -> &[T] {
-        // SAFETY: `local_ptr` was returned by MPI_Win_allocate_shared and is
-        // guaranteed valid for `local_len` elements of type T for the lifetime
-        // of the window. The pointer is non-null (checked in allocate()).
-        unsafe { std::slice::from_raw_parts(self.local_ptr.as_ptr(), self.local_len) }
-    }
-
-    /// Get a mutable slice of this process's local shared memory segment.
-    ///
-    /// The returned slice provides read-write access to the `local_count` elements
-    /// that were allocated by this process in [`allocate()`](Self::allocate).
-    ///
-    /// # Safety Contract
-    ///
-    /// The caller must ensure proper MPI synchronization (fence or lock)
-    /// before writing data that other processes may read.
-    ///
-    /// # Concurrent writes
-    ///
-    /// The slice aliases memory that other processes in the window can read
-    /// and write at any time, but a `&mut [T]` promises the compiler
-    /// exclusive access while it is borrowed. The compiler may therefore keep
-    /// values in registers and skip loads or stores, so a loop that polls the
-    /// slice for another process's write can spin forever.
-    /// Polling through this slice is unsupported. Take a new slice after each
-    /// synchronising call (fence, lock or unlock).
-    pub fn local_slice_mut(&mut self) -> &mut [T] {
-        // SAFETY: `local_ptr` was returned by MPI_Win_allocate_shared and is
-        // guaranteed valid for `local_len` elements of type T for the lifetime
-        // of the window. We have `&mut self` ensuring exclusive access.
-        unsafe { std::slice::from_raw_parts_mut(self.local_ptr.as_ptr(), self.local_len) }
-    }
-
-    /// Query another rank's shared memory region.
-    ///
-    /// Returns a slice of the shared memory segment allocated by the specified
-    /// rank. This allows direct read access to remote memory without any
-    /// message passing overhead.
-    ///
-    /// # Arguments
-    ///
-    /// * `rank` - The rank whose shared memory to query (0-based)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The rank is out of range
-    /// - The MPI shared query call fails
-    ///
-    /// # Safety Contract
-    ///
-    /// The caller must ensure proper MPI synchronization (fence or lock)
-    /// before reading data that was written by the remote process.
-    ///
-    /// # Concurrent writes
-    ///
-    /// The slice aliases memory that other processes in the window can write
-    /// at any time, but a `&[T]` promises the compiler that its contents do
-    /// not change while it is borrowed. The compiler may therefore load a
-    /// value once and reuse it, so a loop that polls the slice for another
-    /// process's write can spin forever; this has been observed in optimised
-    /// builds. Polling through this slice is unsupported. Take a new slice
-    /// after each synchronising call (fence, lock or unlock) and read data
-    /// another process wrote only through that new slice.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use ferrompi::{Mpi, SharedWindow};
-    /// # let mpi = Mpi::init().unwrap();
-    /// # let node = mpi.world().split_shared().unwrap();
-    /// # let win = SharedWindow::<f64>::allocate(&node, 100).unwrap();
-    /// // Read rank 0's shared memory
-    /// let remote = win.remote_slice(0).unwrap();
-    /// println!("Rank 0 has {} elements, first = {}", remote.len(), remote[0]);
-    /// ```
-    pub fn remote_slice(&self, rank: i32) -> Result<&[T]> {
-        let mut size: i64 = 0;
-        let mut disp_unit: i32 = 0;
-        let mut baseptr: *mut std::ffi::c_void = std::ptr::null_mut();
-
-        // SAFETY: We pass valid pointers for out-parameters. The C layer queries
-        // the MPI window for the base pointer and size of the specified rank's
-        // shared memory segment.
-        let ret = unsafe {
-            ffi::ferrompi_win_shared_query(
-                self.win_handle,
-                rank,
-                &mut size,
-                &mut disp_unit,
-                &mut baseptr,
-            )
-        };
-        Error::check_with_op(ret, "win_shared_query")?;
-
-        let count = size as usize / std::mem::size_of::<T>();
-        if baseptr.is_null() {
-            if count == 0 {
-                // Null with zero count: return an empty slice using a dangling pointer
-                // SAFETY: NonNull::dangling() is a valid, aligned pointer for zero-length slices
-                return Ok(unsafe {
-                    std::slice::from_raw_parts(NonNull::<T>::dangling().as_ptr(), 0)
-                });
-            }
-            return Err(Error::Internal(
-                "MPI_Win_shared_query returned null for non-zero size".into(),
-            ));
-        }
-        // SAFETY: MPI_Win_shared_query returns a valid pointer to the shared
-        // memory segment of the specified rank. The pointer is valid for `count`
-        // elements of type T for the lifetime of the window.
-        Ok(unsafe { std::slice::from_raw_parts(baseptr.cast::<T>(), count) })
-    }
-
-    /// Fence synchronization (active target).
-    ///
-    /// A collective operation that synchronizes all accesses to the window.
-    /// All processes in the window's communicator must call this function.
-    /// After `fence()` returns, all preceding local stores are visible to
-    /// remote processes, and all remote stores are visible locally.
-    ///
-    /// This is the simplest synchronization mode, suitable for bulk-synchronous
-    /// access patterns (e.g., write phase → fence → read phase → fence).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the MPI fence operation fails.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use ferrompi::{Mpi, SharedWindow};
-    /// # let mpi = Mpi::init().unwrap();
-    /// # let node = mpi.world().split_shared().unwrap();
-    /// # let mut win = SharedWindow::<f64>::allocate(&node, 100).unwrap();
-    /// // Write phase
-    /// win.local_slice_mut()[0] = 42.0;
-    ///
-    /// // Synchronize
-    /// win.fence().unwrap();
-    ///
-    /// // Read phase — all writes from all ranks are now visible
-    /// let remote = win.remote_slice(0).unwrap();
-    /// ```
-    pub fn fence(&self) -> Result<()> {
-        // SAFETY: win_handle is a valid MPI window handle.
-        let ret = unsafe { ffi::ferrompi_win_fence(0, self.win_handle) };
-        Error::check_with_op(ret, "win_fence")
-    }
-
-    /// Lock a specific rank's window (passive target synchronization).
-    ///
-    /// Acquires a lock on the specified rank's window, allowing one-sided
-    /// access to that rank's shared memory. Returns a [`LockGuard`] that
-    /// automatically unlocks the window when dropped.
-    ///
-    /// # Arguments
-    ///
-    /// * `lock_type` - [`LockType::Exclusive`] for read-write access, or
-    ///   [`LockType::Shared`] for read-only access
-    /// * `rank` - The rank to lock (0-based)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the MPI lock operation fails.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use ferrompi::{Mpi, SharedWindow, LockType};
-    /// # let mpi = Mpi::init().unwrap();
-    /// # let node = mpi.world().split_shared().unwrap();
-    /// # let win = SharedWindow::<f64>::allocate(&node, 100).unwrap();
-    /// {
-    ///     let guard = win.lock(LockType::Shared, 0).unwrap();
-    ///     let remote = win.remote_slice(0).unwrap();
-    ///     println!("Value: {}", remote[0]);
-    ///     guard.flush().unwrap();
-    ///     // Lock is released when `guard` is dropped
-    /// }
-    /// ```
-    pub fn lock(&self, lock_type: LockType, rank: i32) -> Result<LockGuard<'_, T>> {
-        let lt = match lock_type {
-            LockType::Exclusive => ffi::FERROMPI_LOCK_EXCLUSIVE,
-            LockType::Shared => ffi::FERROMPI_LOCK_SHARED,
-        };
-        // SAFETY: win_handle is a valid MPI window handle.
-        let ret = unsafe { ffi::ferrompi_win_lock(lt, rank, 0, self.win_handle) };
-        Error::check_with_op(ret, "win_lock")?;
-        Ok(LockGuard { window: self, rank })
-    }
-
-    /// Lock all ranks' windows (passive target synchronization).
-    ///
-    /// Acquires shared locks on all ranks in the window's communicator.
-    /// Returns a [`LockAllGuard`] that automatically unlocks all windows
-    /// when dropped.
-    ///
-    /// This is useful for algorithms that need to access multiple ranks'
-    /// memory in a single epoch without individual lock/unlock overhead.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the MPI lock_all operation fails.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use ferrompi::{Mpi, SharedWindow};
-    /// # let mpi = Mpi::init().unwrap();
-    /// # let node = mpi.world().split_shared().unwrap();
-    /// # let win = SharedWindow::<f64>::allocate(&node, 100).unwrap();
-    /// {
-    ///     let guard = win.lock_all().unwrap();
-    ///     // Access any rank's memory
-    ///     for rank in 0..node.size() {
-    ///         let remote = win.remote_slice(rank).unwrap();
-    ///         println!("Rank {rank} first value: {}", remote[0]);
-    ///     }
-    ///     guard.flush_all().unwrap();
-    ///     // All locks released when `guard` is dropped
-    /// }
-    /// ```
-    pub fn lock_all(&self) -> Result<LockAllGuard<'_, T>> {
-        // SAFETY: win_handle is a valid MPI window handle.
-        let ret = unsafe { ffi::ferrompi_win_lock_all(0, self.win_handle) };
-        Error::check_with_op(ret, "win_lock_all")?;
-        Ok(LockAllGuard { window: self })
-    }
-
-    /// Get this window's raw handle.
-    ///
-    /// The value is ferrompi's internal table index for this window. It is
-    /// not an MPI handle and cannot be passed to MPI; use it only to tell
-    /// objects apart, for example in logs.
-    pub fn raw_handle(&self) -> i32 {
-        self.win_handle
-    }
-
-    /// Get the number of processes in the window's communicator.
-    ///
-    /// This equals the size of the communicator that was used to create
-    /// the window, and determines the valid range of ranks for
-    /// [`remote_slice()`](Self::remote_slice) and [`lock()`](Self::lock).
-    pub fn comm_size(&self) -> i32 {
-        self.comm_size
-    }
-}
-
-impl<T: MpiDatatype> Drop for SharedWindow<T> {
-    fn drop(&mut self) {
-        let Some(_call) = rt::drop_guard("SharedWindow") else {
-            return;
-        };
-        // Release: pairs with `live_windows`'s Acquire load, so `Mpi::drop`
-        // cannot observe this window as gone before its teardown here has
-        // actually run.
-        LIVE_WINDOWS.fetch_sub(1, Ordering::Release);
-        // SAFETY: win_handle is a valid MPI window handle that was allocated
-        // by ferrompi_win_allocate_shared. It has not been freed yet because
-        // Drop is only called once, and we don't expose a manual free method.
-        unsafe { ffi::ferrompi_win_free(self.win_handle) };
-    }
-}
-
-// SharedWindow is not Send/Sync by default due to NonNull<T>.
-// This is the correct behavior — MPI windows have specific thread-safety
-// rules and should not be shared across threads without careful coordination.
-
 // ============================================================================
-// Win<T> — general-purpose distributed RMA window
+// Win<T> — general-purpose RMA window
 // ============================================================================
 
-/// A general-purpose distributed RMA window.
+/// A general-purpose RMA window.
 ///
 /// `Win<T>` wraps one of:
 ///
@@ -1025,9 +581,8 @@ impl<T: MpiDatatype> Drop for SharedWindow<T> {
 ///   that every process of a shared-memory communicator can access directly,
 ///   and [`remote`](Win::remote) returns a view of each rank's region.
 ///
-/// Unlike [`SharedWindow`], which is restricted to intra-node communicators,
-/// `Win` works across nodes (except for a `Win::allocate_shared` window) and is
-/// the foundation for all distributed RMA operations (Put, Get, Accumulate,
+/// Every constructor but `Win::allocate_shared` works across nodes, and the
+/// window is the foundation for all RMA operations (Put, Get, Accumulate,
 /// etc.) in this library.
 ///
 /// # Ownership
@@ -3547,8 +3102,7 @@ impl<T: MpiDatatype> Win<T> {
         })?;
 
         let local_ptr = if local_count == 0 {
-            // Zero-count: use a dangling aligned pointer (same trick as
-            // SharedWindow::remote_slice for zero-size slices).
+            // Zero-count: use a dangling aligned pointer.
             NonNull::<T>::dangling()
         } else {
             NonNull::new(baseptr.cast::<T>()).ok_or_else(|| {
@@ -4007,8 +3561,8 @@ impl<T: MpiDatatype> Win<T> {
         f: impl for<'s> FnOnce(&'s ActiveEpoch<'s, 'env, T>) -> Result<R>,
     ) -> Result<R> {
         check_fence_asserts(open, close)?;
-        // SAFETY: `win_handle` is a valid MPI window handle allocated by
-        // `ferrompi_win_create` or `ferrompi_win_allocate`. The assert value
+        // SAFETY: `win_handle` is a valid MPI window handle allocated by one of
+        // the three `ferrompi_win_*` constructors. The assert value
         // is a valid bitmask obtained from `WinFenceAssert`, which is either
         // 0 (none) or a combination of values returned by the MPI implementation.
         let ret = unsafe { ffi::ferrompi_win_fence(open.bits(), self.win_handle) };
@@ -4352,8 +3906,8 @@ impl<T: MpiDatatype> Win<T> {
             LockType::Exclusive => ffi::FERROMPI_LOCK_EXCLUSIVE,
             LockType::Shared => ffi::FERROMPI_LOCK_SHARED,
         };
-        // SAFETY: `win_handle` is a valid MPI window handle allocated by
-        // `ferrompi_win_create` or `ferrompi_win_allocate`. `lt` is one of
+        // SAFETY: `win_handle` is a valid MPI window handle allocated by one of
+        // the three `ferrompi_win_*` constructors. `lt` is one of
         // the two valid MPI lock-type constants obtained from the C layer.
         // `rank` is caller-supplied; MPI validates it against the window's
         // communicator.
@@ -4890,13 +4444,13 @@ impl<T: MpiDatatype> Drop for Win<T> {
             std::mem::forget(self.buffer.take());
             return;
         };
-        // SAFETY: `win_handle` is a valid MPI window handle allocated by
-        // ferrompi_win_create or ferrompi_win_allocate. It has not been freed
+        // SAFETY: `win_handle` is a valid MPI window handle allocated by one of
+        // the three `ferrompi_win_*` constructors. It has not been freed
         // yet because Drop is only called once and `into_buffer` sets
         // `WIN_FREED` after its free. MPI_Win_free leaves the user buffer
         // alone for Win::create and frees the MPI-allocated buffer for
-        // Win::allocate per the MPI standard — the C layer handles this
-        // distinction correctly.
+        // Win::allocate and Win::allocate_shared per the MPI standard — the C
+        // layer handles this distinction correctly.
         let ret = unsafe { ffi::ferrompi_win_free(self.win_handle) };
         if ret == 0 {
             // Release: pairs with `live_windows`'s Acquire; this decrement
@@ -4906,131 +4460,6 @@ impl<T: MpiDatatype> Drop for Win<T> {
         } else {
             std::mem::forget(self.buffer.take());
         }
-    }
-}
-
-/// RAII guard for a single-rank window lock.
-///
-/// Created by [`SharedWindow::lock()`]. When dropped, the lock on the
-/// specified rank is automatically released via `MPI_Win_unlock`.
-///
-/// # Example
-///
-/// ```no_run
-/// # use ferrompi::{Mpi, SharedWindow, LockType};
-/// # let mpi = Mpi::init().unwrap();
-/// # let node = mpi.world().split_shared().unwrap();
-/// # let win = SharedWindow::<f64>::allocate(&node, 100).unwrap();
-/// {
-///     let guard = win.lock(LockType::Shared, 0).unwrap();
-///     let remote = win.remote_slice(0).unwrap();
-///     // Ensure all operations are completed
-///     guard.flush().unwrap();
-/// } // Lock released here
-/// ```
-pub struct LockGuard<'a, T: MpiDatatype> {
-    window: &'a SharedWindow<T>,
-    rank: i32,
-}
-
-impl<T: MpiDatatype> LockGuard<'_, T> {
-    /// Flush pending RMA operations to the locked rank.
-    ///
-    /// Ensures that all preceding RMA operations (put, get, accumulate)
-    /// issued to the locked rank are completed at the target.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the MPI flush operation fails.
-    pub fn flush(&self) -> Result<()> {
-        // SAFETY: The window handle is valid (borrowed from SharedWindow)
-        // and the rank was locked in the constructor.
-        let ret = unsafe { ffi::ferrompi_win_flush(self.rank, self.window.win_handle) };
-        Error::check_with_op(ret, "win_flush")
-    }
-}
-
-impl<T: MpiDatatype> Drop for LockGuard<'_, T> {
-    fn drop(&mut self) {
-        let Some(_call) = rt::drop_guard("LockGuard") else {
-            return;
-        };
-        // SAFETY: The window handle is valid (borrowed from SharedWindow)
-        // and the rank was locked in the constructor. This unlock matches
-        // the lock call that created this guard. It calls the raw declaration
-        // because `drop_guard` above is this call's lifecycle check.
-        unsafe { ffi::raw::ferrompi_win_unlock(self.rank, self.window.win_handle) };
-    }
-}
-
-/// RAII guard for a lock-all window lock.
-///
-/// Created by [`SharedWindow::lock_all()`]. When dropped, all locks
-/// are automatically released via `MPI_Win_unlock_all`.
-///
-/// # Example
-///
-/// ```no_run
-/// # use ferrompi::{Mpi, SharedWindow};
-/// # let mpi = Mpi::init().unwrap();
-/// # let node = mpi.world().split_shared().unwrap();
-/// # let win = SharedWindow::<f64>::allocate(&node, 100).unwrap();
-/// {
-///     let guard = win.lock_all().unwrap();
-///     // Access shared memory from any rank
-///     guard.flush_all().unwrap();
-/// } // All locks released here
-/// ```
-pub struct LockAllGuard<'a, T: MpiDatatype> {
-    window: &'a SharedWindow<T>,
-}
-
-impl<T: MpiDatatype> LockAllGuard<'_, T> {
-    /// Flush all pending RMA operations to all ranks.
-    ///
-    /// Ensures that all preceding RMA operations issued to any rank
-    /// in the window are completed at their respective targets.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the MPI flush_all operation fails.
-    pub fn flush_all(&self) -> Result<()> {
-        // SAFETY: The window handle is valid (borrowed from SharedWindow)
-        // and all ranks were locked in the constructor.
-        let ret = unsafe { ffi::ferrompi_win_flush_all(self.window.win_handle) };
-        Error::check_with_op(ret, "win_flush_all")
-    }
-
-    /// Flush pending RMA operations to a specific rank.
-    ///
-    /// Ensures that all preceding RMA operations issued to the specified
-    /// rank are completed at the target.
-    ///
-    /// # Arguments
-    ///
-    /// * `rank` - The rank to flush (0-based)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the MPI flush operation fails.
-    pub fn flush(&self, rank: i32) -> Result<()> {
-        // SAFETY: The window handle is valid (borrowed from SharedWindow)
-        // and all ranks were locked in the constructor.
-        let ret = unsafe { ffi::ferrompi_win_flush(rank, self.window.win_handle) };
-        Error::check_with_op(ret, "win_flush")
-    }
-}
-
-impl<T: MpiDatatype> Drop for LockAllGuard<'_, T> {
-    fn drop(&mut self) {
-        let Some(_call) = rt::drop_guard("LockAllGuard") else {
-            return;
-        };
-        // SAFETY: The window handle is valid (borrowed from SharedWindow)
-        // and all ranks were locked in the constructor. This unlock_all
-        // matches the lock_all call that created this guard. It calls the raw
-        // declaration because `drop_guard` above is this call's lifecycle check.
-        unsafe { ffi::raw::ferrompi_win_unlock_all(self.window.win_handle) };
     }
 }
 

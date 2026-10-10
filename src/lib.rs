@@ -33,12 +33,10 @@
 //!   for struct-type builders.
 //! - **User-defined reduction operations**: [`UserOp`] wraps `MPI_Op_create`
 //!   with safe closure storage and trampoline.
-//! - **Distributed RMA windows** (feature `rma`): `Win<T>` with
+//! - **RMA and shared-memory windows** (feature `rma`): `Win<T>` with
 //!   `WinFenceAssert`, `WinPscwAssert`, and closure epochs over
-//!   `ActiveEpoch` and `PassiveEpoch`.
-//! - **Shared memory windows** (feature `rma`): `SharedWindow<T>`
-//!   with RAII lock guards for intra-node shared memory (distinct from the
-//!   distributed `Win<T>` windows above).
+//!   `ActiveEpoch` and `PassiveEpoch`; `Win::allocate_shared` for intra-node
+//!   shared memory; `WinView` for access to a window's memory.
 //! - **Info objects**: [`Info`] creates and queries MPI info objects;
 //!   no ferrompi call takes one yet.
 //! - **SLURM helpers** (feature `numa`): Job topology queries via `slurm` module
@@ -81,7 +79,7 @@
 //!
 //! | Feature | Description | Dependencies |
 //! |---------|-------------|--------------|
-//! | `rma`   | RMA and shared-memory windows (`Win`, `SharedWindow`, epoch handles, lock guards, RMA operations) | — |
+//! | `rma`   | RMA and shared-memory windows (`Win`, epoch handles, views, RMA operations) | — |
 //! | `numa`  | The `slurm` module and `SlurmInfo` | `rma` |
 //!
 //! `numa` needs no system library: it implies `rma` and adds only the SLURM
@@ -91,8 +89,7 @@
 //!
 //! [`Communicator`], [`Group`], [`Request`], [`PersistentRequest`], [`Status`],
 //! [`CustomDatatype`], [`Info`], and [`UserOp`] are `Send + Sync`; [`Mpi`],
-//! `Win<T>`, its epoch handles and views, `SharedWindow<T>` (feature `rma`), and
-//! its RAII lock guards are not.
+//! `Win<T>`, its epoch handles and `WinView` (feature `rma`) are not.
 //!
 //! Which thread may call MPI is set by the provided [`ThreadLevel`]; see its
 //! documentation for the per-level rules.
@@ -201,8 +198,7 @@ pub use topology::SlurmInfo;
 pub use topology::{HostEntry, TopologyInfo};
 #[cfg(feature = "rma")]
 pub use window::{
-    ActiveEpoch, LockAllGuard, LockGuard, LockType, PassiveEpoch, SharedWindow, Win,
-    WinFenceAssert, WinPscwAssert, WinView,
+    ActiveEpoch, LockType, PassiveEpoch, Win, WinFenceAssert, WinPscwAssert, WinView,
 };
 
 #[cfg(doctest)]
@@ -268,9 +264,9 @@ pub enum ThreadLevel {
 /// user op returns `Err(`[`Error::Finalized`]`)` without calling MPI. The
 /// queries the MPI standard allows at any time ([`Mpi::version`],
 /// [`Mpi::library_version`], [`Mpi::is_initialized`],
-/// [`Mpi::is_finalized`]) still answer. A communicator, request, window or
-/// window lock guard, datatype, group, info object or user op that outlives
-/// this handle makes no MPI call when it is dropped.
+/// [`Mpi::is_finalized`]) still answer. A communicator, request, window,
+/// datatype, group, info object or user op that outlives this handle makes no
+/// MPI call when it is dropped.
 ///
 /// If any window (feature `rma`) is still alive when this handle is
 /// dropped — whatever constructed it — `MPI_Finalize` is skipped instead,
@@ -298,8 +294,8 @@ pub enum ThreadLevel {
 ///
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
 /// whose `Drop` calls MPI — a [`PersistentRequest`], a communicator other than
-/// the world, a window or window lock guard, a datatype, group, info object or
-/// user op — on a thread other than the one that called
+/// the world, a window, a datatype, group, info object or user op — on a
+/// thread other than the one that called
 /// [`Mpi::init`]/[`Mpi::init_thread`] prints
 /// `ferrompi: <Type> dropped on thread <name or id>` to stderr and aborts
 /// the process.
