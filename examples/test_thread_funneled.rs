@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use ferrompi::{CustomDatatype, Error, Info, Mpi, ReduceOp, ThreadLevel, UserOp};
+use ferrompi::{CustomDatatype, Error, Mpi, ReduceOp, ThreadLevel, UserOp};
 
 mod common;
 
@@ -63,7 +63,6 @@ fn main() {
             ok &= matches!(world_ref.duplicate(), Err(Error::ThreadLevelViolation));
             ok &= matches!(world_ref.group(), Err(Error::ThreadLevelViolation));
             ok &= matches!(world_ref.processor_name(), Err(Error::ThreadLevelViolation));
-            ok &= matches!(Info::new(), Err(Error::ThreadLevelViolation));
             ok &= matches!(
                 CustomDatatype::contiguous::<f64>(2),
                 Err(Error::ThreadLevelViolation)

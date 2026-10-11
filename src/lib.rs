@@ -37,8 +37,6 @@
 //!   `WinFenceAssert`, `WinPscwAssert`, and closure epochs over
 //!   `ActiveEpoch` and `PassiveEpoch`; `Win::allocate_shared` for intra-node
 //!   shared memory; `WinView` for access to a window's memory.
-//! - **Info objects**: [`Info`] creates and queries MPI info objects;
-//!   no ferrompi call takes one yet.
 //! - **SLURM helpers** (feature `numa`): Job topology queries via `slurm` module
 //! - **Rich error handling**: [`MpiErrorClass`] categorization with messages from the MPI runtime
 //!
@@ -88,7 +86,7 @@
 //! ## Thread Safety
 //!
 //! [`Communicator`], [`Group`], [`Request`], [`PersistentRequest`], [`Status`],
-//! [`CustomDatatype`], [`Info`], and [`UserOp`] are `Send + Sync`; [`Mpi`],
+//! [`CustomDatatype`] and [`UserOp`] are `Send + Sync`; [`Mpi`],
 //! `Win<T>`, its epoch handles and `WinView` (feature `rma`) are not.
 //!
 //! Which thread may call MPI is set by the provided [`ThreadLevel`]; see its
@@ -155,7 +153,6 @@ pub mod doc;
 mod error;
 mod ffi;
 mod group;
-mod info;
 mod op;
 mod persistent;
 mod request;
@@ -186,7 +183,6 @@ pub use datatype::{LongDoubleInt, LongInt};
 pub use datatype_builder::{CustomDatatype, StructField};
 pub use error::{Error, MpiErrorClass, ResourceKind, Result};
 pub use group::{Group, GroupComparison, RankRange};
-pub use info::Info;
 pub use op::{AccumulateOp, CollectiveOp, FetchOp, ReduceOp, UserOp};
 pub use persistent::PersistentRequest;
 pub use request::Request;
@@ -259,12 +255,12 @@ pub enum ThreadLevel {
 /// `Err(`[`Error::Finalized`]`)`. MPI cannot be re-initialized.
 ///
 /// Dropping this handle finalizes MPI. Afterward, every method that calls
-/// MPI through a communicator, group, request, window, datatype, info or
+/// MPI through a communicator, group, request, window, datatype or
 /// user op returns `Err(`[`Error::Finalized`]`)` without calling MPI. The
 /// queries the MPI standard allows at any time ([`Mpi::version`],
 /// [`Mpi::library_version`], [`Mpi::is_initialized`],
 /// [`Mpi::is_finalized`]) still answer. A communicator, request, window,
-/// datatype, group, info object or user op that outlives this handle makes no
+/// datatype, group or user op that outlives this handle makes no
 /// MPI call when it is dropped.
 ///
 /// If any window (feature `rma`) is still alive when this handle is
@@ -293,7 +289,7 @@ pub enum ThreadLevel {
 ///
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
 /// whose `Drop` calls MPI — a [`PersistentRequest`], a communicator other than
-/// the world, a window, a datatype, group, info object or user op — on a
+/// the world, a window, a datatype, group or user op — on a
 /// thread other than the one that called [`Mpi::init`]/[`Mpi::init_thread`]
 /// prints `ferrompi: <Type> dropped on thread <name or id>` to stderr and
 /// aborts the process.
@@ -892,8 +888,7 @@ mod tests {
             | ResourceKind::Datatype
             | ResourceKind::Operation
             | ResourceKind::Window
-            | ResourceKind::Group
-            | ResourceKind::Info => {}
+            | ResourceKind::Group => {}
         };
         let _ = |op: ReduceOp| match op {
             ReduceOp::Sum

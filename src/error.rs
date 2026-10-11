@@ -19,7 +19,6 @@ const FERROMPI_ERR_DATATYPES_FULL: i32 = -7003;
 const FERROMPI_ERR_OPS_FULL: i32 = -7004;
 const FERROMPI_ERR_WINDOWS_FULL: i32 = -7005;
 const FERROMPI_ERR_GROUPS_FULL: i32 = -7006;
-const FERROMPI_ERR_INFOS_FULL: i32 = -7007;
 
 // Returned by the persistent-collective and comm_create_from_group stubs
 // compiled without FERROMPI_HAVE_MPI4_COLLECTIVES (the library lacks the
@@ -61,9 +60,6 @@ pub enum ResourceKind {
     /// Group table.
     #[error("group")]
     Group,
-    /// Info-object table.
-    #[error("info")]
-    Info,
 }
 
 impl ResourceKind {
@@ -77,7 +73,6 @@ impl ResourceKind {
             FERROMPI_ERR_OPS_FULL => Some(ResourceKind::Operation),
             FERROMPI_ERR_WINDOWS_FULL => Some(ResourceKind::Window),
             FERROMPI_ERR_GROUPS_FULL => Some(ResourceKind::Group),
-            FERROMPI_ERR_INFOS_FULL => Some(ResourceKind::Info),
             _ => None,
         }
     }
@@ -667,7 +662,6 @@ mod tests {
             (-7004, ResourceKind::Operation),
             (-7005, ResourceKind::Window),
             (-7006, ResourceKind::Group),
-            (-7007, ResourceKind::Info),
         ];
         for (code, expected) in cases {
             match Error::from_code(code) {

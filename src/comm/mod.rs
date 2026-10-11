@@ -165,7 +165,7 @@ pub struct Communicator {
 // caller must serialize its own calls (debug builds detect two overlapping
 // calls). At `Multiple`, calls from any thread may run concurrently.
 //
-// The C layer's handle tables claim slots lock-free: six with a C11
+// The C layer's handle tables claim slots lock-free: five with a C11
 // atomic compare-exchange, the request table with an atomic bitmap
 // (`fetch_or`), so there are no data races under MPI_THREAD_MULTIPLE.
 // See docs/adr/0002-handle-tables.md for the full rationale and design.

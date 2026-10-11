@@ -64,7 +64,6 @@ extern "C" {
 #define FERROMPI_ERR_OPS_FULL        (-7004)
 #define FERROMPI_ERR_WINDOWS_FULL    (-7005)
 #define FERROMPI_ERR_GROUPS_FULL     (-7006)
-#define FERROMPI_ERR_INFOS_FULL      (-7007)
 
 /* Returned by the persistent-collective and comm_create_from_group stubs
  * compiled without FERROMPI_HAVE_MPI4_COLLECTIVES (the library lacks the
@@ -455,19 +454,6 @@ int ferrompi_alltoallv_init(const void* sendbuf, const int32_t* sendcounts, cons
 int ferrompi_reduce_scatter_block_init(const void* sendbuf, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t op, int32_t comm, int64_t* request);
 
 /* ============================================================
- * Info Object Operations
- * ============================================================ */
-
-int ferrompi_info_create(int32_t* info_handle);
-
-/** Free an MPI_Info object (MPI_Info_free). No-op on an invalid or already-freed handle. */
-int ferrompi_info_free(int32_t info_handle);
-
-int ferrompi_info_set(int32_t info_handle, const char* key, const char* value);
-
-int ferrompi_info_get(int32_t info_handle, const char* key, char* value, int32_t* valuelen, int32_t* flag);
-
-/* ============================================================
  * Group Operations
  * ============================================================ */
 
@@ -578,14 +564,14 @@ int ferrompi_startall(int64_t count, const int64_t* requests, uint8_t* started);
 #define FERROMPI_LOCK_SHARED    1
 
 /* The three creating shims leave *win unchanged when MPI created no window, and set it to FERROMPI_WIN_LEAKED when MPI created the window but zeroing it failed or the handle table was full (that window is never freed). *win holds the real non-negative handle only on success. ferrompi_win_allocate_shared also writes *unified: 0 on entry, then 1 only when MPI created the window and its MPI_WIN_MODEL attribute is MPI_WIN_UNIFIED, so it is 0 when no window was created or the query failed or found no attribute. */
-int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info,
-                                  int32_t comm, void** baseptr, int32_t* win, int32_t* unified);
+int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t comm,
+                                  void** baseptr, int32_t* win, int32_t* unified);
 
-int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t info,
-                         int32_t comm, int32_t* win);
+int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t comm,
+                         int32_t* win);
 
-int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info,
-                           int32_t comm, void** baseptr, int32_t* win);
+int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t comm,
+                           void** baseptr, int32_t* win);
 
 int ferrompi_win_shared_query(int32_t win, int32_t rank,
                                int64_t* size, int32_t* disp_unit, void** baseptr);

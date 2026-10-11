@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use ferrompi::{CustomDatatype, Error, Info, Mpi, ReduceOp, ThreadLevel, UserOp};
+use ferrompi::{CustomDatatype, Error, Mpi, ReduceOp, ThreadLevel, UserOp};
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -72,10 +72,6 @@ fn main() {
     assert!(
         matches!(dup.barrier(), Err(Error::Finalized)),
         "barrier on a pre-finalize communicator must return Err(Finalized)"
-    );
-    assert!(
-        matches!(Info::new(), Err(Error::Finalized)),
-        "Info::new after finalize must return Err(Finalized)"
     );
     assert!(
         matches!(CustomDatatype::contiguous::<f64>(2), Err(Error::Finalized)),

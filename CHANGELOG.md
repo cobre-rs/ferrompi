@@ -311,6 +311,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   library's `MPI_MODE_*` values, which differ between MPI implementations.
   Migration: delete the call; build an assertion with the named
   constructors and combine them with `|`.
+- **`Info` and `ResourceKind::Info`.** No ferrompi call took an `Info`, so it
+  could only create, fill and read an info object, and no MPI hint could be
+  set through it. Migration: delete its uses, and any match arm that names
+  `ResourceKind::Info`. Every ferrompi call with an MPI info argument (the
+  window constructors, `split_type`, `split_shared`,
+  `Mpi::create_from_group` and the persistent collectives) passes
+  `MPI_INFO_NULL`, as it always did.
 
 ### Fixed
 

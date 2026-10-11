@@ -2999,16 +2999,7 @@ impl<T: MpiDatatype> Win<T> {
             // never resized or borrowed while the window lives, and every path
             // that skips `MPI_Win_free` forgets it. The C shim validates the
             // comm handle before calling MPI.
-            unsafe {
-                ffi::ferrompi_win_create(
-                    base,
-                    size,
-                    disp_unit,
-                    -1, // MPI_INFO_NULL
-                    comm.handle,
-                    handle,
-                )
-            }
+            unsafe { ffi::ferrompi_win_create(base, size, disp_unit, comm.handle, handle) }
         });
         if let Err(err) = created {
             // A window the shim created but could not register is never
@@ -3094,14 +3085,7 @@ impl<T: MpiDatatype> Win<T> {
             // returned baseptr is either a valid MPI-allocated pointer or null
             // (only valid if local_count == 0).
             unsafe {
-                ffi::ferrompi_win_allocate(
-                    size,
-                    disp_unit,
-                    -1, // MPI_INFO_NULL
-                    comm.handle,
-                    &mut baseptr,
-                    handle,
-                )
+                ffi::ferrompi_win_allocate(size, disp_unit, comm.handle, &mut baseptr, handle)
             }
         })?;
 
@@ -3239,7 +3223,6 @@ impl<T: MpiDatatype> Win<T> {
                 ffi::ferrompi_win_allocate_shared(
                     size,
                     disp_unit,
-                    -1, // MPI_INFO_NULL
                     comm.handle,
                     &mut baseptr,
                     handle,

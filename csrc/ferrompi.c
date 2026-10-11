@@ -63,9 +63,6 @@ _Static_assert(MAX_REQUESTS % 64 == 0,
 #define FERROMPI_HAVE_MPI4_COLLECTIVES 1
 #endif
 
-// Maximum number of concurrent MPI_Info objects
-#define MAX_INFOS 64
-
 // Maximum number of concurrent MPI_Group objects
 #define MAX_GROUPS 64
 
@@ -136,16 +133,10 @@ static MPI_Datatype request_dtype[MAX_REQUESTS];
 // alloc_win uses a CAS loop; free_win uses atomic_store (release); readers use
 // atomic_load (acquire).  Mirrors the comm_used/alloc_comm pattern.  (Unlike
 // the request table, the small fixed tables — windows, comms, datatypes, ops,
-// groups, infos — keep the dense per-slot used-flag scan.)
+// groups — keep the dense per-slot used-flag scan.)
 static MPI_Win win_table[MAX_WINDOWS];
 static atomic_int win_used[MAX_WINDOWS];  // 1 if slot is in use
 static atomic_int next_win_hint;
-
-// Info table
-// info_used uses C11 atomics for the same reason as win_used above.
-static MPI_Info info_table[MAX_INFOS];
-static atomic_int info_used[MAX_INFOS];  // 1 if slot is in use
-static atomic_int next_info_hint;
 
 // Group table (slot 0 reserved for MPI_GROUP_EMPTY, lazily populated)
 // group_used uses C11 atomics for the same reason as win_used above.
@@ -225,11 +216,6 @@ static void init_tables(void) {
         atomic_init(&win_used[i], 0);
     }
     atomic_init(&next_win_hint, 0);
-    for (int i = 0; i < MAX_INFOS; i++) {
-        info_table[i] = MPI_INFO_NULL;
-        atomic_init(&info_used[i], 0);
-    }
-    atomic_init(&next_info_hint, 0);
     for (int i = 0; i < MAX_GROUPS; i++) {
         group_table[i] = MPI_GROUP_EMPTY;
         atomic_init(&group_used[i], 0);
@@ -542,42 +528,6 @@ static void free_win(int32_t handle) {
     }
 }
 
-// Allocate an info handle (thread-safe via C11 CAS, mirrors alloc_win).
-static int32_t alloc_info(MPI_Info info) {
-    int hint = atomic_load_explicit(&next_info_hint, memory_order_relaxed);
-    for (int i = 0; i < MAX_INFOS; i++) {
-        int idx = (hint + i) % MAX_INFOS;
-        int expected = 0;
-        if (atomic_compare_exchange_strong_explicit(
-                &info_used[idx], &expected, 1,
-                memory_order_acq_rel, memory_order_relaxed)) {
-            info_table[idx] = info;
-            atomic_store_explicit(&next_info_hint,
-                (idx + 1) % MAX_INFOS, memory_order_relaxed);
-            return (int32_t)idx;
-        }
-    }
-    return -1;  // No space
-}
-
-// Get MPI_Info from handle (thread-safe: acquire load pairs with release store
-// in free_info).
-static MPI_Info get_info(int32_t handle) {
-    if (handle < 0 || handle >= MAX_INFOS ||
-            !atomic_load_explicit(&info_used[handle], memory_order_acquire)) {
-        return MPI_INFO_NULL;
-    }
-    return info_table[handle];
-}
-
-// Free an info handle (thread-safe: release store to info_used).
-static void free_info(int32_t handle) {
-    if (handle >= 0 && handle < MAX_INFOS) {
-        info_table[handle] = MPI_INFO_NULL;
-        atomic_store_explicit(&info_used[handle], 0, memory_order_release);
-    }
-}
-
 // Allocate a group handle (thread-safe via C11 CAS, mirrors alloc_win).
 // Slot 0 is reserved for MPI_GROUP_EMPTY and must NOT be allocated via this
 // path; alloc_group starts scanning from hint > 0 by construction, but the
@@ -873,15 +823,6 @@ int ferrompi_finalize(void) {
             MPI_Group_free(&group_table[i]);
         }
         atomic_store_explicit(&group_used[i], 0, memory_order_release);
-    }
-
-    // Clean up any remaining info objects
-    for (int i = 0; i < MAX_INFOS; i++) {
-        if (atomic_load_explicit(&info_used[i], memory_order_acquire) &&
-                info_table[i] != MPI_INFO_NULL) {
-            MPI_Info_free(&info_table[i]);
-        }
-        atomic_store_explicit(&info_used[i], 0, memory_order_release);
     }
 
     // Clean up any remaining custom datatypes
@@ -3120,60 +3061,6 @@ int ferrompi_reduce_scatter_block_init(const void* sendbuf, void* recvbuf, int64
 #endif /* FERROMPI_HAVE_MPI4_COLLECTIVES */
 
 /* ============================================================
- * Info Object Operations
- * ============================================================ */
-
-int ferrompi_info_create(int32_t* info_handle) {
-    MPI_Info info;
-    int ret = MPI_Info_create(&info);
-    if (ret == MPI_SUCCESS) {
-        *info_handle = alloc_info(info);
-        if (*info_handle < 0) {
-            MPI_Info_free(&info);
-            return FERROMPI_ERR_INFOS_FULL;
-        }
-    }
-    return ret;
-}
-
-int ferrompi_info_free(int32_t info_handle) {
-    if (info_handle < 0 || info_handle >= MAX_INFOS ||
-            !atomic_load_explicit(&info_used[info_handle],
-                                  memory_order_acquire)) {
-        return MPI_SUCCESS;
-    }
-    int ret = MPI_Info_free(&info_table[info_handle]);
-    free_info(info_handle);
-    return ret;
-}
-
-int ferrompi_info_set(int32_t info_handle, const char* key, const char* value) {
-    MPI_Info info = get_info(info_handle);
-    if (info == MPI_INFO_NULL) return MPI_ERR_INFO;
-    return MPI_Info_set(info, key, value);
-}
-
-int ferrompi_info_get(int32_t info_handle, const char* key, char* value, int32_t* valuelen, int32_t* flag) {
-    MPI_Info info = get_info(info_handle);
-    if (info == MPI_INFO_NULL) return MPI_ERR_INFO;
-    int f;
-#if MPI_VERSION >= 4
-    int ret = MPI_Info_get_string(info, key, valuelen, value, &f);
-#else
-    /* MPI 3.x fallback: MPI_Info_get uses (info, key, valuelen, value, &flag) */
-    /* where valuelen is input max length, value is output buffer */
-    int vlen = *valuelen - 1;  /* MPI_Info_get expects max value length excluding null */
-    if (vlen < 0) vlen = 0;
-    int ret = MPI_Info_get(info, key, vlen, value, &f);
-    if (f) {
-        *valuelen = (int32_t)strlen(value);
-    }
-#endif
-    *flag = f;
-    return ret;
-}
-
-/* ============================================================
  * Group Operations
  * ============================================================ */
 
@@ -3992,15 +3879,13 @@ static int zero_own_segment(MPI_Win win, MPI_Comm comm, void* base, MPI_Aint siz
     return ret;
 }
 
-int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_handle,
-                                  int32_t comm_handle, void** baseptr, int32_t* win_handle,
-                                  int32_t* unified) {
+int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t comm_handle,
+                                  void** baseptr, int32_t* win_handle, int32_t* unified) {
     *unified = 0;
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
-    MPI_Info info = (info_handle < 0) ? MPI_INFO_NULL : get_info(info_handle);
     MPI_Win win;
-    int ret = MPI_Win_allocate_shared((MPI_Aint)size, disp_unit, info, comm, baseptr, &win);
+    int ret = MPI_Win_allocate_shared((MPI_Aint)size, disp_unit, MPI_INFO_NULL, comm, baseptr, &win);
     if (ret == MPI_SUCCESS) {
         install_errors_return_win(win);
         /* The attribute value is a pointer to an int (MPI-4.1 Table 12.1). A failed or
@@ -4023,13 +3908,12 @@ int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_h
     return ret;
 }
 
-int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t info_handle,
-                         int32_t comm_handle, int32_t* win_handle) {
+int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t comm_handle,
+                         int32_t* win_handle) {
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
-    MPI_Info info = (info_handle < 0) ? MPI_INFO_NULL : get_info(info_handle);
     MPI_Win win;
-    int ret = MPI_Win_create(base, (MPI_Aint)size, disp_unit, info, comm, &win);
+    int ret = MPI_Win_create(base, (MPI_Aint)size, disp_unit, MPI_INFO_NULL, comm, &win);
     if (ret == MPI_SUCCESS) {
         install_errors_return_win(win);
         *win_handle = alloc_win(win);
@@ -4041,13 +3925,12 @@ int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t inf
     return ret;
 }
 
-int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info_handle,
-                           int32_t comm_handle, void** baseptr, int32_t* win_handle) {
+int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t comm_handle,
+                           void** baseptr, int32_t* win_handle) {
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
-    MPI_Info info = (info_handle < 0) ? MPI_INFO_NULL : get_info(info_handle);
     MPI_Win win;
-    int ret = MPI_Win_allocate((MPI_Aint)size, disp_unit, info, comm, baseptr, &win);
+    int ret = MPI_Win_allocate((MPI_Aint)size, disp_unit, MPI_INFO_NULL, comm, baseptr, &win);
     if (ret == MPI_SUCCESS) {
         install_errors_return_win(win);
         ret = zero_own_segment(win, comm, *baseptr, (MPI_Aint)size);
@@ -4665,8 +4548,8 @@ int ferrompi_irecv_custom(
 /* ============================================================
  * User-Defined Reduction Op — Trampolines and Shims
  *
- * Strategy: per-op static slot table following the group_table /
- * info_table pattern from ADR-0002.  MAX_OPS distinct trampoline
+ * Strategy: per-op static slot table following the group_table pattern
+ * from ADR-0002.  MAX_OPS distinct trampoline
  * functions are generated by the FERROMPI_DEFINE_OP_TRAMPOLINE macro
  * so that MPI_Op_create receives a unique function pointer per slot,
  * sidestepping the lack of a user-data parameter in the MPI user-

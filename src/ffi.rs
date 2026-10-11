@@ -45,7 +45,6 @@ extern "C" {
     pub fn ferrompi_finalized(flag: *mut c_int) -> c_int;
     pub fn ferrompi_comm_free(comm: int32_t) -> c_int;
     pub fn ferrompi_group_free(group_handle: int32_t) -> c_int;
-    pub fn ferrompi_info_free(info_handle: int32_t) -> c_int;
     pub fn ferrompi_request_free(request: int64_t) -> c_int;
     pub fn ferrompi_get_library_version(buf: *mut c_char, len: *mut int32_t) -> c_int;
     pub fn ferrompi_get_version(version: *mut c_char, len: *mut int32_t) -> c_int;
@@ -83,7 +82,6 @@ extern "C" {
     pub fn ferrompi_win_allocate_shared(
         size: int64_t,
         disp_unit: int32_t,
-        info: int32_t,
         comm: int32_t,
         baseptr: *mut *mut c_void,
         win: *mut int32_t,
@@ -93,14 +91,12 @@ extern "C" {
         base: *mut c_void,
         size: int64_t,
         disp_unit: int32_t,
-        info: int32_t,
         comm: int32_t,
         win: *mut int32_t,
     ) -> c_int;
     pub fn ferrompi_win_allocate(
         size: int64_t,
         disp_unit: int32_t,
-        info: int32_t,
         comm: int32_t,
         baseptr: *mut *mut c_void,
         win: *mut int32_t,
@@ -954,25 +950,6 @@ guarded_extern! {
         op: int32_t,
         comm: int32_t,
         request: *mut int64_t,
-    ) -> c_int;
-
-    // ============================================================
-    // Info Object Operations
-    // ============================================================
-    pub fn ferrompi_info_create(info_handle: *mut int32_t) -> c_int;
-
-    pub fn ferrompi_info_set(
-        info_handle: int32_t,
-        key: *const c_char,
-        value: *const c_char,
-    ) -> c_int;
-
-    pub fn ferrompi_info_get(
-        info_handle: int32_t,
-        key: *const c_char,
-        value: *mut c_char,
-        valuelen: *mut int32_t,
-        flag: *mut int32_t,
     ) -> c_int;
 
     // ============================================================
