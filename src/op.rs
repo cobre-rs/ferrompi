@@ -612,7 +612,9 @@ impl<T: MpiDatatype> UserOp<T> {
     /// # Errors
     ///
     /// Returns `Err` if the op-slot table is full (16 concurrent `UserOp`s)
-    /// or if `MPI_Op_create` fails.
+    /// or if `MPI_Op_create` fails, and [`Error::InvalidState`] without calling
+    /// MPI if no [`Mpi::init`](crate::Mpi::init) or
+    /// [`Mpi::init_thread`](crate::Mpi::init_thread) call has returned yet.
     pub fn new<F>(f: F) -> Result<Self>
     where
         F: Fn(&[T], &mut [T]) + Send + Sync + 'static,
@@ -627,7 +629,10 @@ impl<T: MpiDatatype> UserOp<T> {
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the op-slot table is full or if `MPI_Op_create` fails.
+    /// Returns `Err` if the op-slot table is full or if `MPI_Op_create` fails,
+    /// and [`Error::InvalidState`] without calling MPI if no
+    /// [`Mpi::init`](crate::Mpi::init) or
+    /// [`Mpi::init_thread`](crate::Mpi::init_thread) call has returned yet.
     pub fn new_noncommutative<F>(f: F) -> Result<Self>
     where
         F: Fn(&[T], &mut [T]) + Send + Sync + 'static,
@@ -761,7 +766,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use crate::datatype::DatatypeTag;
-    use crate::error::Error;
+    use crate::error::{Error, FERROMPI_ERR_NOT_INITIALIZED};
     use crate::ffi;
     use crate::DoubleInt;
 
@@ -833,7 +838,10 @@ mod tests {
     /// `ferrompi_op_create_user` must reject a slot that was never allocated
     /// via `ferrompi_op_alloc_slot`, before it touches MPI.  Needs no MPI
     /// runtime: slot 0's `op_used` entry is zero-initialised static storage,
-    /// and this test never calls `ferrompi_op_alloc_slot`.
+    /// and this test never calls `ferrompi_op_alloc_slot`. The call goes to
+    /// the unguarded declaration, because the lifecycle guard refuses the
+    /// wrapper before `Mpi::init`; the second assertion fails if the call is
+    /// routed through the wrapper again.
     #[test]
     fn create_user_rejects_unallocated_slot() {
         let mut handle: i32 = -1;
@@ -841,8 +849,12 @@ mod tests {
         // op_used check must reject it before any MPI call; handle is a
         // valid i32 out-parameter that ferrompi_op_create_user only writes
         // on success.
-        let ret = unsafe { ffi::ferrompi_op_create_user(0, 1, &mut handle) };
+        let ret = unsafe { ffi::raw::ferrompi_op_create_user(0, 1, &mut handle) };
         assert_ne!(ret, 0, "must reject a slot that was never allocated");
+        assert_ne!(
+            ret, FERROMPI_ERR_NOT_INITIALIZED,
+            "the lifecycle guard refused it"
+        );
         assert_eq!(handle, -1, "handle must be untouched on rejection");
     }
 
@@ -863,6 +875,9 @@ mod tests {
     /// reduction shim refuses a count above `i32::MAX` for it, before any MPI
     /// call or request allocation. Needs no MPI runtime: the refusal returns
     /// ahead of every MPI function, and the lookups before it are table reads.
+    /// The calls go to the unguarded declarations, because the lifecycle guard
+    /// refuses every wrapper before `Mpi::init`; the second assertion fails if
+    /// a call is routed through a wrapper again.
     #[test]
     fn user_op_code_refuses_large_counts_in_every_reduction_shim() {
         let count = i64::from(i32::MAX) + 1;
@@ -876,68 +891,72 @@ mod tests {
         let rets = [
             // SAFETY: the guard returns before any buffer access.
             ("reduce", unsafe {
-                ffi::ferrompi_reduce(sb, rb, count, dt, op, 0, 0)
+                ffi::raw::ferrompi_reduce(sb, rb, count, dt, op, 0, 0)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("allreduce", unsafe {
-                ffi::ferrompi_allreduce(sb, rb, count, dt, op, 0)
+                ffi::raw::ferrompi_allreduce(sb, rb, count, dt, op, 0)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("scan", unsafe {
-                ffi::ferrompi_scan(sb, rb, count, dt, op, 0)
+                ffi::raw::ferrompi_scan(sb, rb, count, dt, op, 0)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("exscan", unsafe {
-                ffi::ferrompi_exscan(sb, rb, count, dt, op, 0)
+                ffi::raw::ferrompi_exscan(sb, rb, count, dt, op, 0)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("reduce_scatter_block", unsafe {
-                ffi::ferrompi_reduce_scatter_block(sb, rb, count, dt, op, 0)
+                ffi::raw::ferrompi_reduce_scatter_block(sb, rb, count, dt, op, 0)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("iallreduce", unsafe {
-                ffi::ferrompi_iallreduce(sb, rb, count, dt, op, 0, r0)
+                ffi::raw::ferrompi_iallreduce(sb, rb, count, dt, op, 0, r0)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("ireduce", unsafe {
-                ffi::ferrompi_ireduce(sb, rb, count, dt, op, 0, 0, r1)
+                ffi::raw::ferrompi_ireduce(sb, rb, count, dt, op, 0, 0, r1)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("iscan", unsafe {
-                ffi::ferrompi_iscan(sb, rb, count, dt, op, 0, r2)
+                ffi::raw::ferrompi_iscan(sb, rb, count, dt, op, 0, r2)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("iexscan", unsafe {
-                ffi::ferrompi_iexscan(sb, rb, count, dt, op, 0, r3)
+                ffi::raw::ferrompi_iexscan(sb, rb, count, dt, op, 0, r3)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("ireduce_scatter_block", unsafe {
-                ffi::ferrompi_ireduce_scatter_block(sb, rb, count, dt, op, 0, r4)
+                ffi::raw::ferrompi_ireduce_scatter_block(sb, rb, count, dt, op, 0, r4)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("allreduce_init", unsafe {
-                ffi::ferrompi_allreduce_init(sb, rb, count, dt, op, 0, r5)
+                ffi::raw::ferrompi_allreduce_init(sb, rb, count, dt, op, 0, r5)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("reduce_init", unsafe {
-                ffi::ferrompi_reduce_init(sb, rb, count, dt, op, 0, 0, r6)
+                ffi::raw::ferrompi_reduce_init(sb, rb, count, dt, op, 0, 0, r6)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("scan_init", unsafe {
-                ffi::ferrompi_scan_init(sb, rb, count, dt, op, 0, r7)
+                ffi::raw::ferrompi_scan_init(sb, rb, count, dt, op, 0, r7)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("exscan_init", unsafe {
-                ffi::ferrompi_exscan_init(sb, rb, count, dt, op, 0, r8)
+                ffi::raw::ferrompi_exscan_init(sb, rb, count, dt, op, 0, r8)
             }),
             // SAFETY: the guard returns before any buffer access.
             ("reduce_scatter_block_init", unsafe {
-                ffi::ferrompi_reduce_scatter_block_init(sb, rb, count, dt, op, 0, r9)
+                ffi::raw::ferrompi_reduce_scatter_block_init(sb, rb, count, dt, op, 0, r9)
             }),
         ];
 
         for (shim, ret) in rets {
             assert_ne!(ret, 0, "{shim} must refuse a user op above i32::MAX");
+            assert_ne!(
+                ret, FERROMPI_ERR_NOT_INITIALIZED,
+                "the lifecycle guard refused {shim}"
+            );
         }
         assert_eq!(reqs, [-1; 10], "a refusal must leave every request unset");
     }

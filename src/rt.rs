@@ -2,9 +2,10 @@
 //! `Uninit -> Initializing -> Active(level) -> Finalizing -> Finalized`.
 //!
 //! [`enter`] is called by every guarded extern wrapper in [`crate::ffi`] and
-//! rejects the call once state is `Finalizing` or `Finalized`, or once state
-//! is `Active(Single)`/`Active(Funneled)` and the caller is not the thread
-//! that called `activate`, without touching MPI. It returns an [`InFlight`]
+//! rejects the call, without touching MPI: in `Uninit`; in `Initializing` on
+//! every thread but the one that called [`begin_init`]; once state is
+//! `Active(Single)`/`Active(Funneled)` and the caller is not that thread; and
+//! once state is `Finalizing` or `Finalized`. It returns an [`InFlight`]
 //! token that the wrapper holds for the whole call. At `Active(Serialized)`
 //! and `Active(Multiple)` the token counts the call in a per-thread shard of
 //! `IN_FLIGHT`; at `Single`/`Funneled` it is empty, and the check stays one
@@ -12,9 +13,11 @@
 //! check for a `Drop` impl, which cannot return `Err`: it skips the MPI call
 //! silently once finalizing, and aborts the process on a wrong-thread drop
 //! below `Serialized`. `Initializing` is a transient state held only between
-//! [`begin_init`] and [`activate`]/[`abandon_init`]; both `enter` and
-//! `drop_guard` pass it through like `Uninit`: no `Mpi` handle exists yet,
-//! and `Mpi::init_thread` reads the world's rank and size in this state.
+//! [`begin_init`] and [`activate`]/[`abandon_init`]: `Mpi::init_thread` reads
+//! the world's rank and size in it, so `enter` admits the initializing thread
+//! there. `drop_guard` passes `Uninit` and `Initializing` through: a handle
+//! reaches a caller only after [`activate`], so none exists yet for a `Drop`
+//! impl to free.
 //!
 //! Finalizing is two steps. [`begin_finalize`] stores `Finalizing`, which
 //! refuses new calls, waits for the nonblocking scopes open on other threads
@@ -57,7 +60,9 @@ use std::os::raw::c_int;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-use crate::error::{Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL};
+use crate::error::{
+    Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_NOT_INITIALIZED, FERROMPI_ERR_THREAD_LEVEL,
+};
 use crate::ThreadLevel;
 
 const UNINIT: u8 = 0;
@@ -77,8 +82,9 @@ static STATE: AtomicU8 = AtomicU8::new(UNINIT);
 static LEVEL: AtomicU8 = AtomicU8::new(ThreadLevel::Single as u8);
 
 thread_local! {
-    /// Set by `activate` on the thread that calls it. `Mpi` is `!Send`, so
-    /// `STATE` and this flag are always written by the same single thread.
+    /// Set by `begin_init` on the thread that wins it and cleared by
+    /// `abandon_init`, so at most one thread has it set. `Mpi` is `!Send`, so
+    /// that thread also makes every later write of `STATE`.
     static ON_INIT_THREAD: Cell<bool> = const { Cell::new(false) };
 
     /// This thread's index into `IN_FLIGHT`, `LIVE_SCOPES` and `LIVE_HANDLES`;
@@ -230,11 +236,11 @@ fn assign_shard(shards: &'static [Shard; SHARDS]) -> &'static Shard {
     &shards[index]
 }
 
-/// Move `Uninit` to `Initializing`, serialising concurrent
-/// `Mpi::init`/`init_thread` calls. Returns `Err(Error::Finalized)` once
-/// state is `Finalizing` or `Finalized`, and `Err(Error::AlreadyInitialized)`
-/// for any other state (an `Mpi` is alive, or another thread is already
-/// initialising).
+/// Move `Uninit` to `Initializing` and mark the calling thread as the init
+/// thread, serialising concurrent `Mpi::init`/`init_thread` calls. Returns
+/// `Err(Error::Finalized)` once state is `Finalizing` or `Finalized`, and
+/// `Err(Error::AlreadyInitialized)` for any other state (an `Mpi` is alive, or
+/// another thread is already initialising).
 /// Called once, at the top of `Mpi::init_thread`; every path out of that
 /// function afterward reaches either [`activate`] or [`abandon_init`].
 pub(crate) fn begin_init() -> Result<()> {
@@ -245,26 +251,31 @@ pub(crate) fn begin_init() -> Result<()> {
     // order, which the compare-exchange itself guarantees regardless of
     // ordering annotation.
     match STATE.compare_exchange(UNINIT, INITIALIZING, Ordering::Relaxed, Ordering::Relaxed) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            ON_INIT_THREAD.with(|c| c.set(true));
+            Ok(())
+        }
         Err(FINALIZING | FINALIZED) => Err(Error::Finalized),
         Err(_) => Err(Error::AlreadyInitialized),
     }
 }
 
-/// Move `Initializing` back to `Uninit`. Called when `Mpi::init_thread` does
-/// not complete after [`begin_init`] succeeded: MPI turned out already
-/// finalized, or `MPI_Init_thread` itself failed. Only the thread that won
-/// `begin_init`'s compare-exchange calls this, so a plain store is safe.
+/// Move `Initializing` back to `Uninit` and take the init-thread mark off the
+/// calling thread. Called when `Mpi::init_thread` does not complete after
+/// [`begin_init`] succeeded: MPI turned out already finalized, or
+/// `MPI_Init_thread` itself failed. Only the thread that won `begin_init`'s
+/// compare-exchange calls this, so a plain store is safe.
 pub(crate) fn abandon_init() {
     // Relaxed: only the calling thread can observe `Initializing` (it is the
     // sole holder, per this function's contract), so there is no concurrent
     // writer to synchronize with.
     STATE.store(UNINIT, Ordering::Relaxed);
+    ON_INIT_THREAD.with(|c| c.set(false));
 }
 
-/// Move `Initializing` to `Active(level)` and record the calling thread as
-/// the init thread. Called once, from `Mpi::init_thread` after
-/// `MPI_Init_thread` succeeds.
+/// Move `Initializing` to `Active(level)`. Called once, from
+/// `Mpi::init_thread` after `MPI_Init_thread` succeeds, on the thread
+/// [`begin_init`] marked.
 pub(crate) fn activate(level: ThreadLevel) {
     // Relaxed: `Mpi` is `!Send`/`!Sync`, so every later `enter()` load that
     // must observe this store — whether on this thread or one that receives
@@ -274,7 +285,6 @@ pub(crate) fn activate(level: ThreadLevel) {
     // its own to be visible through that chain.
     LEVEL.store(level as u8, Ordering::Relaxed);
     STATE.store(1 + level as u8, Ordering::Relaxed);
-    ON_INIT_THREAD.with(|c| c.set(true));
 }
 
 /// Opens a nonblocking scope: returns its [`ScopeToken`], or
@@ -549,8 +559,10 @@ pub(crate) fn is_finalized() -> bool {
 /// Called at the top of every guarded extern wrapper. Returns
 /// `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or `Finalized`;
 /// `Err(FERROMPI_ERR_THREAD_LEVEL)` once state is `Active(Single)` or
-/// `Active(Funneled)` and the caller is not the init thread; otherwise the
-/// [`InFlight`] token the caller holds until its MPI call returns.
+/// `Active(Funneled)` and the caller is not the init thread;
+/// `Err(FERROMPI_ERR_NOT_INITIALIZED)` in `Uninit`, and in `Initializing` on
+/// every thread but the init thread; otherwise the [`InFlight`] token the
+/// caller holds until its MPI call returns.
 #[inline(always)]
 pub(crate) fn enter() -> std::result::Result<InFlight, c_int> {
     // Relaxed: see `activate`'s comment — visibility of an `Active`,
@@ -578,7 +590,25 @@ fn enter_other(state: u8) -> std::result::Result<InFlight, c_int> {
     if state == FINALIZING || state == FINALIZED {
         return Err(FERROMPI_ERR_FINALIZED);
     }
-    Ok(InFlight(None))
+    enter_before_active()
+}
+
+/// [`enter`] for `Uninit` and `Initializing`: admits the init thread, which
+/// reads the world's rank and size while `Initializing` (`Mpi::init_thread`),
+/// and refuses every other call. Cold and out of line: a process leaves these
+/// two states once, and [`enter_other`] is the path of every call at
+/// `Serialized`/`Multiple`.
+#[cold]
+#[inline(never)]
+fn enter_before_active() -> std::result::Result<InFlight, c_int> {
+    // `begin_init` sets the mark and `abandon_init` clears it, so in these two
+    // states it is set only on the thread that holds `Initializing`. A thread
+    // without it that read one of them late, after `activate`'s store, holds
+    // no handle that would order the two: it is refused, never admitted.
+    if ON_INIT_THREAD.with(Cell::get) {
+        return Ok(InFlight(None));
+    }
+    Err(FERROMPI_ERR_NOT_INITIALIZED)
 }
 
 /// [`enter`] for the calls that complete, test or cancel a request that is
@@ -627,8 +657,10 @@ fn enter_other_completion(state: u8) -> std::result::Result<InFlight, c_int> {
     Err(FERROMPI_ERR_THREAD_LEVEL)
 }
 
-/// The state check of [`enter`] without a token: counts nothing, and refuses
-/// the same states. [`check_completion`], for the two `wait` pre-checks, builds
+/// The state check of [`enter`] without a token, for a call on a request:
+/// counts nothing, and refuses the states `enter` refuses from `Active` on. A
+/// request exists only from `Active` on, so `Uninit` and `Initializing` are not
+/// tested here. [`check_completion`], for the two `wait` pre-checks, builds
 /// on it; their guarded `ffi` call takes the token.
 #[inline(always)]
 fn check() -> c_int {
@@ -798,13 +830,15 @@ fn drop_abort(type_name: &'static str) -> ! {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::os::raw::c_int;
     use std::ptr;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{
-        check, check_completion, drain_shards, enter, enter_completion, live_handle_tokens,
-        open_handle_tokens, open_scope, scopes_on_this_thread, shard, HandleToken, HandleTokens,
-        InFlight, Shard, COUNTED_HERE, IN_FLIGHT, LIVE_HANDLES, LIVE_SCOPES, SHARDS,
+        abandon_init, begin_init, check, check_completion, drain_shards, enter, enter_completion,
+        live_handle_tokens, open_handle_tokens, open_scope, scopes_on_this_thread, shard,
+        HandleToken, HandleTokens, InFlight, Shard, COUNTED_HERE, FERROMPI_ERR_NOT_INITIALIZED,
+        IN_FLIGHT, LIVE_HANDLES, LIVE_SCOPES, ON_INIT_THREAD, SHARDS,
     };
     #[cfg(debug_assertions)]
     use super::{release_in_call_flag, take_in_call_flag};
@@ -879,21 +913,48 @@ mod tests {
         assert_eq!(IN_FLIGHT.len(), SHARDS);
     }
 
+    /// What `entry` returns: `Ok(counted)` for a token, `Err(code)` for a refusal.
+    fn outcome(entry: std::result::Result<InFlight, c_int>) -> std::result::Result<bool, c_int> {
+        entry.map(|token| token.0.is_some())
+    }
+
     #[test]
     fn enter_before_init_takes_no_count() {
-        let token = enter().expect("an uninitialized process passes through");
-        assert!(token.0.is_none());
+        assert_eq!(outcome(enter()), Err(FERROMPI_ERR_NOT_INITIALIZED));
         assert!(IN_FLIGHT.iter().all(|s| s.0.load(Ordering::SeqCst) == 0));
     }
 
     #[test]
     fn completion_entry_matches_enter_outside_finalizing() {
-        let plain = enter().expect("an uninitialized process passes through");
-        let completion = enter_completion().expect("an uninitialized process passes through");
-        assert!(plain.0.is_none());
-        assert!(completion.0.is_none());
+        assert_eq!(outcome(enter()), Err(FERROMPI_ERR_NOT_INITIALIZED));
+        assert_eq!(outcome(enter_completion()), outcome(enter()));
         assert_eq!(check_completion(), check());
         assert_eq!(check_completion(), 0);
+    }
+
+    /// The one test of a default run that moves the state: no test that runs
+    /// beside it tells `Uninit` from `Initializing` on a thread that is not
+    /// initializing. The ignored test that initializes MPI runs alone.
+    #[test]
+    fn only_the_initializing_thread_is_admitted_while_initializing() {
+        fn elsewhere() -> std::result::Result<bool, c_int> {
+            std::thread::scope(|s| {
+                s.spawn(|| outcome(enter()))
+                    .join()
+                    .expect("second thread panicked")
+            })
+        }
+
+        begin_init().expect("no other test initializes MPI");
+        assert!(ON_INIT_THREAD.with(Cell::get));
+        assert_eq!(outcome(enter()), Ok(false));
+        assert_eq!(outcome(enter_completion()), Ok(false));
+        assert_eq!(elsewhere(), Err(FERROMPI_ERR_NOT_INITIALIZED));
+
+        abandon_init();
+        assert!(!ON_INIT_THREAD.with(Cell::get));
+        assert_eq!(outcome(enter()), Err(FERROMPI_ERR_NOT_INITIALIZED));
+        assert_eq!(elsewhere(), Err(FERROMPI_ERR_NOT_INITIALIZED));
     }
 
     #[test]

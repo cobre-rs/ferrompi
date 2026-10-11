@@ -349,6 +349,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`UserOp::new`, `UserOp::new_noncommutative`, `CustomDatatype::contiguous`,
+  `CustomDatatype::vector` and `CustomDatatype::create_struct` return
+  `Error::InvalidState` before `Mpi::init`.** They take no handle, so they
+  could be called before `Mpi::init` or `Mpi::init_thread` had returned, and
+  they reached MPI, which does not allow them before `MPI_Init_thread`:
+  MPICH 4.2 and Open MPI 4.1 and 5.0 abort the process. They now return `Err`
+  with the reason `MPI is not initialized` without calling MPI; so does a call
+  another thread makes while `Mpi::init` is still running.
 - **A full user-op table returns `Error::ResourceExhausted` with resource
   `Operation` instead of `Error::Mpi` with class `Other`; an
   `MPI_Init_thread` failure reports class `Unknown` instead of its return

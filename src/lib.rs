@@ -129,6 +129,10 @@
 //!
 //! ## Lifecycle
 //!
+//! [`Mpi::init`] or [`Mpi::init_thread`] comes first: until one has returned,
+//! any other call that would reach MPI returns [`Error::InvalidState`]
+//! instead, except the queries MPI allows at any time ([`Mpi::version`],
+//! [`Mpi::library_version`], [`Mpi::is_initialized`], [`Mpi::is_finalized`]).
 //! Dropping the [`Mpi`] handle finalizes MPI. See [`Mpi`] for what happens to
 //! other handles afterwards, and [`Error`] for which failures return `Err`
 //! and which abort the process.
@@ -256,6 +260,12 @@ pub enum ThreadLevel {
 /// [`Mpi::init`]/[`Mpi::init_thread`] return
 /// `Err(`[`Error::AlreadyInitialized`]`)`; once it is dropped, they return
 /// `Err(`[`Error::Finalized`]`)`. MPI cannot be re-initialized.
+///
+/// Until one of the two has returned, the constructors that take no handle
+/// ([`UserOp::new`], [`UserOp::new_noncommutative`],
+/// [`CustomDatatype::contiguous`], [`CustomDatatype::vector`] and
+/// [`CustomDatatype::create_struct`]) return
+/// `Err(`[`Error::InvalidState`]`)` without calling MPI, on every thread.
 ///
 /// Dropping this handle finalizes MPI. Afterward, every method that calls
 /// MPI through a communicator, group, request, window, datatype or
@@ -427,8 +437,8 @@ impl Mpi {
             _ => ThreadLevel::Multiple,
         };
 
-        // Read before `rt::activate`: until then no lifecycle state refuses a
-        // call, so only MPI itself can fail these two.
+        // Read before `rt::activate`: until then the guard admits this thread
+        // and no other, so only MPI itself can fail these two.
         let world = Communicator::from_handle(comm::WORLD_HANDLE);
 
         rt::activate(thread_level);

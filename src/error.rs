@@ -29,9 +29,13 @@ const FERROMPI_ERR_NOT_SUPPORTED: i32 = -7008;
 
 // Rust-only lifecycle-guard sentinels. Produced only by the Rust lifecycle
 // guard (never returned by the C layer), and outside the -7001..-7099 range
-// the C sentinels above use.
+// the C sentinels above use. A handle reaches a caller only after
+// `rt::activate`, and the state never goes back from `Active`, so a call on
+// one never returns the third: the call sites that tell a refused call from
+// one MPI ran test for the first two only.
 pub(crate) const FERROMPI_ERR_FINALIZED: i32 = -7101;
 pub(crate) const FERROMPI_ERR_THREAD_LEVEL: i32 = -7102;
+pub(crate) const FERROMPI_ERR_NOT_INITIALIZED: i32 = -7103;
 
 /// Identifies which internal ferrompi handle table was exhausted in an
 /// [`Error::ResourceExhausted`].
@@ -323,11 +327,16 @@ pub enum Error {
         actual: usize,
     },
 
-    /// The object is not in a state that allows the call.
+    /// The object, or MPI itself, is not in a state that allows the call.
+    ///
+    /// Also returned, with the reason `MPI is not initialized`, by a
+    /// constructor that takes no handle and would call MPI, when it is invoked
+    /// before `Mpi::init`/`Mpi::init_thread` has returned; the
+    /// [`Mpi`](crate::Mpi) lifecycle section lists them. No MPI call is made.
     #[error("invalid state: {reason}")]
     #[non_exhaustive]
     InvalidState {
-        /// Why the object's current state rejects the call.
+        /// Why the current state rejects the call.
         reason: &'static str,
     },
 
@@ -389,10 +398,10 @@ impl Error {
     /// Create a structured error from an MPI error code.
     ///
     /// Calls `ferrompi_error_info` to obtain the error class and human-readable
-    /// message from the MPI runtime. That lookup is refused once `MPI_Finalize`
-    /// is running or has returned, and on a thread the thread level does not
-    /// allow to call MPI; the error then has class [`MpiErrorClass::Raw`] and the
-    /// message `MPI error code {code}`.
+    /// message from the MPI runtime. That lookup is refused before MPI is
+    /// initialized, once `MPI_Finalize` is running or has returned, and on a
+    /// thread the thread level does not allow to call MPI; the error then has
+    /// class [`MpiErrorClass::Raw`] and the message `MPI error code {code}`.
     ///
     /// # Returns
     ///
@@ -424,6 +433,11 @@ impl Error {
         }
         if code == FERROMPI_ERR_THREAD_LEVEL {
             return Error::ThreadLevelViolation;
+        }
+        if code == FERROMPI_ERR_NOT_INITIALIZED {
+            return Error::InvalidState {
+                reason: "MPI is not initialized",
+            };
         }
         if code == FERROMPI_ERR_NOT_SUPPORTED {
             return Error::NotSupported("MPI 4.0 operation".into());
@@ -542,8 +556,8 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        Error, MpiErrorClass, ResourceKind, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_NOT_SUPPORTED,
-        FERROMPI_ERR_THREAD_LEVEL,
+        Error, MpiErrorClass, ResourceKind, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_NOT_INITIALIZED,
+        FERROMPI_ERR_NOT_SUPPORTED, FERROMPI_ERR_THREAD_LEVEL,
     };
 
     #[test]
@@ -682,6 +696,12 @@ mod tests {
         match Error::from_code_with_op(FERROMPI_ERR_THREAD_LEVEL, "barrier") {
             Error::ThreadLevelViolation => {}
             other => panic!("expected Error::ThreadLevelViolation, got {other:?}"),
+        }
+        match Error::from_code_with_op(FERROMPI_ERR_NOT_INITIALIZED, "op_create") {
+            Error::InvalidState {
+                reason: "MPI is not initialized",
+            } => {}
+            other => panic!("expected Error::InvalidState, got {other:?}"),
         }
     }
 

@@ -2934,7 +2934,8 @@ fn closing_result<R>(ret: c_int, close_op: &'static str, result: Result<R>) -> R
 }
 
 /// Whether a `ferrompi_win_post` that returned `ret` ran MPI: every return but
-/// the lifecycle guard's two refusals, which come before MPI sees the call.
+/// the two refusals the lifecycle guard gives a call on a window, which come
+/// before MPI sees the call.
 fn post_ran_mpi(ret: c_int) -> bool {
     ret != FERROMPI_ERR_FINALIZED && ret != FERROMPI_ERR_THREAD_LEVEL
 }
@@ -4851,9 +4852,9 @@ pub(crate) mod tests {
 
     /// A `post` counts as opened whenever MPI ran it, whatever it returned
     /// (MPI-4.1 §9.4); only the guard's refusals leave the epoch closed. The
-    /// decision is a pure function of the return code: a sentinel window makes
-    /// the C shim return an error without calling MPI, but `post` then converts
-    /// it with MPI calls that Open MPI aborts on before initialization.
+    /// decision is a pure function of the return code, and is tested as one:
+    /// in a process that never initializes MPI the guard refuses a `post` on a
+    /// sentinel window before the C shim, so the shim returns no code to test.
     #[test]
     fn post_counts_as_open_whenever_mpi_ran() {
         assert!(post_ran_mpi(0));

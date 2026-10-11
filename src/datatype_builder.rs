@@ -154,6 +154,10 @@ impl CustomDatatype {
     ///   or [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg) — `count` is non-positive.
     /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
     ///   — the internal datatype table is full (max 64 concurrent custom datatypes).
+    /// - [`Error::InvalidState`] — MPI is not initialized: no
+    ///   [`Mpi::init`](crate::Mpi::init) or
+    ///   [`Mpi::init_thread`](crate::Mpi::init_thread) call has returned yet.
+    ///   No MPI call is made.
     ///
     /// # Example
     ///
@@ -197,6 +201,10 @@ impl CustomDatatype {
     ///   zero or negative.
     /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
     ///   — the internal datatype table is full (max 64 concurrent custom datatypes).
+    /// - [`Error::InvalidState`] — MPI is not initialized: no
+    ///   [`Mpi::init`](crate::Mpi::init) or
+    ///   [`Mpi::init_thread`](crate::Mpi::init_thread) call has returned yet.
+    ///   No MPI call is made.
     ///
     /// # Example
     ///
@@ -244,6 +252,10 @@ impl CustomDatatype {
     ///   — `fields` is empty.
     /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
     ///   — the internal datatype table is full (max 64 concurrent custom datatypes).
+    /// - [`Error::InvalidState`] — MPI is not initialized: no
+    ///   [`Mpi::init`](crate::Mpi::init) or
+    ///   [`Mpi::init_thread`](crate::Mpi::init_thread) call has returned yet.
+    ///   No MPI call is made.
     ///
     /// # Example
     ///
