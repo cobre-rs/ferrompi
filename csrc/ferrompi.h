@@ -250,11 +250,11 @@ int ferrompi_bcast(void* buf, int64_t count, int32_t datatype_tag, int32_t root,
 
 /**
  * In-place collectives (generic): reduce, allreduce, gather, allgather,
- * alltoall, igather, iallgather, ialltoall, allreduce_init, gather_init,
- * allgather_init and alltoall_init substitute MPI_IN_PLACE for sendbuf when
- * sendbuf == NULL; scatter, iscatter and scatter_init substitute MPI_IN_PLACE
- * for recvbuf when recvbuf == NULL. ireduce, iallreduce and reduce_init pass
- * sendbuf through unchanged.
+ * alltoall, ireduce, iallreduce, igather, iallgather, ialltoall,
+ * allreduce_init, gather_init, allgather_init and alltoall_init substitute
+ * MPI_IN_PLACE for sendbuf when sendbuf == NULL; scatter, iscatter and
+ * scatter_init substitute MPI_IN_PLACE for recvbuf when recvbuf == NULL.
+ * reduce_init passes sendbuf through unchanged.
  * Rust slices never produce a NULL pointer, so NULL is an unambiguous in-place
  * marker here.
  */
@@ -317,8 +317,10 @@ int ferrompi_alltoallv(
 
 int ferrompi_ibcast(void* buf, int64_t count, int32_t datatype_tag, int32_t root, int32_t comm, int64_t* request);
 
+/** Nonblocking all-reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
 int ferrompi_iallreduce(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t comm, int64_t* request);
 
+/** Nonblocking reduce (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_ireduce(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t root, int32_t comm, int64_t* request);
 
 /** Nonblocking gather (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */

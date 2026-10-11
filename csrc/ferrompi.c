@@ -1734,18 +1734,19 @@ int ferrompi_iallreduce(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
+    const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     MPI_Request req;
     int ret;
     
     if (count > INT_MAX) {
         if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
-        ret = MPI_Iallreduce_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
+        ret = MPI_Iallreduce_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Iallreduce(sendbuf, recvbuf, (int)count, dt, mpi_op, comm, &req);
+        ret = MPI_Iallreduce(sb, recvbuf, (int)count, dt, mpi_op, comm, &req);
     }
     
     if (ret == MPI_SUCCESS) {
@@ -1773,18 +1774,19 @@ int ferrompi_ireduce(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
+    const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     MPI_Request req;
     int ret;
 
     if (count > INT_MAX) {
         if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
-        ret = MPI_Ireduce_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm, &req);
+        ret = MPI_Ireduce_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Ireduce(sendbuf, recvbuf, (int)count, dt, mpi_op, root, comm, &req);
+        ret = MPI_Ireduce(sb, recvbuf, (int)count, dt, mpi_op, root, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {

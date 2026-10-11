@@ -986,6 +986,163 @@ impl Communicator {
         Error::check_with_op(ret, "ialltoall_inplace")?;
         Ok(s.request(request_handle, RequestKind::Collective))
     }
+
+    /// Nonblocking in-place all-reduce. `data` is both the input and the
+    /// result on every rank.
+    ///
+    /// The returned [`Request`] belongs to the scope `s`. `data` is borrowed
+    /// mutably for the scope, and a user `op` is borrowed for it: `data` cannot
+    /// be read or changed until [`scope`](crate::scope) returns, even after the
+    /// request was waited, and the scope completes the reduction at the latest
+    /// then.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The scope that owns the request
+    /// * `data` - This process's values on entry and the reduced values once the
+    ///   request completed, borrowed for the scope
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (borrowed
+    ///   until the scope returns), or a [`CollectiveOp`]
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `data.len()` exceeds `i32::MAX`, on every MPI version
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrompi::{Mpi, ReduceOp};
+    /// # let mpi = Mpi::init().unwrap();
+    /// # let world = mpi.world();
+    /// let mut data = vec![world.rank() as f64; 10];
+    /// ferrompi::scope(|s| {
+    ///     let req = world.iallreduce_inplace(s, &mut data, ReduceOp::Sum)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // data holds the sums here.
+    /// ```
+    #[inline]
+    pub fn iallreduce_inplace<'s, T: MpiDatatype>(
+        &self,
+        s: &'s Scope<'s, '_>,
+        data: &'s mut [T],
+        op: impl Into<CollectiveOp<'s, T>>,
+    ) -> Result<Request<'s>> {
+        let op = op.into().code(tag_of::<T>())?;
+        let mut request_handle: i64 = 0;
+        let (p, n, dt) = buf_mut(data);
+        // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
+        // this NULL is unambiguous); ferrompi_iallreduce maps it to MPI_IN_PLACE, so data is
+        // both input and output. data is borrowed mutably for 's, and a user op is borrowed
+        // for 's through `op`. The scope completes every request it holds before 's ends, so
+        // the buffer and the op outlive the span in which MPI may use them, and nothing
+        // touches the buffer meanwhile.
+        let ret = unsafe {
+            ffi::ferrompi_iallreduce(
+                std::ptr::null(),
+                p,
+                n,
+                dt,
+                op,
+                self.handle,
+                &mut request_handle,
+            )
+        };
+        Error::check_with_op(ret, "iallreduce_inplace")?;
+        Ok(s.request(request_handle, RequestKind::Collective))
+    }
+
+    /// Nonblocking in-place reduce to the root process.
+    ///
+    /// At root, `data` is both the input and the result. At every other rank
+    /// `data` is the send buffer only, as for
+    /// [`reduce_inplace`](Self::reduce_inplace).
+    ///
+    /// The returned [`Request`] belongs to the scope `s`. `data` is borrowed
+    /// mutably for the scope on every rank, and a user `op` is borrowed for it:
+    /// `data` cannot be read or changed until [`scope`](crate::scope) returns,
+    /// even after the request was waited, and the scope completes the reduction
+    /// at the latest then.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The scope that owns the request
+    /// * `data` - This process's values on entry; at the root, the reduced
+    ///   values once the request completed. Borrowed for the scope
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (borrowed
+    ///   until the scope returns), or a [`CollectiveOp`]
+    /// * `root` - Rank of the root process
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `data.len()` exceeds `i32::MAX`, on every MPI version
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrompi::{Mpi, ReduceOp};
+    /// # let mpi = Mpi::init().unwrap();
+    /// # let world = mpi.world();
+    /// let mut data = vec![world.rank() as f64; 10];
+    /// ferrompi::scope(|s| {
+    ///     let req = world.ireduce_inplace(s, &mut data, ReduceOp::Sum, 0)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// if world.rank() == 0 {
+    ///     println!("Reduced result: {:?}", &data[..3]);
+    /// }
+    /// ```
+    #[inline]
+    pub fn ireduce_inplace<'s, T: MpiDatatype>(
+        &self,
+        s: &'s Scope<'s, '_>,
+        data: &'s mut [T],
+        op: impl Into<CollectiveOp<'s, T>>,
+        root: i32,
+    ) -> Result<Request<'s>> {
+        let op = op.into().code(tag_of::<T>())?;
+        let mut request_handle: i64 = 0;
+        let (p, n, dt) = buf_mut(data);
+        let sendbuf = if self.rank == root {
+            std::ptr::null()
+        } else {
+            p.cast_const()
+        };
+        // SAFETY: at root, NULL sendbuf is the in-place marker (buf_mut's pointer is never
+        // null, so this NULL is unambiguous); ferrompi_ireduce maps it to MPI_IN_PLACE, so data
+        // is both input and output there. At every other rank data is the send buffer, and it
+        // is passed as recvbuf too, as reduce_inplace does: recvbuf is significant only at the
+        // root (MPI-4.1 section 6.9.1), so a non-root rank's data is only read. data is borrowed
+        // mutably for 's, and a user op is borrowed for 's through `op`. The scope completes every
+        // request it holds before 's ends, so the buffer and the op outlive the span in which
+        // MPI may use them, and nothing touches the buffer meanwhile.
+        let ret = unsafe {
+            ffi::ferrompi_ireduce(
+                sendbuf,
+                p,
+                n,
+                dt,
+                op,
+                root,
+                self.handle,
+                &mut request_handle,
+            )
+        };
+        Error::check_with_op(ret, "ireduce_inplace")?;
+        Ok(s.request(request_handle, RequestKind::Collective))
+    }
 }
 
 #[cfg(test)]
@@ -1069,6 +1226,7 @@ mod tests {
         let comm = test_comm(0, 1);
         let send = vec![1.0f64; 10];
         let mut recv = vec![0.0f64; 5];
+        let mut inplace = vec![1.0f64; 10];
         let op = ReduceOp::BitwiseOr;
         let results = [
             crate::scope(|s| comm.iallreduce(s, &send, &mut recv, op).map(|_| ())),
@@ -1079,6 +1237,8 @@ mod tests {
                 comm.ireduce_scatter_block(s, &send, &mut recv, op)
                     .map(|_| ())
             }),
+            crate::scope(|s| comm.iallreduce_inplace(s, &mut inplace, op).map(|_| ())),
+            crate::scope(|s| comm.ireduce_inplace(s, &mut inplace, op, 0).map(|_| ())),
         ];
         for result in results {
             assert!(matches!(

@@ -16,6 +16,8 @@
 //! | `iallgather`     | nonblocking | as `allgather`, via `iallgather_inplace` + `wait` |
 //! | `iscatter`       | nonblocking | as `scatter`, via `iscatter_inplace` + `wait` |
 //! | `ialltoall`      | nonblocking | as `alltoall`, via `ialltoall_inplace` + `wait` |
+//! | `iallreduce_inplace` | nonblocking | every rank: `data` holds the reduction, for `ReduceOp::Sum` and for a user op; an empty buffer is accepted |
+//! | `ireduce_inplace` | nonblocking | to rank 0 and to the last rank: the root's `data` holds the sums, every other rank's `data` is unchanged; an empty buffer is accepted |
 //! | `gather_init`    | persistent  | as `gather`, 3 iterations of `start`/`wait`, root re-seeds its slot each time |
 //! | `gather_init_all_inplace` | persistent | as `gather_all_inplace`, via `gather_init_inplace` on every rank, 3 iterations |
 //! | `allgather_init` | persistent  | as `allgather`, 3 iterations, re-seed |
@@ -30,11 +32,12 @@
 //!
 //! The three `*_all_inplace` functions have no historical file: every rank
 //! calls the in-place gather, with a non-root rank's `data` as its own block.
+//! Neither have `iallreduce_inplace` and `ireduce_inplace`.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_inplace
 // mpi-test: np=2.. skip-ok=mpich-4.2
 
-use ferrompi::{Communicator, Error, Mpi, Result};
+use ferrompi::{Communicator, Error, Mpi, ReduceOp, Result, UserOp};
 
 mod common;
 
@@ -234,6 +237,81 @@ fn ialltoall(world: &Communicator) -> Result<()> {
             data[s as usize]
         );
     }
+    Ok(())
+}
+
+/// `iallreduce_inplace` on every rank: a predefined op, a user op, and an
+/// empty buffer, which must not be read as anything but a count of zero.
+fn iallreduce_inplace(world: &Communicator) -> Result<()> {
+    let rank = world.rank();
+    let size = world.size();
+    let sum: i32 = (0..size).sum();
+
+    let mut data = vec![rank, rank * 2, rank * 3];
+    ferrompi::scope(|s| {
+        world
+            .iallreduce_inplace(s, &mut data, ReduceOp::Sum)?
+            .wait()
+    })?;
+    assert_eq!(
+        data,
+        [sum, sum * 2, sum * 3],
+        "iallreduce_inplace: rank {rank} got {data:?}"
+    );
+
+    let max = UserOp::<i32>::new(|invec, inoutvec| {
+        for (x, y) in invec.iter().zip(inoutvec.iter_mut()) {
+            *y = (*x).max(*y);
+        }
+    })?;
+    let mut data = vec![rank, -rank];
+    ferrompi::scope(|s| world.iallreduce_inplace(s, &mut data, &max)?.wait())?;
+    assert_eq!(
+        data,
+        [size - 1, 0],
+        "iallreduce_inplace with a user op: rank {rank} got {data:?}"
+    );
+
+    let mut none: Vec<u8> = Vec::new();
+    ferrompi::scope(|s| {
+        world
+            .iallreduce_inplace(s, &mut none, ReduceOp::Max)?
+            .wait()
+    })?;
+    Ok(())
+}
+
+/// `ireduce_inplace` on every rank, to rank 0 and to the last rank: the root's
+/// `data` becomes the result, and every other rank's `data` is only read.
+fn ireduce_inplace(world: &Communicator) -> Result<()> {
+    let rank = world.rank();
+    let size = world.size();
+    let sum: i32 = (0..size).sum();
+
+    for root in [0, size - 1] {
+        let mut data = vec![rank, rank + 1];
+        ferrompi::scope(|s| {
+            world
+                .ireduce_inplace(s, &mut data, ReduceOp::Sum, root)?
+                .wait()
+        })?;
+        let expected = if rank == root {
+            vec![sum, sum + size]
+        } else {
+            vec![rank, rank + 1]
+        };
+        assert_eq!(
+            data, expected,
+            "ireduce_inplace to root {root}: rank {rank} expected {expected:?} but got {data:?}"
+        );
+    }
+
+    let mut none: Vec<u8> = Vec::new();
+    ferrompi::scope(|s| {
+        world
+            .ireduce_inplace(s, &mut none, ReduceOp::Max, 0)?
+            .wait()
+    })?;
     Ok(())
 }
 
@@ -472,6 +550,8 @@ fn main() -> Result<()> {
     iallgather(&world)?;
     iscatter(&world)?;
     ialltoall(&world)?;
+    iallreduce_inplace(&world)?;
+    ireduce_inplace(&world)?;
 
     if common::has_mpi4_collectives() {
         gather_init(&world)?;

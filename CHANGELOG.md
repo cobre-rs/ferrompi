@@ -252,6 +252,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closure scope that completes every request before it returns or unwinds; a
   request error at scope end is returned. Dropping `Mpi` waits, with no
   timeout, for the scopes open on other threads to end.
+- **`Communicator::iallreduce_inplace` and `ireduce_inplace`:** the in-place
+  forms of `iallreduce` and `ireduce`, created inside a `ferrompi::scope`.
+  `ireduce_inplace` replaces `data` with the result at the root; at every
+  other rank `data` is only sent, as for `reduce_inplace`.
 
 ### Changed
 
