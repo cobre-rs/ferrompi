@@ -270,9 +270,10 @@ pub(crate) fn buf_mut<T: MpiDatatype>(s: &mut [T]) -> (*mut c_void, i64, i32) {
 /// buffer MPI reads, the second for one it writes, so that two substituted
 /// buffers of one call never share an address. [`buf_ptr`] substitutes them for
 /// every empty buffer of an alignment-1 type; its test costs a type with a
-/// larger alignment nothing at run time. [`recv_ptr_of_empty_pair`] substitutes
-/// the second for the receive buffer of any type, in the calls where a library
-/// refuses two equal addresses.
+/// larger alignment nothing at run time. [`empty_buf_ptr`] substitutes them for
+/// an empty buffer of any type, in the calls where a library refuses two equal
+/// addresses, and takes the other of the two when the call's other buffer is at
+/// the one it would take.
 static EMPTY: [u64; 2] = [0; 2];
 
 /// `ptr`, or the address of a private static when the buffer holds no bytes
@@ -280,10 +281,9 @@ static EMPTY: [u64; 2] = [0; 2];
 /// usually points at address 1, which is `MPI_IN_PLACE` in Open MPI and in the
 /// MPI-5 ABI; a type with a larger alignment has an even address, and
 /// `MPI_IN_PLACE` is an odd address there and in MPICH. `written` selects the
-/// second address, so that a send and a receive buffer of one call never share
-/// one: MPICH's `MPI_Alltoallv` and Open MPI 5's `MPI_Reduce_init` can refuse
-/// two equal buffers whatever the count. MPI reads and writes nothing through
-/// a buffer of count zero.
+/// second address, so that two substituted buffers of one call never share
+/// one; [`empty_buf_ptr`] names the calls that need that. MPI reads and writes
+/// nothing through a buffer of count zero.
 #[inline(always)]
 pub(crate) fn buf_ptr<T>(ptr: *const T, len: usize, written: bool) -> *const c_void {
     if align_of::<T>() == 1 && (len == 0 || size_of::<T>() == 0) {
@@ -293,30 +293,46 @@ pub(crate) fn buf_ptr<T>(ptr: *const T, len: usize, written: bool) -> *const c_v
     }
 }
 
-/// `recv`, or the second address of [`EMPTY`] when neither the send nor the
-/// receive buffer of the call holds an element.
+/// `ptr`, or, when `empty`, an address of [`EMPTY`] that is not `other`, the
+/// pointer of the call's other buffer: the first for a buffer MPI reads and the
+/// second (`written`) for one it writes, or the remaining one of the two when
+/// `other` is that address. It is [`buf_ptr`]'s substitution for an element
+/// type of any alignment.
 ///
-/// Two empty buffers of a type with alignment 2 or more usually share one dangling
-/// address, which [`buf_ptr`] leaves alone: a test on the length would cost
-/// the blocking collectives a branch. MPICH's `MPI_Alltoallv` and
-/// `MPI_Ialltoallv` and Open MPI 5's `MPI_Reduce_init` can refuse equal send
-/// and receive buffers whatever the count, so `alltoallv`, `ialltoallv` and
-/// `reduce_init` pass their receive pointer through here. MPI reads and writes
-/// nothing through a buffer of count zero.
+/// [`buf_ptr`] leaves an empty buffer of a type with alignment 2 or more at its
+/// own address: a test on the length would cost the blocking collectives a
+/// branch. That address can be the other buffer's: two empty `Vec`s usually
+/// share one dangling address, and an empty slice can start where the other
+/// buffer begins. MPICH's `MPI_Alltoallv` and `MPI_Ialltoallv` can refuse equal
+/// send and receive buffers whatever the counts, and so can Open MPI 5's
+/// `MPI_Reduce_init` at the root. So `alltoallv` and `ialltoallv` pass each of
+/// their two pointers through here, `empty` when that buffer is, and
+/// `reduce_init`, whose two `Vec`s share an address only when both are empty,
+/// its receive pointer, `empty` when both are. MPI reads and writes nothing
+/// through a buffer of count zero.
 ///
 /// MPICH's `MPI_Alltoallv_init` makes the same test. `alltoallv_init` needs no
 /// call here: it hands MPI its own end-to-end copy of the four arrays, in which
 /// the send and the receive counts never share an address.
+///
+/// `other` is needed because the two addresses are not this crate's alone: a
+/// build with link-time optimization can place a caller's read-only constant
+/// of sixteen zero bytes where [`EMPTY`] is, and a send buffer can then start
+/// at the second address.
 #[inline]
-pub(crate) fn recv_ptr_of_empty_pair(
-    send_len: usize,
-    recv_len: usize,
-    recv: *mut c_void,
-) -> *mut c_void {
-    if send_len == 0 && recv_len == 0 {
-        std::ptr::from_ref(&EMPTY[1]).cast::<c_void>().cast_mut()
+pub(crate) fn empty_buf_ptr(
+    ptr: *const c_void,
+    empty: bool,
+    written: bool,
+    other: *const c_void,
+) -> *const c_void {
+    let fixed = |second: bool| std::ptr::from_ref(&EMPTY[usize::from(second)]).cast::<c_void>();
+    if !empty {
+        ptr
+    } else if fixed(written) == other {
+        fixed(!written)
     } else {
-        recv
+        fixed(written)
     }
 }
 
@@ -676,8 +692,8 @@ mod tests {
     #[cfg(feature = "rma")]
     use super::AtomicMpiDatatype;
     use super::{
-        buf, buf_mut, buf_ptr, pair_tag_of, recv_ptr_of_empty_pair, tag_of, BytePermutable,
-        DatatypeTag, DoubleInt, FloatInt, Int2, PlainData, ShortInt,
+        buf, buf_mut, buf_ptr, empty_buf_ptr, pair_tag_of, tag_of, BytePermutable, DatatypeTag,
+        DoubleInt, FloatInt, Int2, PlainData, ShortInt,
     };
     #[cfg(all(
         target_os = "linux",
@@ -760,21 +776,27 @@ mod tests {
     }
 
     #[test]
-    fn receive_pointer_of_two_empty_buffers_is_the_second_fixed_address() {
-        let none: Vec<f64> = Vec::new();
-        let mut none_out: Vec<f64> = Vec::new();
-        let send = buf(&none).0;
-        let recv = buf_mut(&mut none_out).0;
-        // The defect: two empty buffers of an alignment-8 type share an address.
-        assert_eq!(send, recv.cast_const());
-        let apart = recv_ptr_of_empty_pair(0, 0, recv);
-        assert!(!apart.is_null() && apart.cast_const() != send);
-        // It is the address `buf_mut` gives an empty byte buffer.
+    fn empty_buffer_of_any_type_gets_a_fixed_address() {
+        let mut data = [0.0f64; 4];
+        let (none, some) = data.split_at_mut(0);
+        let full = buf(some).0;
+        let empty = buf_mut(none).0.cast_const();
+        // The defect: an empty slice of an alignment-8 type can start where the
+        // other buffer begins.
+        assert_eq!(full, empty);
+        let read = empty_buf_ptr(empty, true, false, full);
+        let written = empty_buf_ptr(empty, true, true, full);
+        assert!(read != full && written != full && read != written);
+        // They are the addresses `buf` and `buf_mut` give empty byte buffers.
         let mut no_bytes: Vec<u8> = Vec::new();
-        assert_eq!(apart, buf_mut(&mut no_bytes).0);
-        // A pair with data on either side keeps its receive pointer.
-        assert_eq!(recv_ptr_of_empty_pair(1, 0, recv), recv);
-        assert_eq!(recv_ptr_of_empty_pair(0, 1, recv), recv);
+        assert_eq!(read, buf(&no_bytes).0);
+        assert_eq!(written, buf_mut(&mut no_bytes).0.cast_const());
+        // An empty buffer never gets the address the other buffer is at.
+        assert_eq!(empty_buf_ptr(empty, true, false, read), written);
+        assert_eq!(empty_buf_ptr(empty, true, true, written), read);
+        // A buffer that is not empty keeps its pointer.
+        assert_eq!(empty_buf_ptr(full, false, false, empty), full);
+        assert_eq!(empty_buf_ptr(full, false, true, full), full);
     }
 
     #[test]

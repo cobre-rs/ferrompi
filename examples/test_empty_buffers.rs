@@ -22,6 +22,13 @@
 //!    `reduce_init` at the root. Each call must return `Ok`; on a library
 //!    without persistent collectives `reduce_init` must return
 //!    `Error::NotSupported`, as in item 3.
+//! 5. `alltoallv` and `ialltoallv` in which rank 0 only sends and every other
+//!    rank only receives, so that one `u64` buffer is empty on every rank.
+//!    Each call must return `Ok` and deliver the data.
+//! 6. `alltoallv` and `ialltoallv` over an empty `f64` slice that starts where
+//!    the other buffer begins, as the send and as the receive buffer. MPICH
+//!    refuses the shared address when one slice gives both counts. Each call
+//!    must return `Ok`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_empty_buffers
 // mpi-test: np=2..
@@ -151,6 +158,82 @@ fn main() {
         &world,
         persistent_ok(reduce_init),
         "persistent reduce of empty f64 buffers",
+    );
+
+    // Rank 0 only sends, one element to each other rank, and the other ranks
+    // only receive: one of the two buffers is empty on every rank. `places`
+    // gives both displacements, so those of the empty side are not all zero.
+    let root = rank == 0;
+    let places: Vec<i32> = (0..size as i32).collect();
+    let to_others: Vec<i32> = (0..size).map(|d| i32::from(d != 0)).collect();
+    let from_root: Vec<i32> = (0..size).map(|r| i32::from(r == 0)).collect();
+    let payload: Vec<u64> = (0..size as u64).map(|d| 100 + d).collect();
+    let (send, sendcounts): (&[u64], &[i32]) = if root {
+        (&payload, &to_others)
+    } else {
+        (&[], &zeros)
+    };
+    let recvcounts: &[i32] = if root { &zeros } else { &from_root };
+    let expected = 100 + rank as u64;
+
+    let mut recv = vec![0u64; usize::from(!root)];
+    let alltoallv = world.alltoallv(send, sendcounts, &places, &mut recv, recvcounts, &places);
+    common::check(
+        &world,
+        alltoallv.is_ok() && (root || recv[0] == expected),
+        "alltoallv with one empty buffer on every rank",
+    );
+
+    let mut recv = vec![0u64; usize::from(!root)];
+    let ialltoallv = ferrompi::scope(|s| {
+        world
+            .ialltoallv(s, send, sendcounts, &places, &mut recv, recvcounts, &places)?
+            .wait()
+    });
+    common::check(
+        &world,
+        ialltoallv.is_ok() && (root || recv[0] == expected),
+        "ialltoallv with one empty buffer on every rank",
+    );
+
+    // An empty slice that starts where the other buffer begins.
+    let mut data = [0.0f64; 4];
+    let (none, some) = data.split_at_mut(0);
+
+    let alltoallv = world.alltoallv(some, &zeros, &zeros, none, &zeros, &zeros);
+    common::check(
+        &world,
+        alltoallv.is_ok(),
+        "alltoallv with an empty receive buffer at the send buffer's address",
+    );
+
+    let alltoallv = world.alltoallv(none, &zeros, &zeros, some, &zeros, &zeros);
+    common::check(
+        &world,
+        alltoallv.is_ok(),
+        "alltoallv with an empty send buffer at the receive buffer's address",
+    );
+
+    let ialltoallv = ferrompi::scope(|s| {
+        world
+            .ialltoallv(s, &*some, &zeros, &zeros, &mut *none, &zeros, &zeros)?
+            .wait()
+    });
+    common::check(
+        &world,
+        ialltoallv.is_ok(),
+        "ialltoallv with an empty receive buffer at the send buffer's address",
+    );
+
+    let ialltoallv = ferrompi::scope(|s| {
+        world
+            .ialltoallv(s, &*none, &zeros, &zeros, &mut *some, &zeros, &zeros)?
+            .wait()
+    });
+    common::check(
+        &world,
+        ialltoallv.is_ok(),
+        "ialltoallv with an empty send buffer at the receive buffer's address",
     );
 
     if rank == 0 {

@@ -3,7 +3,7 @@
 use crate::comm::{
     check_rank_slots, check_same_len, rank_block, scatter_inplace_args, Communicator,
 };
-use crate::datatype::{recv_ptr_of_empty_pair, tag_of, MpiDatatype};
+use crate::datatype::{empty_buf_ptr, tag_of, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::op::CollectiveOp;
@@ -254,7 +254,7 @@ impl Communicator {
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = vec_buf(&send);
         let (rp, _, _) = vec_buf_mut(&mut recv);
-        let rp = recv_ptr_of_empty_pair(send.len(), recv.len(), rp);
+        let rp = empty_buf_ptr(rp, send.is_empty() && recv.is_empty(), true, sp).cast_mut();
         // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
         // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
         // allocations, or `recv` is empty; when both are empty the count is zero and `rp`

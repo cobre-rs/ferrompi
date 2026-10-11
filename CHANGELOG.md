@@ -407,6 +407,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `ialltoallv` when one slice served as both count arrays, and Open MPI 5
   refused it in `reduce_init` at the root. The receive buffer of such a pair
   now reaches MPI at a fixed address of its own.
+- **`alltoallv` and `ialltoallv` accept an empty buffer that starts where the
+  other buffer begins.** An empty slice of a type with alignment 2 or more
+  keeps its address, which can be the other buffer's: the two halves of
+  `split_at_mut(0)`, for example. MPICH refused such a pair with class
+  `Buffer` when one slice served as both count arrays. In the two methods an
+  empty buffer now reaches MPI at a fixed address that is never the other
+  buffer's.
 
 ## [0.6.0] - 2026-10-01
 
