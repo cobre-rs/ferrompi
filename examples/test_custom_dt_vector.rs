@@ -25,25 +25,25 @@ fn main() {
     let mut local_ok = true;
 
     // ========================================================================
-    // Test 1: vector(3, 2, 5, F64) returns Ok
+    // Test 1: vector::<f64>(3, 2, 5) returns Ok
     // ========================================================================
     {
         match CustomDatatype::vector::<f64>(3, 2, 5) {
             Ok(_) => {
                 if rank == 0 {
-                    println!("PASS: Test 1 — vector(3, 2, 5, F64) returned Ok");
+                    println!("PASS: Test 1 — vector::<f64>(3, 2, 5) returned Ok");
                 }
                 // The datatype drops at the end of the match, freeing the MPI handle
             }
             Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 1 — vector(3, 2, 5, F64) returned Err: {e}");
+                eprintln!("rank {rank}: FAIL Test 1 — vector::<f64>(3, 2, 5) returned Err: {e}");
                 local_ok = false;
             }
         }
     }
 
     // ========================================================================
-    // Test 2: vector(0, 2, 5, F64) returns an MPI error or a valid type.
+    // Test 2: vector::<f64>(0, 2, 5) returns an MPI error or a valid type.
     //
     // MPI_Type_vector with count=0 returns MPI_ERR_COUNT on most
     // implementations, but some (e.g., Open MPI >= 5.0) accept it and produce
@@ -54,16 +54,16 @@ fn main() {
             Err(Error::Mpi { class, .. }) => {
                 if matches!(class, MpiErrorClass::Count | MpiErrorClass::Arg) {
                     if rank == 0 {
-                        println!("PASS: Test 2 — vector(0, 2, 5, F64) returned Err({class:?}) (implementation-defined Count or Arg)");
+                        println!("PASS: Test 2 — vector::<f64>(0, 2, 5) returned Err({class:?}) (implementation-defined Count or Arg)");
                     }
                 } else {
-                    eprintln!("rank {rank}: FAIL Test 2 — vector(0, 2, 5, F64) returned unexpected class {class:?}");
+                    eprintln!("rank {rank}: FAIL Test 2 — vector::<f64>(0, 2, 5) returned unexpected class {class:?}");
                     local_ok = false;
                 }
             }
             Err(e) => {
                 eprintln!(
-                    "rank {rank}: FAIL Test 2 — vector(0, 2, 5, F64) returned unexpected error: {e}"
+                    "rank {rank}: FAIL Test 2 — vector::<f64>(0, 2, 5) returned unexpected error: {e}"
                 );
                 local_ok = false;
             }
@@ -73,7 +73,7 @@ fn main() {
                 // but emit a note.
                 if rank == 0 {
                     println!(
-                        "NOTE: Test 2 — vector(0, 2, 5, F64) succeeded — \
+                        "NOTE: Test 2 — vector::<f64>(0, 2, 5) succeeded — \
                          MPI implementation accepts count=0 (conforming)"
                     );
                 }
@@ -88,12 +88,12 @@ fn main() {
         match CustomDatatype::vector::<f64>(3, 0, 5) {
             Ok(_) => {
                 if rank == 0 {
-                    println!("PASS: Test 4 — vector(3, 0, 5, F64) accepted");
+                    println!("PASS: Test 4 — vector::<f64>(3, 0, 5) accepted");
                 }
             }
             Err(e) => {
                 eprintln!(
-                    "rank {rank}: FAIL Test 4 — vector(3, 0, 5, F64) returned unexpected error: {e}"
+                    "rank {rank}: FAIL Test 4 — vector::<f64>(3, 0, 5) returned unexpected error: {e}"
                 );
                 local_ok = false;
             }

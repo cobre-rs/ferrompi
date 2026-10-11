@@ -763,9 +763,6 @@ fn finalize_skip_reason() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    // Note: MPI tests must be run with mpiexec
-    // cargo build --examples && mpiexec -n 4 ./target/debug/examples/hello_world
-
     use super::{group, Error, Mpi, ThreadLevel, ATTACHED_BUFFER};
     use std::marker::PhantomData;
 

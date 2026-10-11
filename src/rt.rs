@@ -13,8 +13,8 @@
 //! silently once finalizing, and aborts the process on a wrong-thread drop
 //! below `Serialized`. `Initializing` is a transient state held only between
 //! [`begin_init`] and [`activate`]/[`abandon_init`]; both `enter` and
-//! `drop_guard` pass it through like `Uninit` since no `Mpi` handle exists
-//! yet to call either.
+//! `drop_guard` pass it through like `Uninit`: no `Mpi` handle exists yet,
+//! and `Mpi::init_thread` reads the world's rank and size in this state.
 //!
 //! Finalizing is two steps. [`begin_finalize`] stores `Finalizing`, which
 //! refuses new calls, waits for the nonblocking scopes open on other threads

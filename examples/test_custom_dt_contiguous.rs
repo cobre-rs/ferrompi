@@ -35,25 +35,25 @@ fn main() {
     let mut local_ok = true;
 
     // ========================================================================
-    // Test 1: contiguous(10, F64) returns Ok
+    // Test 1: contiguous::<f64>(10) returns Ok
     // ========================================================================
     {
         match CustomDatatype::contiguous::<f64>(10) {
             Ok(_) => {
                 if rank == 0 {
-                    println!("PASS: Test 1 — contiguous(10, F64) returned Ok");
+                    println!("PASS: Test 1 — contiguous::<f64>(10) returned Ok");
                 }
                 // The datatype drops at the end of the match, freeing the MPI handle
             }
             Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 1 — contiguous(10, F64) returned Err: {e}");
+                eprintln!("rank {rank}: FAIL Test 1 — contiguous::<f64>(10) returned Err: {e}");
                 local_ok = false;
             }
         }
     }
 
     // ========================================================================
-    // Test 2: contiguous(0, F64) returns an MPI error.
+    // Test 2: contiguous::<f64>(0) returns an MPI error.
     //
     // MPI_Type_contiguous with count=0 returns MPI_ERR_COUNT on most
     // implementations, but MPI_ERR_ARG on some (e.g., MPICH 4.x). Both are
@@ -66,16 +66,16 @@ fn main() {
                 let accepted = matches!(class, MpiErrorClass::Count | MpiErrorClass::Arg);
                 if accepted {
                     if rank == 0 {
-                        println!("PASS: Test 2 — contiguous(0, F64) returned Err({class:?}) (implementation-defined Count or Arg)");
+                        println!("PASS: Test 2 — contiguous::<f64>(0) returned Err({class:?}) (implementation-defined Count or Arg)");
                     }
                 } else {
-                    eprintln!("rank {rank}: FAIL Test 2 — contiguous(0, F64) returned unexpected class {class:?}");
+                    eprintln!("rank {rank}: FAIL Test 2 — contiguous::<f64>(0) returned unexpected class {class:?}");
                     local_ok = false;
                 }
             }
             Err(e) => {
                 eprintln!(
-                    "rank {rank}: FAIL Test 2 — contiguous(0, F64) returned unexpected error: {e}"
+                    "rank {rank}: FAIL Test 2 — contiguous::<f64>(0) returned unexpected error: {e}"
                 );
                 local_ok = false;
             }
@@ -85,7 +85,7 @@ fn main() {
                 // technically conforming; accept it but emit a note.
                 if rank == 0 {
                     println!(
-                        "NOTE: Test 2 — contiguous(0, F64) succeeded — \
+                        "NOTE: Test 2 — contiguous::<f64>(0) succeeded — \
                          MPI implementation accepts count=0 (conforming)"
                     );
                 }

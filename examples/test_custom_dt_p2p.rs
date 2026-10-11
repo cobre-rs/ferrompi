@@ -215,7 +215,7 @@ fn main() {
     }
 
     // ========================================================================
-    // Test 4: contiguous(32, U8) rejected for a 1-byte element type.
+    // Test 4: contiguous::<u8>(32) rejected for a 1-byte element type.
     //
     // Every call is a self-send (dest = source = rank). Call order pairs a
     // nonblocking half before its matching blocking half so the pre-fix run
@@ -225,7 +225,7 @@ fn main() {
     // ========================================================================
     {
         let dt =
-            CustomDatatype::contiguous::<u8>(32).expect("contiguous(32, U8) for Test 4 failed");
+            CustomDatatype::contiguous::<u8>(32).expect("contiguous::<u8>(32) for Test 4 failed");
         let src = [0x41u8; 64];
         let mut frame = Frame {
             recv: [0; 1],
@@ -293,17 +293,17 @@ fn main() {
 
         world.barrier().expect("barrier after Test 4 failed");
         if rank == 0 {
-            println!("PASS: Test 4 — contiguous(32, U8) rejected for 1-byte T");
+            println!("PASS: Test 4 — contiguous::<u8>(32) rejected for 1-byte T");
         }
     }
 
     // ========================================================================
-    // Test 5: contiguous(32, U8).resized(0, 1) rejected — extent (1) equals
+    // Test 5: contiguous::<u8>(32).resized(0, 1) rejected — extent (1) equals
     // size_of::<u8>(), but the true extent (32) overruns it.
     // ========================================================================
     {
         let dt = CustomDatatype::contiguous::<u8>(32)
-            .expect("contiguous(32, U8) for Test 5 failed")
+            .expect("contiguous::<u8>(32) for Test 5 failed")
             .resized(0, 1)
             .expect("resized(0, 1) for Test 5 failed");
         let src = [0x41u8; 64];

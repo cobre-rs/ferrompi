@@ -4612,12 +4612,12 @@ pub(crate) mod tests {
     // -------------------------------------------------------------------------
 
     /// A window over `buffer` with the sentinel handle, so its drop makes no MPI
-    /// call, and `local_ptr` the pointer `Vec::as_mut_ptr` returned.
+    /// call, and `local_ptr` the pointer `vec_buf_mut` returned.
     fn sentinel_window<T: MpiDatatype>(mut buffer: Vec<T>) -> Win<T> {
         let (p, n, _) = vec_buf_mut(&mut buffer);
         Win {
             win_handle: WIN_FREED,
-            // SAFETY: `Vec::as_mut_ptr` is never null.
+            // SAFETY: `vec_buf_mut` never returns a null pointer.
             local_ptr: unsafe { NonNull::new_unchecked(p.cast()) },
             local_len: n as usize,
             words: Box::new([]),
@@ -4641,7 +4641,7 @@ pub(crate) mod tests {
         assert_eq!(n, 4);
         let mut win = Win {
             win_handle: WIN_FREED,
-            // SAFETY: `Vec::as_mut_ptr` is never null.
+            // SAFETY: `vec_buf_mut` never returns a null pointer.
             local_ptr: unsafe { NonNull::new_unchecked(p) },
             local_len: 4,
             words: Box::new([]),

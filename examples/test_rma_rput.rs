@@ -41,7 +41,7 @@ fn pending_rput_epochs(win: &mut Win<i32>, buf: &[i32; 4], exit: Exit) -> bool {
     for _ in 0..ROUNDS {
         let ended = catch_unwind(AssertUnwindSafe(|| {
             win.lock(LockType::Exclusive, 1, |e| {
-                let _req = e.rput(buf, 1, 0)?;
+                e.rput(buf, 1, 0)?;
                 match exit {
                     Exit::Ok => Ok(()),
                     // Rank 99 is outside the window's communicator.
