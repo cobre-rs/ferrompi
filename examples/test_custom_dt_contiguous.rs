@@ -1,7 +1,7 @@
 //! Integration test for `CustomDatatype::contiguous`.
 //!
 //! Exercises:
-//! - Successful construction and `raw_handle() >= 0`
+//! - Successful construction
 //! - Count=0 returns an MPI error (`Count` or `Arg` class, implementation-defined)
 //! - Drop frees the underlying MPI handle (no double-free on exit)
 //!
@@ -18,13 +18,7 @@ mod common;
 /// Builds `contiguous::<T>(4)` and drops it; reports a failure on this rank.
 fn builds<T: MpiDatatype>(rank: i32, name: &str) -> bool {
     match CustomDatatype::contiguous::<T>(4) {
-        Ok(dt) => {
-            if dt.raw_handle() < 0 {
-                eprintln!("rank {rank}: FAIL Test 4 — contiguous::<{name}>(4) handle < 0");
-                return false;
-            }
-            true
-        }
+        Ok(_) => true,
         Err(e) => {
             eprintln!("rank {rank}: FAIL Test 4 — contiguous::<{name}>(4) failed: {e}");
             false
@@ -41,21 +35,15 @@ fn main() {
     let mut local_ok = true;
 
     // ========================================================================
-    // Test 1: contiguous(10, F64) returns Ok with raw_handle() >= 0
+    // Test 1: contiguous(10, F64) returns Ok
     // ========================================================================
     {
         match CustomDatatype::contiguous::<f64>(10) {
-            Ok(dt) => {
-                let h = dt.raw_handle();
-                if h >= 0 {
-                    if rank == 0 {
-                        println!("PASS: Test 1 — contiguous(10, F64) raw_handle = {h}");
-                    }
-                } else {
-                    eprintln!("rank {rank}: FAIL Test 1 — raw_handle = {h}, expected >= 0");
-                    local_ok = false;
+            Ok(_) => {
+                if rank == 0 {
+                    println!("PASS: Test 1 — contiguous(10, F64) returned Ok");
                 }
-                // dt drops here, freeing the MPI handle
+                // The datatype drops at the end of the match, freeing the MPI handle
             }
             Err(e) => {
                 eprintln!("rank {rank}: FAIL Test 1 — contiguous(10, F64) returned Err: {e}");
@@ -91,15 +79,14 @@ fn main() {
                 );
                 local_ok = false;
             }
-            Ok(dt) => {
+            Ok(_) => {
                 // Some MPI implementations (notably Open MPI >= 5.0) accept
                 // count=0 and produce a valid zero-size datatype. This is
                 // technically conforming; accept it but emit a note.
                 if rank == 0 {
                     println!(
-                        "NOTE: Test 2 — contiguous(0, F64) succeeded (raw_handle={}) — \
-                         MPI implementation accepts count=0 (conforming)",
-                        dt.raw_handle()
+                        "NOTE: Test 2 — contiguous(0, F64) succeeded — \
+                         MPI implementation accepts count=0 (conforming)"
                     );
                 }
             }

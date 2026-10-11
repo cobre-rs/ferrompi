@@ -34,13 +34,6 @@ fn main() {
         let count: usize = 10;
         let win = Win::<f64>::allocate_shared(&node, count).expect("Win::allocate_shared failed");
 
-        // Verify raw_handle returns a non-negative handle
-        assert!(
-            win.raw_handle() >= 0,
-            "raw_handle() should be non-negative, got {}",
-            win.raw_handle()
-        );
-
         // Verify comm_size matches the node communicator size
         assert_eq!(
             win.comm_size(),
@@ -84,7 +77,7 @@ fn main() {
         }
 
         if rank == 0 {
-            println!("PASS: allocate and basic properties (raw_handle, comm_size, local view)");
+            println!("PASS: allocate and basic properties (comm_size, local view)");
         }
 
         // Win dropped here — exercises Drop

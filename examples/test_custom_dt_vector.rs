@@ -1,7 +1,7 @@
 //! Integration test for `CustomDatatype::vector`.
 //!
 //! Exercises:
-//! - Successful construction and `raw_handle() >= 0`
+//! - Successful construction
 //! - Count=0 returns an MPI error or a valid zero-size type
 //!   (implementation-defined; both outcomes are accepted)
 //! - Drop frees the underlying MPI handle (no double-free on exit)
@@ -25,21 +25,15 @@ fn main() {
     let mut local_ok = true;
 
     // ========================================================================
-    // Test 1: vector(3, 2, 5, F64) returns Ok with raw_handle() >= 0
+    // Test 1: vector(3, 2, 5, F64) returns Ok
     // ========================================================================
     {
         match CustomDatatype::vector::<f64>(3, 2, 5) {
-            Ok(v) => {
-                let h = v.raw_handle();
-                if h >= 0 {
-                    if rank == 0 {
-                        println!("PASS: Test 1 — vector(3, 2, 5, F64) raw_handle = {h}");
-                    }
-                } else {
-                    eprintln!("rank {rank}: FAIL Test 1 — raw_handle = {h}, expected >= 0");
-                    local_ok = false;
+            Ok(_) => {
+                if rank == 0 {
+                    println!("PASS: Test 1 — vector(3, 2, 5, F64) returned Ok");
                 }
-                // v drops here, freeing the MPI handle
+                // The datatype drops at the end of the match, freeing the MPI handle
             }
             Err(e) => {
                 eprintln!("rank {rank}: FAIL Test 1 — vector(3, 2, 5, F64) returned Err: {e}");
@@ -73,15 +67,14 @@ fn main() {
                 );
                 local_ok = false;
             }
-            Ok(v) => {
+            Ok(_) => {
                 // Some MPI implementations accept count=0 and produce a valid
                 // zero-size datatype. This is technically conforming; accept it
                 // but emit a note.
                 if rank == 0 {
                     println!(
-                        "NOTE: Test 2 — vector(0, 2, 5, F64) succeeded (raw_handle={}) — \
-                         MPI implementation accepts count=0 (conforming)",
-                        v.raw_handle()
+                        "NOTE: Test 2 — vector(0, 2, 5, F64) succeeded — \
+                         MPI implementation accepts count=0 (conforming)"
                     );
                 }
             }
@@ -93,17 +86,9 @@ fn main() {
     // ========================================================================
     {
         match CustomDatatype::vector::<f64>(3, 0, 5) {
-            Ok(v) => {
-                if v.raw_handle() >= 0 {
-                    if rank == 0 {
-                        println!(
-                            "PASS: Test 4 — vector(3, 0, 5, F64) accepted (raw_handle={})",
-                            v.raw_handle()
-                        );
-                    }
-                } else {
-                    eprintln!("rank {rank}: FAIL Test 4 — vector(3, 0, 5, F64) raw_handle < 0");
-                    local_ok = false;
+            Ok(_) => {
+                if rank == 0 {
+                    println!("PASS: Test 4 — vector(3, 0, 5, F64) accepted");
                 }
             }
             Err(e) => {

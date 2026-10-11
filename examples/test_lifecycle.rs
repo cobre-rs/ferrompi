@@ -72,11 +72,6 @@ fn main() {
     );
     println!("PASS: processor_name = {}", name);
 
-    // Test raw_handle
-    let handle = world.raw_handle();
-    assert!(handle >= 0, "raw_handle should be non-negative");
-    println!("PASS: raw_handle = {}", handle);
-
     // Mpi drops here, which calls MPI_Finalize
     drop(mpi);
 

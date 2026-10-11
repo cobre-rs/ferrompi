@@ -1,7 +1,7 @@
 //! Regression test for the `count > INT_MAX` guard across the 30 scalar-count
 //! shims (blocking/nonblocking p2p and collectives, plus every blocking,
-//! nonblocking and persistent reduction with a user op), the 6 v-collective
-//! shims, and the 7 RMA shims.
+//! nonblocking and persistent reduction with a user op), and the 6 v-collective
+//! shims.
 //!
 //! On MPI < 4, a scalar count above `INT_MAX` must return
 //! `Err(Error::Mpi { class: MpiErrorClass::Count, .. })` before any MPI
@@ -13,12 +13,7 @@
 //! V-collectives have no `_c` path on any MPI version, and a user op's classic
 //! function takes an `int` length, so both are checked before that skip. A
 //! persistent reduction without persistent collectives is refused with
-//! `Error::NotSupported` instead. RMA is exercised through a raw `extern "C"`
-//! call to `ferrompi_put`, not the safe `put` method: the count is the slice
-//! length, so a count above `INT_MAX`, which no safe call can pass without a
-//! 32 GiB slice, reaches the C guard only through a direct C call — and only on
-//! MPI < 4, since on MPI >= 4 the fixed shim would hand the oversized count to
-//! `MPI_Put_c` over a four-element window.
+//! `Error::NotSupported` instead.
 //!
 //! A user op in `reduce_scatter_block` reduces `recv.len() * size` elements, so
 //! it is also refused when that span exceeds `INT_MAX`, though `recv.len()`
@@ -28,8 +23,6 @@
 // mpi-test: np=2.. skip-ok=mpich
 
 use ferrompi::{Communicator, Error, Mpi, ReduceOp, UserOp};
-#[cfg(feature = "rma")]
-use ferrompi::{MpiErrorClass, Win, WinFenceAssert};
 
 mod common;
 
@@ -68,68 +61,6 @@ fn v_collectives(world: &Communicator) {
         igatherv_ok,
         "igatherv with a 2^32+16-byte send returns Count",
     );
-}
-
-// Raw FFI declaration for the C-side RMA shim under test, in the same shape
-// as examples/test_waitall_count_overflow.rs. Declared here (rather than via
-// ferrompi::ffi, which is pub(crate)) so the example can call it directly
-// without an API extension on the Rust side.
-//
-// SAFETY invariant for the call in rma_put below: the C guard rejects
-// count before MPI_Put/MPI_Put_c is called, so `origin` is never
-// read by MPI and need only be valid for the duration of the call.
-#[cfg(feature = "rma")]
-extern "C" {
-    fn ferrompi_put(
-        origin: *const std::ffi::c_void,
-        count: i64,
-        dt_tag: i32,
-        target_rank: i32,
-        target_disp: i64,
-        win_handle: i32,
-    ) -> std::ffi::c_int;
-}
-
-/// Calls the C `ferrompi_put` shim directly with a `count` above `INT_MAX`
-/// over a real 4-element window, bypassing the safe `put`'s bounds check so
-/// the C-side guard is reachable. Only reachable on MPI < 4: the fixed shim on
-/// MPI >= 4 would pass the oversized count to `MPI_Put_c`.
-#[cfg(feature = "rma")]
-fn rma_put(world: &Communicator) {
-    let mut win = Win::<u64>::allocate(world, 4).expect("Win::allocate failed");
-    let handle = win.raw_handle();
-    let origin = [0u64; 4];
-    // The C layer's code for u64 (FERROMPI_U64 in csrc/ferrompi.h).
-    let dt_tag = 6;
-
-    let mut rma_put_ok = true;
-    win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |_| {
-        if world.rank() == 0 {
-            let raw_ret = unsafe {
-                // SAFETY: see the invariant comment on the extern "C" block above.
-                ferrompi_put(
-                    origin.as_ptr().cast(),
-                    (1i64 << 32) + 4,
-                    dt_tag,
-                    1,
-                    0,
-                    handle,
-                )
-            };
-            rma_put_ok = matches!(
-                Error::from_code(raw_ret),
-                Error::Mpi {
-                    class: MpiErrorClass::Count,
-                    ..
-                }
-            );
-        }
-        Ok(())
-    })
-    .expect("fence epoch failed");
-    drop(win);
-
-    common::check(world, rma_put_ok, "put with a 2^32+4 count returns Count");
 }
 
 /// True iff `r` is what a persistent reduction with a user op above `INT_MAX`
@@ -369,9 +300,6 @@ fn main() {
         ibroadcast_ok,
         "ibroadcast of 2^32+16 bytes returns Count",
     );
-
-    #[cfg(feature = "rma")]
-    rma_put(&world);
 
     if rank == 0 {
         println!("PASS: test_count_overflow");

@@ -714,7 +714,7 @@ impl Request<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         some_results, with_handles, with_index_buf, Request, RequestKind, HANDLE_STACK_CAP,
     };
@@ -722,6 +722,7 @@ mod tests {
     use crate::ffi::FerrompiStatus;
     use crate::scope::Registry;
     use crate::status::{Source, Status, Tag};
+    use crate::{Communicator, MpiErrorClass};
 
     fn test_request(completed: bool, kind: RequestKind) -> Request<'static> {
         Request {
@@ -881,5 +882,95 @@ mod tests {
     #[test]
     fn cancel_on_rma_request_returns_not_supported_without_ffi() {
         assert_cancel_not_supported(RequestKind::Rma);
+    }
+
+    /// Called by the one test that initializes MPI. A handle kept past its
+    /// request's completion is rejected by the C layer, and does not act on the
+    /// request that reused the slot.
+    pub(crate) fn stale_handle_is_rejected(world: &Communicator) {
+        let me = world.rank();
+        let mut a_buf = [0u8; 4];
+        let mut b_buf = [0u8; 4];
+        crate::scope(|s| {
+            let a = world.irecv(s, &mut a_buf, me, 31)?;
+            let stale = a.handle;
+            world.send(&[31u8; 4], me, 31)?;
+            a.wait()?;
+
+            let b = world.irecv(s, &mut b_buf, me, 32)?;
+            // Sent before either assertion below can fail: the scope waits for
+            // `b` while it unwinds, and `b` completes only if its message exists.
+            world.send(&[32u8; 4], me, 32)?;
+            assert!(
+                (b.handle & 0xffff_ffff) == (stale & 0xffff_ffff) && b.handle != stale,
+                "slot not reused with a new generation: {stale:#x} then {:#x}",
+                b.handle
+            );
+            let mut flag: i32 = 0;
+            // SAFETY: `flag` is a valid out-parameter and a null status is
+            // MPI_STATUS_IGNORE; the stale handle must be refused by the lookup.
+            let ret = unsafe { crate::ffi::ferrompi_test(stale, &mut flag, std::ptr::null_mut()) };
+            assert!(
+                matches!(
+                    Error::from_code(ret),
+                    Error::Mpi {
+                        class: MpiErrorClass::Request,
+                        ..
+                    }
+                ),
+                "test(stale) returned {ret}"
+            );
+            b.wait()?;
+            Ok(())
+        })
+        .expect("scope failed");
+        assert_eq!(b_buf, [32u8; 4]);
+    }
+
+    /// Called by the one test that initializes MPI. An `rput` request the
+    /// closure never waits is completed by its epoch, whatever the closure does:
+    /// every epoch then gets the first epoch's table slot again.
+    #[cfg(feature = "rma")]
+    pub(crate) fn epoch_completes_pending_rput(world: &Communicator) {
+        use crate::{LockType, Win};
+        use std::panic::{catch_unwind, set_hook, take_hook, AssertUnwindSafe};
+
+        const ROUNDS: usize = 300;
+        let me = world.rank();
+        let mut win = Win::<i32>::allocate(world, 4).expect("Win::allocate failed");
+        let buf = [10i32, 20, 30, 40];
+        for exit in 0..3 {
+            let mut slots = Vec::with_capacity(ROUNDS);
+            let mut ended_as_asked = true;
+            // Silent only while the closures run (exit 2 panics once per round).
+            // Nothing is asserted until the default hook is back, so a failed
+            // assertion prints its message.
+            set_hook(Box::new(|_| {}));
+            for _ in 0..ROUNDS {
+                let ended = catch_unwind(AssertUnwindSafe(|| {
+                    win.lock(LockType::Exclusive, me, |e| {
+                        let req = e.rput(&buf, me, 0)?;
+                        slots.push(req.handle as u32);
+                        match exit {
+                            0 => Ok(()),
+                            // Rank 99 is outside the window's communicator.
+                            1 => e.rput(&buf, 99, 0).map(|_| ()),
+                            _ => panic!("closure panics with a request pending"),
+                        }
+                    })
+                }));
+                ended_as_asked &= matches!(
+                    (exit, ended),
+                    (0, Ok(Ok(()))) | (1, Ok(Err(_))) | (2, Err(_))
+                );
+            }
+            drop(take_hook());
+            assert!(ended_as_asked, "exit {exit}: an epoch did not end as asked");
+            assert!(
+                slots.len() == ROUNDS && slots.iter().all(|&slot| slot == slots[0]),
+                "exit {exit}: slots {:?}",
+                &slots[..slots.len().min(8)]
+            );
+        }
     }
 }

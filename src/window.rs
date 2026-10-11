@@ -4491,7 +4491,7 @@ impl<T: MpiDatatype> Drop for Win<T> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{
         check_fence_asserts, check_rma_target, fits_atomic, post_ran_mpi, window_word, Access,
         Error, Win, WinFenceAssert, WinPscwAssert, WinView, WINDOW_WORD_LEN_MASK,
@@ -5068,5 +5068,58 @@ mod tests {
         let mut a = WinPscwAssert::from_bits_for_test(1);
         a |= WinPscwAssert::from_bits_for_test(4);
         assert_eq!(a.bits(), 5);
+    }
+
+    /// Called by the one test that initializes MPI. Every constructor returns a
+    /// table handle, and below MPI 4.0 a put count above `INT_MAX` is refused
+    /// before MPI reads the origin buffer.
+    pub(crate) fn window_handles_and_put_count(world: &crate::Communicator) {
+        let node = world.split_shared().expect("split_shared failed");
+        let shared = Win::<f64>::allocate_shared(&node, 10).expect("allocate_shared failed");
+        assert!(shared.win_handle >= 0);
+        match Win::create(world, vec![0i32; 16]) {
+            Ok(created) => assert!(created.win_handle >= 0),
+            // Open MPI 4.1 over TCP refuses MPI_Win_create.
+            Err(Error::Mpi {
+                class: crate::MpiErrorClass::Win,
+                ..
+            }) => {}
+            Err(e) => panic!("Win::create failed: {e}"),
+        }
+        let mut win = Win::<u64>::allocate(world, 4).expect("Win::allocate failed");
+        assert!(win.win_handle >= 0);
+
+        let version = crate::Mpi::version().expect("Mpi::version failed");
+        if !version.starts_with("MPI 3.") {
+            // From MPI 4.0 on, the shim hands the count to MPI_Put_c.
+            return;
+        }
+        let handle = win.win_handle;
+        let me = world.rank();
+        let origin = [0u64; 4];
+        let mut refused = false;
+        win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |_| {
+            // SAFETY: the count guard returns before MPI reads `origin`.
+            let ret = unsafe {
+                crate::ffi::ferrompi_put(
+                    origin.as_ptr().cast(),
+                    (1i64 << 32) + 4,
+                    crate::datatype::tag_of::<u64>() as i32,
+                    me,
+                    0,
+                    handle,
+                )
+            };
+            refused = matches!(
+                Error::from_code(ret),
+                Error::Mpi {
+                    class: crate::MpiErrorClass::Count,
+                    ..
+                }
+            );
+            Ok(())
+        })
+        .expect("fence epoch failed");
+        assert!(refused, "put with a 2^32+4 count was not refused");
     }
 }

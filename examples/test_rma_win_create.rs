@@ -1,9 +1,9 @@
 //! Integration test for Win::create and Win::allocate (distributed RMA windows).
 //!
 //! Verifies that `Win<T>` can be constructed via both constructors, that
-//! `raw_handle()` and `comm_size()` return expected values, and that
-//! `into_buffer()` frees the window and returns the `Win::create` buffer (and
-//! `None` for a `Win::allocate` window).
+//! `comm_size()` returns the expected value, and that `into_buffer()` frees the
+//! window and returns the `Win::create` buffer (and `None` for a
+//! `Win::allocate` window).
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_create
 // mpi-test: np=2 skip-ok=openmpi-4
@@ -36,12 +36,6 @@ fn main() {
     // ========================================================================
     let test1_skipped = match Win::create(&world, vec![0i32; 16]) {
         Ok(win) => {
-            let handle = win.raw_handle();
-            assert!(
-                handle >= 0,
-                "Win::create raw_handle() = {handle}, expected >= 0"
-            );
-
             assert_eq!(win.comm_size(), size, "Win::create comm_size() mismatch");
 
             assert_eq!(win.local().len(), 16, "Win::create local len mismatch");
@@ -75,7 +69,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 1 failed");
     if rank == 0 && !test1_skipped {
-        println!("PASS: Win::create (i32, 16 elements, raw_handle, comm_size, local, into_buffer)");
+        println!("PASS: Win::create (i32, 16 elements, comm_size, local, into_buffer)");
     }
 
     // ========================================================================
@@ -84,12 +78,6 @@ fn main() {
     {
         let local_count: usize = 32;
         let win = Win::<f64>::allocate(&world, local_count).expect("Win::allocate failed");
-
-        let handle = win.raw_handle();
-        assert!(
-            handle >= 0,
-            "Win::allocate raw_handle() = {handle}, expected >= 0"
-        );
 
         assert_eq!(win.comm_size(), size, "Win::allocate comm_size() mismatch");
 
@@ -122,9 +110,7 @@ fn main() {
 
     world.barrier().expect("barrier after test 2 failed");
     if rank == 0 {
-        println!(
-            "PASS: Win::allocate (f64, 32 elements, raw_handle, comm_size, local, into_buffer)"
-        );
+        println!("PASS: Win::allocate (f64, 32 elements, comm_size, local, into_buffer)");
     }
 
     world.barrier().expect("final barrier failed");

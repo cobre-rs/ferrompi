@@ -3,7 +3,7 @@
 //! stale handle left in a slice or held past completion must not act on
 //! whatever request now occupies the reused slot.
 //!
-//! Five parts, each ending in a `common::check`:
+//! Four parts, each ending in a `common::check`:
 //!
 //! 1. The Waitany loop idiom: calling `wait_any` repeatedly on the same
 //!    slice without removing completed entries reaches `Ok(None)`, and
@@ -15,8 +15,6 @@
 //! 4. A `test()` that fails with a truncation error still marks the request
 //!    completed, so dropping it does not disturb a newer request that
 //!    reused its slot.
-//! 5. A stale raw handle passed directly to the C layer is rejected instead
-//!    of acting on whatever now occupies the slot.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_request_aba
 // mpi-test: np=2
@@ -24,26 +22,6 @@
 use ferrompi::{Communicator, Error, Mpi, MpiErrorClass, Request};
 
 mod common;
-
-// Raw FFI declaration for the C-side shim under test (Part 5).
-//
-// SAFETY invariants for the call below:
-//   - `request` is a stale i64 handle: valid table bounds, but freed and
-//     possibly reused by the time of this call, so the generation check
-//     inside the C-side lookup must reject it without touching whatever
-//     request now occupies the slot.
-//   - `flag` points to a valid i32 on the stack; it is only meaningful if
-//     the call succeeds, which it must not.
-//   - `status` is null, which the shim treats as MPI_STATUS_IGNORE; it is
-//     declared as an opaque pointer because the shim's status type is
-//     crate-private.
-extern "C" {
-    fn ferrompi_test(
-        request: i64,
-        flag: *mut i32,
-        status: *mut std::ffi::c_void,
-    ) -> std::ffi::c_int;
-}
 
 // Drains `reqs` through the Waitany loop idiom. Returns `Err` if any call
 // fails outright (the BASE behavior: the loop idiom cannot even reach
@@ -252,70 +230,6 @@ fn part4_failed_test(world: &Communicator, rank: i32) {
     );
 }
 
-fn part5_stale_raw_handle(world: &Communicator, rank: i32) {
-    let mut a_buf = [0u8; 4];
-    let mut b_buf = [0u8; 4];
-    let mut ok = true;
-
-    if rank == 0 {
-        ok &= ferrompi::scope(|s| {
-            let a = world.irecv(s, &mut a_buf, 1, 31).expect("part5: irecv a");
-            let stale_handle = a.raw_handle();
-            world.barrier().expect("part5: barrier after posting a");
-
-            a.wait().expect("part5: wait a");
-
-            let b = world.irecv(s, &mut b_buf, 1, 32).expect("part5: irecv b");
-            common::check(
-                world,
-                (b.raw_handle() & 0xffff_ffff) == (stale_handle & 0xffff_ffff)
-                    && b.raw_handle() != stale_handle,
-                "part 5 precondition: slot reused with a new generation",
-            );
-            world.barrier().expect("part5: barrier after posting b");
-
-            let mut flag: i32 = 0;
-            let raw_ret = unsafe {
-                // SAFETY: see the invariant comment on the extern "C" block above.
-                ferrompi_test(
-                    stale_handle,
-                    std::ptr::addr_of_mut!(flag),
-                    std::ptr::null_mut(),
-                )
-            };
-            let mut scope_ok = raw_ret != 0;
-            scope_ok &= matches!(
-                Error::from_code(raw_ret),
-                Error::Mpi {
-                    class: MpiErrorClass::Request,
-                    ..
-                }
-            );
-
-            scope_ok &= b.wait().is_ok();
-            Ok(scope_ok)
-        })
-        .expect("part5: scope failed");
-        ok &= b_buf == [32u8; 4];
-    } else {
-        world.barrier().expect("part5: barrier after posting a");
-        world.send(&[31u8; 4], 0, 31).expect("part5: send tag31");
-        common::check(
-            world,
-            true,
-            "part 5 precondition: slot reused with a new generation",
-        );
-        world.barrier().expect("part5: barrier after posting b");
-        world.send(&[32u8; 4], 0, 32).expect("part5: send tag32");
-    }
-
-    common::check(
-        world,
-        ok,
-        "part 5: stale raw handle is rejected, not aliased",
-    );
-}
-
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
     let world = mpi.world();
@@ -331,7 +245,6 @@ fn main() {
     part2_wait_all_completed_slice(&world, rank);
     part3_stale_wait_any_entry(&world, rank);
     part4_failed_test(&world, rank);
-    part5_stale_raw_handle(&world, rank);
 
     if rank == 0 {
         println!("\n========================================");

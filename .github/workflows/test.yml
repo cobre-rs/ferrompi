@@ -119,6 +119,10 @@ jobs:
       - name: Unit tests
         run: cargo test --lib --features numa --verbose
 
+      - name: Unit test that initializes MPI
+        timeout-minutes: 5
+        run: cargo test --lib --features "${{ matrix.features }}" -- --ignored
+
       - name: Build examples
         run: cargo build --examples --features "${{ matrix.features }}"
 
@@ -181,6 +185,10 @@ jobs:
 
       - name: MPI integration tests (rma)
         run: MPI_NP_LIST=4 ./tests/run_mpi_tests.sh rma
+
+      - name: Unit test that initializes MPI
+        timeout-minutes: 5
+        run: cargo test --lib --features rma -- --ignored
 
       - name: Receive pending after a process failure aborts (ULFM)
         shell: bash
@@ -341,6 +349,7 @@ jobs:
           source <(cargo llvm-cov show-env --export-prefix)
           cargo llvm-cov clean --workspace
           cargo test --lib --features numa
+          cargo test --lib --features numa -- --ignored
           MPI_NP_LIST=4 ./tests/run_mpi_tests.sh numa
           cargo llvm-cov report --lcov --output-path lcov.info
 

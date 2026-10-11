@@ -927,6 +927,127 @@ mod tests {
         };
     }
 
+    // ── checks that need an initialized MPI ───────────────────────────────
+
+    /// The one test that initializes MPI. Other tests of this binary need a
+    /// process in which MPI was never initialized, so this one is ignored by
+    /// default and runs alone, as a singleton: `cargo test --lib -- --ignored`.
+    #[test]
+    #[ignore = "initializes MPI; run alone with `cargo test --lib -- --ignored`"]
+    fn checks_that_need_mpi() {
+        use crate::{CustomDatatype, MpiDatatype, MpiErrorClass, StructField};
+
+        let mpi = Mpi::init_thread(ThreadLevel::Multiple).expect("MPI init failed");
+        let world = mpi.world();
+        // The threads below duplicate the world communicator with no order
+        // between their calls, which is valid only in a world of one process.
+        assert_eq!(world.size(), 1, "this test needs a world of one process");
+        assert!(world.handle >= 0, "world handle {}", world.handle);
+
+        // An out-of-range group handle reaches MPI as MPI_GROUP_NULL.
+        let mut size: i32 = 0;
+        // SAFETY: `size` is a valid out-parameter; handle 999 is past the group table.
+        let ret = unsafe { crate::ffi::ferrompi_group_size(999, &mut size) };
+        assert!(
+            matches!(
+                Error::from_code(ret),
+                Error::Mpi {
+                    class: MpiErrorClass::Group,
+                    ..
+                }
+            ),
+            "group_size(999) returned {ret}"
+        );
+
+        // A count above INT_MAX is refused before either array is read.
+        let handle: i64 = -1;
+        let mut done: u8 = 0;
+        let mut failed: i64 = -1;
+        // SAFETY: the count guard returns before the two arrays are read or written.
+        let ret =
+            unsafe { crate::ffi::ferrompi_waitall(i64::MAX, &handle, &mut done, &mut failed) };
+        assert!(
+            matches!(
+                Error::from_code(ret),
+                Error::Mpi {
+                    class: MpiErrorClass::Count,
+                    ..
+                }
+            ),
+            "waitall(i64::MAX) returned {ret}"
+        );
+
+        // A refused create-from-group call writes no handle: the group handle
+        // is past the table, and where the library lacks
+        // MPI_Comm_create_from_group the shim refuses every call.
+        let mut out: i32 = -2;
+        // SAFETY: the tag is a C string and `out` is a valid out-parameter.
+        let ret = unsafe {
+            crate::ffi::ferrompi_comm_create_from_group(999, c"refused".as_ptr(), &mut out)
+        };
+        assert!(
+            ret != 0 && out == -2,
+            "create_from_group(999) returned {ret}, handle {out}"
+        );
+
+        crate::request::tests::stale_handle_is_rejected(&world);
+
+        // Four threads duplicate the world communicator at once: every handle
+        // names its own table slot.
+        if mpi.thread_level() == ThreadLevel::Multiple {
+            let comms = std::sync::Mutex::new(Vec::new());
+            std::thread::scope(|s| {
+                for _ in 0..4 {
+                    s.spawn(|| {
+                        let local: Vec<_> = (0..50)
+                            .map(|_| world.duplicate().expect("duplicate failed"))
+                            .collect();
+                        comms.lock().expect("mutex poisoned").extend(local);
+                    });
+                }
+            });
+            let comms = comms.into_inner().expect("mutex poisoned");
+            let unique: std::collections::HashSet<i32> = comms.iter().map(|c| c.handle).collect();
+            assert_eq!((comms.len(), unique.len()), (200, 200));
+        }
+
+        fn contiguous_handle<T: MpiDatatype>() -> i32 {
+            CustomDatatype::contiguous::<T>(4)
+                .expect("contiguous failed")
+                .handle
+        }
+        for handle in [
+            contiguous_handle::<f32>(),
+            contiguous_handle::<f64>(),
+            contiguous_handle::<i32>(),
+            contiguous_handle::<i64>(),
+            contiguous_handle::<u8>(),
+            contiguous_handle::<u32>(),
+            contiguous_handle::<u64>(),
+        ] {
+            assert!(handle >= 0);
+        }
+        let vector = CustomDatatype::vector::<f64>(3, 2, 5).expect("vector failed");
+        assert!(vector.handle >= 0);
+        let empty_blocks = CustomDatatype::vector::<f64>(3, 0, 5).expect("vector failed");
+        assert!(empty_blocks.handle >= 0);
+        let s = CustomDatatype::create_struct(&[
+            StructField::new::<f64>(1, 0),
+            StructField::new::<i32>(1, 8),
+        ])
+        .expect("create_struct failed");
+        assert!(s.handle >= 0);
+        let r = s.resized(0, 16).expect("resized failed");
+        assert!(r.handle >= 0 && r.handle != s.handle);
+        assert!(s.handle >= 0);
+
+        #[cfg(feature = "rma")]
+        {
+            crate::window::tests::window_handles_and_put_count(&world);
+            crate::request::tests::epoch_completes_pending_rput(&world);
+        }
+    }
+
     // ── Mpi::create_from_group unit tests ─────────────────────────────────
 
     /// Verify that a `stringtag` containing a null byte is rejected before

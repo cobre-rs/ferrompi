@@ -2,7 +2,7 @@
 //!
 //! Exercises:
 //! - Successful construction of a `{ f64, i32 }` struct type (8-byte f64 at
-//!   offset 0, i32 at offset 8) and `raw_handle() >= 0`
+//!   offset 0, i32 at offset 8)
 //! - Empty `fields` slice returns `Err` with class `Arg` without calling into
 //!   MPI
 //! - Drop frees the underlying MPI handle (no double-free on exit)
@@ -25,21 +25,16 @@ fn main() {
     let mut local_ok = true;
 
     // ========================================================================
-    // Test 1: create_struct for a { f64, i32 } layout returns Ok with
-    //         raw_handle() >= 0
+    // Test 1: create_struct for a { f64, i32 } layout returns Ok
     // ========================================================================
     {
         let fields = [StructField::new::<f64>(1, 0), StructField::new::<i32>(1, 8)];
         match CustomDatatype::create_struct(&fields) {
-            Ok(s) => {
-                let h = s.raw_handle();
-                if h < 0 {
-                    eprintln!("rank {rank}: FAIL Test 1 — raw_handle = {h}, expected >= 0");
-                    local_ok = false;
-                } else if rank == 0 {
-                    println!("PASS: Test 1 — create_struct({{f64,i32}}) raw_handle = {h}");
+            Ok(_) => {
+                if rank == 0 {
+                    println!("PASS: Test 1 — create_struct({{f64,i32}}) returned Ok");
                 }
-                // s drops here, freeing the MPI handle
+                // The datatype drops at the end of the match, freeing the MPI handle
             }
             Err(e) => {
                 eprintln!(

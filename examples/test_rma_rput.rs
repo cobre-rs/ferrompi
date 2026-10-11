@@ -10,11 +10,9 @@
 //! 2. A request the closure never waits is completed by the epoch before it
 //!    unlocks, whether the closure returns `Ok`, returns an error or panics.
 //!    Rank 0 runs many `lock` epochs per exit, each posting one `rput` it
-//!    never waits, and records the request's table slot (the low 32 bits of its
-//!    raw handle; the high bits count the slot's reuses). A slot the epoch
-//!    completed is the lowest free one again, so every epoch of an exit gets
-//!    the first epoch's slot; an epoch that left its request pending would take
-//!    a new slot each time.
+//!    never waits. That the epoch completed the request is checked by the
+//!    `checks_that_need_mpi` unit test in `src/lib.rs`, which can read the
+//!    request's table slot.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_rput
 // mpi-test: np=2
@@ -36,16 +34,14 @@ enum Exit {
 }
 
 /// Runs `ROUNDS` `lock` epochs on rank 1, each posting one `rput` that it never
-/// waits and ending as `exit` says, and returns every request's table slot and
-/// whether every epoch ended that way.
-fn pending_rput_slots(win: &mut Win<i32>, buf: &[i32; 4], exit: Exit) -> (Vec<u32>, bool) {
-    let mut slots = Vec::with_capacity(ROUNDS);
+/// waits and ending as `exit` says, and returns whether every epoch ended that
+/// way.
+fn pending_rput_epochs(win: &mut Win<i32>, buf: &[i32; 4], exit: Exit) -> bool {
     let mut ended_as_asked = true;
     for _ in 0..ROUNDS {
         let ended = catch_unwind(AssertUnwindSafe(|| {
             win.lock(LockType::Exclusive, 1, |e| {
-                let req = e.rput(buf, 1, 0)?;
-                slots.push(req.raw_handle() as u32);
+                let _req = e.rput(buf, 1, 0)?;
                 match exit {
                     Exit::Ok => Ok(()),
                     // Rank 99 is outside the window's communicator.
@@ -59,7 +55,7 @@ fn pending_rput_slots(win: &mut Win<i32>, buf: &[i32; 4], exit: Exit) -> (Vec<u3
             (Exit::Ok, Ok(Ok(()))) | (Exit::Err, Ok(Err(_))) | (Exit::Panic, Err(_))
         );
     }
-    (slots, ended_as_asked)
+    ended_as_asked
 }
 
 fn main() {
@@ -157,16 +153,8 @@ fn main() {
                 (Exit::Err, "returns an error"),
                 (Exit::Panic, "panics"),
             ] {
-                let (slots, ended_as_asked) = pending_rput_slots(&mut win, &buf, exit);
-                if !ended_as_asked {
+                if !pending_rput_epochs(&mut win, &buf, exit) {
                     eprintln!("FAIL: a closure that {name} did not end its epoch that way");
-                    local_ok = false;
-                }
-                if slots.len() != ROUNDS || slots.iter().any(|&slot| slot != slots[0]) {
-                    eprintln!(
-                        "FAIL: an unwaited rput left pending by a closure that {name} was not completed by its epoch: slots {:?}...",
-                        &slots[..slots.len().min(8)]
-                    );
                     local_ok = false;
                 }
             }

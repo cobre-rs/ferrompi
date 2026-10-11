@@ -39,6 +39,7 @@ cargo clippy --all-targets --features rma -- -D warnings
 cargo clippy --all-targets --features numa -- -D warnings
 
 cargo test --lib --features numa
+cargo test --lib --features rma -- --ignored   # the one unit test that initializes MPI
 cargo test --doc
 cargo test --doc --all-features
 cargo +nightly-2026-09-30 test --doc --all-features   # enforces compile_fail error codes
@@ -117,6 +118,12 @@ collectives capability, mirroring the C gate), `class_of` (the class of an
 `Error::Mpi` result), `PAYLOAD` (four elements that truncate into a one-element
 receive), and `displs_from_counts` (the exclusive prefix sum of v-collective
 counts).
+
+A check that needs a crate-private item and an initialized MPI goes into
+`tests::checks_that_need_mpi` in `src/lib.rs`, or into a function it calls. It is the
+only unit test that initializes MPI, so it is `#[ignore]`d and runs alone, as a
+singleton: `cargo test --lib -- --ignored`. Never pass `--include-ignored`: some of the
+other unit tests need a process in which MPI was never initialized.
 
 ## Benchmarks
 
