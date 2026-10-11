@@ -2,14 +2,16 @@
 //!
 //! Tests the full PersistentRequest lifecycle: init, start, wait, test,
 //! start_all, wait_all, and drop. Where the library lacks persistent
-//! collectives (below MPI 4.0, except Open MPI 5), asserts that broadcast_init
-//! refuses with Error::NotSupported instead of running the suite.
+//! collectives (below MPI 4.0, except Open MPI 5), asserts that broadcast_init,
+//! reduce_init_inplace and barrier_init refuse with Error::NotSupported
+//! instead of running the suite.
 //!
-//! Exercises all 15 persistent collective `_init` methods in `Comm`:
+//! Exercises 17 persistent collective `_init` methods in `Comm`:
 //! broadcast_init, allreduce_init, allreduce_init_inplace, gather_init,
 //! reduce_init, scatter_init, allgather_init, scan_init, exscan_init,
 //! alltoall_init, gatherv_init, scatterv_init, allgatherv_init,
-//! alltoallv_init, and reduce_scatter_block_init.
+//! alltoallv_init, reduce_scatter_block_init, reduce_init_inplace and
+//! barrier_init.
 //!
 //! Additionally tests PersistentRequest::test() polling, start_all/wait_all,
 //! drop without start (inactive path), and drop after start without wait
@@ -51,6 +53,20 @@ fn main() {
             &world,
             ok,
             "broadcast_init refuses without persistent collectives",
+        );
+        let result = world.reduce_init_inplace(vec![0.0f64; 10], ReduceOp::Sum, 0);
+        let ok = matches!(&result, Err(Error::NotSupported(op)) if op == "reduce_init_inplace");
+        common::check(
+            &world,
+            ok,
+            "reduce_init_inplace refuses without persistent collectives",
+        );
+        let result = world.barrier_init();
+        let ok = matches!(&result, Err(Error::NotSupported(op)) if op == "barrier_init");
+        common::check(
+            &world,
+            ok,
+            "barrier_init refuses without persistent collectives",
         );
         return;
     }
@@ -847,6 +863,80 @@ fn main() {
         test_count += 1;
         if rank == 0 {
             println!("PASS: drop after start without wait (active Drop path)");
+        }
+    }
+
+    // ========================================================================
+    // Test 20: reduce_init_inplace (Sum, to rank 0 and to the last rank)
+    //
+    // The root's buffer holds the result after each wait; every other rank's
+    // buffer is only sent. An empty buffer is a reduction of nothing.
+    // ========================================================================
+    for root in [0, size - 1] {
+        let mut req = world
+            .reduce_init_inplace(vec![0i32; 3], ReduceOp::Sum, root)
+            .expect("reduce_init_inplace failed");
+        for iter in 0..3 {
+            req.buffer_mut().expect("buffer_mut").fill(rank + iter);
+            req.start().expect("reduce_init_inplace start failed");
+            req.wait().expect("reduce_init_inplace wait failed");
+            // The sum over every rank r of (r + iter), at the root only.
+            let expected = if rank == root {
+                size * (size - 1) / 2 + size * iter
+            } else {
+                rank + iter
+            };
+            assert_eq!(
+                req.buffer().expect("buffer"),
+                [expected; 3],
+                "reduce_init_inplace to root {root}, iteration {iter}, rank {rank}"
+            );
+        }
+    }
+    {
+        let mut req = world
+            .reduce_init_inplace(Vec::<u8>::new(), ReduceOp::Max, 0)
+            .expect("reduce_init_inplace of an empty buffer failed");
+        req.start()
+            .expect("start of an empty reduce_init_inplace failed");
+        req.wait()
+            .expect("wait of an empty reduce_init_inplace failed");
+    }
+    test_count += 1;
+    if rank == 0 {
+        println!("PASS: reduce_init_inplace (Sum)");
+    }
+
+    world.barrier().expect("barrier failed");
+
+    // ========================================================================
+    // Test 21: barrier_init (three barriers through one request)
+    // ========================================================================
+    {
+        let mut req = world.barrier_init().expect("barrier_init failed");
+        assert!(
+            req.buffer().expect("buffer").is_empty(),
+            "a barrier request owns no data"
+        );
+        for iter in 0..3 {
+            assert!(
+                !req.is_active(),
+                "barrier request should be inactive before start {iter}"
+            );
+            req.start().expect("barrier_init start failed");
+            assert!(
+                req.is_active(),
+                "barrier request should be active after start {iter}"
+            );
+            req.wait().expect("barrier_init wait failed");
+        }
+        assert!(
+            !req.is_active(),
+            "barrier request should be inactive after the last wait"
+        );
+        test_count += 1;
+        if rank == 0 {
+            println!("PASS: barrier_init");
         }
     }
 

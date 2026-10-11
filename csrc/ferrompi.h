@@ -250,16 +250,15 @@ int ferrompi_bcast(void* buf, int64_t count, int32_t datatype_tag, int32_t root,
 
 /**
  * In-place collectives (generic): reduce, allreduce, gather, allgather,
- * alltoall, ireduce, iallreduce, igather, iallgather, ialltoall,
+ * alltoall, ireduce, iallreduce, igather, iallgather, ialltoall, reduce_init,
  * allreduce_init, gather_init, allgather_init and alltoall_init substitute
  * MPI_IN_PLACE for sendbuf when sendbuf == NULL; scatter, iscatter and
  * scatter_init substitute MPI_IN_PLACE for recvbuf when recvbuf == NULL.
- * reduce_init passes sendbuf through unchanged.
  * Rust slices never produce a NULL pointer, so NULL is an unambiguous in-place
  * marker here.
  */
 
-/** Reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
+/** Reduce (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_reduce(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t root, int32_t comm);
 
 /** All-reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
@@ -422,6 +421,8 @@ int ferrompi_bsend_init(
  * Generic Persistent Collectives (MPI 4.0, or Open MPI 5)
  * ============================================================ */
 
+int ferrompi_barrier_init(int32_t comm, int64_t* request);
+
 int ferrompi_bcast_init(void* buf, int64_t count, int32_t datatype_tag, int32_t root, int32_t comm, int64_t* request);
 
 /** Initialize persistent all-reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
@@ -430,6 +431,7 @@ int ferrompi_allreduce_init(const void* sendbuf, void* recvbuf, int64_t count, i
 /** Initialize persistent gather (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_gather_init(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t root, int32_t comm, int64_t* request);
 
+/** Initialize persistent reduce (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_reduce_init(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t root, int32_t comm, int64_t* request);
 
 /** Initialize persistent scatter (generic). NULL recvbuf maps to MPI_IN_PLACE (valid only at root). */

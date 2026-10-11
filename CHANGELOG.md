@@ -256,6 +256,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   forms of `iallreduce` and `ireduce`, created inside a `ferrompi::scope`.
   `ireduce_inplace` replaces `data` with the result at the root; at every
   other rank `data` is only sent, as for `reduce_inplace`.
+- **`Communicator::reduce_init_inplace` and `barrier_init`** (MPI 4.0, or Open
+  MPI 5): the persistent in-place reduce and the persistent barrier. A
+  barrier request is a `PersistentRequest<()>`, which owns no data. On a
+  library without persistent collectives both return `Error::NotSupported`.
 
 ### Changed
 

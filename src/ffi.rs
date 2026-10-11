@@ -803,6 +803,8 @@ guarded_extern! {
     // ============================================================
     // Generic Persistent Collectives (MPI 4.0, or Open MPI 5)
     // ============================================================
+    pub fn ferrompi_barrier_init(comm: int32_t, request: *mut int64_t) -> c_int;
+
     pub fn ferrompi_bcast_init(
         buf: *mut c_void,
         count: int64_t,

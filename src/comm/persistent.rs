@@ -10,6 +10,36 @@ use crate::op::CollectiveOp;
 use crate::persistent::{vec_buf, vec_buf_mut, PersistentRequest};
 
 impl Communicator {
+    /// Initialize a persistent barrier.
+    ///
+    /// Each `start()` followed by `wait()` is one barrier: the wait returns once
+    /// every process of the communicator has started the same request. The
+    /// request owns no data, so its buffer is empty.
+    ///
+    /// Requires MPI 4.0, or Open MPI 5.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrompi::Mpi;
+    /// # let mpi = Mpi::init().unwrap();
+    /// # let world = mpi.world();
+    /// let mut barrier = world.barrier_init().unwrap();
+    /// for _ in 0..100 {
+    ///     // ... one step of work ...
+    ///     barrier.start().unwrap();
+    ///     barrier.wait().unwrap();
+    /// }
+    /// ```
+    pub fn barrier_init(&self) -> Result<PersistentRequest<()>> {
+        let mut request_handle: i64 = 0;
+        // SAFETY: self.handle is owned by this Communicator; request_handle is an exclusive
+        // output. MPI keeps no pointer into caller memory for a barrier.
+        let ret = unsafe { ffi::ferrompi_barrier_init(self.handle, &mut request_handle) };
+        Error::check_with_op(ret, "barrier_init")?;
+        Ok(PersistentRequest::new(request_handle, Vec::new()))
+    }
+
     /// Initialize a persistent broadcast operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
@@ -236,6 +266,93 @@ impl Communicator {
         };
         Error::check_with_op(ret, "reduce_init")?;
         let mut request = PersistentRequest::new_pair(request_handle, send, recv, Vec::new());
+        request.op = op.registration();
+        Ok(request)
+    }
+
+    /// Initialize a persistent in-place reduce operation.
+    ///
+    /// At root, the request's buffer is both the input and the result. At every
+    /// other rank it is the send buffer only, as for
+    /// [`reduce_inplace`](Self::reduce_inplace).
+    ///
+    /// The returned handle can be started multiple times with `start()`. Each start
+    /// reads the buffer as it is then: a root that does not rewrite it contributes
+    /// the result of the previous start.
+    /// Requires MPI 4.0, or Open MPI 5.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Buffer, owned by the request: this process's values before each start
+    ///   and, at the root, the reduced values after each wait. Reach it with `buffer` and
+    ///   `buffer_mut` while the request is inactive, or take it back with `into_buffer`
+    /// * `op` - a [`ReduceOp`](crate::ReduceOp), a `&`[`UserOp<T>`](crate::UserOp) (the
+    ///   request keeps the op alive until it is freed), or a [`CollectiveOp`]
+    /// * `root` - Rank of the root process
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidArgument`] with `arg: "op"` if `op` is a predefined op MPI does not
+    ///   define on `T` (a bitwise or logical op on `f32`/`f64`)
+    /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count) if
+    ///   `op` is a user op and `data.len()` exceeds `i32::MAX`
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrompi::{Mpi, ReduceOp};
+    /// # let mpi = Mpi::init().unwrap();
+    /// # let world = mpi.world();
+    /// let mut persistent = world
+    ///     .reduce_init_inplace(vec![0.0f64; 10], ReduceOp::Sum, 0)
+    ///     .unwrap();
+    /// for iter in 0..100 {
+    ///     persistent.buffer_mut().unwrap().fill(iter as f64);
+    ///     persistent.start().unwrap();
+    ///     persistent.wait().unwrap();
+    ///     if world.rank() == 0 {
+    ///         assert_eq!(persistent.buffer().unwrap()[0], (iter * world.size()) as f64);
+    ///     }
+    /// }
+    /// ```
+    pub fn reduce_init_inplace<'a, T: MpiDatatype>(
+        &self,
+        mut data: Vec<T>,
+        op: impl Into<CollectiveOp<'a, T>>,
+        root: i32,
+    ) -> Result<PersistentRequest<T>> {
+        let op = op.into();
+        let code = op.code(tag_of::<T>())?;
+        let mut request_handle: i64 = 0;
+        let (p, n, dt) = vec_buf_mut(&mut data);
+        let sendbuf = if self.rank == root {
+            std::ptr::null()
+        } else {
+            p.cast_const()
+        };
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, taken from the `Vec` by
+        // `vec_buf_mut`. At root, NULL sendbuf is the in-place marker (a Vec's pointer is
+        // never null, so this NULL is unambiguous); ferrompi_reduce_init maps it to
+        // MPI_IN_PLACE, so data is both input and output there. At every other rank data is
+        // the send buffer, and it is passed as recvbuf too, as reduce_inplace does: recvbuf
+        // is significant only at the root (MPI-4.1 section 6.9.1), so a non-root rank's data
+        // is only read. The request built below owns `data` under the ownership invariant
+        // documented on `PersistentRequest::new_pair`, and a user op is cloned into it, so
+        // its closure outlives every start.
+        let ret = unsafe {
+            ffi::ferrompi_reduce_init(
+                sendbuf,
+                p,
+                n,
+                dt,
+                code,
+                root,
+                self.handle,
+                &mut request_handle,
+            )
+        };
+        Error::check_with_op(ret, "reduce_init_inplace")?;
+        let mut request = PersistentRequest::new(request_handle, data);
         request.op = op.registration();
         Ok(request)
     }
@@ -1089,6 +1206,19 @@ mod tests {
     fn allreduce_init_float_bitwise_op_returns_invalid_argument() {
         let comm = test_comm(0, 1);
         let result = comm.allreduce_init(vec![1.0f64; 4], vec![0.0f64; 4], ReduceOp::BitwiseOr);
+        assert!(matches!(
+            result,
+            Err(Error::InvalidArgument {
+                arg: "op",
+                reason: "bitwise and logical ops do not apply to floating-point types"
+            })
+        ));
+    }
+
+    #[test]
+    fn reduce_init_inplace_float_bitwise_op_returns_invalid_argument() {
+        let comm = test_comm(0, 1);
+        let result = comm.reduce_init_inplace(vec![1.0f64; 4], ReduceOp::BitwiseOr, 0);
         assert!(matches!(
             result,
             Err(Error::InvalidArgument {

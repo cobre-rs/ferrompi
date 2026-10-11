@@ -10,8 +10,8 @@
 //! - **Blocking collectives**: barrier, broadcast, reduce, allreduce, gather, scatter, allgather,
 //!   alltoall, scan, exscan, reduce\_scatter\_block, plus V-variants (gatherv, scatterv, allgatherv, alltoallv)
 //! - **Nonblocking collectives**: all 15 `i`-prefixed variants, created inside a [`scope`]
-//! - **Persistent collectives** (MPI 4.0, or Open MPI 5): `*_init` forms of every blocking collective except
-//!   `barrier`, plus five in-place forms, with [`PersistentRequest`] handles
+//! - **Persistent collectives** (MPI 4.0, or Open MPI 5): `*_init` forms of every blocking collective,
+//!   plus six in-place forms, with [`PersistentRequest`] handles
 //! - **Large counts**: with an MPI 4.0 library, a count above `i32::MAX` uses MPI's `_c` call
 //!   (point-to-point, collectives including persistent ones, RMA); below
 //!   MPI 4.0 it returns [`Error::Mpi`] with class [`MpiErrorClass::Count`]. The V-collectives

@@ -2422,6 +2422,25 @@ int ferrompi_bsend_init(
 
 #ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
 
+int ferrompi_barrier_init(
+    int32_t comm_handle,
+    int64_t* request_handle
+) {
+    MPI_Comm comm = get_comm(comm_handle);
+    MPI_Request req;
+    int ret = MPI_Barrier_init(comm, MPI_INFO_NULL, &req);
+
+    if (ret == MPI_SUCCESS) {
+        *request_handle = alloc_request(req, 1);
+        if (*request_handle < 0) {
+            MPI_Request_free(&req);
+            return FERROMPI_ERR_REQUESTS_FULL;
+        }
+    }
+
+    return ret;
+}
+
 int ferrompi_bcast_init(
     void* buf,
     int64_t count,
@@ -2554,19 +2573,20 @@ int ferrompi_reduce_init(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
+    const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     MPI_Request req;
     int ret;
 
     if (count > INT_MAX) {
         if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
-        ret = MPI_Reduce_init_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm,
+        ret = MPI_Reduce_init_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm,
                                  MPI_INFO_NULL, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Reduce_init(sendbuf, recvbuf, (int)count, dt, mpi_op, root, comm,
+        ret = MPI_Reduce_init(sb, recvbuf, (int)count, dt, mpi_op, root, comm,
                               MPI_INFO_NULL, &req);
     }
 
@@ -2958,6 +2978,11 @@ int ferrompi_reduce_scatter_block_init(
 }
 
 #else /* !FERROMPI_HAVE_MPI4_COLLECTIVES */
+
+int ferrompi_barrier_init(int32_t comm_handle, int64_t* request_handle) {
+    (void)comm_handle; (void)request_handle;
+    return FERROMPI_ERR_NOT_SUPPORTED;
+}
 
 int ferrompi_bcast_init(void* buf, int64_t count, int32_t datatype_tag, int32_t root,
                         int32_t comm_handle, int64_t* request_handle) {
