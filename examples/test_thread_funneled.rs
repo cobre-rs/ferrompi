@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Info, Mpi, ReduceOp, ThreadLevel, UserOp};
+use ferrompi::{CustomDatatype, Error, Info, Mpi, ReduceOp, ThreadLevel, UserOp};
 
 mod common;
 
@@ -65,7 +65,7 @@ fn main() {
             ok &= matches!(world_ref.processor_name(), Err(Error::ThreadLevelViolation));
             ok &= matches!(Info::new(), Err(Error::ThreadLevelViolation));
             ok &= matches!(
-                CustomDatatype::contiguous(2, DatatypeTag::F64),
+                CustomDatatype::contiguous::<f64>(2),
                 Err(Error::ThreadLevelViolation)
             );
             // One more than the op table's 16 slots: a rejected create must

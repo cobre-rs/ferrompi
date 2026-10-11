@@ -1,6 +1,6 @@
 //! The `PersistentRequest` handle returned by the persistent `*_init` constructors.
 
-use crate::datatype::MpiDatatype;
+use crate::datatype::{tag_of, MpiDatatype};
 use crate::error::{Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL};
 use crate::ffi;
 use crate::op::OpRegistration;
@@ -23,12 +23,12 @@ use std::sync::Arc;
     reason = "the pointer must come from the Vec, not from a slice reborrow"
 )]
 pub(crate) fn vec_buf<T: MpiDatatype>(v: &Vec<T>) -> (*const c_void, i64, i32) {
-    (v.as_ptr().cast(), v.len() as i64, T::TAG as i32)
+    (v.as_ptr().cast(), v.len() as i64, tag_of::<T>() as i32)
 }
 
 /// See [`vec_buf`]; the pointer comes from `Vec::as_mut_ptr`.
 pub(crate) fn vec_buf_mut<T: MpiDatatype>(v: &mut Vec<T>) -> (*mut c_void, i64, i32) {
-    (v.as_mut_ptr().cast(), v.len() as i64, T::TAG as i32)
+    (v.as_mut_ptr().cast(), v.len() as i64, tag_of::<T>() as i32)
 }
 
 /// A persistent MPI request that owns its buffers.

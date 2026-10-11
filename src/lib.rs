@@ -172,8 +172,7 @@ pub use comm::{Communicator, SplitType};
 #[cfg(feature = "rma")]
 pub use datatype::AtomicMpiDatatype;
 pub use datatype::{
-    BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, MpiDatatype, MpiIndexedDatatype,
-    PlainData, ShortInt,
+    BytePermutable, DoubleInt, FloatInt, Int2, MpiDatatype, MpiIndexedDatatype, PlainData, ShortInt,
 };
 #[cfg(all(
     target_os = "linux",

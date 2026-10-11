@@ -4,7 +4,6 @@
 //! - Successful construction and `raw_handle() >= 0`
 //! - Count=0 returns an MPI error or a valid zero-size type
 //!   (implementation-defined; both outcomes are accepted)
-//! - Indexed-basetype rejection returns `Error::InvalidArgument` before any FFI call
 //! - Drop frees the underlying MPI handle (no double-free on exit)
 //!
 //! All assertions are protected by a sentinel allreduce(Min) before any
@@ -13,7 +12,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_custom_dt_vector
 // mpi-test: np=2
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, MpiErrorClass};
+use ferrompi::{CustomDatatype, Error, Mpi, MpiErrorClass};
 
 mod common;
 
@@ -29,7 +28,7 @@ fn main() {
     // Test 1: vector(3, 2, 5, F64) returns Ok with raw_handle() >= 0
     // ========================================================================
     {
-        match CustomDatatype::vector(3, 2, 5, DatatypeTag::F64) {
+        match CustomDatatype::vector::<f64>(3, 2, 5) {
             Ok(v) => {
                 let h = v.raw_handle();
                 if h >= 0 {
@@ -57,7 +56,7 @@ fn main() {
     // a valid zero-size datatype. Both outcomes are accepted.
     // ========================================================================
     {
-        match CustomDatatype::vector(0, 2, 5, DatatypeTag::F64) {
+        match CustomDatatype::vector::<f64>(0, 2, 5) {
             Err(Error::Mpi { class, .. }) => {
                 if matches!(class, MpiErrorClass::Count | MpiErrorClass::Arg) {
                     if rank == 0 {
@@ -90,33 +89,10 @@ fn main() {
     }
 
     // ========================================================================
-    // Test 3: vector(3, 2, 5, FloatInt) returns Err(Error::InvalidArgument) without
-    //         calling into MPI (pre-FFI validation in the Rust wrapper)
-    // ========================================================================
-    {
-        match CustomDatatype::vector(3, 2, 5, DatatypeTag::FloatInt) {
-            Err(Error::InvalidArgument { .. }) => {
-                if rank == 0 {
-                    println!(
-                        "PASS: Test 3 — vector(3, 2, 5, FloatInt) returned Err(InvalidArgument)"
-                    );
-                }
-            }
-            other => {
-                eprintln!(
-                    "rank {rank}: FAIL Test 3 — expected Err(InvalidArgument), got: {:?}",
-                    other.err()
-                );
-                local_ok = false;
-            }
-        }
-    }
-
-    // ========================================================================
     // Test 4: vector with blocklength=0 is accepted (produces an empty-block type)
     // ========================================================================
     {
-        match CustomDatatype::vector(3, 0, 5, DatatypeTag::F64) {
+        match CustomDatatype::vector::<f64>(3, 0, 5) {
             Ok(v) => {
                 if v.raw_handle() >= 0 {
                     if rank == 0 {

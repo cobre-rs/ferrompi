@@ -9,7 +9,7 @@
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_proc_null
 // mpi-test: np=1.. valgrind
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, Source, Status, StructField, Tag};
+use ferrompi::{CustomDatatype, Error, Mpi, Source, Status, StructField, Tag};
 
 mod common;
 
@@ -122,12 +122,8 @@ fn main() {
         "recv_init from ProcNull reports the ProcNull status on every start",
     );
 
-    let one_i32 = CustomDatatype::create_struct(&[StructField {
-        blocklength: 1,
-        displacement: 0,
-        basetype: DatatypeTag::I32,
-    }])
-    .expect("create_struct failed");
+    let one_i32 = CustomDatatype::create_struct(&[StructField::new::<i32>(1, 0)])
+        .expect("create_struct failed");
     let r = world.recv_custom(&mut buf, &one_i32, Source::ProcNull, Tag::Any);
     common::check(
         &world,

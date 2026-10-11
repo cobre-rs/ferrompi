@@ -13,7 +13,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_custom_dt_p2p
 // mpi-test: np=2
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, PlainData, StructField};
+use ferrompi::{CustomDatatype, Error, Mpi, PlainData, StructField};
 
 mod common;
 
@@ -42,19 +42,8 @@ struct Frame {
 
 /// Build the custom datatype for `Pair`.
 fn make_pair_datatype() -> CustomDatatype {
-    CustomDatatype::create_struct(&[
-        StructField {
-            blocklength: 1,
-            displacement: 0,
-            basetype: DatatypeTag::F64,
-        },
-        StructField {
-            blocklength: 1,
-            displacement: 8,
-            basetype: DatatypeTag::I32,
-        },
-    ])
-    .expect("create_struct for Pair failed")
+    CustomDatatype::create_struct(&[StructField::new::<f64>(1, 0), StructField::new::<i32>(1, 8)])
+        .expect("create_struct for Pair failed")
 }
 
 fn main() {
@@ -235,8 +224,8 @@ fn main() {
     // Err(InvalidArgument) before any request is created.
     // ========================================================================
     {
-        let dt = CustomDatatype::contiguous(32, DatatypeTag::U8)
-            .expect("contiguous(32, U8) for Test 4 failed");
+        let dt =
+            CustomDatatype::contiguous::<u8>(32).expect("contiguous(32, U8) for Test 4 failed");
         let src = [0x41u8; 64];
         let mut frame = Frame {
             recv: [0; 1],
@@ -313,7 +302,7 @@ fn main() {
     // size_of::<u8>(), but the true extent (32) overruns it.
     // ========================================================================
     {
-        let dt = CustomDatatype::contiguous(32, DatatypeTag::U8)
+        let dt = CustomDatatype::contiguous::<u8>(32)
             .expect("contiguous(32, U8) for Test 5 failed")
             .resized(0, 1)
             .expect("resized(0, 1) for Test 5 failed");

@@ -20,10 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a counts or displacements array of the wrong length or a block past
   the buffer, and `InvalidArgument` for a negative count or displacement.
   Migration: match the new variants; `arg` names the parameter.
-- **`CustomDatatype::contiguous`, `vector` and `create_struct`
-  reject a pair base type with `Error::InvalidArgument`** instead of
-  `Error::InvalidOp`. Migration: match `Error::InvalidArgument`; `arg` is
-  `basetype` for `contiguous` and `vector`, `fields` for `create_struct`.
+- **Derived datatypes take their base type as a type parameter:**
+  `CustomDatatype::contiguous::<T>(count)`,
+  `CustomDatatype::vector::<T>(count, blocklength, stride)` and
+  `StructField::new::<T>(blocklength, displacement)`. `DatatypeTag` and the
+  `TAG` constants of `MpiDatatype` and `MpiIndexedDatatype` are removed.
+  `StructField`'s fields are private: it is built only with
+  `StructField::new` and has no accessors. A pair type as a base type is a
+  compile error (it was `Error::InvalidOp`), and `MPI_BYTE` is no longer a
+  base type. Migration: `contiguous(10, DatatypeTag::F64)` becomes
+  `contiguous::<f64>(10)`; `StructField { blocklength: 1, displacement: 8,
+  basetype: DatatypeTag::I32 }` becomes `StructField::new::<i32>(1, 8)`; use
+  `u8` where `DatatypeTag::Byte` was the base type.
 - **The `*_custom` methods
   reject a datatype that does not fit `T` with `Error::InvalidArgument {
   arg: "datatype", .. }`** instead of `Error::InvalidBuffer`. Migration:

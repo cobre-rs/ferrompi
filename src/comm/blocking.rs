@@ -3,7 +3,9 @@
 use crate::comm::{
     check_rank_slots, check_same_len, rank_block, scatter_inplace_args, Communicator,
 };
-use crate::datatype::{buf, buf_mut, BytePermutable, DatatypeTag, MpiDatatype, MpiIndexedDatatype};
+use crate::datatype::{
+    buf, buf_mut, pair_tag_of, tag_of, BytePermutable, DatatypeTag, MpiDatatype, MpiIndexedDatatype,
+};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::op::{check_op, Builtin, CollectiveOp};
@@ -94,7 +96,7 @@ impl Communicator {
         op: impl Into<CollectiveOp<'a, T>>,
         root: i32,
     ) -> Result<()> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         if self.rank == root {
             check_same_len("recv", send.len(), recv.len())?;
         }
@@ -185,7 +187,7 @@ impl Communicator {
         op: impl Into<CollectiveOp<'a, T>>,
         root: i32,
     ) -> Result<()> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         let (p, n, dt) = buf_mut(data);
         let ret = if self.rank() == root {
             // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so
@@ -267,7 +269,7 @@ impl Communicator {
         recv: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -300,7 +302,7 @@ impl Communicator {
         data: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         let (p, n, dt) = buf_mut(data);
         // SAFETY: NULL sendbuf is the in-place marker (buf_mut's pointer is never null, so this
         // NULL is unambiguous); ferrompi_allreduce maps it to MPI_IN_PLACE, so data serves as
@@ -404,19 +406,19 @@ impl Communicator {
         recv: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(pair_tag_of::<T>())?;
         check_same_len("recv", send.len(), recv.len())?;
         // SAFETY: send is a valid shared slice and recv is a valid exclusive slice of T
         // (T: MpiIndexedDatatype — one of the six predefined MPI paired types). They cannot
         // alias (Rust borrow rules). send.len() == recv.len() verified above. op is MAX_LOC
         // or MIN_LOC, the only ops CollectiveOp offers for a pair type.
-        // T::TAG matches T's MPI paired datatype. Slices outlive this call.
+        // The tag is T's MPI paired datatype. Slices outlive this call.
         let ret = unsafe {
             ffi::ferrompi_allreduce(
                 send.as_ptr().cast::<std::ffi::c_void>(),
                 recv.as_mut_ptr().cast::<std::ffi::c_void>(),
                 send.len() as i64,
-                T::TAG as i32,
+                pair_tag_of::<T>() as i32,
                 op,
                 self.handle,
             )
@@ -537,7 +539,7 @@ impl Communicator {
         recv: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -590,7 +592,7 @@ impl Communicator {
         recv: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         check_same_len("recv", send.len(), recv.len())?;
         let (sp, n, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
@@ -1038,7 +1040,7 @@ impl Communicator {
         recv: &mut [T],
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<()> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         check_same_len(
             "recv",
             rank_block("send", send.len(), self.size)?,

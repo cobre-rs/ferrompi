@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Info, Mpi, ReduceOp, ThreadLevel, UserOp};
+use ferrompi::{CustomDatatype, Error, Info, Mpi, ReduceOp, ThreadLevel, UserOp};
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -78,10 +78,7 @@ fn main() {
         "Info::new after finalize must return Err(Finalized)"
     );
     assert!(
-        matches!(
-            CustomDatatype::contiguous(2, DatatypeTag::F64),
-            Err(Error::Finalized)
-        ),
+        matches!(CustomDatatype::contiguous::<f64>(2), Err(Error::Finalized)),
         "CustomDatatype::contiguous after finalize must return Err(Finalized)"
     );
 

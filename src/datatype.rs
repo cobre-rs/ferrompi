@@ -42,7 +42,15 @@ use std::ffi::c_void;
 
 /// Internal module to seal [`MpiDatatype`] — prevents external implementations.
 mod sealed {
-    pub trait Sealed {}
+    use super::DatatypeTag;
+
+    /// Argument of [`Sealed::tag`]: it cannot be named outside this crate, so
+    /// the tag cannot be read through a public bound.
+    pub struct Token;
+
+    pub trait Sealed {
+        fn tag(_: Token) -> DatatypeTag;
+    }
 }
 
 /// Internal module to seal [`MpiIndexedDatatype`] — a separate seal so that
@@ -50,7 +58,11 @@ mod sealed {
 /// `MpiIndexedDatatype` must NOT automatically satisfy `MpiDatatype`, and
 /// vice-versa.
 mod sealed_indexed {
-    pub trait Sealed {}
+    use super::{sealed::Token, DatatypeTag};
+
+    pub trait Sealed {
+        fn tag(_: Token) -> DatatypeTag;
+    }
 }
 
 /// Internal module to seal [`BytePermutable`] — a separate seal for types
@@ -136,9 +148,44 @@ pub enum DatatypeTag {
 /// let mut data_i32 = vec![42i32; 10];
 /// world.broadcast(&mut data_i32, 0).unwrap();
 /// ```
-pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {
-    /// The datatype tag used for FFI dispatch to the C layer.
-    const TAG: DatatypeTag;
+///
+/// # The datatype code is private
+///
+/// The code the C layer dispatches on has no public name:
+///
+/// ```compile_fail,E0432
+/// use ferrompi::DatatypeTag;
+/// ```
+///
+/// ```no_run
+/// use ferrompi::MpiDatatype;
+/// ```
+///
+/// and it cannot be read through a bound on this trait:
+///
+/// ```compile_fail,E0599
+/// fn f<T: ferrompi::MpiDatatype>() {
+///     let _ = T::TAG;
+/// }
+/// ```
+///
+/// ```no_run
+/// fn f<T: ferrompi::MpiDatatype>() {
+///     let _ = ferrompi::CustomDatatype::contiguous::<T>(1);
+/// }
+/// ```
+pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {}
+
+/// The tag the C layer dispatches on for `T`.
+#[inline]
+pub(crate) fn tag_of<T: MpiDatatype>() -> DatatypeTag {
+    T::tag(sealed::Token)
+}
+
+/// The tag the C layer dispatches on for the pair type `T`.
+#[inline]
+pub(crate) fn pair_tag_of<T: MpiIndexedDatatype>() -> DatatypeTag {
+    T::tag(sealed::Token)
 }
 
 /// Bound for the element type of the custom-datatype point-to-point methods
@@ -160,17 +207,17 @@ pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {
 ///
 /// # Example
 ///
-/// ```compile_fail
-/// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi};
+/// ```compile_fail,E0277
+/// # use ferrompi::{CustomDatatype, Mpi};
 /// # let _mpi = Mpi::init().unwrap();
 /// # let world = _mpi.world();
-/// let dt8 = CustomDatatype::contiguous(8, DatatypeTag::U8).unwrap();
+/// let dt8 = CustomDatatype::contiguous::<u8>(8).unwrap();
 /// let mut boxes: [Box<u64>; 1] = [Box::new(5)];
 /// world.recv_custom(&mut boxes, &dt8, 0, 2).unwrap();
 /// ```
 ///
 /// ```no_run
-/// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, PlainData};
+/// # use ferrompi::{CustomDatatype, Mpi, PlainData};
 /// #[repr(C)]
 /// #[derive(Clone, Copy)]
 /// struct Pair { v: f64, i: i32 }
@@ -178,7 +225,7 @@ pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {
 /// unsafe impl PlainData for Pair {}
 /// # let _mpi = Mpi::init().unwrap();
 /// # let world = _mpi.world();
-/// let dt8 = CustomDatatype::contiguous(8, DatatypeTag::U8).unwrap();
+/// let dt8 = CustomDatatype::contiguous::<u8>(8).unwrap();
 /// let mut boxes: [Pair; 1] = [Pair { v: 0.0, i: 0 }];
 /// world.recv_custom(&mut boxes, &dt8, 0, 2).unwrap();
 /// ```
@@ -198,20 +245,23 @@ unsafe impl<T: PlainData, const N: usize> PlainData for [T; N] {}
 /// `T`'s. The pointer is never null, even for an empty slice, so a NULL
 /// passed elsewhere as an in-place marker stays unambiguous.
 pub(crate) fn buf<T: MpiDatatype>(s: &[T]) -> (*const c_void, i64, i32) {
-    (s.as_ptr().cast(), s.len() as i64, T::TAG as i32)
+    (s.as_ptr().cast(), s.len() as i64, tag_of::<T>() as i32)
 }
 
 /// See [`buf`].
 pub(crate) fn buf_mut<T: MpiDatatype>(s: &mut [T]) -> (*mut c_void, i64, i32) {
-    (s.as_mut_ptr().cast(), s.len() as i64, T::TAG as i32)
+    (s.as_mut_ptr().cast(), s.len() as i64, tag_of::<T>() as i32)
 }
 
 macro_rules! impl_mpi_datatype {
     ($ty:ty, $tag:expr) => {
-        impl sealed::Sealed for $ty {}
-        impl MpiDatatype for $ty {
-            const TAG: DatatypeTag = $tag;
+        impl sealed::Sealed for $ty {
+            #[inline]
+            fn tag(_: sealed::Token) -> DatatypeTag {
+                $tag
+            }
         }
+        impl MpiDatatype for $ty {}
     };
 }
 
@@ -254,19 +304,15 @@ impl_mpi_datatype!(u64, DatatypeTag::U64);
 ///
 /// # Sealed: cannot implement for external types
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use ferrompi::MpiIndexedDatatype;
-/// use ferrompi::DatatypeTag;
 ///
+/// #[derive(Clone, Copy)]
+/// struct Mine;
 /// // This must not compile — MpiIndexedDatatype is sealed.
-/// impl MpiIndexedDatatype for i32 {
-///     const TAG: DatatypeTag = DatatypeTag::Int2;
-/// }
+/// impl MpiIndexedDatatype for Mine {}
 /// ```
-pub trait MpiIndexedDatatype: sealed_indexed::Sealed + Copy + Send + 'static {
-    /// The datatype tag used for FFI dispatch to the C layer.
-    const TAG: DatatypeTag;
-}
+pub trait MpiIndexedDatatype: sealed_indexed::Sealed + Copy + Send + 'static {}
 
 /// Paired `{ f32 value; i32 index }` — maps to `MPI_FLOAT_INT`.
 ///
@@ -394,10 +440,13 @@ pub struct LongDoubleInt {
 
 macro_rules! impl_mpi_indexed_datatype {
     ($ty:ty, $tag:expr) => {
-        impl sealed_indexed::Sealed for $ty {}
-        impl MpiIndexedDatatype for $ty {
-            const TAG: DatatypeTag = $tag;
+        impl sealed_indexed::Sealed for $ty {
+            #[inline]
+            fn tag(_: sealed::Token) -> DatatypeTag {
+                $tag
+            }
         }
+        impl MpiIndexedDatatype for $ty {}
     };
 }
 
@@ -465,11 +514,13 @@ const _: () = assert!(
 ///
 /// # Sealed: cannot implement for external types
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use ferrompi::BytePermutable;
 ///
+/// #[derive(Clone, Copy)]
+/// struct Mine;
 /// // This must not compile — BytePermutable is sealed.
-/// impl BytePermutable for f64 {}
+/// impl BytePermutable for Mine {}
 /// ```
 pub trait BytePermutable: sealed_byte::Sealed + Copy + Send + 'static {}
 
@@ -558,8 +609,8 @@ mod tests {
     #[cfg(feature = "rma")]
     use super::AtomicMpiDatatype;
     use super::{
-        BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, MpiDatatype, MpiIndexedDatatype,
-        PlainData, ShortInt,
+        pair_tag_of, tag_of, BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, PlainData,
+        ShortInt,
     };
     #[cfg(all(
         target_os = "linux",
@@ -588,15 +639,15 @@ mod tests {
         assert_eq!(DatatypeTag::LongDoubleInt as i32, 12);
         assert_eq!(DatatypeTag::Byte as i32, 13);
 
-        assert_eq!(f32::TAG as i32, 0);
-        assert_eq!(f64::TAG as i32, 1);
-        assert_eq!(i32::TAG as i32, 2);
-        assert_eq!(i64::TAG as i32, 3);
-        assert_eq!(u8::TAG as i32, 4);
-        assert_eq!(u32::TAG as i32, 5);
-        assert_eq!(u64::TAG as i32, 6);
-        assert_eq!(FloatInt::TAG as i32, 7);
-        assert_eq!(DoubleInt::TAG as i32, 8);
+        assert_eq!(tag_of::<f32>() as i32, 0);
+        assert_eq!(tag_of::<f64>() as i32, 1);
+        assert_eq!(tag_of::<i32>() as i32, 2);
+        assert_eq!(tag_of::<i64>() as i32, 3);
+        assert_eq!(tag_of::<u8>() as i32, 4);
+        assert_eq!(tag_of::<u32>() as i32, 5);
+        assert_eq!(tag_of::<u64>() as i32, 6);
+        assert_eq!(pair_tag_of::<FloatInt>() as i32, 7);
+        assert_eq!(pair_tag_of::<DoubleInt>() as i32, 8);
         #[cfg(all(
             target_os = "linux",
             any(
@@ -605,9 +656,9 @@ mod tests {
                 all(target_arch = "powerpc64", target_endian = "little")
             )
         ))]
-        assert_eq!(LongInt::TAG as i32, 9);
-        assert_eq!(Int2::TAG as i32, 10);
-        assert_eq!(ShortInt::TAG as i32, 11);
+        assert_eq!(pair_tag_of::<LongInt>() as i32, 9);
+        assert_eq!(pair_tag_of::<Int2>() as i32, 10);
+        assert_eq!(pair_tag_of::<ShortInt>() as i32, 11);
         #[cfg(all(
             target_os = "linux",
             any(
@@ -616,7 +667,7 @@ mod tests {
                 all(target_arch = "powerpc64", target_endian = "little")
             )
         ))]
-        assert_eq!(LongDoubleInt::TAG as i32, 12);
+        assert_eq!(pair_tag_of::<LongDoubleInt>() as i32, 12);
     }
 
     #[test]

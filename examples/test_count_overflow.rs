@@ -29,7 +29,7 @@
 
 use ferrompi::{Communicator, Error, Mpi, ReduceOp, UserOp};
 #[cfg(feature = "rma")]
-use ferrompi::{MpiDatatype, MpiErrorClass, Win, WinFenceAssert};
+use ferrompi::{MpiErrorClass, Win, WinFenceAssert};
 
 mod common;
 
@@ -99,7 +99,8 @@ fn rma_put(world: &Communicator) {
     let mut win = Win::<u64>::allocate(world, 4).expect("Win::allocate failed");
     let handle = win.raw_handle();
     let origin = [0u64; 4];
-    let dt_tag = <u64 as MpiDatatype>::TAG as i32;
+    // The C layer's code for u64 (FERROMPI_U64 in csrc/ferrompi.h).
+    let dt_tag = 6;
 
     let mut rma_put_ok = true;
     win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |_| {

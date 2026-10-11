@@ -3,7 +3,7 @@
 use crate::comm::{
     check_rank_slots, check_same_len, rank_block, scatter_inplace_args, Communicator,
 };
-use crate::datatype::MpiDatatype;
+use crate::datatype::{tag_of, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::op::CollectiveOp;
@@ -99,7 +99,7 @@ impl Communicator {
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<PersistentRequest<T>> {
         let op = op.into();
-        let code = op.code(T::TAG)?;
+        let code = op.code(tag_of::<T>())?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = vec_buf(&send);
@@ -143,7 +143,7 @@ impl Communicator {
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<PersistentRequest<T>> {
         let op = op.into();
-        let code = op.code(T::TAG)?;
+        let code = op.code(tag_of::<T>())?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = vec_buf_mut(&mut data);
         // SAFETY: `p` and `n` describe `data`'s heap allocation, taken from the `Vec` by
@@ -217,7 +217,7 @@ impl Communicator {
         root: i32,
     ) -> Result<PersistentRequest<T>> {
         let op = op.into();
-        let code = op.code(T::TAG)?;
+        let code = op.code(tag_of::<T>())?;
         if self.rank == root {
             check_same_len("recv", send.len(), recv.len())?;
         }
@@ -475,7 +475,7 @@ impl Communicator {
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<PersistentRequest<T>> {
         let op = op.into();
-        let code = op.code(T::TAG)?;
+        let code = op.code(tag_of::<T>())?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = vec_buf(&send);
@@ -539,7 +539,7 @@ impl Communicator {
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<PersistentRequest<T>> {
         let op = op.into();
-        let code = op.code(T::TAG)?;
+        let code = op.code(tag_of::<T>())?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = vec_buf(&send);
@@ -670,7 +670,7 @@ impl Communicator {
         op: impl Into<CollectiveOp<'a, T>>,
     ) -> Result<PersistentRequest<T>> {
         let op = op.into();
-        let code = op.code(T::TAG)?;
+        let code = op.code(tag_of::<T>())?;
         check_same_len(
             "recv",
             rank_block("send", send.len(), self.size)?,

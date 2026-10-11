@@ -12,7 +12,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_custom_dt_resized
 // mpi-test: np=2
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, ReduceOp, StructField};
+use ferrompi::{CustomDatatype, Error, Mpi, ReduceOp, StructField};
 
 mod common;
 
@@ -27,16 +27,8 @@ fn main() {
     // Build the base struct type used by tests 1-3.
     // Models `{ f64, i32 }`: 8-byte f64 at offset 0, i32 at offset 8.
     let s = match CustomDatatype::create_struct(&[
-        StructField {
-            blocklength: 1,
-            displacement: 0,
-            basetype: DatatypeTag::F64,
-        },
-        StructField {
-            blocklength: 1,
-            displacement: 8,
-            basetype: DatatypeTag::I32,
-        },
+        StructField::new::<f64>(1, 0),
+        StructField::new::<i32>(1, 8),
     ]) {
         Ok(s) => s,
         Err(e) => {

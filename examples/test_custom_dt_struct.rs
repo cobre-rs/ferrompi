@@ -3,7 +3,6 @@
 //! Exercises:
 //! - Successful construction of a `{ f64, i32 }` struct type (8-byte f64 at
 //!   offset 0, i32 at offset 8) and `raw_handle() >= 0`
-//! - Indexed-basetype rejection returns `Error::InvalidArgument` before any FFI call
 //! - Empty `fields` slice returns `Err` with class `Arg` without calling into
 //!   MPI
 //! - Drop frees the underlying MPI handle (no double-free on exit)
@@ -14,7 +13,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_custom_dt_struct
 // mpi-test: np=2
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, MpiErrorClass, StructField};
+use ferrompi::{CustomDatatype, Error, Mpi, MpiErrorClass, StructField};
 
 mod common;
 
@@ -30,18 +29,7 @@ fn main() {
     //         raw_handle() >= 0
     // ========================================================================
     {
-        let fields = [
-            StructField {
-                blocklength: 1,
-                displacement: 0,
-                basetype: DatatypeTag::F64,
-            },
-            StructField {
-                blocklength: 1,
-                displacement: 8,
-                basetype: DatatypeTag::I32,
-            },
-        ];
+        let fields = [StructField::new::<f64>(1, 0), StructField::new::<i32>(1, 8)];
         match CustomDatatype::create_struct(&fields) {
             Ok(s) => {
                 let h = s.raw_handle();
@@ -56,34 +44,6 @@ fn main() {
             Err(e) => {
                 eprintln!(
                     "rank {rank}: FAIL Test 1 — create_struct({{f64,i32}}) returned Err: {e}"
-                );
-                local_ok = false;
-            }
-        }
-    }
-
-    // ========================================================================
-    // Test 2: create_struct with a FloatInt field returns Err(Error::InvalidArgument)
-    //         without calling into MPI (pre-FFI validation in the Rust wrapper)
-    // ========================================================================
-    {
-        let fields = [StructField {
-            blocklength: 1,
-            displacement: 0,
-            basetype: DatatypeTag::FloatInt,
-        }];
-        match CustomDatatype::create_struct(&fields) {
-            Err(Error::InvalidArgument { .. }) => {
-                if rank == 0 {
-                    println!(
-                        "PASS: Test 2 — create_struct(FloatInt field) returned Err(InvalidArgument)"
-                    );
-                }
-            }
-            other => {
-                eprintln!(
-                    "rank {rank}: FAIL Test 2 — expected Err(InvalidArgument), got: {:?}",
-                    other.err()
                 );
                 local_ok = false;
             }

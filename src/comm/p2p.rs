@@ -2,7 +2,7 @@
 //! constructors, sendrecv, probe, iprobe.
 
 use crate::comm::Communicator;
-use crate::datatype::{buf, buf_mut, MpiDatatype, PlainData};
+use crate::datatype::{buf, buf_mut, tag_of, MpiDatatype, PlainData};
 use crate::datatype_builder::CustomDatatype;
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -317,8 +317,9 @@ impl Communicator {
         let mut status = ffi::FerrompiStatus::default();
 
         // SAFETY: all arguments are scalar integers or exclusive output pointers; self.handle is owned.
-        let ret =
-            unsafe { ffi::ferrompi_probe(source, tag, self.handle, &mut status, T::TAG as i32) };
+        let ret = unsafe {
+            ffi::ferrompi_probe(source, tag, self.handle, &mut status, tag_of::<T>() as i32)
+        };
         Error::check_with_op(ret, "probe")?;
         Ok(Status::from_ffi(status))
     }
@@ -370,7 +371,7 @@ impl Communicator {
                 self.handle,
                 &mut flag,
                 &mut status,
-                T::TAG as i32,
+                tag_of::<T>() as i32,
             )
         };
         Error::check_with_op(ret, "iprobe")?;
@@ -707,7 +708,7 @@ impl Communicator {
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, StructField};
+    /// # use ferrompi::{CustomDatatype, Mpi, StructField};
     /// # let _mpi = Mpi::init().unwrap();
     /// # let world = _mpi.world();
     /// #[repr(C)]
@@ -716,8 +717,8 @@ impl Communicator {
     /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
     /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
-    ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
-    ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
+    ///     StructField::new::<f64>(1, 0),
+    ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
     /// let buf = [Pair { v: 1.23456789, i: 42 }];
     /// world.send_custom(&buf, &dt, 1, 0).unwrap();
@@ -777,7 +778,7 @@ impl Communicator {
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, StructField};
+    /// # use ferrompi::{CustomDatatype, Mpi, StructField};
     /// # let _mpi = Mpi::init().unwrap();
     /// # let world = _mpi.world();
     /// #[repr(C)]
@@ -786,8 +787,8 @@ impl Communicator {
     /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
     /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
-    ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
-    ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
+    ///     StructField::new::<f64>(1, 0),
+    ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
     /// let mut buf = [Pair { v: 0.0, i: 0 }];
     /// let status = world.recv_custom(&mut buf, &dt, 0, 0).unwrap();
@@ -859,7 +860,7 @@ impl Communicator {
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, StructField};
+    /// # use ferrompi::{CustomDatatype, Mpi, StructField};
     /// # let _mpi = Mpi::init().unwrap();
     /// # let world = _mpi.world();
     /// #[repr(C)]
@@ -868,8 +869,8 @@ impl Communicator {
     /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
     /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
-    ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
-    ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
+    ///     StructField::new::<f64>(1, 0),
+    ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
     /// let buf = [Pair { v: 1.23456789, i: 42 }];
     /// ferrompi::scope(|s| {
@@ -945,7 +946,7 @@ impl Communicator {
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, StructField};
+    /// # use ferrompi::{CustomDatatype, Mpi, StructField};
     /// # let _mpi = Mpi::init().unwrap();
     /// # let world = _mpi.world();
     /// #[repr(C)]
@@ -954,8 +955,8 @@ impl Communicator {
     /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
     /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
-    ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
-    ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
+    ///     StructField::new::<f64>(1, 0),
+    ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
     /// let mut buf = [Pair { v: 0.0, i: 0 }];
     /// ferrompi::scope(|s| {

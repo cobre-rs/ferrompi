@@ -58,7 +58,7 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-use crate::datatype::{buf, buf_mut};
+use crate::datatype::{buf, buf_mut, tag_of};
 use crate::error::{Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL};
 use crate::ffi;
 use crate::group::Group;
@@ -4266,7 +4266,7 @@ impl<T: MpiDatatype> Win<T> {
         target_disp: i64,
         op: impl Into<AccumulateOp>,
     ) -> Result<()> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         let (p, n, dt) = buf(origin);
         self.check_target(access, target_rank, target_disp, n as usize, &[])?;
         // SAFETY: the caller upholds this function's contract (see `rma_put`).
@@ -4295,7 +4295,7 @@ impl<T: MpiDatatype> Win<T> {
         target_disp: i64,
         op: impl Into<AccumulateOp>,
     ) -> Result<i64> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         let (p, n, dt) = buf(origin);
         self.check_target(access, target_rank, target_disp, n as usize, &[])?;
         let mut request_handle: i64 = 0;
@@ -4338,7 +4338,7 @@ impl<T: MpiDatatype> Win<T> {
         target_disp: i64,
         op: impl Into<FetchOp>,
     ) -> Result<()> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         let (o_ptr, n, dt) = buf(origin);
         let (r_ptr, r_n, _) = buf_mut(result);
         self.check_target(
@@ -4387,10 +4387,10 @@ impl<T: MpiDatatype> Win<T> {
         target_disp: i64,
         op: impl Into<FetchOp>,
     ) -> Result<()> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         self.check_target(access, target_rank, target_disp, 1, &[])?;
         // SAFETY: the caller upholds this function's contract (see `rma_put`).
-        // `T::TAG` matches `T`'s memory layout per the `MpiDatatype` invariant, and
+        // The tag of `T` matches `T`'s memory layout per the `MpiDatatype` invariant, and
         // MPI reads one `T` from `origin` and writes one `T` to `result`, both
         // pointers taken from the references themselves (`result` from the
         // `&mut T`, never from a shared borrow), and only MPI writes `result`
@@ -4403,7 +4403,7 @@ impl<T: MpiDatatype> Win<T> {
             ffi::ferrompi_fetch_and_op(
                 (origin as *const T).cast(),
                 (result as *mut T).cast(),
-                T::TAG as i32,
+                tag_of::<T>() as i32,
                 target_rank,
                 target_disp,
                 op,
@@ -4433,7 +4433,7 @@ impl<T: MpiDatatype> Win<T> {
         T: crate::AtomicMpiDatatype,
     {
         self.check_target(access, target_rank, target_disp, 1, &[])?;
-        // SAFETY: as in `rma_fetch_and_op`: the caller's contract, `T::TAG`, the
+        // SAFETY: as in `rma_fetch_and_op`: the caller's contract, the tag of `T`, the
         // pointers taken from the references (`compare` read like `origin`), and
         // `check_target` above for a count of 1. `AtomicMpiDatatype` restricts
         // `T` to the types MPI-4.1 §12.3.4 allows in compare-and-swap (integer,
@@ -4443,7 +4443,7 @@ impl<T: MpiDatatype> Win<T> {
                 (origin as *const T).cast(),
                 (compare as *const T).cast(),
                 (result as *mut T).cast(),
-                T::TAG as i32,
+                tag_of::<T>() as i32,
                 target_rank,
                 target_disp,
                 self.win_handle,

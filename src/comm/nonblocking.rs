@@ -3,7 +3,7 @@
 use crate::comm::{
     check_rank_slots, check_same_len, rank_block, scatter_inplace_args, Communicator,
 };
-use crate::datatype::{buf, buf_mut, MpiDatatype};
+use crate::datatype::{buf, buf_mut, tag_of, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::op::CollectiveOp;
@@ -112,7 +112,7 @@ impl Communicator {
         recv: &'s mut [T],
         op: impl Into<CollectiveOp<'s, T>>,
     ) -> Result<Request<'s>> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -182,7 +182,7 @@ impl Communicator {
         op: impl Into<CollectiveOp<'s, T>>,
         root: i32,
     ) -> Result<Request<'s>> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         if self.rank == root {
             check_same_len("recv", send.len(), recv.len())?;
         }
@@ -470,7 +470,7 @@ impl Communicator {
         recv: &'s mut [T],
         op: impl Into<CollectiveOp<'s, T>>,
     ) -> Result<Request<'s>> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -543,7 +543,7 @@ impl Communicator {
         recv: &'s mut [T],
         op: impl Into<CollectiveOp<'s, T>>,
     ) -> Result<Request<'s>> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         check_same_len("recv", send.len(), recv.len())?;
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = buf(send);
@@ -678,7 +678,7 @@ impl Communicator {
         recv: &'s mut [T],
         op: impl Into<CollectiveOp<'s, T>>,
     ) -> Result<Request<'s>> {
-        let op = op.into().code(T::TAG)?;
+        let op = op.into().code(tag_of::<T>())?;
         check_same_len(
             "recv",
             rank_block("send", send.len(), self.size)?,

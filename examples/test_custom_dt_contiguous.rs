@@ -3,7 +3,6 @@
 //! Exercises:
 //! - Successful construction and `raw_handle() >= 0`
 //! - Count=0 returns an MPI error (`Count` or `Arg` class, implementation-defined)
-//! - Indexed-basetype rejection returns `Error::InvalidArgument` before any FFI call
 //! - Drop frees the underlying MPI handle (no double-free on exit)
 //!
 //! All assertions are protected by a sentinel allreduce(Min) before any
@@ -12,9 +11,26 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_custom_dt_contiguous
 // mpi-test: np=2
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, MpiErrorClass};
+use ferrompi::{CustomDatatype, Error, Mpi, MpiDatatype, MpiErrorClass};
 
 mod common;
+
+/// Builds `contiguous::<T>(4)` and drops it; reports a failure on this rank.
+fn builds<T: MpiDatatype>(rank: i32, name: &str) -> bool {
+    match CustomDatatype::contiguous::<T>(4) {
+        Ok(dt) => {
+            if dt.raw_handle() < 0 {
+                eprintln!("rank {rank}: FAIL Test 4 — contiguous::<{name}>(4) handle < 0");
+                return false;
+            }
+            true
+        }
+        Err(e) => {
+            eprintln!("rank {rank}: FAIL Test 4 — contiguous::<{name}>(4) failed: {e}");
+            false
+        }
+    }
+}
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -28,7 +44,7 @@ fn main() {
     // Test 1: contiguous(10, F64) returns Ok with raw_handle() >= 0
     // ========================================================================
     {
-        match CustomDatatype::contiguous(10, DatatypeTag::F64) {
+        match CustomDatatype::contiguous::<f64>(10) {
             Ok(dt) => {
                 let h = dt.raw_handle();
                 if h >= 0 {
@@ -57,7 +73,7 @@ fn main() {
     // but error reporting is implementation-defined).
     // ========================================================================
     {
-        match CustomDatatype::contiguous(0, DatatypeTag::F64) {
+        match CustomDatatype::contiguous::<f64>(0) {
             Err(Error::Mpi { class, .. }) => {
                 let accepted = matches!(class, MpiErrorClass::Count | MpiErrorClass::Arg);
                 if accepted {
@@ -91,58 +107,20 @@ fn main() {
     }
 
     // ========================================================================
-    // Test 3: contiguous(5, FloatInt) returns Err(Error::InvalidArgument) without
-    //         calling into MPI (pre-FFI validation in the Rust wrapper)
-    // ========================================================================
-    {
-        match CustomDatatype::contiguous(5, DatatypeTag::FloatInt) {
-            Err(Error::InvalidArgument { .. }) => {
-                if rank == 0 {
-                    println!(
-                        "PASS: Test 3 — contiguous(5, FloatInt) returned Err(InvalidArgument)"
-                    );
-                }
-            }
-            other => {
-                eprintln!(
-                    "rank {rank}: FAIL Test 3 — expected Err(InvalidArgument), got: {:?}",
-                    other.err()
-                );
-                local_ok = false;
-            }
-        }
-    }
-
-    // ========================================================================
     // Test 4: Multiple CustomDatatype instances all drop cleanly
     // ========================================================================
     {
-        let mut success = true;
-        let tags = [
-            DatatypeTag::F32,
-            DatatypeTag::F64,
-            DatatypeTag::I32,
-            DatatypeTag::I64,
-            DatatypeTag::U8,
-            DatatypeTag::U32,
-            DatatypeTag::U64,
-            DatatypeTag::Byte,
-        ];
-        for tag in tags {
-            match CustomDatatype::contiguous(4, tag) {
-                Ok(dt) => {
-                    if dt.raw_handle() < 0 {
-                        eprintln!("rank {rank}: FAIL Test 4 — contiguous(4, {tag:?}) handle < 0");
-                        success = false;
-                    }
-                    // Drop frees the handle
-                }
-                Err(e) => {
-                    eprintln!("rank {rank}: FAIL Test 4 — contiguous(4, {tag:?}) failed: {e}");
-                    success = false;
-                }
-            }
-        }
+        let success = [
+            builds::<f32>(rank, "f32"),
+            builds::<f64>(rank, "f64"),
+            builds::<i32>(rank, "i32"),
+            builds::<i64>(rank, "i64"),
+            builds::<u8>(rank, "u8"),
+            builds::<u32>(rank, "u32"),
+            builds::<u64>(rank, "u64"),
+        ]
+        .iter()
+        .all(|&built| built);
         if success {
             if rank == 0 {
                 println!("PASS: Test 4 — all primitive base types construct and drop cleanly");
