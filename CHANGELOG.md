@@ -218,6 +218,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slices with views, `remote_slice(r)` with `remote(r)`, a guard with a
   `lock`/`lock_all` closure, and separate a fence from a following lock with
   `WinFenceAssert::no_succeed()` and a barrier.
+- **`MpiErrorClass`, `ResourceKind`, `ReduceOp` and `SplitType` are
+  `#[non_exhaustive]`, and so are the structs `HostEntry` and `SlurmInfo`.**
+  `ThreadLevel`, `GroupComparison`, `Source`, `Tag` and `LockType` stay
+  exhaustive, and `RankRange` keeps its three public fields: MPI fixes
+  them. Migration: add a wildcard arm to a `match` on one of the four enums;
+  a pattern on `HostEntry` or `SlurmInfo` needs a trailing `..`, and neither
+  can be built with a struct literal.
 
 ### Added
 

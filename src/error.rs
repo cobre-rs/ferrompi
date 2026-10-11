@@ -41,6 +41,7 @@ pub(crate) const FERROMPI_ERR_THREAD_LEVEL: i32 = -7102;
 /// `MAX_COMMS`, `MAX_DATATYPES`, `MAX_OPS`, `MAX_REQUESTS`). The `Display`
 /// form is the lowercase resource noun used in the error message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
 pub enum ResourceKind {
     /// Nonblocking / persistent request table (`MAX_REQUESTS`).
     #[error("request")]
@@ -88,6 +89,7 @@ impl ResourceKind {
 /// the linked MPI library's own `MPI_ERR_*` constants (see [`Self::from_raw`]).
 /// [`Self::Raw`] carries a class value this enum does not name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
 pub enum MpiErrorClass {
     /// `MPI_SUCCESS` — no error
     #[error("SUCCESS")]

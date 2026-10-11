@@ -839,6 +839,95 @@ mod tests {
         assert!(crate::rt::live_handle_tokens() <= before);
     }
 
+    // ── public enum shapes ────────────────────────────────────────────────
+
+    /// Each match has no wildcard arm and no `cfg`, so a variant that exists
+    /// under one feature set only stops this test compiling in the other.
+    #[test]
+    fn public_enums_have_one_shape_in_every_feature_set() {
+        use crate::{
+            GroupComparison, MpiErrorClass, ReduceOp, ResourceKind, Source, SplitType, Tag,
+        };
+
+        let _ = |e: &Error| match e {
+            Error::AlreadyInitialized
+            | Error::Finalized
+            | Error::ThreadLevelViolation
+            | Error::InvalidArgument { .. }
+            | Error::BufferSize { .. }
+            | Error::InvalidState { .. }
+            | Error::Mpi { .. }
+            | Error::NotSupported(_)
+            | Error::ResourceExhausted { .. }
+            | Error::Internal(_) => {}
+        };
+        let _ = |c: MpiErrorClass| match c {
+            MpiErrorClass::Success
+            | MpiErrorClass::Buffer
+            | MpiErrorClass::Count
+            | MpiErrorClass::Type
+            | MpiErrorClass::Tag
+            | MpiErrorClass::Comm
+            | MpiErrorClass::Rank
+            | MpiErrorClass::Request
+            | MpiErrorClass::Root
+            | MpiErrorClass::Group
+            | MpiErrorClass::Op
+            | MpiErrorClass::Topology
+            | MpiErrorClass::Dims
+            | MpiErrorClass::Arg
+            | MpiErrorClass::Unknown
+            | MpiErrorClass::Truncate
+            | MpiErrorClass::Other
+            | MpiErrorClass::Intern
+            | MpiErrorClass::InStatus
+            | MpiErrorClass::Pending
+            | MpiErrorClass::Win
+            | MpiErrorClass::Info
+            | MpiErrorClass::File
+            | MpiErrorClass::Raw(_) => {}
+        };
+        let _ = |r: ResourceKind| match r {
+            ResourceKind::Request
+            | ResourceKind::Communicator
+            | ResourceKind::Datatype
+            | ResourceKind::Operation
+            | ResourceKind::Window
+            | ResourceKind::Group
+            | ResourceKind::Info => {}
+        };
+        let _ = |op: ReduceOp| match op {
+            ReduceOp::Sum
+            | ReduceOp::Max
+            | ReduceOp::Min
+            | ReduceOp::Prod
+            | ReduceOp::BitwiseOr
+            | ReduceOp::BitwiseAnd
+            | ReduceOp::BitwiseXor
+            | ReduceOp::LogicalOr
+            | ReduceOp::LogicalAnd
+            | ReduceOp::LogicalXor => {}
+        };
+        let _ = |t: SplitType| match t {
+            SplitType::Shared => {}
+        };
+        let _ = |l: ThreadLevel| match l {
+            ThreadLevel::Single
+            | ThreadLevel::Funneled
+            | ThreadLevel::Serialized
+            | ThreadLevel::Multiple => {}
+        };
+        let _ = |c: GroupComparison| match c {
+            GroupComparison::Identical | GroupComparison::Similar | GroupComparison::Unequal => {}
+        };
+        let _ = |s: Source| match s {
+            Source::Any | Source::ProcNull | Source::Rank(_) => {}
+        };
+        let _ = |t: Tag| match t {
+            Tag::Any | Tag::Value(_) => {}
+        };
+    }
+
     // ── Mpi::create_from_group unit tests ─────────────────────────────────
 
     /// Verify that a `stringtag` containing a null byte is rejected before

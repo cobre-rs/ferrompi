@@ -44,6 +44,7 @@ pub struct TopologyInfo {
 
 /// A single host and its assigned MPI ranks.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct HostEntry {
     /// Hostname as reported by `MPI_Get_processor_name`.
     pub hostname: String,
@@ -54,6 +55,7 @@ pub struct HostEntry {
 /// SLURM job metadata.
 #[cfg(feature = "numa")]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SlurmInfo {
     /// SLURM job ID.
     pub job_id: String,

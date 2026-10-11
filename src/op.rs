@@ -37,6 +37,7 @@ use crate::rt;
 /// collective accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
+#[non_exhaustive]
 pub enum ReduceOp {
     /// Sum of values
     Sum = 0,

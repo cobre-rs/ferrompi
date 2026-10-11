@@ -94,6 +94,7 @@ fn scatter_inplace_args<T: MpiDatatype>(
 /// shared-memory splits are supported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
+#[non_exhaustive]
 pub enum SplitType {
     /// Split by shared memory domain (same physical node).
     /// Maps to `MPI_COMM_TYPE_SHARED`.
