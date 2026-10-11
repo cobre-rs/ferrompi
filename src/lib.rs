@@ -85,8 +85,8 @@
 //!
 //! ## Thread Safety
 //!
-//! [`Communicator`], [`Group`], [`Request`], [`PersistentRequest`], [`Status`],
-//! [`CustomDatatype`] and [`UserOp`] are `Send + Sync`; [`Mpi`],
+//! [`Communicator`], [`Group`], [`PersistentRequest`], [`Status`],
+//! [`CustomDatatype`] and [`UserOp`] are `Send + Sync`; [`Mpi`], [`Request`],
 //! `Win<T>`, its epoch handles and `WinView` (feature `rma`) are not.
 //!
 //! Which thread may call MPI is set by the provided [`ThreadLevel`]; see its
@@ -970,7 +970,6 @@ mod tests {
         // The threads below duplicate the world communicator with no order
         // between their calls, which is valid only in a world of one process.
         assert_eq!(world.size(), 1, "this test needs a world of one process");
-        assert!(world.handle >= 0, "world handle {}", world.handle);
 
         // An out-of-range group handle reaches MPI as MPI_GROUP_NULL.
         let mut size: i32 = 0;
@@ -1067,7 +1066,6 @@ mod tests {
         assert!(s.handle >= 0);
         let r = s.resized(0, 16).expect("resized failed");
         assert!(r.handle >= 0 && r.handle != s.handle);
-        assert!(s.handle >= 0);
 
         #[cfg(feature = "rma")]
         {

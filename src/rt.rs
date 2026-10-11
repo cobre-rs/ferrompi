@@ -265,7 +265,7 @@ pub(crate) fn abandon_init() {
 pub(crate) fn activate(level: ThreadLevel) {
     // Relaxed: `Mpi` is `!Send`/`!Sync`, so every later `enter()` load that
     // must observe this store — whether on this thread or one that receives
-    // a `Communicator`/`Request` afterward — is already ordered by the
+    // a `Communicator` afterward — is already ordered by the
     // synchronizing operation (thread spawn, channel, mutex, `Arc`) that
     // thread used to obtain that handle; this store needs no ordering of
     // its own to be visible through that chain.

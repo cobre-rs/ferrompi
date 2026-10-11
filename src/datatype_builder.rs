@@ -104,7 +104,7 @@ impl StructField {
 /// Cloning is intentionally not supported: each `CustomDatatype` owns its
 /// handle slot, and cloning would risk a double-free when both copies are
 /// dropped. If you need to share a datatype, keep a single owned instance and
-/// pass its handle by reference.
+/// pass it by reference.
 ///
 /// # Thread Safety
 ///

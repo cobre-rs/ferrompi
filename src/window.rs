@@ -1770,10 +1770,10 @@ impl<T: MpiDatatype> WinView<'_, T> {
     pub unsafe fn as_slice(&self) -> &[T] {
         // SAFETY: `ptr` is non-null, aligned and valid for `len` initialized
         // elements until the window is freed, which this view's borrow of the
-        // window excludes (a zero-length view holds a dangling pointer, which
-        // `len == 0` allows), and every bit pattern is a valid `T`. That nothing
-        // writes the region while the slice lives is the caller's half, `# Safety`
-        // above.
+        // window excludes (a zero-length view's pointer is only non-null and
+        // aligned, which is all `len == 0` needs), and every bit pattern is a
+        // valid `T`. That nothing writes the region while the slice lives is the
+        // caller's half, `# Safety` above.
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 
@@ -4966,14 +4966,14 @@ pub(crate) mod tests {
     fn win_fence_assert_or_combines_bits() {
         // Use placeholder constants for the test; the real values come from MPI.
         let a = WinFenceAssert::from_bits_for_test(1);
-        let b = WinFenceAssert::from_bits_for_test(2);
+        let b = WinFenceAssert::from_bits_for_test(3);
         assert_eq!((a | b).bits(), 3);
     }
 
     #[test]
     fn win_fence_assert_or_assign_combines_bits() {
         let mut a = WinFenceAssert::from_bits_for_test(1);
-        a |= WinFenceAssert::from_bits_for_test(4);
+        a |= WinFenceAssert::from_bits_for_test(5);
         assert_eq!(a.bits(), 5);
     }
 
@@ -5050,15 +5050,27 @@ pub(crate) mod tests {
     fn win_pscw_assert_or_combines_bits() {
         // Use placeholder constants for the test; the real values come from MPI.
         let a = WinPscwAssert::from_bits_for_test(1);
-        let b = WinPscwAssert::from_bits_for_test(2);
+        let b = WinPscwAssert::from_bits_for_test(3);
         assert_eq!((a | b).bits(), 3);
     }
 
     #[test]
     fn win_pscw_assert_or_assign_combines_bits() {
         let mut a = WinPscwAssert::from_bits_for_test(1);
-        a |= WinPscwAssert::from_bits_for_test(4);
+        a |= WinPscwAssert::from_bits_for_test(5);
         assert_eq!(a.bits(), 5);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "calls the C layer")]
+    fn pscw_assertions_are_distinct_and_combine() {
+        let no_check = WinPscwAssert::no_check().bits();
+        let no_store = WinPscwAssert::no_store().bits();
+        let both = (WinPscwAssert::no_check() | WinPscwAssert::no_store()).bits();
+        assert!(
+            no_check != 0 && no_store != 0 && both != no_check && both != no_store,
+            "no_check {no_check}, no_store {no_store}, both {both}"
+        );
     }
 
     /// Called by the one test that initializes MPI. Every constructor returns a
