@@ -236,7 +236,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`Communicator::create_from_group` is renamed `Communicator::create`.**
   It wraps `MPI_Comm_create`, and shared its name with
   `Mpi::create_from_group`, which wraps `MPI_Comm_create_from_group`. Each
-  method now has the name of its MPI call. Migration: `comm.create(&group)`;
+  method now has the name of its MPI call, and an error from `create` names
+  the operation `comm_create`. Migration: `comm.create(&group)`;
   `Mpi::create_from_group` is unchanged.
 
 ### Added
@@ -271,6 +272,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   correct when several threads receive on one communicator. Dropping a
   `Message` receives and discards it. While one is unreceived, dropping `Mpi`
   skips `MPI_Finalize`.
+- **`Communicator::create_group`** (`MPI_Comm_create_group`): creates a
+  sub-communicator collectively over the members of the group only. A rank
+  outside the group gets `Ok(None)` from a call that is then local.
 
 ### Changed
 

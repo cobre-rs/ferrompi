@@ -59,7 +59,8 @@ impl Communicator {
     /// Returns a [`Group`] containing all processes in this communicator.
     /// Use [`Group::include`] or [`Group::exclude`] on the returned group
     /// to derive sub-groups, which can then be used with
-    /// [`Communicator::create`](Self::create).
+    /// [`Communicator::create`](Self::create) or
+    /// [`Communicator::create_group`](Self::create_group).
     ///
     /// # Errors
     ///
@@ -96,8 +97,8 @@ impl Communicator {
     }
 
     /// Convert a communicator-handle result into `Option<Self>`, treating a
-    /// negative handle as `MPI_COMM_NULL` (used by split, split_type, and
-    /// create).
+    /// negative handle as `MPI_COMM_NULL` (used by split, split_type, create
+    /// and create_group).
     fn from_optional_handle(new_handle: i32) -> Result<Option<Self>> {
         if new_handle < 0 {
             Ok(None)
@@ -212,7 +213,8 @@ impl Communicator {
     ///
     /// `group` must be a subset of `self`'s group. This call is collective
     /// over `self` — every rank in the parent communicator must invoke it,
-    /// even ranks not in `group`.
+    /// even ranks not in `group`. [`create_group`](Self::create_group) is
+    /// collective over the group only.
     ///
     /// Returns `Ok(None)` for ranks that are not members of `group`
     /// (MPI returns `MPI_COMM_NULL` for those ranks). Returns
@@ -220,10 +222,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns an error if `group` contains a rank not present in the parent
-    /// communicator (`MPI_ERR_GROUP`), or
-    /// [`Error::ResourceExhausted`](crate::Error::ResourceExhausted) if the
-    /// communicator table is full.
+    /// Returns [`Error::ResourceExhausted`](crate::Error::ResourceExhausted)
+    /// if the communicator table is full. A `group` with a member that is not
+    /// in the parent communicator is not checked here: MPICH returns class
+    /// [`MpiErrorClass::Group`](crate::MpiErrorClass::Group) to a member of
+    /// it, and Open MPI returns a communicator.
     ///
     /// # Example
     ///
@@ -244,6 +247,59 @@ impl Communicator {
         // argument and remains valid for the duration of this call.
         let ret = unsafe { ffi::ferrompi_comm_create(self.handle, group.handle, &mut new_handle) };
         Error::check_with_op(ret, "comm_create")?;
+        Self::from_optional_handle(new_handle)
+    }
+
+    /// Create a sub-communicator from a group, collectively over the members
+    /// of the group only (`MPI_Comm_create_group`).
+    ///
+    /// `group` must be a subset of `self`'s group. Every member of `group`
+    /// must invoke the call, with a group of the same members in the same
+    /// order and with the same `tag`; the other ranks of `self` take no part.
+    /// A rank that is not a member may still make the call: it is then local
+    /// and returns `Ok(None)`, as it does for the empty group.
+    ///
+    /// These rules are not checked, here or by MPICH and Open MPI. If `group`
+    /// has a member that is not in `self`, the call can crash the process of
+    /// a member that makes it. If the members pass different groups or tags,
+    /// the call can block, or return communicators on which a later call
+    /// blocks.
+    ///
+    /// Threads of one process that make this call on this communicator at
+    /// the same time must each pass a different `tag`: it is how MPI tells
+    /// their calls apart. It does not conflict with the tags of
+    /// point-to-point messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Mpi`] with class
+    /// [`MpiErrorClass::Tag`](crate::MpiErrorClass::Tag) if `tag` is negative
+    /// or above the library's tag limit, or
+    /// [`Error::ResourceExhausted`](crate::Error::ResourceExhausted) if the
+    /// communicator table is full.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::Mpi;
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let g = world.group().unwrap().include(&[0, 2]).unwrap();
+    /// // Collective over the group: only its members, ranks 0 and 2, call
+    /// if [0, 2].contains(&world.rank()) {
+    ///     let sub = world.create_group(&g, 0).unwrap().expect("a member gets a communicator");
+    ///     assert_eq!(sub.size(), 2);
+    /// }
+    /// ```
+    pub fn create_group(&self, group: &Group, tag: i32) -> Result<Option<Communicator>> {
+        let mut new_handle: i32 = -1;
+        // SAFETY: self.handle is owned by this Communicator; group.handle is owned by the Group
+        // argument and remains valid for the duration of this call.
+        let ret = unsafe {
+            ffi::ferrompi_comm_create_group(self.handle, group.handle, tag, &mut new_handle)
+        };
+        Error::check_with_op(ret, "comm_create_group")?;
         Self::from_optional_handle(new_handle)
     }
 

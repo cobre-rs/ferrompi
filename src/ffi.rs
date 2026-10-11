@@ -288,6 +288,13 @@ guarded_extern! {
 
     pub fn ferrompi_comm_create(comm: int32_t, group: int32_t, newcomm: *mut int32_t) -> c_int;
 
+    pub fn ferrompi_comm_create_group(
+        comm: int32_t,
+        group: int32_t,
+        tag: int32_t,
+        newcomm: *mut int32_t,
+    ) -> c_int;
+
     pub fn ferrompi_comm_create_from_group(
         group: int32_t,
         stringtag: *const c_char,

@@ -129,6 +129,17 @@ int ferrompi_comm_create(int32_t comm_handle,
                          int32_t* newcomm_handle);
 
 /**
+ * Create a sub-communicator from a parent communicator and a group
+ * (MPI_Comm_create_group). Collective over group_handle only: its members
+ * call with the same group and tag. For a rank not in group_handle the call
+ * is local and newcomm_handle is set to -1.
+ */
+int ferrompi_comm_create_group(int32_t comm_handle,
+                               int32_t group_handle,
+                               int32_t tag,
+                               int32_t* newcomm_handle);
+
+/**
  * Create a communicator from a group without a parent communicator
  * (MPI_Comm_create_from_group, MPI 4.0, or Open MPI 5). Collective only over the processes
  * sharing the same group and stringtag, not over an existing communicator.

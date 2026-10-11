@@ -559,7 +559,7 @@ static int32_t alloc_group(MPI_Group group) {
  *
  * The MPI_GROUP_NULL sentinel pairs with the
  *   `if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;`
- * guards at ferrompi_comm_create,
+ * guards at ferrompi_comm_create, ferrompi_comm_create_group,
  * ferrompi_comm_create_from_group, and the group-operation shims.
  * Callers without that guard (group_incl, group_excl, group_size,
  * group_rank) correctly defer to MPI's own MPI_ERR_GROUP for invalid
@@ -879,9 +879,10 @@ int ferrompi_comm_size(int32_t comm_handle, int32_t* size) {
 
 /* A shim below that cannot hand a new communicator to Rust (MPI_ERRORS_RETURN
  * cannot be installed on it, or the handle table is full) returns the error
- * without freeing it: MPI created it on every rank, MPI_Comm_free is
- * collective, and freeing it on this rank alone can hang or mismatch
- * collectives. It stays allocated until MPI_Finalize. */
+ * without freeing it: MPI created it on every rank that belongs to it,
+ * MPI_Comm_free is collective over those ranks, and freeing it on this rank
+ * alone can hang or mismatch collectives. It stays allocated until
+ * MPI_Finalize. */
 int ferrompi_comm_dup(int32_t comm_handle, int32_t* newcomm_handle) {
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Comm newcomm;
@@ -975,6 +976,27 @@ int ferrompi_comm_create(int32_t comm_h,
     if (parent == MPI_COMM_NULL || g == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Comm new_comm;
     int ret = MPI_Comm_create(parent, g, &new_comm);
+    if (ret != MPI_SUCCESS) return ret;
+    if (new_comm == MPI_COMM_NULL) {
+        *out_h = -1;  /* Caller is not in the group */
+        return MPI_SUCCESS;
+    }
+    int eh_ret = install_errors_return(new_comm);
+    if (eh_ret != MPI_SUCCESS) return eh_ret;
+    *out_h = alloc_comm(new_comm);
+    if (*out_h < 0) return FERROMPI_ERR_COMMS_FULL;
+    return MPI_SUCCESS;
+}
+
+int ferrompi_comm_create_group(int32_t comm_h,
+                               int32_t group_h,
+                               int32_t tag,
+                               int32_t* out_h) {
+    MPI_Comm parent = get_comm(comm_h);
+    MPI_Group g = get_group(group_h);
+    if (parent == MPI_COMM_NULL || g == MPI_GROUP_NULL) return MPI_ERR_ARG;
+    MPI_Comm new_comm;
+    int ret = MPI_Comm_create_group(parent, g, tag, &new_comm);
     if (ret != MPI_SUCCESS) return ret;
     if (new_comm == MPI_COMM_NULL) {
         *out_h = -1;  /* Caller is not in the group */
