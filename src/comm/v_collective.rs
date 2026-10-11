@@ -1239,7 +1239,8 @@ impl Communicator {
         let (counts, [scp, sdp, rcp, rdp]) =
             copy_arrays([sendcounts, sdispls, recvcounts, rdispls]);
         // SAFETY: `sp` and `rp` describe the heap allocations of `send` and `recv`, taken
-        // from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct allocations.
+        // from the Vecs by `vec_buf`/`vec_buf_mut`. Two non-empty Vecs are distinct
+        // allocations, and MPI reads and writes nothing through an empty one.
         // sendcounts/sdispls and recvcounts/rdispls are each checked above, on every rank,
         // to have size() entries, non-negative counts, and each positive-count block inside
         // send/recv respectively. `scp`, `sdp`, `rcp` and `rdp` point into `counts`, the

@@ -1441,7 +1441,7 @@ pub struct Win<T: MpiDatatype> {
     win_handle: i32,
     /// Non-null pointer to this process's local window buffer.
     ///
-    /// For `Win::create` this is the pointer `Vec::as_mut_ptr` returned for
+    /// For `Win::create` this is the pointer `vec_buf_mut` returned for
     /// `buffer`, the same one MPI holds. For `Win::allocate` and
     /// `Win::allocate_shared` this points into the MPI-managed allocation.
     local_ptr: NonNull<T>,
@@ -2993,13 +2993,13 @@ impl<T: MpiDatatype> Win<T> {
         let mut win_handle: i32 = -1;
 
         let created = counted_window_call("win_create", &mut win_handle, |handle| {
-            // SAFETY: `base` is the pointer `Vec::as_mut_ptr` returned for
-            // `buf`, valid for `size` bytes (a dangling pointer with size 0 for
-            // an empty `Vec`), and the window owns `buf` from here: it is moved
-            // into `buffer` only after this call succeeded, never resized or
-            // borrowed while the window lives, and every path that skips
-            // `MPI_Win_free` forgets it. The C shim validates the comm handle
-            // before calling MPI.
+            // SAFETY: `base` is the pointer `vec_buf_mut` returned for `buf`,
+            // valid for `size` bytes (size 0 for an empty `Vec`, so MPI then
+            // accesses nothing through it), and the window owns `buf` from
+            // here: it is moved into `buffer` only after this call succeeded,
+            // never resized or borrowed while the window lives, and every path
+            // that skips `MPI_Win_free` forgets it. The C shim validates the
+            // comm handle before calling MPI.
             unsafe {
                 ffi::ferrompi_win_create(
                     base,
@@ -3020,7 +3020,7 @@ impl<T: MpiDatatype> Win<T> {
             return Err(err);
         }
 
-        // SAFETY: `Vec::as_mut_ptr` is never null.
+        // SAFETY: `vec_buf_mut` never returns a null pointer.
         let local_ptr = unsafe { NonNull::new_unchecked(base.cast::<T>()) };
         Ok(Win {
             win_handle,

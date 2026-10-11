@@ -599,7 +599,8 @@ impl Communicator {
         let (sp, _, dt) = vec_buf(&send);
         let (rp, _, _) = vec_buf_mut(&mut recv);
         // SAFETY: `sp` and `rp` describe the heap allocations of `send` and `recv`, taken
-        // from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct allocations.
+        // from the Vecs by `vec_buf`/`vec_buf_mut`. Two non-empty Vecs are distinct
+        // allocations, and MPI reads and writes nothing through an empty one.
         // send.len() == recv.len() and divisibility by size are both verified above. The
         // request built below owns both under the ownership invariant documented on
         // `PersistentRequest::new_pair`.

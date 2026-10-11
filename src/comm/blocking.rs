@@ -4,7 +4,8 @@ use crate::comm::{
     check_rank_slots, check_same_len, rank_block, scatter_inplace_args, Communicator,
 };
 use crate::datatype::{
-    buf, buf_mut, pair_tag_of, tag_of, BytePermutable, DatatypeTag, MpiDatatype, MpiIndexedDatatype,
+    buf, buf_mut, buf_ptr, pair_tag_of, tag_of, BytePermutable, DatatypeTag, MpiDatatype,
+    MpiIndexedDatatype,
 };
 use crate::error::{Error, Result};
 use crate::ffi;
@@ -415,8 +416,8 @@ impl Communicator {
         // The tag is T's MPI paired datatype. Slices outlive this call.
         let ret = unsafe {
             ffi::ferrompi_allreduce(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                buf_ptr(send.as_ptr(), send.len(), false),
+                buf_ptr(recv.as_mut_ptr(), recv.len(), true).cast_mut(),
                 send.len() as i64,
                 pair_tag_of::<T>() as i32,
                 op,
@@ -491,8 +492,8 @@ impl Communicator {
         // - send and recv do not alias (send is &[T], recv is &mut [T]).
         let ret = unsafe {
             ffi::ferrompi_allreduce(
-                send.as_ptr().cast::<std::ffi::c_void>(),
-                recv.as_mut_ptr().cast::<std::ffi::c_void>(),
+                buf_ptr(send.as_ptr(), send.len(), false),
+                buf_ptr(recv.as_mut_ptr(), recv.len(), true).cast_mut(),
                 byte_count as i64,
                 DatatypeTag::Byte as i32,
                 op.code(),

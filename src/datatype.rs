@@ -242,15 +242,50 @@ unsafe impl<T: PlainData, const N: usize> PlainData for [T; N] {}
 /// unaliased). The count is exact: a slice length never exceeds
 /// `isize::MAX <= i64::MAX`. The tag is the MPI datatype that the sealed
 /// `MpiDatatype` impl assigns to `T`, so MPI's element size and layout equal
-/// `T`'s. The pointer is never null, even for an empty slice, so a NULL
-/// passed elsewhere as an in-place marker stays unambiguous.
+/// `T`'s. The pointer is never null, so a NULL passed elsewhere as an in-place
+/// marker stays unambiguous; see [`buf_ptr`] for an empty slice.
+// PERF: with no inline attribute on `buf` and `buf_mut` (and `#[inline]` on
+// `buf_ptr`), `isend` and `irecv` are no longer inlined into a caller's scope
+// body.
+#[inline(always)]
 pub(crate) fn buf<T: MpiDatatype>(s: &[T]) -> (*const c_void, i64, i32) {
-    (s.as_ptr().cast(), s.len() as i64, tag_of::<T>() as i32)
+    (
+        buf_ptr(s.as_ptr(), s.len(), false),
+        s.len() as i64,
+        tag_of::<T>() as i32,
+    )
 }
 
 /// See [`buf`].
+#[inline(always)]
 pub(crate) fn buf_mut<T: MpiDatatype>(s: &mut [T]) -> (*mut c_void, i64, i32) {
-    (s.as_mut_ptr().cast(), s.len() as i64, tag_of::<T>() as i32)
+    (
+        buf_ptr(s.as_mut_ptr(), s.len(), true).cast_mut(),
+        s.len() as i64,
+        tag_of::<T>() as i32,
+    )
+}
+
+/// The addresses MPI gets for a buffer of an alignment-1 type that holds no
+/// bytes: the first for a buffer MPI reads, the second for one it writes.
+static EMPTY: [u64; 2] = [0; 2];
+
+/// `ptr`, or the address of a private static when the buffer holds no bytes
+/// (`len` is zero or `T` is zero-sized) and `T` has alignment 1. Such a buffer
+/// usually points at address 1, which is `MPI_IN_PLACE` in Open MPI and in the
+/// MPI-5 ABI; a type with a larger alignment has an even address, and
+/// `MPI_IN_PLACE` is an odd address there and in MPICH. `written` selects the
+/// second address, so that a send and a receive buffer of one call never share
+/// one: MPICH's `MPI_Alltoallv` and Open MPI 5's `MPI_Reduce_init` can refuse
+/// two equal buffers whatever the count. MPI reads and writes nothing through
+/// a buffer of count zero.
+#[inline(always)]
+pub(crate) fn buf_ptr<T>(ptr: *const T, len: usize, written: bool) -> *const c_void {
+    if align_of::<T>() == 1 && (len == 0 || size_of::<T>() == 0) {
+        std::ptr::from_ref(&EMPTY[usize::from(written)]).cast()
+    } else {
+        ptr.cast()
+    }
 }
 
 macro_rules! impl_mpi_datatype {
@@ -609,8 +644,8 @@ mod tests {
     #[cfg(feature = "rma")]
     use super::AtomicMpiDatatype;
     use super::{
-        pair_tag_of, tag_of, BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, PlainData,
-        ShortInt,
+        buf, buf_mut, buf_ptr, pair_tag_of, tag_of, BytePermutable, DatatypeTag, DoubleInt,
+        FloatInt, Int2, PlainData, ShortInt,
     };
     #[cfg(all(
         target_os = "linux",
@@ -668,6 +703,28 @@ mod tests {
             )
         ))]
         assert_eq!(pair_tag_of::<LongDoubleInt>() as i32, 12);
+    }
+
+    #[test]
+    fn empty_byte_buffer_is_passed_at_a_fixed_even_address() {
+        let empty: Vec<u8> = Vec::new();
+        assert_eq!(empty.as_ptr() as usize, 1);
+        let (ptr, len, _) = buf(&empty);
+        assert_eq!(len, 0);
+        assert!(!ptr.is_null() && (ptr as usize) % 2 == 0);
+        let mut empty_out: Vec<u8> = Vec::new();
+        let out = buf_mut(&mut empty_out).0.cast_const();
+        assert!(!out.is_null() && (out as usize) % 2 == 0 && out != ptr);
+        let no_bytes = [[0u8; 0]; 3];
+        assert_eq!(buf_ptr(no_bytes.as_ptr(), no_bytes.len(), false), ptr);
+    }
+
+    #[test]
+    fn other_buffers_are_passed_at_their_own_address() {
+        let bytes = [7u8; 3];
+        assert_eq!(buf(&bytes).0, bytes.as_ptr().cast());
+        let no_words: Vec<u64> = Vec::new();
+        assert_eq!(buf(&no_words).0, no_words.as_ptr().cast());
     }
 
     #[test]

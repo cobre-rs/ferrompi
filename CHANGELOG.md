@@ -319,6 +319,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Error::InvalidState` without calling `MPI_Win_free`; that window, like one
   dropped in that state, is leaked, and `Mpi` then skips `MPI_Finalize`. Close
   the epoch first with `wait_exposure` or a `test_exposure` that returns `true`.
+- **A zero-length `u8` buffer no longer reaches MPI as `MPI_IN_PLACE`.** An
+  empty `Vec<u8>` points at address 1, which is `MPI_IN_PLACE` in Open MPI. On
+  Open MPI, every blocking and nonblocking collective that takes a buffer,
+  except `exscan` and `iexscan`, returned `Error::Mpi` on every rank when all
+  its buffers were empty `u8` buffers; `gatherv` with data on the other ranks
+  returned it only on a non-root rank whose send buffer was empty; and on
+  Open MPI 5 so did every persistent collective except `exscan_init`. An
+  empty `u8` send buffer and an empty `u8` receive buffer now also reach MPI
+  at two different addresses: MPICH refused `alltoallv` and `ialltoallv` over
+  two empty `Vec<u8>` when one slice served as both count arrays.
 
 ## [0.6.0] - 2026-10-01
 
