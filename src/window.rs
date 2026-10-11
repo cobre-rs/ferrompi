@@ -89,8 +89,8 @@ use crate::{AccumulateOp, FetchOp};
 /// ```
 /// use ferrompi::WinFenceAssert;
 ///
-/// let flags = WinFenceAssert::no_store() | WinFenceAssert::no_put();
-/// assert!(flags.bits() != 0);
+/// let mut flags = WinFenceAssert::no_store() | WinFenceAssert::no_put();
+/// flags |= WinFenceAssert::no_precede();
 /// ```
 ///
 /// Use `WinFenceAssert::default()` (equivalent to `WinFenceAssert::none()`)
@@ -164,7 +164,7 @@ impl WinFenceAssert {
 
     /// Returns the raw integer bitmask.
     #[inline]
-    pub fn bits(self) -> i32 {
+    pub(crate) fn bits(self) -> i32 {
         self.0
     }
 
@@ -234,8 +234,8 @@ fn check_fence_asserts(open: WinFenceAssert, close: WinFenceAssert) -> Result<()
 /// ```
 /// use ferrompi::WinPscwAssert;
 ///
-/// let flags = WinPscwAssert::no_store() | WinPscwAssert::no_put();
-/// assert!(flags.bits() != 0);
+/// let mut flags = WinPscwAssert::no_store() | WinPscwAssert::no_put();
+/// flags |= WinPscwAssert::no_check();
 /// ```
 ///
 /// Use `WinPscwAssert::default()` (equivalent to `WinPscwAssert::none()`)
@@ -297,7 +297,7 @@ impl WinPscwAssert {
 
     /// Returns the raw integer bitmask.
     #[inline]
-    pub fn bits(self) -> i32 {
+    pub(crate) fn bits(self) -> i32 {
         self.0
     }
 
@@ -4992,6 +4992,24 @@ pub(crate) mod tests {
         let mut a = WinFenceAssert::from_bits_for_test(1);
         a |= WinFenceAssert::from_bits_for_test(4);
         assert_eq!(a.bits(), 5);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "calls the C layer")]
+    fn fence_assertions_are_distinct_and_combine() {
+        let no_store = WinFenceAssert::no_store().bits();
+        let no_put = WinFenceAssert::no_put().bits();
+        let both = (WinFenceAssert::no_store() | WinFenceAssert::no_put()).bits();
+        assert!(
+            no_store != 0 && no_put != 0 && both != no_store && both != no_put,
+            "no_store {no_store}, no_put {no_put}, both {both}"
+        );
+        let no_precede = WinFenceAssert::no_precede().bits();
+        let no_succeed = WinFenceAssert::no_succeed().bits();
+        assert!(
+            no_precede != 0 && no_succeed != 0 && no_precede != no_succeed,
+            "no_precede {no_precede}, no_succeed {no_succeed}"
+        );
     }
 
     #[test]

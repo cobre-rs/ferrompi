@@ -1,9 +1,8 @@
 //! Integration test for Win::fence active-target epoch synchronization.
 //!
-//! Verifies that `Win::fence` opens and closes an epoch correctly on all
-//! ranks, that `WinFenceAssert` composition works as expected, and that the two
-//! assertions that would leave the epoch's operations uncompleted are rejected
-//! before any MPI call.
+//! Verifies that `Win::fence` opens and closes an epoch on all ranks, with and
+//! without assertions, and that the two assertions that would leave the epoch's
+//! operations uncompleted are rejected before any MPI call.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_fence
 // mpi-test: np=2
@@ -61,40 +60,7 @@ fn main() {
     }
 
     // ========================================================================
-    // Test 3: WinFenceAssert bitflag composition (non-MPI, compile+logic only)
-    //
-    // Verify that the OR of two non-zero flags has at least two bits set.
-    // We use no_store() | no_put() as an example. On real MPI installations
-    // these constants are non-zero and distinct, so their OR has >=2 bits set.
-    // If the MPI < 3 fallback is active, both equal 0 and the OR is also 0
-    // (which is the safe "no assertion" value).
-    // ========================================================================
-    {
-        let combined = WinFenceAssert::no_store() | WinFenceAssert::no_put();
-        let no_store_bits = WinFenceAssert::no_store().bits();
-        let no_put_bits = WinFenceAssert::no_put().bits();
-
-        // If both are non-zero they must be distinct (MPI guarantees that) and
-        // their combination must differ from each individually.
-        if no_store_bits != 0 && no_put_bits != 0 {
-            assert!(
-                combined.bits() != no_store_bits && combined.bits() != no_put_bits,
-                "WinFenceAssert OR result ({}) is not a proper superset of \
-                 no_store ({}) | no_put ({})",
-                combined.bits(),
-                no_store_bits,
-                no_put_bits
-            );
-        }
-    }
-
-    world.barrier().expect("barrier after test 3 failed");
-    if rank == 0 {
-        println!("PASS: WinFenceAssert bitflag composition");
-    }
-
-    // ========================================================================
-    // Test 4: Win::fence with no_precede()/no_succeed() and an actual put.
+    // Test 3: Win::fence with no_precede()/no_succeed() and an actual put.
     //
     // Uses a fresh window — MPI_MODE_NOPRECEDE is valid only when no RMA
     // epoch was previously open on the window.
@@ -102,20 +68,8 @@ fn main() {
     {
         let no_precede = WinFenceAssert::no_precede();
         let no_succeed = WinFenceAssert::no_succeed();
-        if no_precede.bits() == 0
-            || no_succeed.bits() == 0
-            || no_precede.bits() == no_succeed.bits()
-        {
-            eprintln!(
-                "rank {rank}: FAIL: no_precede/no_succeed bits invalid \
-                 (no_precede={}, no_succeed={})",
-                no_precede.bits(),
-                no_succeed.bits()
-            );
-            local_ok = false;
-        }
 
-        let mut win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 4) failed");
+        let mut win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 3) failed");
         let buf = [1.0f64, 2.0, 3.0, 4.0];
 
         let epoch = win.fence(no_precede, no_succeed, |e| {
@@ -140,19 +94,19 @@ fn main() {
         }
     }
 
-    world.barrier().expect("barrier after test 4 failed");
+    world.barrier().expect("barrier after test 3 failed");
     if rank == 0 && local_ok {
         println!("PASS: Win::fence with no_precede/no_succeed and put");
     }
 
     // ========================================================================
-    // Test 5: fence rejects no_succeed() on the opening fence and no_precede()
+    // Test 4: fence rejects no_succeed() on the opening fence and no_precede()
     // on the closing one with InvalidArgument, on every rank, without running
     // the closure and before any MPI call: no rank enters a collective, so the
     // window still takes a normal epoch afterwards.
     // ========================================================================
     {
-        let mut win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 5) failed");
+        let mut win = Win::<f64>::allocate(&world, 4).expect("Win::allocate (test 4) failed");
         let mut ran = false;
 
         let open = win.fence(WinFenceAssert::no_succeed(), WinFenceAssert::none(), |_| {
@@ -184,7 +138,7 @@ fn main() {
         }
     }
 
-    world.barrier().expect("barrier after test 5 failed");
+    world.barrier().expect("barrier after test 4 failed");
     if rank == 0 && local_ok {
         println!("PASS: Win::fence rejects no_succeed open and no_precede close");
     }
@@ -194,7 +148,7 @@ fn main() {
     world.barrier().expect("final barrier failed");
     if rank == 0 {
         println!("\n========================================");
-        println!("All Win::fence tests passed! (5 tests)");
+        println!("All Win::fence tests passed! (4 tests)");
         println!("========================================");
     }
 }

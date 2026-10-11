@@ -307,6 +307,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`MpiErrorClass::from_raw`.** It maps a class number of the linked MPI
   library, which no ferrompi call returns. Migration: read the `class`
   field of `Error::Mpi`.
+- **`WinFenceAssert::bits()` and `WinPscwAssert::bits()`.** They returned the
+  library's `MPI_MODE_*` values, which differ between MPI implementations.
+  Migration: delete the call; build an assertion with the named
+  constructors and combine them with `|`.
 
 ### Fixed
 
