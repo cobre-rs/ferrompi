@@ -7,9 +7,11 @@
 //! fresh groups, so every round is a first use, and releases its two threads
 //! together.
 //!
-//! Both threads make the same call on groups they share: `difference`,
-//! `intersection`, `union`, `compare` and `translate_ranks` in turn. Each
-//! result is compared with the members it must have.
+//! 1. Both threads make the same call on groups they share: `difference`,
+//!    `intersection`, `union`, `compare` and `translate_ranks` in turn. Each
+//!    result is compared with the members it must have.
+//! 2. One thread creates a communicator from a fresh group with `create_group`
+//!    while the other compares that group with a second one.
 //!
 //! The ordered list matters from three members on, so the test needs at least
 //! 3 processes.
@@ -17,13 +19,15 @@
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_group_threads
 // mpi-test: np=3.. timeout=60
 
-use ferrompi::{Group, GroupComparison, Mpi, ThreadLevel};
+use ferrompi::{Group, GroupComparison, Mpi, ReduceOp, ThreadLevel};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 mod common;
 
-/// Each of the five calls runs in a fifth of the rounds.
+/// Rounds of step 1; each of its five calls runs in a fifth of them.
 const ROUNDS: usize = 2000;
+/// Rounds of step 2, one communicator each.
+const CREATE_ROUNDS: usize = 100;
 
 /// Spins, giving the processor away now and then so that a machine with fewer
 /// cores than threads still makes progress.
@@ -89,10 +93,10 @@ fn main() {
     let world_group = world.group().expect("world.group() failed");
     let half = (size + 1) / 2;
 
-    // The same call from both threads, on groups made for the round: `a`
-    // holds every rank in descending order from a start that moves with the
-    // round, `b` half of them in ascending order, and `c` the members of `a`
-    // in another order.
+    // 1. The same call from both threads, on groups made for the round: `a`
+    //    holds every rank in descending order from a start that moves with
+    //    the round, `b` half of them in ascending order, and `c` the members
+    //    of `a` in another order.
     let mut ok = true;
     for round in 0..ROUNDS {
         let start = round as i32 % size;
@@ -131,6 +135,34 @@ fn main() {
         ok &= together(call, call);
     }
     common::check(&world, ok, "group calls from two threads on shared groups");
+
+    // 2. One thread creates a communicator from a group made for the round
+    //    while the other compares that group with a second one. Every rank is
+    //    a member, so the creating threads of all ranks meet in the call.
+    let mut ok = true;
+    for round in 0..CREATE_ROUNDS {
+        let start = round as i32 % size;
+        let in_g: Vec<i32> = (0..size)
+            .map(|i| (start + size - 1 - i).rem_euclid(size))
+            .collect();
+        let mut in_h = in_g.clone();
+        in_h.rotate_left(1);
+        let g = world_group.include(&in_g).expect("include failed");
+        let h = world_group.include(&in_h).expect("include failed");
+        let create = || match world.create_group(&g, round as i32) {
+            Ok(Some(sub)) => {
+                sub.size() == size && sub.allreduce_scalar(1i32, ReduceOp::Sum).ok() == Some(size)
+            }
+            _ => false,
+        };
+        let compare = || g.compare(&h).ok() == Some(GroupComparison::Similar);
+        ok &= together(create, compare);
+    }
+    common::check(
+        &world,
+        ok,
+        "create_group while another thread compares the group",
+    );
 
     if world.rank() == 0 {
         println!("PASS: test_group_threads");

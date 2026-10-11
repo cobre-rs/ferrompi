@@ -11,11 +11,16 @@
 //! 3. Every rank calls: a member receives `Some(comm)`; for any other rank the
 //!    call is local and returns `Ok(None)`.
 //! 4. With the empty group every rank receives `Ok(None)`.
+//! 5. On a communicator made by `split`, whose group nothing has asked for,
+//!    the members of a half create a communicator from a group taken from
+//!    the world group.
+//! 6. A group with a member outside the communicator is refused on every
+//!    rank, before the MPI call.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_comm_create_group
 // mpi-test: np=2.. timeout=30
 
-use ferrompi::{Mpi, MpiErrorClass, ReduceOp};
+use ferrompi::{Error, Mpi, MpiErrorClass, ReduceOp};
 
 mod common;
 
@@ -73,6 +78,39 @@ fn main() {
     let nobody = world_group.include(&[]).expect("include of no rank failed");
     let ok = matches!(world.create_group(&nobody, 5), Ok(None));
     common::check(&world, ok, "create_group of the empty group returns None");
+
+    // 5. A communicator whose group nothing has asked for: the even ranks
+    //    and the odd ranks, each with the group of its own ranks, built from
+    //    the world group.
+    let half = world
+        .split(Some(rank % 2), rank)
+        .expect("split failed")
+        .expect("every rank has a color");
+    let mine: Vec<i32> = (rank % 2..size).step_by(2).collect();
+    let own = world_group.include(&mine).expect("include failed");
+    let ok = match half.create_group(&own, 5) {
+        Ok(Some(sub)) => {
+            sub.size() == mine.len() as i32
+                && sub.allreduce_scalar(1i32, ReduceOp::Sum).ok() == Some(mine.len() as i32)
+        }
+        _ => false,
+    };
+    common::check(
+        &world,
+        ok,
+        "create_group on a communicator whose group was never asked for",
+    );
+
+    // 6. The world group has a member outside each half.
+    let ok = matches!(
+        half.create_group(&world_group, 6),
+        Err(Error::InvalidArgument { arg: "group", .. })
+    );
+    common::check(
+        &world,
+        ok,
+        "create_group refuses a group with a member outside the communicator",
+    );
 
     if rank == 0 {
         println!("PASS: test_comm_create_group");

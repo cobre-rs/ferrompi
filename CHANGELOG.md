@@ -423,6 +423,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Communicator::create`, `create_group` and `Mpi::create_from_group` are
   now serialised when MPI grants `Serialized` or `Multiple`. `Group::size`
   and `Group::rank` take no lock.
+- **`Communicator::create` and `create_group` refuse a group with a member
+  outside the communicator.** MPI requires the group to be a subset of the
+  communicator's, and a library need not check it: with such a group
+  `MPI_Comm_create_group` ended the process of a member that called it, on
+  MPICH and on Open MPI, and `MPI_Comm_create` returned class `Group` to a
+  member on MPICH and a communicator on Open MPI. Both methods now return
+  `Error::InvalidArgument` with `arg: "group"` on every rank that passes
+  such a group, before the MPI call. The same check ends a crash of
+  `create_group` on MPICH 4.2.3 for a valid group of two or more members,
+  on a communicator whose group had never been asked for.
 
 ## [0.6.0] - 2026-10-01
 

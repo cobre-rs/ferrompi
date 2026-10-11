@@ -216,17 +216,25 @@ impl Communicator {
     /// even ranks not in `group`. [`create_group`](Self::create_group) is
     /// collective over the group only.
     ///
+    /// The subset rule is checked on the calling rank, before the creating
+    /// call. The check is local work that grows with the sizes of `group` and
+    /// of `self`'s group: with their sum in MPICH 4.2 and with their product
+    /// in Open MPI 4.1 and 5.0, by the sources of those libraries.
+    ///
     /// Returns `Ok(None)` for ranks that are not members of `group`
     /// (MPI returns `MPI_COMM_NULL` for those ranks). Returns
     /// `Ok(Some(comm))` for ranks that are members.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::ResourceExhausted`](crate::Error::ResourceExhausted)
-    /// if the communicator table is full. A `group` with a member that is not
-    /// in the parent communicator is not checked here: MPICH returns class
-    /// [`MpiErrorClass::Group`](crate::MpiErrorClass::Group) to a member of
-    /// it, and Open MPI returns a communicator.
+    /// Returns [`Error::InvalidArgument`](crate::Error::InvalidArgument) if
+    /// `group` has a member that is not in `self`, to every rank that passes
+    /// such a group, whether it is a member of it or not. The check is local
+    /// and precedes the creating call, as described under "Argument
+    /// validation" on [`Communicator`]: ranks that already entered the
+    /// collective are not told and may block. Returns
+    /// [`Error::ResourceExhausted`](crate::Error::ResourceExhausted) if the
+    /// communicator table is full.
     ///
     /// # Example
     ///
@@ -259,11 +267,13 @@ impl Communicator {
     /// A rank that is not a member may still make the call: it is then local
     /// and returns `Ok(None)`, as it does for the empty group.
     ///
-    /// These rules are not checked, here or by MPICH and Open MPI. If `group`
-    /// has a member that is not in `self`, the call can crash the process of
-    /// a member that makes it. If the members pass different groups or tags,
-    /// the call can block, or return communicators on which a later call
-    /// blocks.
+    /// The subset rule is checked on the calling rank, before the creating
+    /// call. The check is local work that grows with the sizes of `group` and
+    /// of `self`'s group: with their sum in MPICH 4.2 and with their product
+    /// in Open MPI 4.1 and 5.0, by the sources of those libraries. The other
+    /// rules are not checked, here or by MPICH and Open MPI: if the members
+    /// pass different groups or tags, the call can block, or return
+    /// communicators on which a later call blocks.
     ///
     /// Threads of one process that make this call on this communicator at
     /// the same time must each pass a different `tag`: it is how MPI tells
@@ -272,9 +282,11 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Mpi`] with class
+    /// Returns [`Error::InvalidArgument`](crate::Error::InvalidArgument) if
+    /// `group` has a member that is not in `self`, to a member of `group` and
+    /// to any other caller alike; [`Error::Mpi`] with class
     /// [`MpiErrorClass::Tag`](crate::MpiErrorClass::Tag) if `tag` is negative
-    /// or above the library's tag limit, or
+    /// or above the library's tag limit; or
     /// [`Error::ResourceExhausted`](crate::Error::ResourceExhausted) if the
     /// communicator table is full.
     ///

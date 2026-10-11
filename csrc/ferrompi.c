@@ -993,12 +993,41 @@ int ferrompi_comm_split_type(int32_t comm_handle, int32_t split_type, int32_t ke
     return ret;
 }
 
+/* MPI_SUCCESS if every member of `group` is in `comm`, FERROMPI_ERR_GROUP_NOT_IN_COMM
+ * if one is not, or the error of a group call. MPI requires the subset
+ * (MPI-4.1 7.4.2) and need not check it: with a group that has a member outside
+ * the communicator, MPI_Comm_create_group ends the process in MPICH 4.2 and in
+ * Open MPI 4.1 and 5.0, and MPI_Comm_create returns a communicator in Open MPI.
+ * The group calls go through GROUP_CALL, and they leave two things built
+ * before the creating call of MPICH 4.2: the communicator's group, which its
+ * MPI_Comm_create_group reads without building and without which it ends the
+ * process for any group of two or more members, and the ordered member lists
+ * of both groups, which it would otherwise build on first use inside the
+ * call. The work is local: in MPICH 4.2 it is linear in the two group sizes
+ * once the lists exist; in Open MPI it is the product of the two sizes. */
+static int check_group_in_comm(MPI_Comm comm, MPI_Group group) {
+    MPI_Group comm_group, outside;
+    int ret;
+    GROUP_CALL(ret, MPI_Comm_group(comm, &comm_group));
+    if (ret != MPI_SUCCESS) return ret;
+    GROUP_CALL(ret, MPI_Group_difference(group, comm_group, &outside));
+    MPI_Group_free(&comm_group);
+    if (ret != MPI_SUCCESS) return ret;
+    int outside_size = 0;
+    ret = MPI_Group_size(outside, &outside_size);
+    if (outside != MPI_GROUP_EMPTY) MPI_Group_free(&outside);
+    if (ret != MPI_SUCCESS) return ret;
+    return outside_size == 0 ? MPI_SUCCESS : FERROMPI_ERR_GROUP_NOT_IN_COMM;
+}
+
 int ferrompi_comm_create(int32_t comm_h,
                          int32_t group_h,
                          int32_t* out_h) {
     MPI_Comm parent = get_comm(comm_h);
     MPI_Group g = get_group(group_h);
     if (parent == MPI_COMM_NULL || g == MPI_GROUP_NULL) return MPI_ERR_ARG;
+    int in_ret = check_group_in_comm(parent, g);
+    if (in_ret != MPI_SUCCESS) return in_ret;
     MPI_Comm new_comm;
     int ret = MPI_Comm_create(parent, g, &new_comm);
     if (ret != MPI_SUCCESS) return ret;
@@ -1020,6 +1049,8 @@ int ferrompi_comm_create_group(int32_t comm_h,
     MPI_Comm parent = get_comm(comm_h);
     MPI_Group g = get_group(group_h);
     if (parent == MPI_COMM_NULL || g == MPI_GROUP_NULL) return MPI_ERR_ARG;
+    int in_ret = check_group_in_comm(parent, g);
+    if (in_ret != MPI_SUCCESS) return in_ret;
     MPI_Comm new_comm;
     int ret = MPI_Comm_create_group(parent, g, tag, &new_comm);
     if (ret != MPI_SUCCESS) return ret;

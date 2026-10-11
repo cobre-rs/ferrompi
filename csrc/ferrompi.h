@@ -71,6 +71,12 @@ extern "C" {
  * MUST stay in sync with the mirrored const in src/error.rs. */
 #define FERROMPI_ERR_NOT_SUPPORTED   (-7008)
 
+/* Returned by ferrompi_comm_create and ferrompi_comm_create_group, before the
+ * MPI call, for a group with a member that is not in the communicator.
+ * src/error.rs maps it to Error::InvalidArgument. This MUST stay in sync with
+ * the mirrored const in src/error.rs. */
+#define FERROMPI_ERR_GROUP_NOT_IN_COMM (-7009)
+
 /* Private codes for the wildcard receive sources and tags. The C layer
  * translates them to the linked MPI's MPI_ANY_SOURCE, MPI_PROC_NULL and
  * MPI_ANY_TAG, whose values differ per implementation. These MUST stay in
@@ -123,6 +129,8 @@ int ferrompi_comm_split_type(int32_t comm, int32_t split_type, int32_t key, int3
  * Create a sub-communicator from a parent communicator and a group (MPI_Comm_create).
  * Collective over comm_handle: every rank in comm_handle must call, even ranks
  * not in group_handle. Ranks not in group_handle receive newcomm_handle = -1.
+ * Returns FERROMPI_ERR_GROUP_NOT_IN_COMM, before the MPI call, when group_handle
+ * has a member that is not in comm_handle.
  */
 int ferrompi_comm_create(int32_t comm_handle,
                          int32_t group_handle,
@@ -133,6 +141,8 @@ int ferrompi_comm_create(int32_t comm_handle,
  * (MPI_Comm_create_group). Collective over group_handle only: its members
  * call with the same group and tag. For a rank not in group_handle the call
  * is local and newcomm_handle is set to -1.
+ * Returns FERROMPI_ERR_GROUP_NOT_IN_COMM, before the MPI call, when group_handle
+ * has a member that is not in comm_handle.
  */
 int ferrompi_comm_create_group(int32_t comm_handle,
                                int32_t group_handle,

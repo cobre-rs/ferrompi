@@ -27,6 +27,13 @@ const FERROMPI_ERR_GROUPS_FULL: i32 = -7006;
 // MUST match `FERROMPI_ERR_NOT_SUPPORTED` in `csrc/ferrompi.h`.
 const FERROMPI_ERR_NOT_SUPPORTED: i32 = -7008;
 
+// Returned by the `ferrompi_comm_create` and `ferrompi_comm_create_group`
+// shims, before their MPI call, for a group with a member that is not in the
+// communicator. Intercepted in [`Error::from_code`] and mapped to
+// [`Error::InvalidArgument`]. This MUST match
+// `FERROMPI_ERR_GROUP_NOT_IN_COMM` in `csrc/ferrompi.h`.
+const FERROMPI_ERR_GROUP_NOT_IN_COMM: i32 = -7009;
+
 // Rust-only lifecycle-guard sentinels. Produced only by the Rust lifecycle
 // guard (never returned by the C layer), and outside the -7001..-7099 range
 // the C sentinels above use. A handle reaches a caller only after
@@ -303,7 +310,11 @@ pub enum Error {
     #[error("MPI call not permitted on this thread at the provided thread level")]
     ThreadLevelViolation,
 
-    /// An argument outside what the call accepts, detected before any MPI call.
+    /// An argument outside what the call accepts, detected before any MPI call
+    /// other than the local calls the check itself makes. The constructors of
+    /// a window are the exception: they first exchange each rank's length and
+    /// displacement unit with one allgather, and report such an argument after
+    /// it.
     #[error("invalid argument `{arg}`: {reason}")]
     #[non_exhaustive]
     InvalidArgument {
@@ -442,6 +453,12 @@ impl Error {
         if code == FERROMPI_ERR_NOT_SUPPORTED {
             return Error::NotSupported("MPI 4.0 operation".into());
         }
+        if code == FERROMPI_ERR_GROUP_NOT_IN_COMM {
+            return Error::InvalidArgument {
+                arg: "group",
+                reason: "member outside the communicator",
+            };
+        }
 
         let mut class: i32 = 0;
         let mut msg_buf = [0u8; 512];
@@ -556,8 +573,8 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        Error, MpiErrorClass, ResourceKind, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_NOT_INITIALIZED,
-        FERROMPI_ERR_NOT_SUPPORTED, FERROMPI_ERR_THREAD_LEVEL,
+        Error, MpiErrorClass, ResourceKind, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_GROUP_NOT_IN_COMM,
+        FERROMPI_ERR_NOT_INITIALIZED, FERROMPI_ERR_NOT_SUPPORTED, FERROMPI_ERR_THREAD_LEVEL,
     };
 
     #[test]
@@ -702,6 +719,24 @@ mod tests {
                 reason: "MPI is not initialized",
             } => {}
             other => panic!("expected Error::InvalidState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_code_maps_group_not_in_comm_sentinel() {
+        // The sentinel is intercepted before any MPI FFI call, so this is
+        // safe to run without an initialized MPI runtime.
+        for err in [
+            Error::from_code(FERROMPI_ERR_GROUP_NOT_IN_COMM),
+            Error::from_code_with_op(FERROMPI_ERR_GROUP_NOT_IN_COMM, "comm_create_group"),
+        ] {
+            match err {
+                Error::InvalidArgument {
+                    arg: "group",
+                    reason: "member outside the communicator",
+                } => {}
+                other => panic!("expected Error::InvalidArgument, got {other:?}"),
+            }
         }
     }
 

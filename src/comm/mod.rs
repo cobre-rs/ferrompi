@@ -128,8 +128,9 @@ pub enum SplitType {
 ///
 /// Collective methods that document an [`Error::BufferSize`] or
 /// [`Error::InvalidArgument`] condition check it on the calling rank before any
-/// MPI call. The check is local: ranks that already entered the collective are not
-/// told about the failure and may block.
+/// MPI call other than the local calls the check itself makes. The check is
+/// local: ranks that already entered the collective are not told about the
+/// failure and may block.
 ///
 /// # Errors in collective calls
 ///
