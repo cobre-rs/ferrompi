@@ -111,6 +111,7 @@ The crate has a solid core (sealed datatype traits, sound UserOp trampolines,
 | D-36 | **Planner deviations from register fix directions, approved at the design sign-off:** (a) no `NotRoot` error variant: ARC-08's list is narrowed, because the only root-only misuse goes with (b); (b) the in-place gathers (`gather_inplace`, `igather_inplace`, `gather_init_inplace`) accept non-root ranks, where the data is the rank's send block, resolving that ARC-15 asymmetry instead of naming it with an error; (c) send destinations take the same `Source` type as receive sources, with `Source::Any` rejected at run time as `InvalidArgument`, instead of a separate destination type. | **accepted 2026-10-01** | 0.7.0 — ARC-08, ARC-15, ARC-16 |
 | D-37 | **Budget Z pinning:** the Z arms (the group call at 8 threads against 1) are measured with one thread per physical core (`taskset -c 0,2,4,6,8,10,12,14`), with the 0.6.0 reference re-measured at `2802bf9` in the same session. Under `taskset -c 0-7` (4 cores × 2 hyperthreads), plain MPI itself slows 1.64-1.80× at 8 threads, so Z could not separate contention from noise. The budget numbers are unchanged, and the other budgets keep `0-7`. | **accepted 2026-10-02** | 0.7.0 — SND-16 |
 | D-38 | **Status of a completed send request:** `wait`/`test` return `Status` for every request. A send request's `Status` is MPI's empty status (`Source::Any`, `Tag::Any`, `count: Some(0)`), with `error` set as for any request, because MPI leaves a send's source, tag and count undefined (MPI-4.1 §3.7.3). The shim never reads those fields, and only `error` has meaning for a send. No separate send or receive request type. | **accepted 2026-10-02** | 0.7.0 — ARC-09 |
+| D-39 | **`RankRange` stays exhaustive:** it is one row of the `ranges[N][3]` argument of `MPI_Group_range_incl` and `MPI_Group_range_excl`, a (first, last, stride) triplet that MPI fixes, the reason D-30 keeps `ThreadLevel` exhaustive; this departs from ARC-02's list. Marking it `#[non_exhaustive]` would also need a public constructor that nothing else asks for. | **accepted 2026-10-10** | 0.7.0 — ARC-02 |
 
 ## Roadmap (accepted 2026-09-24)
 
@@ -192,7 +193,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | ID | Title | Sev | Reversibility | Target | Status |
 |---|---|---|---|---|---|
 | ARC-01 | C handle tables are the root cause of ABA, per-request cost, caps, sweep | major | two-way (large) | 0.8.0 (D-2) | open |
-| ARC-02 | Non-additive `rma` feature; no `#[non_exhaustive]` anywhere | major | one-way | 0.7.0 | fixed (1bbac44): #[non_exhaustive] on Error; rest planned (ferrompi-0.7.0) |
+| ARC-02 | Non-additive `rma` feature; no `#[non_exhaustive]` anywhere | major | one-way | 0.7.0 | fixed (1bbac44, f371c7a, 3784942, d01558f, b39adfb, 9d921e7, 40f7958) |
 | ARC-03 | Shim representation in public API (`raw_handle`, discriminant contract, pub `from_code`) | major | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
 | ARC-04 | Handles not tied to `Mpi` lifetime | major | mixed | 0.5.x guards / 0.7.0 | fixed (90d9544): runtime guards; lifetime parameter superseded (D-34) |
 | ARC-05 | Thread-safety model inconsistent | major | mixed | 0.5.x (D-3) | fixed (49cb30c) |
