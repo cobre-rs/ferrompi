@@ -900,10 +900,12 @@ mod tests {
         // Other tests hold tokens for a moment too, so wait for the sum to come
         // back to its earlier value instead of asserting zero.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while crate::rt::live_handle_tokens() > before && std::time::Instant::now() < deadline {
+        let mut live = crate::rt::live_handle_tokens();
+        while live > before && std::time::Instant::now() < deadline {
             std::thread::yield_now();
+            live = crate::rt::live_handle_tokens();
         }
-        assert!(crate::rt::live_handle_tokens() <= before);
+        assert!(live <= before);
     }
 
     // ── public enum shapes ────────────────────────────────────────────────
