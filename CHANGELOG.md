@@ -414,6 +414,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Buffer` when one slice served as both count arrays. In the two methods an
   empty buffer now reaches MPI at a fixed address that is never the other
   buffer's.
+- **Group calls made by several threads on one group no longer race.**
+  `Group` is `Sync`, and MPICH 4.2 builds a group's ordered member list on
+  its first use by `difference`, `intersection`, `union`, `compare` or
+  `translate_ranks` without locking the group: two threads that made such a
+  call on a group they shared, at `ThreadLevel::Multiple`, could crash or
+  block. These calls, the calls that make a group, and the group work of
+  `Communicator::create`, `create_group` and `Mpi::create_from_group` are
+  now serialised when MPI grants `Serialized` or `Multiple`. `Group::size`
+  and `Group::rank` take no lock.
 
 ## [0.6.0] - 2026-10-01
 

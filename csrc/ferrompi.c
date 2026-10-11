@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <pthread.h>
 
 // Every int32_t* to int* cast below (count, displacement and rank-array
 // arguments passed to the underlying MPI call, and the rank-range triples
@@ -143,6 +144,29 @@ static atomic_int next_win_hint;
 static MPI_Group group_table[MAX_GROUPS];
 static atomic_int group_used[MAX_GROUPS];  // 1 if slot is in use
 static atomic_int next_group_hint;
+
+// Serialises the MPI group calls that can write an object two threads share.
+// MPICH 4.2 builds a group's ordered member list on first use, inside
+// MPI_Group_compare, MPI_Group_difference, MPI_Group_intersection,
+// MPI_Group_union and MPI_Group_translate_ranks and inside the calls that
+// create a communicator from a group, and builds a communicator's group on
+// the first MPI_Comm_group; Open MPI 4.1 resolves a group's process entries
+// in place in its group constructors. Neither locks the object. Every such
+// call is written through GROUP_CALL. The lock is held across one local group
+// call at a time, never across a collective or blocking call, and no other
+// lock is taken in this file. It is taken only when MPI granted
+// MPI_THREAD_SERIALIZED or MPI_THREAD_MULTIPLE: below that the Rust guard
+// admits one thread. group_calls_overlap is written once, by
+// ferrompi_init_thread, before a second thread can hold a handle.
+static pthread_mutex_t group_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int group_calls_overlap;
+
+#define GROUP_CALL(ret, call)                                      \
+    do {                                                           \
+        if (group_calls_overlap) pthread_mutex_lock(&group_mutex); \
+        (ret) = (call);                                            \
+        if (group_calls_overlap) pthread_mutex_unlock(&group_mutex); \
+    } while (0)
 
 // Custom (derived) datatype table
 // datatype_used uses C11 atomics for the same reason as win_used above.
@@ -749,6 +773,7 @@ int ferrompi_init_thread(int required, int* provided) {
     
     // Initialize COMM_WORLD after MPI_Init and install the error handler
     if (ret == MPI_SUCCESS) {
+        group_calls_overlap = mpi_provided >= MPI_THREAD_SERIALIZED;
         comm_table[0] = MPI_COMM_WORLD;
         atomic_store_explicit(&comm_used[0], 1, memory_order_release);
         int eh_ret = install_errors_return(MPI_COMM_WORLD);
@@ -1009,12 +1034,33 @@ int ferrompi_comm_create_group(int32_t comm_h,
     return MPI_SUCCESS;
 }
 
+#ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
+/* MPI_Comm_create_from_group has no parent communicator to check the group
+ * against, and needs no check: every group this crate hands out is made of
+ * processes of the world communicator. MPICH 4.2 runs the call on the world
+ * communicator, and builds that communicator's group and the ordered member
+ * list of `group` on first use inside it. Both are built here instead, through
+ * GROUP_CALL, so that the creating call only reads them. */
+static int order_group_for_world(MPI_Group group) {
+    MPI_Group world_group;
+    int ret;
+    GROUP_CALL(ret, MPI_Comm_group(MPI_COMM_WORLD, &world_group));
+    if (ret != MPI_SUCCESS) return ret;
+    MPI_Group_free(&world_group);
+    int same;
+    GROUP_CALL(ret, MPI_Group_compare(group, group, &same));
+    return ret;
+}
+#endif
+
 int ferrompi_comm_create_from_group(int32_t group_h,
                                     const char* stringtag,
                                     int32_t* out_h) {
 #ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
     MPI_Group g = get_group(group_h);
     if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;
+    int order_ret = order_group_for_world(g);
+    if (order_ret != MPI_SUCCESS) return order_ret;
     MPI_Comm new_comm;
     int ret = MPI_Comm_create_from_group(g, stringtag, MPI_INFO_NULL,
                                          MPI_ERRORS_RETURN, &new_comm);
@@ -3211,7 +3257,8 @@ int ferrompi_comm_group(int32_t comm_handle, int32_t* group_handle) {
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
     MPI_Group g;
-    int ret = MPI_Comm_group(comm, &g);
+    int ret;
+    GROUP_CALL(ret, MPI_Comm_group(comm, &g));
     if (ret == MPI_SUCCESS) {
         *group_handle = alloc_group(g);
         if (*group_handle < 0) {
@@ -3228,7 +3275,8 @@ int ferrompi_group_incl(int32_t group_handle, int32_t n, const int32_t* ranks, i
     }
     MPI_Group group = get_group(group_handle);
     MPI_Group newgroup;
-    int ret = MPI_Group_incl(group, (int)n, (const int*)ranks, &newgroup);
+    int ret;
+    GROUP_CALL(ret, MPI_Group_incl(group, (int)n, (const int*)ranks, &newgroup));
     if (ret == MPI_SUCCESS) {
         *newgroup_handle = alloc_group(newgroup);
         if (*newgroup_handle < 0) {
@@ -3245,7 +3293,8 @@ int ferrompi_group_excl(int32_t group_handle, int32_t n, const int32_t* ranks, i
     }
     MPI_Group group = get_group(group_handle);
     MPI_Group newgroup;
-    int ret = MPI_Group_excl(group, (int)n, (const int*)ranks, &newgroup);
+    int ret;
+    GROUP_CALL(ret, MPI_Group_excl(group, (int)n, (const int*)ranks, &newgroup));
     if (ret == MPI_SUCCESS) {
         *newgroup_handle = alloc_group(newgroup);
         if (*newgroup_handle < 0) {
@@ -3297,7 +3346,8 @@ int ferrompi_group_union(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     MPI_Group g2 = get_group(g2_h);
     if (g1 == MPI_GROUP_NULL || g2 == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    int ret = MPI_Group_union(g1, g2, &new_grp);
+    int ret;
+    GROUP_CALL(ret, MPI_Group_union(g1, g2, &new_grp));
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
         if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
@@ -3310,7 +3360,8 @@ int ferrompi_group_intersection(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     MPI_Group g2 = get_group(g2_h);
     if (g1 == MPI_GROUP_NULL || g2 == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    int ret = MPI_Group_intersection(g1, g2, &new_grp);
+    int ret;
+    GROUP_CALL(ret, MPI_Group_intersection(g1, g2, &new_grp));
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
         if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
@@ -3323,7 +3374,8 @@ int ferrompi_group_difference(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     MPI_Group g2 = get_group(g2_h);
     if (g1 == MPI_GROUP_NULL || g2 == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    int ret = MPI_Group_difference(g1, g2, &new_grp);
+    int ret;
+    GROUP_CALL(ret, MPI_Group_difference(g1, g2, &new_grp));
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
         if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
@@ -3338,7 +3390,8 @@ int ferrompi_group_range_incl(int32_t g_h, int32_t n,
     MPI_Group g = get_group(g_h);
     if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    int ret = MPI_Group_range_incl(g, n, (int (*)[3])ranges_flat, &new_grp);
+    int ret;
+    GROUP_CALL(ret, MPI_Group_range_incl(g, n, (int (*)[3])ranges_flat, &new_grp));
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
         if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
@@ -3353,7 +3406,8 @@ int ferrompi_group_range_excl(int32_t g_h, int32_t n,
     MPI_Group g = get_group(g_h);
     if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    int ret = MPI_Group_range_excl(g, n, (int (*)[3])ranges_flat, &new_grp);
+    int ret;
+    GROUP_CALL(ret, MPI_Group_range_excl(g, n, (int (*)[3])ranges_flat, &new_grp));
     if (ret == MPI_SUCCESS) {
         *out_h = alloc_group(new_grp);
         if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
@@ -3366,7 +3420,8 @@ int ferrompi_group_compare(int32_t g1_h, int32_t g2_h, int32_t* result) {
     MPI_Group g2 = get_group(g2_h);
     if (g1 == MPI_GROUP_NULL || g2 == MPI_GROUP_NULL) return MPI_ERR_ARG;
     int mpi_result;
-    int ret = MPI_Group_compare(g1, g2, &mpi_result);
+    int ret;
+    GROUP_CALL(ret, MPI_Group_compare(g1, g2, &mpi_result));
     if (ret != MPI_SUCCESS) return ret;
     if (mpi_result == MPI_IDENT)        *result = 0;
     else if (mpi_result == MPI_SIMILAR) *result = 1;
@@ -3382,7 +3437,8 @@ int ferrompi_group_translate_ranks(int32_t g1_h, int32_t n,
     MPI_Group g1 = get_group(g1_h);
     MPI_Group g2 = get_group(g2_h);
     if (g1 == MPI_GROUP_NULL || g2 == MPI_GROUP_NULL) return MPI_ERR_ARG;
-    int ret = MPI_Group_translate_ranks(g1, n, ranks1, g2, ranks2);
+    int ret;
+    GROUP_CALL(ret, MPI_Group_translate_ranks(g1, n, ranks1, g2, ranks2));
     if (ret != MPI_SUCCESS) return ret;
     /* Normalize MPI_UNDEFINED to -1 so the Rust side has a single
      * portable sentinel. The MPI standard does not fix MPI_UNDEFINED's

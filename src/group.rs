@@ -119,7 +119,10 @@ pub struct Group {
 unsafe impl Send for Group {}
 // SAFETY: &Group exposes only reads of the immutable handle field and FFI
 // calls gated by the same lifecycle guard, so its thread safety follows
-// the requested ThreadLevel as Communicator's does.
+// the requested ThreadLevel as Communicator's does. MPI libraries write a
+// group object inside some group calls without locking it (MPICH 4.2 builds
+// its ordered member list on first use), so the C layer serialises those calls
+// when two threads can be inside MPI at once.
 unsafe impl Sync for Group {}
 
 impl Group {
