@@ -4,8 +4,8 @@
 //! `ferrompi_comm_create_from_group` shim.  Verifies that:
 //!
 //! - On MPI 4.0, or Open MPI 5: every rank that calls `mpi.create_from_group(&g, tag)`
-//!   with the same world group and the same tag receives an `Ok(comm)` with
-//!   `comm.size() == world.size()`.
+//!   with the same world group and the same tag receives an `Ok(Some(comm))`
+//!   with `comm.size() == world.size()`.
 //! - Where the library lacks it (below MPI 4.0, except Open MPI 5):
 //!   `create_from_group` returns `Err(Error::NotSupported(_))` instead of
 //!   calling into the (unbuilt) MPI 4.0 shim.
@@ -57,12 +57,15 @@ fn main() {
     }
 
     // ========================================================================
-    // Test 1: create_from_group returns Ok(comm).
+    // Test 1: create_from_group returns Ok(Some(comm)) to a member.
     // ========================================================================
     let comm = match mpi.create_from_group(&world_group, "ferrompi-test") {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("rank {rank}: FAIL: create_from_group returned error: {e}");
+        Ok(Some(c)) => c,
+        other => {
+            eprintln!(
+                "rank {rank}: FAIL: create_from_group returned {:?}",
+                other.map(|c| c.map(|c| c.size()))
+            );
             let _ = world.allreduce_scalar(0i32, ReduceOp::Min);
             std::process::exit(1);
         }

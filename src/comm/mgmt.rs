@@ -97,9 +97,9 @@ impl Communicator {
     }
 
     /// Convert a communicator-handle result into `Option<Self>`, treating a
-    /// negative handle as `MPI_COMM_NULL` (used by split, split_type, create
-    /// and create_group).
-    fn from_optional_handle(new_handle: i32) -> Result<Option<Self>> {
+    /// negative handle as `MPI_COMM_NULL` (used by split, split_type, create,
+    /// create_group and `Mpi::create_from_group`).
+    pub(crate) fn from_optional_handle(new_handle: i32) -> Result<Option<Self>> {
         if new_handle < 0 {
             Ok(None)
         } else {

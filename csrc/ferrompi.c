@@ -1019,9 +1019,9 @@ int ferrompi_comm_create_from_group(int32_t group_h,
     int ret = MPI_Comm_create_from_group(g, stringtag, MPI_INFO_NULL,
                                          MPI_ERRORS_RETURN, &new_comm);
     if (ret != MPI_SUCCESS) return ret;
-    /* MPI_COMM_NULL is returned on ranks outside the group */
     if (new_comm == MPI_COMM_NULL) {
-        return MPI_ERR_OTHER;
+        *out_h = -1;  /* Empty group, or caller is not in the group */
+        return MPI_SUCCESS;
     }
     *out_h = alloc_comm(new_comm);
     if (*out_h < 0) return FERROMPI_ERR_COMMS_FULL;

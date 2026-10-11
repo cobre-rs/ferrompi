@@ -238,7 +238,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Mpi::create_from_group`, which wraps `MPI_Comm_create_from_group`. Each
   method now has the name of its MPI call, and an error from `create` names
   the operation `comm_create`. Migration: `comm.create(&group)`;
-  `Mpi::create_from_group` is unchanged.
+  `Mpi::create_from_group` keeps its name.
+- **`Mpi::create_from_group` returns `Result<Option<Communicator>>`.** A rank
+  outside the group, and every rank with the empty group, gets `Ok(None)`,
+  as from `Communicator::create` and `create_group`; it used to get an
+  `Error::Mpi` with class `Other`. Migration: handle the `Option`, for
+  example `mpi.create_from_group(&group, tag)?.expect("this rank is in the group")`.
 
 ### Added
 

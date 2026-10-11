@@ -544,9 +544,26 @@ impl Mpi {
     /// Create a communicator from a group without requiring a parent
     /// communicator (MPI 4.0, or Open MPI 5).
     ///
-    /// `stringtag` must be identical across all ranks that participate
-    /// in the call; ranks with different tags or in different groups
-    /// produce separate communicators.
+    /// Every member of `group` must make the call, with a group of the same
+    /// members in the same order and with the same `stringtag`
+    /// (MPI-4.1 §7.4.2, p.339). These rules are not checked, here or by MPICH
+    /// and Open MPI: if the members pass different groups or string tags, the
+    /// call can block, or return communicators on which a later call blocks.
+    ///
+    /// MPI bounds the length of `stringtag`: with its terminating NUL it must
+    /// fit in `MPI_MAX_STRINGTAG_LEN` bytes, a limit of at least 63
+    /// (MPI-4.1 §7.4.2, p.339), so up to 62 bytes are portable. The length is
+    /// not checked here; MPICH 4.2 and Open MPI 5.0 accept longer tags.
+    ///
+    /// Returns `Ok(Some(comm))` to a member of `group`, and `Ok(None)` when
+    /// MPI creates no communicator for the caller:
+    /// - with the empty group, where the call is local
+    ///   (MPI-4.1 §7.4.2, p.339);
+    /// - on a rank that is not a member of a non-empty `group`. MPI-4.1 does
+    ///   not spell this case out for `MPI_Comm_create_from_group`: it calls the
+    ///   function similar to `MPI_Comm_create_group`, which returns no
+    ///   communicator to such a rank (MPI-4.1 §7.4.2, p.328). MPICH 4.2 and
+    ///   Open MPI 5.0 return none here.
     ///
     /// # Errors
     ///
@@ -555,6 +572,8 @@ impl Mpi {
     /// - Returns `Err(Error::NotSupported(_))` when ferrompi was built
     ///   against an MPI older than 4.0 other than Open MPI 5.
     /// - Returns `Err(Error::Mpi { .. })` if the underlying MPI call fails.
+    /// - Returns `Err(`[`Error::ResourceExhausted`]`)` if the communicator
+    ///   table is full.
     ///
     /// # Example
     ///
@@ -565,10 +584,17 @@ impl Mpi {
     /// let world = mpi.world();
     /// let g = world.group().unwrap();
     /// // All ranks participate with the same tag.
-    /// let comm = mpi.create_from_group(&g, "my-tag").unwrap();
+    /// let comm = mpi
+    ///     .create_from_group(&g, "my-tag")
+    ///     .unwrap()
+    ///     .expect("every rank is in the group");
     /// assert_eq!(comm.size(), world.size());
     /// ```
-    pub fn create_from_group(&self, group: &group::Group, stringtag: &str) -> Result<Communicator> {
+    pub fn create_from_group(
+        &self,
+        group: &group::Group,
+        stringtag: &str,
+    ) -> Result<Option<Communicator>> {
         let c_tag = CString::new(stringtag).map_err(|_| Error::InvalidArgument {
             arg: "stringtag",
             reason: "contains a NUL byte",
@@ -582,7 +608,7 @@ impl Mpi {
             ffi::ferrompi_comm_create_from_group(group.handle, c_tag.as_ptr(), &mut new_handle)
         };
         Error::check_with_op(ret, "comm_create_from_group")?;
-        Communicator::from_handle(new_handle)
+        Communicator::from_optional_handle(new_handle)
     }
 
     /// Attach a user-provided buffer for use by buffered sends.

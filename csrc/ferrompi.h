@@ -143,6 +143,8 @@ int ferrompi_comm_create_group(int32_t comm_handle,
  * Create a communicator from a group without a parent communicator
  * (MPI_Comm_create_from_group, MPI 4.0, or Open MPI 5). Collective only over the processes
  * sharing the same group and stringtag, not over an existing communicator.
+ * When MPI returns MPI_COMM_NULL (the empty group, or a caller that is not in
+ * group_handle), newcomm_handle is set to -1.
  * Returns FERROMPI_ERR_NOT_SUPPORTED when built against a library without
  * MPI_Comm_create_from_group.
  */

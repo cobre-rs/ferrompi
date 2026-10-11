@@ -1,10 +1,13 @@
 //! Integration test for the `MPI_COMM_NULL` guard in
 //! `ferrompi_comm_create_from_group` (MPI-4 path).
 //!
-//! Calls `Mpi::create_from_group` with a group that excludes some ranks,
-//! verifying that those ranks receive an `Err` from the create call itself
-//! (previously the shim stored a corrupt handle because the NULL guard was
-//! missing).
+//! 1. `Mpi::create_from_group` with a group that holds rank 0 only. Rank 0
+//!    receives `Ok(Some(comm))` of size 1. Rank 1 is outside the group: MPI
+//!    returns `MPI_COMM_NULL` to it, and the shim must report that as "no
+//!    communicator", so the call returns `Ok(None)`. Without the guard the null
+//!    handle is stored in the communicator table, and the call returns the
+//!    error of the rank query on it (operation `comm_rank`).
+//! 2. With the empty group every rank receives `Ok(None)`.
 //!
 //! Where the library lacks it (below MPI 4.0, except Open MPI 5), the shim is
 //! an unconditional stub: `create_from_group` returns `Error::NotSupported`.
@@ -14,7 +17,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_create_from_group_null_handle
 // mpi-test: np=2
 
-use ferrompi::{Error, Mpi, ReduceOp};
+use ferrompi::{Error, Mpi};
 
 mod common;
 
@@ -44,69 +47,47 @@ fn main() {
         return;
     }
 
-    // ========================================================================
-    // Build a group containing only rank 0.  Rank 1 is excluded and will
-    // receive MPI_COMM_NULL from MPI_Comm_create_from_group.
-    // ========================================================================
+    // 1. A group of rank 0 alone: rank 1 is outside it.
     let rank0_group = world_group
         .include(&[0])
         .expect("group.include(&[0]) failed");
-
     let result = mpi.create_from_group(&rank0_group, "test_null_guard");
-
-    if rank == 1 {
-        // Rank 1 is not in the group; MPI_Comm_create_from_group returns
-        // MPI_COMM_NULL for this rank.  The guard must refuse that in the
-        // create call itself rather than store MPI_COMM_NULL in the handle
-        // table.  Without the guard the caller still gets an error, but from
-        // the rank query on the stored null handle (operation `comm_rank`),
-        // so the operation is what tells the two apart.
-        match result.err() {
-            Some(
-                err @ Error::Mpi {
-                    operation: Some("comm_create_from_group"),
-                    ..
-                },
-            ) => {
-                println!("PASS rank {rank}: create_from_group for excluded rank returned: {err:?}");
-            }
-            // The capability gate above already excludes libraries without
-            // MPI_Comm_create_from_group, so anything else is definitely a bug.
-            other => {
-                eprintln!(
-                    "rank {rank}: FAIL: create_from_group for excluded rank was not refused \
-                     by the create call (its error, if any: {other:?}) — MPI_COMM_NULL \
-                     guard is missing or not compiled in"
-                );
-                // Participate in the sentinel barrier before exiting.
-                let _ = world.allreduce_scalar(0i32, ReduceOp::Min);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        // Rank 0 is in the group; the capability gate above already excludes
-        // libraries without MPI_Comm_create_from_group, so it must succeed.
-        match result {
-            Ok(_) => println!("PASS rank {rank}: create_from_group succeeded for member rank"),
-            Err(err) => {
-                eprintln!(
-                    "rank {rank}: FAIL: create_from_group for member rank returned \
-                     unexpected error: {err:?}"
-                );
-                let _ = world.allreduce_scalar(0i32, ReduceOp::Min);
-                std::process::exit(1);
-            }
-        }
+    let ok = match &result {
+        Ok(Some(comm)) => rank == 0 && comm.size() == 1,
+        Ok(None) => rank == 1,
+        Err(_) => false,
+    };
+    if !ok {
+        eprintln!(
+            "rank {rank}: create_from_group returned {:?}",
+            result.as_ref().map(|c| c.as_ref().map(|c| c.size()))
+        );
     }
+    drop(result);
+    common::check(
+        &world,
+        ok,
+        "create_from_group returns None to a rank outside the group",
+    );
 
-    // Sentinel barrier: all ranks must reach this point.
-    world
-        .allreduce_scalar(1i32, ReduceOp::Min)
-        .expect("sentinel allreduce failed");
+    // 2. The empty group.
+    let nobody = world_group.include(&[]).expect("include of no rank failed");
+    let result = mpi.create_from_group(&nobody, "test_null_guard_empty");
+    let ok = matches!(&result, Ok(None));
+    if !ok {
+        eprintln!(
+            "rank {rank}: create_from_group of the empty group returned {:?}",
+            result.as_ref().map(|c| c.as_ref().map(|c| c.size()))
+        );
+    }
+    drop(result);
+    common::check(
+        &world,
+        ok,
+        "create_from_group of the empty group returns None",
+    );
 
     if rank == 0 {
-        println!("\n========================================");
-        println!("All create_from_group_null_handle tests passed!");
-        println!("========================================");
+        println!("PASS: test_create_from_group_null_handle");
     }
 }
