@@ -3,7 +3,7 @@
 use crate::comm::{
     check_rank_slots, check_same_len, rank_block, scatter_inplace_args, Communicator,
 };
-use crate::datatype::{tag_of, MpiDatatype};
+use crate::datatype::{recv_ptr_of_empty_pair, tag_of, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::op::CollectiveOp;
@@ -254,13 +254,15 @@ impl Communicator {
         let mut request_handle: i64 = 0;
         let (sp, n, dt) = vec_buf(&send);
         let (rp, _, _) = vec_buf_mut(&mut recv);
+        let rp = recv_ptr_of_empty_pair(send.len(), recv.len(), rp);
         // SAFETY: `sp`, `n` and `rp` describe the heap allocations of `send` and `recv`,
         // taken from the Vecs by `vec_buf`/`vec_buf_mut`. The two Vecs are distinct
-        // allocations, or `recv` is empty. send.len() == recv.len() is verified above at
-        // the root; MPI ignores recvbuf at every other rank (MPI-4.1 section 6.9.1), where
-        // `recv` may be empty. The request built below owns both under the ownership
-        // invariant documented on `PersistentRequest::new_pair`, and a user op is cloned
-        // into it, so its closure outlives every start.
+        // allocations, or `recv` is empty; when both are empty the count is zero and `rp`
+        // is a fixed address of its own, through which MPI writes nothing. send.len() ==
+        // recv.len() is verified above at the root; MPI ignores recvbuf at every other rank
+        // (MPI-4.1 section 6.9.1), where `recv` may be empty. The request built below owns
+        // both under the ownership invariant documented on `PersistentRequest::new_pair`,
+        // and a user op is cloned into it, so its closure outlives every start.
         let ret = unsafe {
             ffi::ferrompi_reduce_init(sp, rp, n, dt, code, root, self.handle, &mut request_handle)
         };

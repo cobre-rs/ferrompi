@@ -1,8 +1,8 @@
-//! Regression test for zero-length `u8` buffers in collectives.
+//! Regression test for zero-length buffers in collectives.
 //!
 //! An empty `Vec<u8>` points at address 1, which some MPI libraries read as
-//! `MPI_IN_PLACE`. Every call below passes an empty byte buffer where a
-//! process has nothing to send or receive, and must return `Ok`:
+//! `MPI_IN_PLACE`. Every call of items 1 to 3 passes an empty byte buffer where
+//! a process has nothing to send or receive, and must return `Ok`:
 //!
 //! 1. `gather`, `gather_inplace`, `allgather`, `allreduce`, `allreduce_bytes`,
 //!    `reduce`, `scatter` and `alltoallv` with every buffer empty. `alltoallv`
@@ -15,6 +15,13 @@
 //!    `reduce_init` whose two buffers share an address at the root. A library
 //!    without persistent collectives must refuse both with
 //!    `Error::NotSupported`.
+//! 4. `alltoallv`, `ialltoallv` and a persistent `reduce_init` over two empty
+//!    `f64` buffers. Two empty buffers of a type with alignment 2 or more share
+//!    one address; MPICH refuses that in the two all-to-all calls when one
+//!    slice gives the send and the receive counts, and Open MPI 5 in
+//!    `reduce_init` at the root. Each call must return `Ok`; on a library
+//!    without persistent collectives `reduce_init` must return
+//!    `Error::NotSupported`, as in item 3.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_empty_buffers
 // mpi-test: np=2..
@@ -25,7 +32,7 @@ mod common;
 
 /// True iff `request` was built, started and waited, or, on a library without
 /// persistent collectives, refused with `Error::NotSupported`.
-fn persistent_ok(request: Result<PersistentRequest<u8>>) -> bool {
+fn persistent_ok<T>(request: Result<PersistentRequest<T>>) -> bool {
     if common::has_mpi4_collectives() {
         match request {
             Ok(mut request) => request.start().is_ok() && request.wait().is_ok(),
@@ -119,6 +126,31 @@ fn main() {
         &world,
         persistent_ok(reduce_init),
         "persistent reduce of empty buffers",
+    );
+
+    // Two empty buffers of a type with alignment 2 or more share one address.
+    let none: Vec<f64> = Vec::new();
+    let mut none_out: Vec<f64> = Vec::new();
+
+    let alltoallv = world.alltoallv(&none, &zeros, &zeros, &mut none_out, &zeros, &zeros);
+    common::check(&world, alltoallv.is_ok(), "alltoallv of empty f64 buffers");
+
+    let ialltoallv = ferrompi::scope(|s| {
+        world
+            .ialltoallv(s, &none, &mut none_out, &zeros, &zeros, &zeros, &zeros)?
+            .wait()
+    });
+    common::check(
+        &world,
+        ialltoallv.is_ok(),
+        "ialltoallv of empty f64 buffers",
+    );
+
+    let reduce_init = world.reduce_init(Vec::<f64>::new(), Vec::<f64>::new(), ReduceOp::Max, 0);
+    common::check(
+        &world,
+        persistent_ok(reduce_init),
+        "persistent reduce of empty f64 buffers",
     );
 
     if rank == 0 {

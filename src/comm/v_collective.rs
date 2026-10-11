@@ -2,7 +2,7 @@
 //! and their nonblocking (i*) and persistent (*_init) variants.
 
 use crate::comm::Communicator;
-use crate::datatype::{buf, buf_mut, MpiDatatype};
+use crate::datatype::{buf, buf_mut, recv_ptr_of_empty_pair, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::persistent::{vec_buf, vec_buf_mut, PersistentRequest};
@@ -438,9 +438,12 @@ impl Communicator {
         )?;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
+        let rp = recv_ptr_of_empty_pair(send.len(), recv.len(), rp);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). sendcounts/sdispls and
         // recvcounts/rdispls are each checked above, on every rank, to have size() entries,
         // non-negative counts, and each positive-count block inside send/recv respectively.
+        // When both buffers are empty every count is zero, and `rp` is then a fixed address
+        // of its own, through which MPI writes nothing.
         let ret = unsafe {
             ffi::ferrompi_alltoallv(
                 sp,
@@ -842,9 +845,12 @@ impl Communicator {
         let mut request_handle: i64 = 0;
         let (sp, _, dt) = buf(send);
         let (rp, _, _) = buf_mut(recv);
+        let rp = recv_ptr_of_empty_pair(send.len(), recv.len(), rp);
         // SAFETY: send and recv cannot alias (&[T] vs &mut [T]). sendcounts/sdispls and
         // recvcounts/rdispls are each checked above, on every rank, to have size() entries,
         // non-negative counts, and each positive-count block inside send/recv respectively.
+        // When both buffers are empty every count is zero, and `rp` is then a fixed address
+        // of its own, through which MPI writes nothing.
         // send, recv and all four count/displacement arrays are borrowed for 's (recv
         // mutably), and MPI may read the arrays until the request completes. The scope
         // completes every request it holds before 's ends, so the buffers and the arrays

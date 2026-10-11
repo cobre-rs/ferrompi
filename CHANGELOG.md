@@ -386,6 +386,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   thread's MPI call was in progress. The rank and size are now read once,
   when MPI is initialized; if that read fails, `Mpi::init` and
   `Mpi::init_thread` return its error and finalize MPI.
+- **`alltoallv`, `ialltoallv` and `reduce_init` accept two empty buffers of
+  any element type.** Two empty buffers of a type with alignment 2 or more,
+  such as `f64`, usually share one address. MPICH refused that in `alltoallv`
+  and `ialltoallv` when one slice served as both count arrays, and Open MPI 5
+  refused it in `reduce_init` at the root. The receive buffer of such a pair
+  now reaches MPI at a fixed address of its own.
 
 ## [0.6.0] - 2026-10-01
 
