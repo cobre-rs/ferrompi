@@ -271,7 +271,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaving it pending; every other call still returns `Error::Finalized`.
   Dropping `Mpi` inside a `scope` on the same thread also skips
   `MPI_Finalize`, with a warning: the scope's requests complete at scope end.
-- **`Error::from_code` no longer asks MPI for the error text while
+- **The text of an MPI error is no longer asked from MPI while
   `MPI_Finalize` is running or after it returned**, or on a thread the thread
   level does not allow to call MPI: the error has class `Raw` and the message
   `MPI error code N`. An error converted on a worker thread could previously
@@ -300,6 +300,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into a private table: it could not be passed to MPI, and another object
   could get the same value after a drop. Migration: delete the call; to
   tell two objects apart, keep your own identifier next to them.
+- **`Error::from_code`, `Error::from_code_with_op`, `Error::check` and
+  `Error::check_with_op`.** They interpret return codes of the crate's own
+  C layer, which no code outside the crate can obtain. Migration: match on
+  the `Error` a ferrompi call returns.
+- **`MpiErrorClass::from_raw`.** It maps a class number of the linked MPI
+  library, which no ferrompi call returns. Migration: read the `class`
+  field of `Error::Mpi`.
 
 ### Fixed
 

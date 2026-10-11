@@ -86,7 +86,7 @@ impl ResourceKind {
 /// MPI error class, categorizing the type of MPI error.
 ///
 /// The named variants correspond to the MPI error classes, compared against
-/// the linked MPI library's own `MPI_ERR_*` constants (see [`Self::from_raw`]).
+/// the linked MPI library's own `MPI_ERR_*` constants.
 /// [`Self::Raw`] carries a class value this enum does not name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
 #[non_exhaustive]
@@ -175,7 +175,7 @@ impl MpiErrorClass {
     /// delegates to the C layer, which compares `class` against the linked
     /// library's own `MPI_ERR_*` constants, so the mapping is correct on
     /// MPICH-derived libraries, Open MPI and the MPI 5 standard ABI.
-    pub fn from_raw(class: i32) -> Self {
+    pub(crate) fn from_raw(class: i32) -> Self {
         // SAFETY: ferrompi_error_class_index only compares its argument
         // against compile-time MPI_ERR_* constants; there is no pointer,
         // buffer, or initialization precondition to uphold.
@@ -403,17 +403,17 @@ impl Error {
     ///
     /// If called with `MPI_SUCCESS` (code 0), returns
     /// `Error::Internal("from_code called with success code 0")`.
-    /// Callers should use [`Error::check`] or [`Error::check_with_op`]
-    /// for the standard "Ok on success, Err on failure" idiom.
+    /// Callers should use [`Error::check_with_op`] for the standard "Ok on
+    /// success, Err on failure" idiom.
     ///
     /// Marked `#[cold]` + `#[inline(never)]`: this is only reached on the error
-    /// path of [`Error::check`]/[`Error::check_with_op`], and its body (a 512-byte
+    /// path of [`Error::check_with_op`], and its body (a 512-byte
     /// stack buffer, an FFI call to `ferrompi_error_info`, and a `format!`
     /// fallback) must stay out of line so the inlined success-path check folds
     /// to a single return-code branch in the caller.
     #[cold]
     #[inline(never)]
-    pub fn from_code(code: i32) -> Self {
+    pub(crate) fn from_code(code: i32) -> Self {
         if code == 0 {
             return Error::Internal("from_code called with success code 0".into());
         }
@@ -502,7 +502,7 @@ impl Error {
     /// it out of line lets [`Error::check_with_op`] inline to a bare branch.
     #[cold]
     #[inline(never)]
-    pub fn from_code_with_op(code: i32, operation: &'static str) -> Self {
+    pub(crate) fn from_code_with_op(code: i32, operation: &'static str) -> Self {
         if code == FERROMPI_ERR_NOT_SUPPORTED {
             return Error::NotSupported(operation.into());
         }
@@ -524,24 +524,6 @@ impl Error {
         }
     }
 
-    /// Check an MPI return code, returning `Ok(())` for success.
-    ///
-    /// Returns `Err(Error::from_code(code))` for a non-zero code: `Error::Mpi`
-    /// for an MPI error code, or the variant [`Error::from_code`] maps a
-    /// ferrompi sentinel to.
-    ///
-    /// `#[inline]` so the success-path check (`code == 0`) folds into the
-    /// caller across codegen-unit/crate boundaries; the cold error
-    /// construction is delegated to the `#[cold]` [`Error::from_code`].
-    #[inline]
-    pub fn check(code: i32) -> Result<()> {
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(Error::from_code(code))
-        }
-    }
-
     /// Check an MPI return code with an operation name, returning `Ok(())` for
     /// success.
     ///
@@ -553,7 +535,7 @@ impl Error {
     /// cold error construction stays out of line in the `#[cold]`
     /// [`Error::from_code_with_op`].
     #[inline]
-    pub fn check_with_op(code: i32, operation: &'static str) -> Result<()> {
+    pub(crate) fn check_with_op(code: i32, operation: &'static str) -> Result<()> {
         if code == 0 {
             Ok(())
         } else {
@@ -571,7 +553,7 @@ mod tests {
 
     #[test]
     fn check_success_returns_ok() {
-        assert!(Error::check(0).is_ok());
+        assert!(Error::check_with_op(0, "barrier").is_ok());
     }
 
     #[test]

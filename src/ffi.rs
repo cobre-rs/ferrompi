@@ -132,7 +132,7 @@ extern "C" {
 /// admitted while finalizing, and refused once finalized or on a thread the
 /// thread level does not allow, with the refusal code as the result. Unlike the
 /// other wrappers it skips the debug overlap check: MPI-4.1 §11.6 and Table 11.1
-/// make `MPI_Error_class` and `MPI_Error_string` always thread-safe, the public
+/// make `MPI_Error_class` and `MPI_Error_string` always thread-safe, so
 /// `Error::from_code` needs no serialization from its callers, and a refusal
 /// would only lose the message.
 ///
