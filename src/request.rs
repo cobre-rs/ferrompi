@@ -250,15 +250,6 @@ impl Request<'_> {
         self.registry.release(self.slot as u32);
     }
 
-    /// Get the raw request handle (for advanced use).
-    ///
-    /// The value is an opaque table handle carrying a generation counter in
-    /// its high bits; it names no request once this `Request` completes,
-    /// because completion frees the underlying table slot for reuse.
-    pub fn raw_handle(&self) -> i64 {
-        self.handle
-    }
-
     /// Check if this request has been completed.
     pub fn is_completed(&self) -> bool {
         self.completed

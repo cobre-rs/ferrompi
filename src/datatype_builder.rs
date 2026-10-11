@@ -23,7 +23,6 @@
 //!
 //! // Create a contiguous block of 10 f64 values.
 //! let dt = CustomDatatype::contiguous::<f64>(10).unwrap();
-//! assert!(dt.raw_handle() >= 0);
 //! // dt is freed when it goes out of scope.
 //! ```
 
@@ -51,7 +50,6 @@ use crate::rt;
 ///     StructField::new::<f64>(1, 0),
 ///     StructField::new::<i32>(1, 8),
 /// ]).unwrap();
-/// assert!(dt.raw_handle() >= 0);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StructField {
@@ -164,7 +162,6 @@ impl CustomDatatype {
     ///
     /// let _mpi = Mpi::init().unwrap();
     /// let dt = CustomDatatype::contiguous::<f64>(10).unwrap();
-    /// assert!(dt.raw_handle() >= 0);
     /// ```
     pub fn contiguous<T: MpiDatatype>(count: i32) -> Result<Self> {
         let mut handle: i32 = -1;
@@ -211,7 +208,6 @@ impl CustomDatatype {
     /// // the start of consecutive blocks (useful for column extraction in a
     /// // 5-column row-major matrix).
     /// let dt = CustomDatatype::vector::<f64>(3, 2, 5).unwrap();
-    /// assert!(dt.raw_handle() >= 0);
     /// ```
     pub fn vector<T: MpiDatatype>(count: i32, blocklength: i32, stride: i32) -> Result<Self> {
         let mut handle: i32 = -1;
@@ -261,7 +257,6 @@ impl CustomDatatype {
     ///     StructField::new::<f64>(1, 0),
     ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
-    /// assert!(dt.raw_handle() >= 0);
     /// ```
     pub fn create_struct(fields: &[StructField]) -> Result<Self> {
         let mut blocklengths: Vec<i32> = Vec::with_capacity(fields.len());
@@ -332,8 +327,6 @@ impl CustomDatatype {
     ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
     /// let r = s.resized(0, 16).unwrap();
-    /// assert!(r.raw_handle() >= 0);
-    /// assert_ne!(r.raw_handle(), s.raw_handle());
     /// ```
     pub fn resized(&self, lb: i64, extent: i64) -> Result<Self> {
         let mut h: i32 = -1;
@@ -341,14 +334,6 @@ impl CustomDatatype {
         let ret = unsafe { ffi::ferrompi_type_create_resized(self.handle, lb, extent, &mut h) };
         Error::check_with_op(ret, "type_create_resized")?;
         Self::from_committed(h)
-    }
-
-    /// Return the raw integer handle for this datatype.
-    ///
-    /// The handle is an index into the C-side `datatype_table`. It is always
-    /// `>= 0` for a successfully constructed `CustomDatatype`.
-    pub fn raw_handle(&self) -> i32 {
-        self.handle
     }
 
     /// Build a `CustomDatatype` from a just-committed handle, caching its

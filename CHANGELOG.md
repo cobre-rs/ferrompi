@@ -295,6 +295,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `PendingFetchResult`.
 - **The debug-build note `MPI_Finalize leaves N active request(s) unfreed`**:
   no request can be left pending at finalize any more.
+- **`raw_handle()` on `Communicator`, `Group`, `Request`,
+  `PersistentRequest`, `CustomDatatype` and `Win`.** The value was an index
+  into a private table: it could not be passed to MPI, and another object
+  could get the same value after a drop. Migration: delete the call; to
+  tell two objects apart, keep your own identifier next to them.
 
 ### Fixed
 

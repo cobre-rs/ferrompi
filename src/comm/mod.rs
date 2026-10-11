@@ -205,11 +205,6 @@ impl Communicator {
         Ok(Communicator { handle, rank, size })
     }
 
-    /// Get the raw communicator handle (for advanced use).
-    pub fn raw_handle(&self) -> i32 {
-        self.handle
-    }
-
     /// Get the rank of the calling process in this communicator.
     ///
     /// Returns the cached value stored at construction time. No FFI call is made.

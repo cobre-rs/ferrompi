@@ -263,11 +263,6 @@ impl<T> PersistentRequest<T> {
         std::mem::forget(self.op.take());
     }
 
-    /// Get the raw request handle (for advanced use).
-    pub fn raw_handle(&self) -> i64 {
-        self.handle
-    }
-
     /// Check if this request is currently active (started but not waited).
     pub fn is_active(&self) -> bool {
         self.token.is_some()

@@ -173,11 +173,6 @@ impl Group {
         Ok(if rank == -1 { None } else { Some(rank) })
     }
 
-    /// Get the raw group handle for internal use.
-    pub fn raw_handle(&self) -> i32 {
-        self.handle
-    }
-
     /// Create a new group containing only the specified ranks from this group.
     ///
     /// The resulting group contains the processes from this group whose ranks

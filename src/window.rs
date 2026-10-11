@@ -1431,7 +1431,6 @@ fn check_rma_target(
 ///
 /// // Create a window over a buffer it owns until MPI_Win_free
 /// let win = Win::create(&world, vec![0i32; 16]).unwrap();
-/// assert!(win.raw_handle() >= 0);
 /// assert_eq!(win.comm_size(), world.size());
 /// drop(win); // MPI_Win_free called here
 /// ```
@@ -3503,15 +3502,6 @@ impl<T: MpiDatatype> Win<T> {
             len,
             window: PhantomData,
         })
-    }
-
-    /// Get this window's raw handle.
-    ///
-    /// The value is ferrompi's internal table index for this window. It is
-    /// not an MPI handle and cannot be passed to MPI; use it only to tell
-    /// objects apart, for example in logs.
-    pub fn raw_handle(&self) -> i32 {
-        self.win_handle
     }
 
     /// Get the number of processes in the window's communicator.
