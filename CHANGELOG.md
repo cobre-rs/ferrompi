@@ -352,6 +352,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty `u8` send buffer and an empty `u8` receive buffer now also reach MPI
   at two different addresses: MPICH refused `alltoallv` and `ialltoallv` over
   two empty `Vec<u8>` when one slice served as both count arrays.
+- **`Mpi::world()` makes no MPI call and can no longer panic.** It asked MPI
+  for the rank and size on every call, and panicked when that call was
+  refused: in a debug build at `ThreadLevel::Serialized`, while another
+  thread's MPI call was in progress. The rank and size are now read once,
+  when MPI is initialized; if that read fails, `Mpi::init` and
+  `Mpi::init_thread` return its error and finalize MPI.
 
 ## [0.6.0] - 2026-10-01
 

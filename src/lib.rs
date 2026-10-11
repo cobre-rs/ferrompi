@@ -328,6 +328,10 @@ pub enum ThreadLevel {
 pub struct Mpi {
     /// The thread level that was provided
     thread_level: ThreadLevel,
+    /// This process's rank in `MPI_COMM_WORLD`, read once at init
+    world_rank: i32,
+    /// The size of `MPI_COMM_WORLD`, read once at init
+    world_size: i32,
     /// Marker to make Mpi !Send and !Sync
     _marker: PhantomData<*const ()>,
 }
@@ -342,7 +346,9 @@ impl Mpi {
     /// once MPI has been finalized, or `Err(`[`Error::Mpi`]`)` if
     /// `MPI_Init_thread` itself fails. An error inside `MPI_Init_thread`
     /// itself usually aborts the process before `Err(`[`Error::Mpi`]`)` can
-    /// be returned; see [`Error`].
+    /// be returned; see [`Error`]. If MPI then fails to report this process's
+    /// rank or the size of `MPI_COMM_WORLD`, that error is returned and MPI is
+    /// finalized, as it is when an `Mpi` handle is dropped.
     pub fn init() -> Result<Self> {
         Self::init_thread(ThreadLevel::Single)
     }
@@ -367,7 +373,9 @@ impl Mpi {
     /// itself usually aborts the process before `Err(`[`Error::Mpi`]`)` can
     /// be returned; see [`Error`]. That error's class is
     /// [`MpiErrorClass::Unknown`], because MPI cannot be asked for the class
-    /// of an error from its own initialization.
+    /// of an error from its own initialization. If MPI then fails to report
+    /// this process's rank or the size of `MPI_COMM_WORLD`, that error is
+    /// returned and MPI is finalized, as it is when an `Mpi` handle is dropped.
     pub fn init_thread(required: ThreadLevel) -> Result<Self> {
         rt::begin_init()?;
 
@@ -406,12 +414,23 @@ impl Mpi {
             _ => ThreadLevel::Multiple,
         };
 
+        // Read before `rt::activate`: until then no lifecycle state refuses a
+        // call, so only MPI itself can fail these two.
+        let world = Communicator::from_handle(comm::WORLD_HANDLE);
+
         rt::activate(thread_level);
 
-        Ok(Mpi {
+        let mut mpi = Mpi {
             thread_level,
+            world_rank: 0,
+            world_size: 0,
             _marker: PhantomData,
-        })
+        };
+        // If the read failed, `?` drops `mpi`, which finalizes MPI.
+        let world = world?;
+        mpi.world_rank = world.rank;
+        mpi.world_size = world.size;
+        Ok(mpi)
     }
 
     /// Get the thread support level that was provided.
@@ -420,8 +439,15 @@ impl Mpi {
     }
 
     /// Get a handle to `MPI_COMM_WORLD`.
+    ///
+    /// Makes no MPI call: the rank and size were read when MPI was
+    /// initialized, and neither changes afterwards.
     pub fn world(&self) -> Communicator {
-        Communicator::world()
+        Communicator {
+            handle: comm::WORLD_HANDLE,
+            rank: self.world_rank,
+            size: self.world_size,
+        }
     }
 
     /// Get the current wall-clock time (`MPI_Wtime`), in seconds.
@@ -748,8 +774,18 @@ mod tests {
     fn stub_mpi() -> Mpi {
         Mpi {
             thread_level: ThreadLevel::Single,
+            world_rank: 3,
+            world_size: 8,
             _marker: PhantomData,
         }
+    }
+
+    /// `world()` on a stub handle: any MPI call here would run before
+    /// `MPI_Init_thread`.
+    #[test]
+    fn world_is_built_from_the_rank_and_size_read_at_init() {
+        let world = stub_mpi().world();
+        assert_eq!((world.rank(), world.size()), (3, 8));
     }
 
     // ── ThreadLevel tests ──────────────────────────────────────────────

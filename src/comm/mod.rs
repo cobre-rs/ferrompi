@@ -177,19 +177,15 @@ unsafe impl Sync for Communicator {}
 
 /// Handle of `MPI_COMM_WORLD`: slot 0 of the C communicator table, set at
 /// init and never freed.
-const WORLD_HANDLE: i32 = 0;
+pub(crate) const WORLD_HANDLE: i32 = 0;
 
 impl Communicator {
-    /// Get a handle to `MPI_COMM_WORLD`.
-    pub(crate) fn world() -> Self {
-        Self::from_handle(WORLD_HANDLE).expect("COMM_WORLD must be valid post-init")
-    }
-
     /// Construct a `Communicator` by querying rank and size once from MPI.
     ///
-    /// This is the canonical internal constructor. All construction sites use it
-    /// so that `rank` and `size` are cached at creation time and subsequent calls
-    /// to [`rank()`](Self::rank) / [`size()`](Self::size) require no FFI round-trip.
+    /// This is the canonical internal constructor: every `rank` and `size` comes
+    /// from it, so [`rank()`](Self::rank) / [`size()`](Self::size) require no FFI
+    /// round-trip. `Mpi::world` builds its value from the pair this returned to
+    /// `Mpi::init_thread`.
     ///
     /// Returns `Err` if either `MPI_Comm_rank` or `MPI_Comm_size` fails.
     pub(crate) fn from_handle(handle: i32) -> Result<Self> {
