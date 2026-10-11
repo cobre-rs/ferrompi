@@ -194,7 +194,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 |---|---|---|---|---|---|
 | ARC-01 | C handle tables are the root cause of ABA, per-request cost, caps, sweep | major | two-way (large) | 0.8.0 (D-2) | open |
 | ARC-02 | Non-additive `rma` feature; no `#[non_exhaustive]` anywhere | major | one-way | 0.7.0 | fixed (1bbac44, f371c7a, 3784942, d01558f, b39adfb, 9d921e7, 40f7958) |
-| ARC-03 | Shim representation in public API (`raw_handle`, discriminant contract, pub `from_code`) | major | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
+| ARC-03 | Shim representation in public API (`raw_handle`, discriminant contract, pub `from_code`) | major | one-way | 0.7.0 | fixed (73a8c06, 2b965c3, 40f7958, 480ef2d, 88453ee, e546426, f49b02a) |
 | ARC-04 | Handles not tied to `Mpi` lifetime | major | mixed | 0.5.x guards / 0.7.0 | fixed (90d9544): runtime guards; lifetime parameter superseded (D-34) |
 | ARC-05 | Thread-safety model inconsistent | major | mixed | 0.5.x (D-3) | fixed (49cb30c) |
 | ARC-06 | Buffer-safety model (umbrella SND-01…05) | critical | one-way | 0.7.0 (D-1) | planned (ferrompi-0.7.0) |
@@ -203,7 +203,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | ARC-09 | `Status` always discarded | major | one-way | 0.7.0 | fixed (e6650c3, 3784942, 7bcf69c, 61664de, 0344d22) |
 | ARC-10 | Copy-pasted families drifted (root of SND-06) | major | two-way | 0.5.x (validators) | fixed (c402d59) |
 | ARC-11 | Capability gaps (in-place nonblocking, mprobe, HW_GUIDED…) | minor | additive | 0.7.0 | planned (ferrompi-0.7.0); HW_GUIDED wont-fix (D-31) |
-| ARC-12 | `Info` public but unused | minor | one-way | 0.7.0 (D-4) | planned (ferrompi-0.7.0) |
+| ARC-12 | `Info` public but unused | minor | one-way | 0.7.0 (D-4) | fixed (f49b02a) |
 | ARC-13 | `SharedWindow` duplicates `Win`; `WinKind` dead | minor | one-way | 0.5.x WinKind / 0.7.0 (D-5) | fixed (b39adfb, f1765b3, 2b965c3) |
 | ARC-14 | `numa` feature has no NUMA code, implies `rma` | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
 | ARC-15 | Naming/coverage asymmetries | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
@@ -218,7 +218,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | ABI-01 | build.rs drops `-D` flags (`MPI_ABI` lost → silent ABI mismatch) | critical (latent) | reading | 0.5.x | fixed (8e5e108) |
 | ABI-02 | No ABI detection probe; MPICH 4.3 draft ABI accepted | major | reading | 0.5.x reject / 0.8.0 build | fixed (67fbcd4): draft ABI rejected; ABI build open (0.8.0) |
 | ABI-03 | Build-selection env vars not tracked (= INF-03) | major | repro | 0.5.x | fixed (8f9fbfd) |
-| ABI-04 | Public-API one-way doors (= ARC-02/03) | major | reading | 0.7.0 | planned (ferrompi-0.7.0) |
+| ABI-04 | Public-API one-way doors (= ARC-02/03) | major | reading | 0.7.0 | fixed (9d921e7, 40f7958, 480ef2d, 88453ee, e546426, f49b02a) |
 | ABI-05 | ADR-0001 misstates what the ABI adds; ADR-0006 needed | minor | reading | 0.5.x | fixed (03f01e8, fb99656) |
 | ABI-06 | No interop API (deliberately deferred) | info | — | after ABI backend | open |
 | ABI-07 | Optional CI compile+link job against Forum ABI stubs | info | built locally | 0.5.x or 0.7 | fixed (5d62df7) |
