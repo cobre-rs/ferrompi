@@ -218,9 +218,9 @@ fn main() {
             let result = world.iscatterv(
                 s,
                 &send,
-                &mut recv,
                 &sendcounts_full[..size - 1],
                 &displs_full[..size - 1],
+                &mut recv,
                 0,
             );
             check_request(result, rank, "iscatterv", &BUFFER_SIZE, &mut local_ok);
@@ -298,9 +298,9 @@ fn main() {
             let result = world.ialltoallv(
                 s,
                 &send,
-                &mut recv,
                 &sendcounts,
                 &sdispls,
+                &mut recv,
                 &recvcounts,
                 &rdispls,
             );

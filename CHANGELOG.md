@@ -134,6 +134,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `igatherv`, `iscatterv`, `iallgatherv`, `ialltoallv` take `s` first and
   borrow their buffers, and the v-forms their count and displacement arrays,
   until the scope returns. Migration: call them inside `ferrompi::scope`.
+- **`iscatterv` and `ialltoallv` take their parameters in the order of
+  `scatterv` and `alltoallv`, which is MPI's:** `iscatterv(s, send,
+  sendcounts, displs, recv, root)` and `ialltoallv(s, send, sendcounts,
+  sdispls, recv, recvcounts, rdispls)`. `recv` came directly after `send`
+  before. Migration: move the `recv` argument behind the send displacements;
+  a call left in the old order passes a shared slice where `recv` is expected
+  and does not compile.
 - **Persistent point-to-point requests own their buffer:** `send_init`,
   `bsend_init`, `rsend_init`, `ssend_init` and `recv_init` take a `Vec<T>` and
   return `PersistentRequest<T>`. `buffer()`/`buffer_mut()` reach the buffer

@@ -579,11 +579,11 @@ impl Communicator {
     /// * `s` - The scope that owns the request
     /// * `send` - Data to scatter (only significant at root), borrowed for the scope
     ///   on every rank
-    /// * `recv` - Buffer for received data, borrowed for the scope
     /// * `sendcounts` - Number of elements sent to each rank, borrowed for the scope
     ///   on every rank
     /// * `displs` - Displacement in `send` for data to each rank, borrowed for the
     ///   scope on every rank
+    /// * `recv` - Buffer for received data, borrowed for the scope
     /// * `root` - Rank of the root process
     ///
     /// # Errors
@@ -611,7 +611,7 @@ impl Communicator {
     /// let send = vec![0.0f64; total as usize];
     /// let mut recv = vec![0.0f64; (rank + 1) as usize];
     /// ferrompi::scope(|s| {
-    ///     let req = world.iscatterv(s, &send, &mut recv, &sendcounts, &displs, 0)?;
+    ///     let req = world.iscatterv(s, &send, &sendcounts, &displs, &mut recv, 0)?;
     ///     req.wait()?;
     ///     Ok(())
     /// })
@@ -623,9 +623,9 @@ impl Communicator {
         &self,
         s: &'s Scope<'s, '_>,
         send: &'s [T],
-        recv: &'s mut [T],
         sendcounts: &'s [i32],
         displs: &'s [i32],
+        recv: &'s mut [T],
         root: i32,
     ) -> Result<Request<'s>> {
         if self.rank == root {
@@ -775,9 +775,9 @@ impl Communicator {
     ///
     /// * `s` - The scope that owns the request
     /// * `send` - Send buffer, borrowed for the scope
-    /// * `recv` - Receive buffer, borrowed for the scope
     /// * `sendcounts` - Number of elements to send to each rank, borrowed for the scope
     /// * `sdispls` - Send displacement for each rank, borrowed for the scope
+    /// * `recv` - Receive buffer, borrowed for the scope
     /// * `recvcounts` - Number of elements to receive from each rank, borrowed for the
     ///   scope
     /// * `rdispls` - Receive displacement for each rank, borrowed for the scope
@@ -805,7 +805,7 @@ impl Communicator {
     /// let send = vec![world.rank() as f64; size];
     /// let mut recv = vec![0.0f64; size];
     /// ferrompi::scope(|s| {
-    ///     let req = world.ialltoallv(s, &send, &mut recv, &sendcounts, &sdispls, &recvcounts, &rdispls)?;
+    ///     let req = world.ialltoallv(s, &send, &sendcounts, &sdispls, &mut recv, &recvcounts, &rdispls)?;
     ///     req.wait()?;
     ///     Ok(())
     /// })
@@ -818,9 +818,9 @@ impl Communicator {
         &self,
         s: &'s Scope<'s, '_>,
         send: &'s [T],
-        recv: &'s mut [T],
         sendcounts: &'s [i32],
         sdispls: &'s [i32],
+        recv: &'s mut [T],
         recvcounts: &'s [i32],
         rdispls: &'s [i32],
     ) -> Result<Request<'s>> {
@@ -1623,7 +1623,7 @@ mod tests {
         let displs = vec![0i32, 10, 20]; // 3 elements != 4
         let mut recv = vec![0.0f64; 10];
         let result = crate::scope(|s| {
-            comm.iscatterv(s, &send, &mut recv, &sendcounts, &displs, 0)
+            comm.iscatterv(s, &send, &sendcounts, &displs, &mut recv, 0)
                 .map(|_| ())
         });
         assert!(matches!(
@@ -1670,9 +1670,9 @@ mod tests {
             comm.ialltoallv(
                 s,
                 &send,
-                &mut recv,
                 &sendcounts,
                 &sdispls,
+                &mut recv,
                 &recvcounts,
                 &rdispls,
             )
@@ -1701,9 +1701,9 @@ mod tests {
             comm.ialltoallv(
                 s,
                 &send,
-                &mut recv,
                 &sendcounts,
                 &sdispls,
+                &mut recv,
                 &recvcounts,
                 &rdispls,
             )

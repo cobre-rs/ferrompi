@@ -137,7 +137,7 @@ fn main() {
 
     let ialltoallv = ferrompi::scope(|s| {
         world
-            .ialltoallv(s, &none, &mut none_out, &zeros, &zeros, &zeros, &zeros)?
+            .ialltoallv(s, &none, &zeros, &zeros, &mut none_out, &zeros, &zeros)?
             .wait()
     });
     common::check(

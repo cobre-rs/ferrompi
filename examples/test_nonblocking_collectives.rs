@@ -7,7 +7,8 @@
 //!
 //! Each operation returns a `Request` that is `.wait()`ed before
 //! verifying results with assertions matching the blocking test
-//! math in `test_collectives.rs`.
+//! math in `test_collectives.rs`; `ialltoallv` alone uses send and
+//! receive layouts that differ.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_nonblocking_collectives
 // mpi-test: np=2..
@@ -453,7 +454,7 @@ fn main() {
         let mut recv = vec![0.0f64; recv_count];
         ferrompi::scope(|s| {
             let req = world
-                .iscatterv(s, &send, &mut recv, &sendcounts, &displs, 0)
+                .iscatterv(s, &send, &sendcounts, &displs, &mut recv, 0)
                 .expect("iscatterv failed");
             req.wait().expect("iscatterv wait failed");
             Ok(())
@@ -521,25 +522,42 @@ fn main() {
     // Test 14: ialltoallv (variable-count all-to-all)
     // ========================================================================
     {
-        // Each rank sends 1 element to every other rank.
-        // The element sent from rank r to rank d is (r * 1000 + d) as f64.
+        // Rank r sends 1 + (r + 2 * d) % 3 elements to rank d, so the counts a
+        // rank sends differ from the counts it receives. Send blocks start one
+        // element into strides of four, in rank order; receive blocks start at
+        // strides of four, in reverse rank order. Element k of the block from r
+        // to d is (r * size + d) * 4 + k. Every other element of `send` is -2.0
+        // and of `recv` -1.0, and `recv` must keep those.
         let sz = size as usize;
-        let sendcounts = vec![1i32; sz];
-        let sdispls: Vec<i32> = (0..sz as i32).collect();
-        let recvcounts = vec![1i32; sz];
-        let rdispls: Vec<i32> = (0..sz as i32).collect();
+        let count = |from: i32, to: i32| 1 + (from + 2 * to) % 3;
+        let value = |from: i32, to: i32, k: i32| ((from * size + to) * 4 + k) as f64;
 
-        let send: Vec<f64> = (0..size).map(|d| (rank * 1000 + d) as f64).collect();
-        let mut recv = vec![0.0f64; sz];
+        let sendcounts: Vec<i32> = (0..size).map(|d| count(rank, d)).collect();
+        let sdispls: Vec<i32> = (0..size).map(|d| 4 * d + 1).collect();
+        let recvcounts: Vec<i32> = (0..size).map(|r| count(r, rank)).collect();
+        let rdispls: Vec<i32> = (0..size).map(|r| 4 * (size - 1 - r)).collect();
+
+        let mut send = vec![-2.0f64; 4 * sz];
+        let mut expected = vec![-1.0f64; 4 * sz];
+        for peer in 0..size {
+            let p = peer as usize;
+            for k in 0..sendcounts[p] {
+                send[(sdispls[p] + k) as usize] = value(rank, peer, k);
+            }
+            for k in 0..recvcounts[p] {
+                expected[(rdispls[p] + k) as usize] = value(peer, rank, k);
+            }
+        }
+        let mut recv = vec![-1.0f64; 4 * sz];
 
         ferrompi::scope(|s| {
             let req = world
                 .ialltoallv(
                     s,
                     &send,
-                    &mut recv,
                     &sendcounts,
                     &sdispls,
+                    &mut recv,
                     &recvcounts,
                     &rdispls,
                 )
@@ -549,12 +567,10 @@ fn main() {
         })
         .expect("ialltoallv scope failed");
 
-        // recv[i] should be the value that rank i sent to us = i * 1000 + rank
-        for (i, &v) in recv.iter().enumerate() {
-            let expected = (i as i32 * 1000 + rank) as f64;
+        for (i, (&v, &e)) in recv.iter().zip(&expected).enumerate() {
             assert!(
-                (v - expected).abs() < f64::EPSILON,
-                "rank {rank}: ialltoallv recv[{i}] = {v}, expected {expected}"
+                (v - e).abs() < f64::EPSILON,
+                "rank {rank}: ialltoallv recv[{i}] = {v}, expected {e}"
             );
         }
         test_count += 1;
