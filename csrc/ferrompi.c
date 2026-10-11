@@ -139,7 +139,8 @@ static MPI_Win win_table[MAX_WINDOWS];
 static atomic_int win_used[MAX_WINDOWS];  // 1 if slot is in use
 static atomic_int next_win_hint;
 
-// Group table (slot 0 reserved for MPI_GROUP_EMPTY, lazily populated)
+// Group table. Handle 0 stands for MPI_GROUP_EMPTY and has no slot of its
+// own to free; no slot holds MPI_GROUP_EMPTY (store_group).
 // group_used uses C11 atomics for the same reason as win_used above.
 static MPI_Group group_table[MAX_GROUPS];
 static atomic_int group_used[MAX_GROUPS];  // 1 if slot is in use
@@ -241,7 +242,7 @@ static void init_tables(void) {
     }
     atomic_init(&next_win_hint, 0);
     for (int i = 0; i < MAX_GROUPS; i++) {
-        group_table[i] = MPI_GROUP_EMPTY;
+        group_table[i] = MPI_GROUP_NULL;
         atomic_init(&group_used[i], 0);
     }
     atomic_init(&next_group_hint, 0);
@@ -576,7 +577,7 @@ static int32_t alloc_group(MPI_Group group) {
 /* Get MPI_Group from handle (thread-safe: acquire load).
  *
  * Sentinel contract (depended on by all callers in this file):
- *   handle == 0                → MPI_GROUP_EMPTY (the reserved lazy slot)
+ *   handle == 0                → MPI_GROUP_EMPTY (the reserved handle)
  *   handle out of range        → MPI_GROUP_NULL  (invalid handle error)
  *   handle in range, unused    → MPI_GROUP_NULL  (handle was freed)
  *   handle in range, used      → group_table[handle]
@@ -589,7 +590,7 @@ static int32_t alloc_group(MPI_Group group) {
  * group_rank) correctly defer to MPI's own MPI_ERR_GROUP for invalid
  * handles. */
 static MPI_Group get_group(int32_t handle) {
-    // Slot 0: lazily return MPI_GROUP_EMPTY (always valid post-init)
+    // Handle 0 is MPI_GROUP_EMPTY (always valid post-init)
     if (handle == 0) {
         return MPI_GROUP_EMPTY;
     }
@@ -602,10 +603,27 @@ static MPI_Group get_group(int32_t handle) {
     return group_table[handle];
 }
 
+/* Hand a group that MPI returned to Rust: handle 0 for MPI_GROUP_EMPTY, a
+ * predefined object that the user must not free (MPI-4.1 2.5.1), otherwise a
+ * table slot. With the table full, frees the group and returns
+ * FERROMPI_ERR_GROUPS_FULL. */
+static int store_group(MPI_Group group, int32_t* out_h) {
+    if (group == MPI_GROUP_EMPTY) {
+        *out_h = 0;
+        return MPI_SUCCESS;
+    }
+    *out_h = alloc_group(group);
+    if (*out_h < 0) {
+        MPI_Group_free(&group);
+        return FERROMPI_ERR_GROUPS_FULL;
+    }
+    return MPI_SUCCESS;
+}
+
 // Free a group handle (thread-safe: release store; does NOT call MPI_Group_free).
 static void free_group(int32_t handle) {
     if (handle > 0 && handle < MAX_GROUPS) {
-        group_table[handle] = MPI_GROUP_EMPTY;
+        group_table[handle] = MPI_GROUP_NULL;
         atomic_store_explicit(&group_used[handle], 0, memory_order_release);
     }
 }
@@ -841,10 +859,9 @@ int ferrompi_finalize(void) {
         }
     }
 
-    // Clean up any remaining group objects (skip slot 0, which is MPI_GROUP_EMPTY)
+    // Clean up any remaining group objects (slot 0 is never allocated)
     for (int i = 1; i < MAX_GROUPS; i++) {
-        if (atomic_load_explicit(&group_used[i], memory_order_acquire) &&
-                group_table[i] != MPI_GROUP_EMPTY) {
+        if (atomic_load_explicit(&group_used[i], memory_order_acquire)) {
             MPI_Group_free(&group_table[i]);
         }
         atomic_store_explicit(&group_used[i], 0, memory_order_release);
@@ -3290,14 +3307,8 @@ int ferrompi_comm_group(int32_t comm_handle, int32_t* group_handle) {
     MPI_Group g;
     int ret;
     GROUP_CALL(ret, MPI_Comm_group(comm, &g));
-    if (ret == MPI_SUCCESS) {
-        *group_handle = alloc_group(g);
-        if (*group_handle < 0) {
-            MPI_Group_free(&g);
-            return FERROMPI_ERR_GROUPS_FULL;
-        }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(g, group_handle);
 }
 
 int ferrompi_group_incl(int32_t group_handle, int32_t n, const int32_t* ranks, int32_t* newgroup_handle) {
@@ -3308,14 +3319,8 @@ int ferrompi_group_incl(int32_t group_handle, int32_t n, const int32_t* ranks, i
     MPI_Group newgroup;
     int ret;
     GROUP_CALL(ret, MPI_Group_incl(group, (int)n, (const int*)ranks, &newgroup));
-    if (ret == MPI_SUCCESS) {
-        *newgroup_handle = alloc_group(newgroup);
-        if (*newgroup_handle < 0) {
-            MPI_Group_free(&newgroup);
-            return FERROMPI_ERR_GROUPS_FULL;
-        }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(newgroup, newgroup_handle);
 }
 
 int ferrompi_group_excl(int32_t group_handle, int32_t n, const int32_t* ranks, int32_t* newgroup_handle) {
@@ -3326,18 +3331,12 @@ int ferrompi_group_excl(int32_t group_handle, int32_t n, const int32_t* ranks, i
     MPI_Group newgroup;
     int ret;
     GROUP_CALL(ret, MPI_Group_excl(group, (int)n, (const int*)ranks, &newgroup));
-    if (ret == MPI_SUCCESS) {
-        *newgroup_handle = alloc_group(newgroup);
-        if (*newgroup_handle < 0) {
-            MPI_Group_free(&newgroup);
-            return FERROMPI_ERR_GROUPS_FULL;
-        }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(newgroup, newgroup_handle);
 }
 
 int ferrompi_group_free(int32_t group_handle) {
-    // Slot 0 is reserved for MPI_GROUP_EMPTY — never free it.
+    // Handle 0 is MPI_GROUP_EMPTY, which is never freed.
     if (group_handle <= 0) {
         return MPI_SUCCESS;
     }
@@ -3379,11 +3378,8 @@ int ferrompi_group_union(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     MPI_Group new_grp;
     int ret;
     GROUP_CALL(ret, MPI_Group_union(g1, g2, &new_grp));
-    if (ret == MPI_SUCCESS) {
-        *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(new_grp, out_h);
 }
 
 int ferrompi_group_intersection(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
@@ -3393,11 +3389,8 @@ int ferrompi_group_intersection(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     MPI_Group new_grp;
     int ret;
     GROUP_CALL(ret, MPI_Group_intersection(g1, g2, &new_grp));
-    if (ret == MPI_SUCCESS) {
-        *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(new_grp, out_h);
 }
 
 int ferrompi_group_difference(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
@@ -3407,11 +3400,8 @@ int ferrompi_group_difference(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     MPI_Group new_grp;
     int ret;
     GROUP_CALL(ret, MPI_Group_difference(g1, g2, &new_grp));
-    if (ret == MPI_SUCCESS) {
-        *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(new_grp, out_h);
 }
 
 int ferrompi_group_range_incl(int32_t g_h, int32_t n,
@@ -3423,11 +3413,8 @@ int ferrompi_group_range_incl(int32_t g_h, int32_t n,
     MPI_Group new_grp;
     int ret;
     GROUP_CALL(ret, MPI_Group_range_incl(g, n, (int (*)[3])ranges_flat, &new_grp));
-    if (ret == MPI_SUCCESS) {
-        *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(new_grp, out_h);
 }
 
 int ferrompi_group_range_excl(int32_t g_h, int32_t n,
@@ -3439,11 +3426,8 @@ int ferrompi_group_range_excl(int32_t g_h, int32_t n,
     MPI_Group new_grp;
     int ret;
     GROUP_CALL(ret, MPI_Group_range_excl(g, n, (int (*)[3])ranges_flat, &new_grp));
-    if (ret == MPI_SUCCESS) {
-        *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(new_grp, out_h);
 }
 
 int ferrompi_group_compare(int32_t g1_h, int32_t g2_h, int32_t* result) {
@@ -4288,14 +4272,8 @@ int ferrompi_win_get_group(int32_t win_handle, int32_t* group_handle) {
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
     MPI_Group g;
     int ret = MPI_Win_get_group(win, &g);
-    if (ret == MPI_SUCCESS) {
-        *group_handle = alloc_group(g);
-        if (*group_handle < 0) {
-            MPI_Group_free(&g);
-            return FERROMPI_ERR_GROUPS_FULL;
-        }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(g, group_handle);
 }
 
 int ferrompi_win_complete(int32_t win_handle) {

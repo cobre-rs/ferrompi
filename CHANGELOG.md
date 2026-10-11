@@ -433,6 +433,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   such a group, before the MPI call. The same check ends a crash of
   `create_group` on MPICH 4.2.3 for a valid group of two or more members,
   on a communicator whose group had never been asked for.
+- **An empty `Group` is no longer passed to `MPI_Group_free`.** A group call
+  with an empty result returns MPI's predefined `MPI_GROUP_EMPTY`, which the
+  user must not free (MPI-4.1 §2.5.1). The crate stored it like any other
+  group and freed it on drop. An empty group now takes no slot of the group
+  table and is never freed.
 
 ## [0.6.0] - 2026-10-01
 

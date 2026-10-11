@@ -97,7 +97,8 @@ pub struct RankRange {
 ///
 /// This type wraps an `MPI_Group` handle with RAII semantics: the underlying
 /// MPI group object is freed automatically when the `Group` is dropped,
-/// unless it is slot 0 (reserved for `MPI_GROUP_EMPTY`).
+/// unless it is the empty group: that is MPI's predefined `MPI_GROUP_EMPTY`,
+/// which is never freed.
 ///
 /// Obtain a `Group` from a communicator via
 /// [`Communicator::group`](crate::Communicator::group), then use
@@ -535,7 +536,7 @@ impl Group {
 
 impl Drop for Group {
     fn drop(&mut self) {
-        // Slot 0 is reserved for MPI_GROUP_EMPTY and must not be freed.
+        // Handle 0 is MPI_GROUP_EMPTY, which must not be freed.
         if self.handle <= 0 {
             return;
         }

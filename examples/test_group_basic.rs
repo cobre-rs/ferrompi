@@ -8,7 +8,7 @@
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_group_basic
 // mpi-test: np=4
 
-use ferrompi::{Mpi, ReduceOp};
+use ferrompi::{Mpi, RankRange, ReduceOp};
 
 mod common;
 
@@ -188,6 +188,50 @@ fn main() {
                 eprintln!("rank {rank}: FAIL Test 5: sub-group rank error: {e}");
                 local_ok = false;
             }
+        }
+    }
+
+    // ========================================================================
+    // Test 6: an empty group takes no slot of the group table.
+    //   The table has 63 slots. 64 empty results of each of the seven calls
+    //   that can return one are held at once, and a group with a member can
+    //   still be made.
+    // ========================================================================
+    {
+        let world_group = world.group().expect("world.group() failed in Test 6");
+        let low = world_group.include(&[0, 1]).expect("include failed");
+        let high = world_group.include(&[2, 3]).expect("include failed");
+        let nobody = world_group.include(&[]).expect("include of no rank failed");
+        let everyone = RankRange {
+            first: 0,
+            last: 3,
+            stride: 1,
+        };
+        let mut held = Vec::new();
+        for _ in 0..64 {
+            held.push(world_group.include(&[]));
+            held.push(world_group.exclude(&[0, 1, 2, 3]));
+            held.push(world_group.difference(&world_group));
+            held.push(low.intersection(&high));
+            held.push(nobody.union(&nobody));
+            held.push(world_group.range_include(&[]));
+            held.push(world_group.range_exclude(&[everyone]));
+        }
+        let all_empty = held
+            .iter()
+            .all(|group| group.as_ref().is_ok_and(|g| g.size().ok() == Some(0)));
+        let still_room = world_group
+            .include(&[0])
+            .is_ok_and(|g| g.size().ok() == Some(1));
+        if all_empty && still_room {
+            if rank == 0 {
+                println!("PASS: Test 6 — {} empty groups held at once", held.len());
+            }
+        } else {
+            eprintln!(
+                "rank {rank}: FAIL Test 6: all empty = {all_empty}, room for one more = {still_room}"
+            );
+            local_ok = false;
         }
     }
 
