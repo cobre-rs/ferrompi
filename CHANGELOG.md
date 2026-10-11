@@ -260,6 +260,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MPI 5): the persistent in-place reduce and the persistent barrier. A
   barrier request is a `PersistentRequest<()>`, which owns no data. On a
   library without persistent collectives both return `Error::NotSupported`.
+- **Matched probes:** `Communicator::mprobe` and `improbe` take a message out
+  of the receive queue and return it as a `Message` with its `Status`;
+  `Message::mrecv` receives exactly that message, so probe-then-receive is
+  correct when several threads receive on one communicator. Dropping a
+  `Message` receives and discards it. While one is unreceived, dropping `Mpi`
+  skips `MPI_Finalize`.
 
 ### Changed
 

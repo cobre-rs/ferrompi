@@ -243,6 +243,54 @@ int ferrompi_iprobe(
 );
 
 /* ============================================================
+ * Matched Probe and Receive
+ * ============================================================ */
+
+/**
+ * Matched probe (MPI_Mprobe). On success *message holds the MPI_Message by
+ * value, *bytes its length in bytes (-1 if MPI cannot report it) and *status
+ * its status counted in datatype_tag elements. The message stays matched until
+ * ferrompi_mrecv receives it.
+ */
+int ferrompi_mprobe(
+    int32_t source,
+    int32_t tag,
+    int32_t comm,
+    int64_t* message,
+    int64_t* bytes,
+    ferrompi_status* status,
+    int32_t datatype_tag
+);
+
+/**
+ * Nonblocking matched probe (MPI_Improbe). *flag is 0 when nothing matched;
+ * message, bytes and status are then left untouched.
+ */
+int ferrompi_improbe(
+    int32_t source,
+    int32_t tag,
+    int32_t comm,
+    int32_t* flag,
+    int64_t* message,
+    int64_t* bytes,
+    ferrompi_status* status,
+    int32_t datatype_tag
+);
+
+/**
+ * Matched receive (MPI_Mrecv) of a message from ferrompi_mprobe or
+ * ferrompi_improbe. status may be NULL. A call that reached MPI consumed the
+ * message whatever it returned, so a message is never passed twice.
+ */
+int ferrompi_mrecv(
+    void* buf,
+    int64_t count,
+    int32_t datatype_tag,
+    int64_t message,
+    ferrompi_status* status
+);
+
+/* ============================================================
  * Generic Collective Operations - Blocking
  * ============================================================ */
 

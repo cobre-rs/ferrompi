@@ -1363,6 +1363,100 @@ int ferrompi_iprobe(int32_t source, int32_t tag, int32_t comm_handle,
 }
 
 /* ============================================================
+ * Matched Probe and Receive
+ * ============================================================ */
+
+// An MPI_Message crosses to Rust by value in an int64_t: an integer handle in
+// MPICH, a pointer in Open MPI and in the MPI 5.0 ABI.
+_Static_assert(sizeof(MPI_Message) <= sizeof(int64_t),
+               "MPI_Message must fit in the int64_t that carries it");
+
+static int64_t message_to_i64(MPI_Message m) {
+    int64_t v = 0;
+    memcpy(&v, &m, sizeof m);
+    return v;
+}
+
+static MPI_Message message_from_i64(int64_t v) {
+    MPI_Message m;
+    memcpy(&m, &v, sizeof m);
+    return m;
+}
+
+// Fills what a matched probe returns: the message, its status counted in dt
+// elements, and its length in bytes (-1 if MPI cannot report it), which a later
+// discard needs. The message is matched whatever MPI_Get_count answers, so a
+// failed count is an unknown count, never a failed probe.
+static void fill_matched(MPI_Message m, const MPI_Status* st, MPI_Datatype dt,
+                         int64_t* message, int64_t* bytes, ferrompi_status* status) {
+    *message = message_to_i64(m);
+    (void)get_count64(st, MPI_BYTE, bytes);
+    (void)fill_status(st, dt, status);
+}
+
+int ferrompi_mprobe(int32_t source, int32_t tag, int32_t comm_handle, int64_t* message,
+                    int64_t* bytes, ferrompi_status* status, int32_t datatype_tag) {
+    MPI_Comm comm = get_comm(comm_handle);
+    MPI_Datatype dt = get_datatype(datatype_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+
+    MPI_Message m;
+    MPI_Status st;
+    int ret = MPI_Mprobe(source_to_mpi(source), tag_to_mpi(tag), comm, &m, &st);
+    if (ret == MPI_SUCCESS) {
+        fill_matched(m, &st, dt, message, bytes, status);
+    }
+    return ret;
+}
+
+int ferrompi_improbe(int32_t source, int32_t tag, int32_t comm_handle, int32_t* flag,
+                     int64_t* message, int64_t* bytes, ferrompi_status* status,
+                     int32_t datatype_tag) {
+    MPI_Comm comm = get_comm(comm_handle);
+    MPI_Datatype dt = get_datatype(datatype_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+
+    MPI_Message m;
+    MPI_Status st;
+    int f;
+    int ret = MPI_Improbe(source_to_mpi(source), tag_to_mpi(tag), comm, &f, &m, &st);
+    if (ret == MPI_SUCCESS) {
+        *flag = f;
+        if (f) {
+            fill_matched(m, &st, dt, message, bytes, status);
+        }
+    }
+    return ret;
+}
+
+int ferrompi_mrecv(void* buf, int64_t count, int32_t datatype_tag, int64_t message,
+                   ferrompi_status* status) {
+    MPI_Datatype dt = get_datatype(datatype_tag);
+    // The one return that leaves the message matched. Rust never takes it: it
+    // passes only tags that get_datatype maps.
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Message m = message_from_i64(message);
+    MPI_Status st;
+    int ret;
+    if (count > INT_MAX) {
+#if MPI_VERSION >= 4
+        ret = MPI_Mrecv_c(buf, (MPI_Count)count, dt, &m, &st);
+#else
+        // A receive buffer may be longer than the message. Without the
+        // large-count call the room is stated as INT_MAX elements, so that
+        // every return below is MPI's own and the message was consumed.
+        ret = MPI_Mrecv(buf, INT_MAX, dt, &m, &st);
+#endif
+    } else {
+        ret = MPI_Mrecv(buf, (int)count, dt, &m, &st);
+    }
+    if (ret == MPI_SUCCESS && status) {
+        ret = fill_status(&st, dt, status);
+    }
+    return ret;
+}
+
+/* ============================================================
  * Generic Collective Operations - Blocking
  * ============================================================ */
 

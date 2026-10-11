@@ -20,7 +20,8 @@
 //!   `int` length, return that error on every MPI version.
 //! - **Scalar and in-place variants**: `reduce_scalar`, `allreduce_scalar`, `reduce_inplace`,
 //!   `allreduce_inplace`, `scan_scalar`, `exscan_scalar`
-//! - **Point-to-point**: `send`, `recv`, `isend`, `irecv`, `sendrecv`, `probe`, `iprobe`
+//! - **Point-to-point**: `send`, `recv`, `isend`, `irecv`, `sendrecv`, `probe`, `iprobe`, and the
+//!   matched probes `mprobe` and `improbe`, whose [`Message`] only its own `mrecv` can receive
 //! - **Persistent point-to-point**: `send_init`, `bsend_init`, `rsend_init`, `ssend_init`,
 //!   `recv_init` methods on [`Communicator`], each returning a [`PersistentRequest`]
 //! - **Communicator management**: `split`, `split_type`, `split_shared`, `duplicate`
@@ -85,7 +86,7 @@
 //!
 //! ## Thread Safety
 //!
-//! [`Communicator`], [`Group`], [`PersistentRequest`], [`Status`],
+//! [`Communicator`], [`Group`], [`PersistentRequest`], [`Message`], [`Status`],
 //! [`CustomDatatype`] and [`UserOp`] are `Send + Sync`; [`Mpi`], [`Request`],
 //! `Win<T>`, its epoch handles and `WinView` (feature `rma`) are not.
 //!
@@ -153,6 +154,7 @@ pub mod doc;
 mod error;
 mod ffi;
 mod group;
+mod message;
 mod op;
 mod persistent;
 mod request;
@@ -183,6 +185,7 @@ pub use datatype::{LongDoubleInt, LongInt};
 pub use datatype_builder::{CustomDatatype, StructField};
 pub use error::{Error, MpiErrorClass, ResourceKind, Result};
 pub use group::{Group, GroupComparison, RankRange};
+pub use message::Message;
 pub use op::{AccumulateOp, CollectiveOp, FetchOp, ReduceOp, UserOp};
 pub use persistent::PersistentRequest;
 pub use request::Request;
@@ -279,20 +282,29 @@ pub enum ThreadLevel {
 /// with `wait`/`test` afterwards; dropping it then makes no MPI call and leaks
 /// its handle and, if it is still active, its buffers.
 ///
+/// The same holds while a [`Message`] from a matched probe is unreceived,
+/// whatever thread holds it: MPI requires every matched message to be received
+/// before `MPI_Finalize` (MPI-4.1 §11.2.2). It can still be received with
+/// `mrecv`, or dropped, afterwards.
+///
 /// When `MPI_Finalize` is skipped, MPI stays initialized: a `wait` or `test`
 /// on a request still pending completes it, a `cancel` on one still reaches
-/// MPI, an open RMA epoch still issues its closing call (fence,
+/// MPI, a matched [`Message`] can still be received, an open RMA epoch still
+/// issues its closing call (fence,
 /// `MPI_Win_complete`, unlock; it can wait for a peer that no longer calls
 /// MPI), and an exposure epoch can still be waited for or tested; every other
 /// call returns `Err(`[`Error::Finalized`]`)`, and handles dropped afterwards
-/// are leaked without an MPI call.
+/// are leaked without an MPI call, except a [`Message`], whose drop still
+/// receives it.
 ///
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
 /// whose `Drop` calls MPI — a [`PersistentRequest`], a communicator other than
 /// the world, a window, a datatype, group or user op — on a
 /// thread other than the one that called [`Mpi::init`]/[`Mpi::init_thread`]
 /// prints `ferrompi: <Type> dropped on thread <name or id>` to stderr and
-/// aborts the process.
+/// aborts the process. A [`Message`] is the exception: dropped there, it makes
+/// no MPI call and stays unreceived, so this handle's drop skips
+/// `MPI_Finalize`.
 ///
 /// At [`ThreadLevel::Serialized`]/[`ThreadLevel::Multiple`], dropping this
 /// handle waits for every MPI call that other threads have in progress
@@ -301,7 +313,8 @@ pub enum ThreadLevel {
 /// completion, test or cancel call on a request that a scope open on another
 /// thread still holds, which the drop waits for. A `wait` or `test` on an
 /// active [`PersistentRequest`] is admitted too, and the drop does not wait for
-/// the request: it skips `MPI_Finalize` instead. The closing call of a fence,
+/// the request: it skips `MPI_Finalize` instead. So is the `mrecv` or the drop
+/// of a matched [`Message`]. The closing call of a fence,
 /// PSCW access or passive-target epoch (the unlock), `Win::wait_exposure` and
 /// `Win::test_exposure` (feature `rma`) are admitted too: the drop does not
 /// wait for an epoch, because the epoch's window keeps it on the skip path. A
@@ -734,8 +747,8 @@ impl Drop for Mpi {
 
 /// Why `Mpi::drop` must not call `MPI_Finalize`, or `None` when it may: a
 /// nonblocking scope open on the dropping thread, an active persistent request
-/// on any thread, or a live window (feature `rma`). This is the one place the
-/// skip is decided.
+/// or an unreceived matched message on any thread, or a live window (feature
+/// `rma`). This is the one place the skip is decided.
 fn finalize_skip_reason() -> Option<String> {
     if rt::scopes_on_this_thread() > 0 {
         return Some(
@@ -746,7 +759,7 @@ fn finalize_skip_reason() -> Option<String> {
     let live = rt::live_handle_tokens();
     if live > 0 {
         return Some(format!(
-            "{live} persistent request(s) still active; their buffers stay valid until the process exits"
+            "{live} persistent request(s) still active or matched message(s) not yet received; request buffers stay valid until the process exits"
         ));
     }
     #[cfg(feature = "rma")]

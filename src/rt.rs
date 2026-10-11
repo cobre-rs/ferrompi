@@ -43,11 +43,12 @@
 //! also counted in its thread's shard of `LIVE_SCOPES`, which [`begin_finalize`]
 //! waits on.
 //!
-//! An active persistent request holds a [`HandleToken`], counted in a shard of
-//! `LIVE_HANDLES` at every thread level, whatever thread holds the request.
-//! [`begin_finalize`] never waits for it, because the request can be held by a
-//! thread that is itself waiting for the finalizer; [`live_handle_tokens`] lets
-//! `Mpi::drop` skip `MPI_Finalize` instead while the sum is nonzero.
+//! An active persistent request and a matched, unreceived message each hold a
+//! [`HandleToken`], counted in a shard of `LIVE_HANDLES` at every thread level,
+//! whatever thread holds the handle. [`begin_finalize`] never waits for it,
+//! because the handle can be held by a thread that is itself waiting for the
+//! finalizer; [`live_handle_tokens`] lets `Mpi::drop` skip `MPI_Finalize`
+//! instead while the sum is nonzero.
 
 use std::cell::Cell;
 use std::io::Write;
@@ -109,10 +110,11 @@ static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
 /// the shards is the count.
 static LIVE_SCOPES: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARDS];
 
-/// How many persistent requests are active, on any thread and at any thread
-/// level. A request counts in the shard its opening thread's `SHARD` index
-/// names, and the token it holds subtracts from that same shard from whatever
-/// thread drops it; the sum of the shards is the count.
+/// How many persistent requests are active and matched messages are unreceived,
+/// on any thread and at any thread level. Each counts in the shard its opening
+/// thread's `SHARD` index names, and the token it holds subtracts from that
+/// same shard from whatever thread drops it; the sum of the shards is the
+/// count.
 static LIVE_HANDLES: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARDS];
 
 /// Held by a guarded call or `Drop` path for as long as it may call MPI. At
@@ -157,7 +159,8 @@ impl Drop for ScopeToken {
 }
 
 /// Held by an active persistent request, at every thread level, from before its
-/// start until MPI completed it. Unlike a [`ScopeToken`] it is movable: it keeps
+/// start until MPI completed it, and by a matched message from before its probe
+/// until MPI received it. Unlike a [`ScopeToken`] it is movable: it keeps
 /// no thread-local count and can be dropped on any thread, so it always counts in
 /// its shard and [`begin_finalize`] never waits for it. [`live_handle_tokens`]
 /// feeds the skip decision of `Mpi::drop`.
@@ -327,7 +330,8 @@ pub(crate) fn scopes_on_this_thread() -> usize {
     SCOPES_HERE.with(Cell::get)
 }
 
-/// Counts `n` persistent requests about to start, with one increment: returns
+/// Counts `n` persistent requests about to start, or one message about to be
+/// probed for, with one increment: returns
 /// the tokens, or `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or
 /// `Finalized`, or `Err(FERROMPI_ERR_THREAD_LEVEL)` on a thread other than the
 /// init thread at `Single`/`Funneled`, counting nothing. The count rises before
@@ -339,7 +343,8 @@ pub(crate) fn scopes_on_this_thread() -> usize {
 /// completion and release of a request runs on the init thread, where
 /// `Mpi::drop` reads the sum: another thread's start and completion are
 /// refused, and a drop there aborts while the request is active and, once
-/// `Finalizing`, leaks it with its token forgotten.
+/// `Finalizing`, leaks it with its token forgotten. A message's probe, receive
+/// and discard are refused there too, and a refused discard forgets the token.
 #[inline]
 pub(crate) fn open_handle_tokens(n: usize) -> std::result::Result<HandleTokens, c_int> {
     // Relaxed: see `enter`'s comment.
@@ -387,8 +392,9 @@ pub(crate) fn release_forgotten_handle_token() {
     shard(&LIVE_HANDLES).0.fetch_sub(1, Ordering::Release);
 }
 
-/// How many persistent requests are active, summed over the shards of
-/// `LIVE_HANDLES`. Read by `Mpi::drop` after [`begin_finalize`], which does not
+/// How many persistent requests are active and matched messages are unreceived,
+/// summed over the shards of `LIVE_HANDLES`. Read by `Mpi::drop` after
+/// [`begin_finalize`], which does not
 /// wait for them: a nonzero sum makes it skip `MPI_Finalize`.
 ///
 /// The shards are read one after another, not as a snapshot, and a sum of zero
@@ -401,15 +407,18 @@ pub(crate) fn release_forgotten_handle_token() {
 ///   so the load sees it unless it also sees the request's release, or after,
 ///   and then its re-check reads `Finalizing`, the open fails and takes the count
 ///   back. A back-out can only raise a reading, never hide a request: it can
-///   cause a skip that was not needed, never a missed one. So can a start the
-///   guarded call refuses after the open succeeded, which gives the count back,
-///   and a `wait` or `test` racing `Mpi::drop`, which releases its token after
-///   its own call returned.
+///   cause a skip that was not needed, never a missed one. So can a start or a
+///   probe the guarded call refuses after the open succeeded, and a probe that
+///   failed or matched nothing, each of which gives the count back after its
+///   call returned, and a `wait`, a `test`, an `mrecv` or the discard of a
+///   dropped message racing `Mpi::drop`, which releases its token after its own
+///   call returned.
 /// - Every write to a shard is a read-modify-write, so each Release decrement
 ///   heads a release sequence holding all later writes, whichever thread made
 ///   them. A load that sees a shard without a request's count read that
 ///   request's release or a later write, and so acquires the `MPI_Wait`,
-///   `MPI_Test` or `MPI_Waitall` that completed it.
+///   `MPI_Test` or `MPI_Waitall` that completed it; for a message, the
+///   `MPI_Mrecv` that received it.
 pub(crate) fn live_handle_tokens() -> usize {
     // SeqCst: the load of the pair with `open_handle_tokens`'s increment, and an
     // acquire of the release sequence the value it reads belongs to.

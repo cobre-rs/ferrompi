@@ -1,13 +1,15 @@
 //! Point-to-point communication: send, recv, isend, irecv, the persistent send/recv
-//! constructors, sendrecv, probe, iprobe.
+//! constructors, sendrecv, probe, iprobe, mprobe, improbe.
 
 use crate::comm::Communicator;
 use crate::datatype::{buf, buf_mut, tag_of, MpiDatatype, PlainData};
 use crate::datatype_builder::CustomDatatype;
 use crate::error::{Error, Result};
 use crate::ffi;
+use crate::message::Message;
 use crate::persistent::{vec_buf, vec_buf_mut, PersistentRequest};
 use crate::request::{Request, RequestKind};
+use crate::rt;
 use crate::scope::Scope;
 use crate::status::{Source, Status, Tag};
 
@@ -380,6 +382,156 @@ impl Communicator {
         } else {
             Ok(None)
         }
+    }
+
+    /// Blocking matched probe.
+    ///
+    /// Waits until a matching message is available, takes it out of the receive
+    /// queue and returns it as a [`Message`] with its [`Status`]. Only
+    /// [`Message::mrecv`] on that handle receives it, so no other receive or
+    /// probe, on any thread, can take the message in between. Use it instead of
+    /// [`probe`](Self::probe) when several threads receive on one communicator.
+    ///
+    /// `Source::Any`/`Tag::Any` match any source/tag. `Source::ProcNull`
+    /// returns at once with a message that holds no data, whose status is
+    /// `Source::ProcNull`, `Tag::Any` and `Some(0)`.
+    ///
+    /// The type parameter `T` determines the MPI datatype used by
+    /// `MPI_Get_count` to compute the element count in the returned
+    /// [`Status`].
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Source rank to match, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag` - Message tag to match or [`Tag::Any`]
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] for a negative rank or tag;
+    /// [`Error::Finalized`] once [`Mpi`](crate::Mpi) is being dropped;
+    /// [`Error::ThreadLevelViolation`] on a thread that may not call MPI at the
+    /// provided thread level; otherwise MPI's own error, for example class
+    /// [`MpiErrorClass::Rank`](crate::MpiErrorClass::Rank) for a rank outside
+    /// the communicator. No message is matched when an error is returned.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrompi::{Mpi, Source, Tag};
+    /// # let mpi = Mpi::init().unwrap();
+    /// # let world = mpi.world();
+    /// let (message, status) = world.mprobe::<f64>(Source::Any, Tag::Any).unwrap();
+    /// // Allocate a buffer of exactly the right size
+    /// let mut buf = vec![0.0f64; status.count.expect("whole number of f64")];
+    /// message.mrecv(&mut buf).unwrap();
+    /// ```
+    pub fn mprobe<T: MpiDatatype>(
+        &self,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<(Message, Status)> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
+        // Counted before the probe, so the probe's own in-flight count cannot be
+        // released before the message it matched is counted. Dropped, and so
+        // given back, on every return that built no `Message`.
+        let tokens =
+            rt::open_handle_tokens(1).map_err(|code| Error::from_code_with_op(code, "mprobe"))?;
+        let mut message: i64 = 0;
+        let mut bytes: i64 = -1;
+        let mut status = ffi::FerrompiStatus::default();
+
+        // SAFETY: all arguments are scalar integers or exclusive output pointers; self.handle is owned.
+        let ret = unsafe {
+            ffi::ferrompi_mprobe(
+                source,
+                tag,
+                self.handle,
+                &mut message,
+                &mut bytes,
+                &mut status,
+                tag_of::<T>() as i32,
+            )
+        };
+        Error::check_with_op(ret, "mprobe")?;
+        Ok((
+            Message::new(message, bytes, tokens.take()),
+            Status::from_ffi(status),
+        ))
+    }
+
+    /// Nonblocking matched probe.
+    ///
+    /// Checks whether a matching message is available without blocking. If one
+    /// is, takes it out of the receive queue and returns `Some` of the
+    /// [`Message`] and its [`Status`], as [`mprobe`](Self::mprobe) does;
+    /// otherwise returns `None`.
+    ///
+    /// `Source::Any`/`Tag::Any` match any source/tag. `Source::ProcNull` always
+    /// matches, with a message that holds no data.
+    ///
+    /// The type parameter `T` determines the MPI datatype used by
+    /// `MPI_Get_count` to compute the element count in the returned
+    /// [`Status`].
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Source rank to match, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag` - Message tag to match or [`Tag::Any`]
+    ///
+    /// # Errors
+    ///
+    /// As [`mprobe`](Self::mprobe).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrompi::{Mpi, Source, Tag};
+    /// # let mpi = Mpi::init().unwrap();
+    /// # let world = mpi.world();
+    /// // Poll for an incoming f64 message without blocking
+    /// if let Some((message, status)) = world.improbe::<f64>(Source::Any, Tag::Any).unwrap() {
+    ///     let mut buf = vec![0.0f64; status.count.expect("whole number of f64")];
+    ///     message.mrecv(&mut buf).unwrap();
+    /// }
+    /// ```
+    pub fn improbe<T: MpiDatatype>(
+        &self,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<Option<(Message, Status)>> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
+        // Counted before the probe, as in `mprobe`, and given back when nothing
+        // matched.
+        let tokens =
+            rt::open_handle_tokens(1).map_err(|code| Error::from_code_with_op(code, "improbe"))?;
+        let mut flag: i32 = 0;
+        let mut message: i64 = 0;
+        let mut bytes: i64 = -1;
+        let mut status = ffi::FerrompiStatus::default();
+
+        // SAFETY: all arguments are scalar integers or exclusive output pointers; self.handle is owned.
+        let ret = unsafe {
+            ffi::ferrompi_improbe(
+                source,
+                tag,
+                self.handle,
+                &mut flag,
+                &mut message,
+                &mut bytes,
+                &mut status,
+                tag_of::<T>() as i32,
+            )
+        };
+        Error::check_with_op(ret, "improbe")?;
+        if flag == 0 {
+            return Ok(None);
+        }
+        Ok(Some((
+            Message::new(message, bytes, tokens.take()),
+            Status::from_ffi(status),
+        )))
     }
 
     // ========================================================================

@@ -188,7 +188,8 @@ pub(crate) unsafe fn ferrompi_win_fence_close(assert_val: int32_t, win: int32_t)
 /// resolving to the guarded wrapper without any change.
 ///
 /// The externs after the trailing marker complete, test or cancel a request that
-/// is already pending, or close an epoch that is already open. Their wrappers
+/// is already pending, receive a message that is already matched, or close an
+/// epoch that is already open. Their wrappers
 /// take the completion entry instead, which admits them while finalizing; both
 /// lists share one `raw` module and one wrapper body.
 macro_rules! guarded_extern {
@@ -444,6 +445,27 @@ guarded_extern! {
         tag: int32_t,
         comm: int32_t,
         flag: *mut int32_t,
+        status: *mut FerrompiStatus,
+        datatype_tag: int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_mprobe(
+        source: int32_t,
+        tag: int32_t,
+        comm: int32_t,
+        message: *mut int64_t,
+        bytes: *mut int64_t,
+        status: *mut FerrompiStatus,
+        datatype_tag: int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_improbe(
+        source: int32_t,
+        tag: int32_t,
+        comm: int32_t,
+        flag: *mut int32_t,
+        message: *mut int64_t,
+        bytes: *mut int64_t,
         status: *mut FerrompiStatus,
         datatype_tag: int32_t,
     ) -> c_int;
@@ -1206,8 +1228,9 @@ guarded_extern! {
 
     // ============================================================
     // Request Completion and Cancellation
-    // Complete, test or cancel a request that is already pending: admitted
-    // while finalizing, unlike every call above.
+    // Complete, test or cancel a request that is already pending, or receive
+    // a message that is already matched: admitted while finalizing, unlike
+    // every call above.
     // ============================================================
     @completion
     pub fn ferrompi_wait(request: int64_t, status: *mut FerrompiStatus) -> c_int;
@@ -1263,6 +1286,14 @@ guarded_extern! {
     ) -> c_int;
 
     pub fn ferrompi_cancel(request: int64_t) -> c_int;
+
+    pub fn ferrompi_mrecv(
+        buf: *mut c_void,
+        count: int64_t,
+        datatype_tag: int32_t,
+        message: int64_t,
+        status: *mut FerrompiStatus,
+    ) -> c_int;
 
     // ============================================================
     // RMA / Epoch Closing
