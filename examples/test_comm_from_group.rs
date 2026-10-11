@@ -1,7 +1,7 @@
-//! Integration test for `Communicator::create_from_group`.
+//! Integration test for `Communicator::create`.
 //!
-//! Exercises `MPI_Comm_create` via the `ferrompi_comm_create_from_group_parent`
-//! shim. Verifies that:
+//! Exercises `MPI_Comm_create` via the `ferrompi_comm_create` shim. Verifies
+//! that:
 //!
 //! - Ranks 0 and 2 receive `Ok(Some(comm))` with `comm.size() == 2`.
 //! - Ranks 1 and 3 receive `Ok(None)` (they are not in the sub-group).
@@ -42,14 +42,14 @@ fn main() {
         .expect("group.include(&[0, 2]) failed");
 
     // ========================================================================
-    // Test 1: create_from_group — collective over all 4 ranks.
+    // Test 1: create — collective over all 4 ranks.
     //
     // Ranks 0 and 2 must receive Some(comm); ranks 1 and 3 must receive None.
     // ========================================================================
-    let sub_comm = match world.create_from_group(&sub_group) {
+    let sub_comm = match world.create(&sub_group) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("rank {rank}: FAIL: create_from_group returned error: {e}");
+            eprintln!("rank {rank}: FAIL: create returned error: {e}");
             common::check(&world, false, "test_comm_from_group");
             std::process::exit(1);
         }

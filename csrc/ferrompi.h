@@ -124,9 +124,9 @@ int ferrompi_comm_split_type(int32_t comm, int32_t split_type, int32_t key, int3
  * Collective over comm_handle: every rank in comm_handle must call, even ranks
  * not in group_handle. Ranks not in group_handle receive newcomm_handle = -1.
  */
-int ferrompi_comm_create_from_group_parent(int32_t comm_handle,
-                                           int32_t group_handle,
-                                           int32_t* newcomm_handle);
+int ferrompi_comm_create(int32_t comm_handle,
+                         int32_t group_handle,
+                         int32_t* newcomm_handle);
 
 /**
  * Create a communicator from a group without a parent communicator

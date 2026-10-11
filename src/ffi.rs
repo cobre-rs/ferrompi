@@ -286,11 +286,7 @@ guarded_extern! {
         newcomm: *mut int32_t,
     ) -> c_int;
 
-    pub fn ferrompi_comm_create_from_group_parent(
-        comm: int32_t,
-        group: int32_t,
-        newcomm: *mut int32_t,
-    ) -> c_int;
+    pub fn ferrompi_comm_create(comm: int32_t, group: int32_t, newcomm: *mut int32_t) -> c_int;
 
     pub fn ferrompi_comm_create_from_group(
         group: int32_t,

@@ -59,7 +59,7 @@ impl Communicator {
     /// Returns a [`Group`] containing all processes in this communicator.
     /// Use [`Group::include`] or [`Group::exclude`] on the returned group
     /// to derive sub-groups, which can then be used with
-    /// [`Communicator::create_from_group`](Self::create_from_group).
+    /// [`Communicator::create`](Self::create).
     ///
     /// # Errors
     ///
@@ -97,7 +97,7 @@ impl Communicator {
 
     /// Convert a communicator-handle result into `Option<Self>`, treating a
     /// negative handle as `MPI_COMM_NULL` (used by split, split_type, and
-    /// create_from_group).
+    /// create).
     fn from_optional_handle(new_handle: i32) -> Result<Option<Self>> {
         if new_handle < 0 {
             Ok(None)
@@ -207,7 +207,8 @@ impl Communicator {
             .ok_or_else(|| Error::Internal("split_shared returned null communicator".into()))
     }
 
-    /// Create a sub-communicator from a group.
+    /// Create a sub-communicator from a group, collectively over this
+    /// communicator (`MPI_Comm_create`).
     ///
     /// `group` must be a subset of `self`'s group. This call is collective
     /// over `self` — every rank in the parent communicator must invoke it,
@@ -232,19 +233,17 @@ impl Communicator {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let g = world.group().unwrap().include(&[0, 2]).unwrap();
-    /// // Collective: every rank calls create_from_group
-    /// if let Some(sub) = world.create_from_group(&g).unwrap() {
+    /// // Collective: every rank calls create
+    /// if let Some(sub) = world.create(&g).unwrap() {
     ///     assert_eq!(sub.size(), 2);
     /// }
     /// ```
-    pub fn create_from_group(&self, group: &Group) -> Result<Option<Communicator>> {
+    pub fn create(&self, group: &Group) -> Result<Option<Communicator>> {
         let mut new_handle: i32 = -1;
         // SAFETY: self.handle is owned by this Communicator; group.handle is owned by the Group
         // argument and remains valid for the duration of this call.
-        let ret = unsafe {
-            ffi::ferrompi_comm_create_from_group_parent(self.handle, group.handle, &mut new_handle)
-        };
-        Error::check_with_op(ret, "comm_create_from_group_parent")?;
+        let ret = unsafe { ffi::ferrompi_comm_create(self.handle, group.handle, &mut new_handle) };
+        Error::check_with_op(ret, "comm_create")?;
         Self::from_optional_handle(new_handle)
     }
 

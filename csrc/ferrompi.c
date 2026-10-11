@@ -559,7 +559,7 @@ static int32_t alloc_group(MPI_Group group) {
  *
  * The MPI_GROUP_NULL sentinel pairs with the
  *   `if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;`
- * guards at ferrompi_comm_create_from_group_parent,
+ * guards at ferrompi_comm_create,
  * ferrompi_comm_create_from_group, and the group-operation shims.
  * Callers without that guard (group_incl, group_excl, group_size,
  * group_rank) correctly defer to MPI's own MPI_ERR_GROUP for invalid
@@ -967,9 +967,9 @@ int ferrompi_comm_split_type(int32_t comm_handle, int32_t split_type, int32_t ke
     return ret;
 }
 
-int ferrompi_comm_create_from_group_parent(int32_t comm_h,
-                                           int32_t group_h,
-                                           int32_t* out_h) {
+int ferrompi_comm_create(int32_t comm_h,
+                         int32_t group_h,
+                         int32_t* out_h) {
     MPI_Comm parent = get_comm(comm_h);
     MPI_Group g = get_group(group_h);
     if (parent == MPI_COMM_NULL || g == MPI_GROUP_NULL) return MPI_ERR_ARG;

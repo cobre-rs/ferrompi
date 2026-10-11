@@ -233,6 +233,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them. Migration: add a wildcard arm to a `match` on one of the four enums;
   a pattern on `HostEntry` or `SlurmInfo` needs a trailing `..`, and neither
   can be built with a struct literal.
+- **`Communicator::create_from_group` is renamed `Communicator::create`.**
+  It wraps `MPI_Comm_create`, and shared its name with
+  `Mpi::create_from_group`, which wraps `MPI_Comm_create_from_group`. Each
+  method now has the name of its MPI call. Migration: `comm.create(&group)`;
+  `Mpi::create_from_group` is unchanged.
 
 ### Added
 
