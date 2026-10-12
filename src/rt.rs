@@ -244,12 +244,13 @@ fn assign_shard(shards: &'static [Shard; SHARDS]) -> &'static Shard {
 /// Called once, at the top of `Mpi::init_thread`; every path out of that
 /// function afterward reaches either [`activate`] or [`abandon_init`].
 pub(crate) fn begin_init() -> Result<()> {
-    // Relaxed: a successful compare-exchange only ever transitions out of the
-    // initial zero state, which carries no prior writer to synchronize with;
-    // a losing thread returns without touching MPI, so it needs no ordering
-    // beyond observing the current value through this atomic's modification
-    // order, which the compare-exchange itself guarantees regardless of
-    // ordering annotation.
+    // Relaxed: the winner needs no order with an earlier writer of `Uninit`.
+    // That value is the initial one or `abandon_init`'s, and no later call
+    // rests on the calls an abandoned attempt made: `MPI_Finalized` may be
+    // called at any time and by several threads at once (MPI-4.1 §11.4.1),
+    // and after an `MPI_Init_thread` that failed a second one is erroneous
+    // whichever thread makes it (MPI-4.1 §11.2.1). A losing thread returns
+    // without calling MPI, whatever value its compare-exchange read.
     match STATE.compare_exchange(UNINIT, INITIALIZING, Ordering::Relaxed, Ordering::Relaxed) {
         Ok(_) => {
             ON_INIT_THREAD.with(|c| c.set(true));
@@ -260,31 +261,37 @@ pub(crate) fn begin_init() -> Result<()> {
     }
 }
 
-/// Move `Initializing` back to `Uninit` and take the init-thread mark off the
-/// calling thread. Called when `Mpi::init_thread` does not complete after
+/// Take the init-thread mark off the calling thread and move `Initializing`
+/// back to `Uninit`. Called when `Mpi::init_thread` does not complete after
 /// [`begin_init`] succeeded: MPI turned out already finalized, or
 /// `MPI_Init_thread` itself failed. Only the thread that won `begin_init`'s
 /// compare-exchange calls this, so a plain store is safe.
 pub(crate) fn abandon_init() {
-    // Relaxed: only the calling thread can observe `Initializing` (it is the
-    // sole holder, per this function's contract), so there is no concurrent
-    // writer to synchronize with.
-    STATE.store(UNINIT, Ordering::Relaxed);
+    // The mark first: once the state is given back, another thread can win
+    // `begin_init` and set its own.
     ON_INIT_THREAD.with(|c| c.set(false));
+    // Relaxed: no reader needs the store ordered. The guard refuses a thread
+    // without the mark in `Uninit` as in `Initializing`, and the next
+    // `begin_init` needs no order with this thread (see there).
+    STATE.store(UNINIT, Ordering::Relaxed);
 }
 
 /// Move `Initializing` to `Active(level)`. Called once, from
 /// `Mpi::init_thread` after `MPI_Init_thread` succeeds, on the thread
 /// [`begin_init`] marked.
 pub(crate) fn activate(level: ThreadLevel) {
-    // Relaxed: `Mpi` is `!Send`/`!Sync`, so every later `enter()` load that
-    // must observe this store — whether on this thread or one that receives
-    // a `Communicator` afterward — is already ordered by the
-    // synchronizing operation (thread spawn, channel, mutex, `Arc`) that
-    // thread used to obtain that handle; this store needs no ordering of
-    // its own to be visible through that chain.
+    // Relaxed: stored before `STATE` on this thread, so a load that acquires
+    // the store below is ordered after this one too.
     LEVEL.store(level as u8, Ordering::Relaxed);
-    STATE.store(1 + level as u8, Ordering::Relaxed);
+    // Release: a thread other than this one that reads `Active(Serialized)`,
+    // `Active(Multiple)` or a later state is admitted by the guard to an MPI
+    // call only through `enter_counted`. Its SeqCst load of `STATE` reads this
+    // store or one of the two later ones, both SeqCst and both made by this
+    // thread, so the admitted call is ordered after `MPI_Init_thread` and
+    // after the `LEVEL` store. That holds for a thread that was handed no
+    // handle too (a constructor that takes none), which nothing else orders
+    // after them.
+    STATE.store(1 + level as u8, Ordering::Release);
 }
 
 /// Opens a nonblocking scope: returns its [`ScopeToken`], or
@@ -550,9 +557,9 @@ pub(crate) fn end_finalize() {
 /// kept `Mpi::drop` from calling it): `begin_finalize()` already moved
 /// `STATE` to `Finalizing` before that skip decision runs, and it stays there.
 pub(crate) fn is_finalized() -> bool {
-    // Relaxed: see `enter`'s comment — visibility of the `Finalizing` or
-    // `Finalized` state set on another thread is carried by that thread's own
-    // handle hand-off, not by this load's ordering.
+    // Relaxed: no call is admitted on this answer. A `false` that is out of
+    // date sends `Mpi::is_finalized` on to `MPI_Finalized`, which MPI allows
+    // at any time (MPI-4.1 §11.4.1).
     matches!(STATE.load(Ordering::Relaxed), FINALIZING | FINALIZED)
 }
 
@@ -565,10 +572,12 @@ pub(crate) fn is_finalized() -> bool {
 /// caller holds until its MPI call returns.
 #[inline(always)]
 pub(crate) fn enter() -> std::result::Result<InFlight, c_int> {
-    // Relaxed: see `activate`'s comment — visibility of an `Active`,
-    // `Finalizing` or `Finalized` state set on another thread is carried by
-    // that thread's own handle hand-off, not by this load's ordering. The
-    // counted path re-checks with SeqCst.
+    // Relaxed: this load only picks the path. The init thread reads its own
+    // stores. Any other thread is refused or goes to the counted path, whose
+    // SeqCst load is what orders its MPI call after `activate` (see there),
+    // so an old value admits nothing. A thread that holds a handle reads no
+    // value older than `activate`'s store: its loads are ordered after it by
+    // the hand-off of the handle, or by the counted call that made the handle.
     let state = STATE.load(Ordering::Relaxed);
     if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
         if ON_INIT_THREAD.with(Cell::get) {
@@ -646,8 +655,12 @@ fn enter_other_completion(state: u8) -> std::result::Result<InFlight, c_int> {
     if state != FINALIZING {
         return enter_other(state);
     }
-    // Relaxed: see `activate`'s comment; `LEVEL` is written once, before the
-    // handle that reaches this call exists.
+    // Relaxed: `LEVEL` is stored once, by `activate`, before `STATE`. The
+    // init thread reads its own store, and a thread that holds a handle or
+    // that the counted path admitted before is ordered after it. Any other
+    // thread may still read `Single`, the value `LEVEL` starts with, and is
+    // then refused below; with the stored level it is refused below as well
+    // or goes to `enter_counted`, which orders its call.
     if LEVEL.load(Ordering::Relaxed) >= ThreadLevel::Serialized as u8 {
         return enter_counted(true);
     }
@@ -763,8 +776,10 @@ fn release_in_call_flag() {
 /// other level, returns `Ok(false)` without touching the flag.
 #[cfg(debug_assertions)]
 pub(crate) fn begin_call() -> std::result::Result<bool, c_int> {
-    // Relaxed: see `enter_other_completion`'s comment; `LEVEL` is written once,
-    // before the handle that reaches this call exists. `Single` until then.
+    // Relaxed: this runs after `enter` or `enter_completion` passed: on the
+    // init thread, which stores `LEVEL` (`Single` until then), or on a thread
+    // the counted path admitted, whose SeqCst load of `STATE` is ordered
+    // after that store.
     if LEVEL.load(Ordering::Relaxed) == ThreadLevel::Serialized as u8 {
         if take_in_call_flag() {
             Ok(true)
@@ -955,6 +970,9 @@ mod tests {
         assert!(!ON_INIT_THREAD.with(Cell::get));
         assert_eq!(outcome(enter()), Err(FERROMPI_ERR_NOT_INITIALIZED));
         assert_eq!(elsewhere(), Err(FERROMPI_ERR_NOT_INITIALIZED));
+
+        begin_init().expect("abandon_init gave the state back");
+        abandon_init();
     }
 
     #[test]
