@@ -5,7 +5,8 @@
 //! and convergence flags, and reads scenario data from node-shared memory. The
 //! example has no LP solve and no I/O; it shows the communication only.
 //!
-//! Run: `mpiexec -n 4 ./target/debug/examples/sddp_pattern`
+//! Build: `cargo build --features rma --example sddp_pattern`
+//! Run:   `mpiexec -n 4 ./target/debug/examples/sddp_pattern`
 
 use ferrompi::{Communicator, Mpi, ReduceOp, ThreadLevel, Win};
 
@@ -148,8 +149,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(ctx.world.allreduce_scalar(cost, ReduceOp::Min)?, 1.0);
     assert_eq!(ctx.world.allreduce_scalar(cost, ReduceOp::Max)?, n);
 
-    // Convergence test: each rank sets its own bit, and the OR is the set of
-    // ranks that have converged.
+    // Convergence test: each rank sets bit `rank % 64`, so with up to 64
+    // ranks the OR is the set of ranks that have converged.
     let flags = ctx
         .world
         .allreduce_scalar(1u64 << (rank % 64), ReduceOp::BitwiseOr)?;
