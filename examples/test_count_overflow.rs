@@ -1,6 +1,6 @@
-//! Regression test for the `count > INT_MAX` guard across the 30 scalar-count
+//! Regression test for the `count > INT_MAX` guard across the scalar-count
 //! shims (blocking/nonblocking p2p and collectives, plus every blocking,
-//! nonblocking and persistent reduction with a user op), and the 6 v-collective
+//! nonblocking and persistent reduction with a user op) and the v-collective
 //! shims.
 //!
 //! On MPI < 4, a scalar count above `INT_MAX` must return

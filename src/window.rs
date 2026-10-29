@@ -1414,12 +1414,17 @@ fn check_rma_target(
 /// - A window locked and exposed at once, by `post` before `lock` or `lock_all`
 ///   or by a peer's lock during an exposure epoch, is erroneous (MPI-4.1 §12.5.3).
 ///   The open exposure epoch still keeps the window from being freed.
+/// - A fence opened while this rank's `post` exposure epoch is open is
+///   erroneous (MPI-4.1 §12.5: distinct exposure epochs on one window must be
+///   disjoint). MPICH 4.2.3 rejects it with `MPI_ERR_RMA_SYNC` on the opening
+///   fence.
 /// - A panic in a fence or `start` closure aborts the process, because the
-///   closing call is collective, and one in a `lock` or `lock_all` closure
-///   unwinds after the unlock. Both rely on unwinding: under `panic = "abort"`
-///   the process stops at the panic itself, before any closing call, but with
-///   Rust's message instead of the crate's, and the `test_rma_epoch_panic`
-///   example, which checks that message, needs the default `panic = "unwind"`.
+///   closing call is collective or synchronizing, and one in a `lock` or
+///   `lock_all` closure unwinds after the unlock. Both rely on unwinding: under
+///   `panic = "abort"` the process stops at the panic itself, before any
+///   closing call, but with Rust's message instead of the crate's, and the
+///   `test_rma_epoch_panic` example, which checks that message, needs the
+///   default `panic = "unwind"`.
 ///
 /// # Example
 ///
@@ -1970,12 +1975,12 @@ impl<'s, T: MpiDatatype> ActiveEpoch<'s, '_, T> {
     /// the target's own closing call returns.
     ///
     /// `op` is a [`ReduceOp`](crate::ReduceOp) or [`AccumulateOp::REPLACE`]
-    /// (semantically `MPI_Put`); a user op is not accepted (MPI-4.1 §12.3.4).
-    /// Under the default `accumulate_ops` window info value, `same_op_no_op`
-    /// (MPI-4.1 §12.2.1), concurrent accumulates to one target location must
-    /// use the same op or `MPI_NO_OP`, so mixing [`AccumulateOp::REPLACE`] and
-    /// [`ReduceOp::Sum`](crate::ReduceOp::Sum) on one location is erroneous,
-    /// and no type prevents it.
+    /// (like `MPI_Put`, but element-wise atomic); a user op is not accepted
+    /// (MPI-4.1 §12.3.4). Under the default `accumulate_ops` window info value,
+    /// `same_op_no_op` (MPI-4.1 §12.2.1), concurrent accumulates to one target
+    /// location must use the same op or `MPI_NO_OP`, so mixing
+    /// [`AccumulateOp::REPLACE`] and [`ReduceOp::Sum`](crate::ReduceOp::Sum) on
+    /// one location is erroneous, and no type prevents it.
     ///
     /// The count is `origin.len()`; pass a sub-slice for a shorter transfer.
     ///
@@ -2684,9 +2689,10 @@ impl<'s, T: MpiDatatype> PassiveEpoch<'s, '_, T> {
     /// completed.
     ///
     /// `op` is as for [`ActiveEpoch::accumulate`], with
-    /// [`AccumulateOp::REPLACE`] semantically `MPI_Rput`; a user op is not
-    /// accepted (MPI-4.1 §12.3.4). Concurrent accumulates to one target location
-    /// must use the same op or `MPI_NO_OP`, as there (MPI-4.1 §12.2.1).
+    /// [`AccumulateOp::REPLACE`] like `MPI_Rput`, but element-wise atomic; a
+    /// user op is not accepted (MPI-4.1 §12.3.4). Concurrent accumulates to one
+    /// target location must use the same op or `MPI_NO_OP`, as there
+    /// (MPI-4.1 §12.2.1).
     ///
     /// [`Request::cancel`] on the returned request returns
     /// [`Error::NotSupported`] without calling MPI, as for
@@ -2968,6 +2974,10 @@ impl<T: MpiDatatype> Win<T> {
     /// - The length exchange fails (`Error::Mpi` with
     ///   `operation: Some("allgather")`); this can happen on some ranks only,
     ///   and the other ranks can then block creating the window.
+    /// - The call is refused after the length exchange (`Error::Finalized` or
+    ///   `Error::ThreadLevelViolation`, as those variants describe): no window
+    ///   is created on this rank, and the other ranks can then block creating
+    ///   the window.
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_create")`).
     /// - The window table is full (`Error::ResourceExhausted`; the window is
     ///   then leaked: never freed, and counted as alive so `Mpi` skips
@@ -3050,6 +3060,10 @@ impl<T: MpiDatatype> Win<T> {
     /// - The length exchange fails (`Error::Mpi` with
     ///   `operation: Some("allgather")`); this can happen on some ranks only,
     ///   and the other ranks can then block creating the window.
+    /// - The call is refused after the length exchange (`Error::Finalized` or
+    ///   `Error::ThreadLevelViolation`, as those variants describe): no window
+    ///   is created on this rank, and the other ranks can then block creating
+    ///   the window.
     /// - The MPI call fails (`Error::Mpi` with `operation: Some("win_allocate")`);
     ///   this can happen on some ranks only, and the other ranks can then
     ///   block in the barrier after the new segment is zeroed.
@@ -3154,6 +3168,10 @@ impl<T: MpiDatatype> Win<T> {
     /// - The length exchange fails (`Error::Mpi` with
     ///   `operation: Some("allgather")`); this can happen on some ranks only,
     ///   and the other ranks can then block creating the window.
+    /// - The call is refused after the length exchange (`Error::Finalized` or
+    ///   `Error::ThreadLevelViolation`, as those variants describe): no window
+    ///   is created on this rank, and the other ranks can then block creating
+    ///   the window.
     /// - The MPI call fails (`Error::Mpi` with
     ///   `operation: Some("win_allocate_shared")`); this can happen on some
     ///   ranks only, and the other ranks can then block in the barrier after

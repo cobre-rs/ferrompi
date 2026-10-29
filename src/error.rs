@@ -293,9 +293,14 @@ pub enum Error {
     ///
     /// Returned by any MPI-calling method invoked after the [`Mpi`](crate::Mpi)
     /// handle was dropped, and by `Mpi::init`/`Mpi::init_thread` once MPI has
-    /// been finalized. No MPI call is made. After a skipped `MPI_Finalize`,
-    /// `wait` and `test` on a request still pending complete it, and `cancel`
-    /// reaches it, instead.
+    /// been finalized. The refused call makes no MPI call. A method that makes
+    /// several MPI calls can be refused after an earlier one ran: a window
+    /// constructor after its length exchange, which leaves no window on this
+    /// rank while the other ranks can block creating theirs, and a
+    /// communicator constructor after its creating call, which loses the new
+    /// communicator (it is never freed, and keeps its handle-table slot).
+    /// After a skipped `MPI_Finalize`, `wait` and `test` on a request still
+    /// pending complete it, and `cancel` reaches it, instead.
     #[error("MPI has been finalized")]
     Finalized,
 
@@ -306,7 +311,12 @@ pub enum Error {
     /// below [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized),
     /// and, in debug builds only, by a call that overlaps another thread's
     /// call at [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized).
-    /// No MPI call is made.
+    /// The refused call makes no MPI call. A method that makes several MPI
+    /// calls can be refused after an earlier one ran: a window constructor
+    /// after its length exchange, which leaves no window on this rank while the
+    /// other ranks can block creating theirs, and a communicator constructor
+    /// after its creating call, which loses the new communicator (it is never
+    /// freed, and keeps its handle-table slot).
     #[error("MPI call not permitted on this thread at the provided thread level")]
     ThreadLevelViolation,
 

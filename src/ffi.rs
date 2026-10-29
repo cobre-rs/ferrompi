@@ -39,8 +39,8 @@ pub const FERROMPI_LOCK_SHARED: int32_t = 1;
 // only from a `Drop` impl, and the op-table calls of `UserOp`'s constructors,
 // which hold an in-flight token from before they take a slot until they have
 // created its op or given the slot back. The error lookup is guarded by hand
-// after this block: MPI 3.1 libraries need not allow it during or after
-// `MPI_Finalize`.
+// after this block: MPI 3.1 libraries need not allow
+// it before MPI is initialized, nor during or after `MPI_Finalize`.
 extern "C" {
     pub fn ferrompi_init_thread(required: c_int, provided: *mut c_int) -> c_int;
     pub fn ferrompi_finalize() -> c_int;
@@ -143,10 +143,11 @@ extern "C" {
 
 /// Looks up the class and text of an MPI error code, under an in-flight token
 /// so that it cannot overlap `MPI_Finalize`. Takes the completion entry: it is
-/// admitted while finalizing, and refused once finalized or on a thread the
-/// thread level does not allow, with the refusal code as the result. Unlike the
-/// other wrappers it skips the debug overlap check: MPI-4.1 §11.6 and Table 11.1
-/// make `MPI_Error_class` and `MPI_Error_string` always thread-safe, so
+/// admitted while finalizing, and refused before MPI is initialized (except on
+/// the init thread), once finalized, or on a thread the thread level does not
+/// allow, with the refusal code as the result. Unlike the other wrappers it
+/// skips the debug overlap check: MPI-4.1 §11.6 and Table 11.1 make
+/// `MPI_Error_class` and `MPI_Error_string` always thread-safe, so
 /// `Error::from_code` needs no serialization from its callers, and a refusal
 /// would only lose the message.
 ///
