@@ -1,6 +1,6 @@
 # ADR-0003: Sealed Generic MpiDatatype Trait Family
 
-**Status:** Accepted — 2026-05-17; amended 2026-09-24
+**Status:** Accepted — 2026-05-17; amended 2026-09-24 and 2026-10-29
 **Date:** 2026-05-17
 **Deciders:** Rogerio Alves
 
@@ -61,6 +61,8 @@ constant in `csrc/ferrompi.h` and a matching `case` in every C-side switch.
 Adding an rsmpi-style open trait would either require rewriting the C dispatch
 layer or accepting a vtable lookup on every buffer element.
 
+> **Amended 2026-10-29 — The tag is a sealed method.** See [Amendments](#amendments).
+
 ---
 
 ## Decision Drivers
@@ -80,6 +82,8 @@ layer or accepting a vtable lookup on every buffer element.
    followed by a recompile. External crates must not be able to add types to the
    set by implementing a trait, because such types would have no corresponding C
    `case` to dispatch to.
+
+   > **Amended 2026-10-29 — The tag is a sealed method.** See [Amendments](#amendments).
 
 3. **Compile-time rejection of misuse.** Passing a `bool`, `String`, or
    `Vec<f64>` where an `&[T: MpiDatatype]` is required must produce a compile
@@ -133,6 +137,8 @@ pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {
 `FERROMPI_*` defines in `csrc/ferrompi.h`. The constant `TAG` is resolved at
 compile time; the C layer receives it as an `i32` argument and dispatches
 through a `switch`. No allocation, no vtable, no branch per element.
+
+> **Amended 2026-10-29 — The tag is a sealed method.** See [Amendments](#amendments).
 
 Subtype traits compose naturally via supertrait bounds. `AtomicMpiDatatype` does
 not redeclare `TAG`; it inherits the `MpiDatatype` bound implicitly through the
@@ -229,6 +235,8 @@ Cons:
 
 **Option A — sealed trait family with `const TAG: DatatypeTag` — is chosen.**
 
+> **Amended 2026-10-29 — The tag is a sealed method.** See [Amendments](#amendments).
+
 The decision is grounded directly in the five decision drivers:
 
 - **Driver 1 (zero overhead):** `T::TAG` is a compile-time constant. The C
@@ -318,6 +326,8 @@ C case) produces `MPI_ERR_TYPE` at runtime for the new type. The coordination
 requirement is a deliberate friction point that discourages ad-hoc additions to
 the type set.
 
+> **Amended 2026-10-29 — The tag is a sealed method.** See [Amendments](#amendments).
+
 **User-defined non-primitive types are supported through `CustomDatatype` builders.**
 The sealed-trait design does not prevent ferrompi from operating on
 user-defined structs, padded layouts, or non-primitive numeric types. The
@@ -349,6 +359,8 @@ which breaks the ABI stability invariant of `DatatypeTag`.
 
 > **Amended 2026-09-24 — Discriminant values are internal.** See [Amendments](#amendments).
 
+> **Amended 2026-10-29 — The tag is a sealed method.** See [Amendments](#amendments).
+
 **Attribute-macro opt-in on user types.** A `#[derive(MpiDatatype)]` or
 `#[ferrompi::mpi_type(f64)]` attribute macro could allow user types to opt in
 to the trait for a specific base MPI type. This is rejected for the same reason
@@ -369,8 +381,12 @@ The Alternatives section above called the `DatatypeTag` discriminant values an A
 
 No discriminant value changed in 0.6.0. Code names the enum variant, never its integer value. Keeping the values internal leaves room to encode them as MPI 5.0 standard-ABI handle values.
 
+### 2026-10-29 — The tag is a sealed method
+
+In 0.7.0 `MpiDatatype` has no public `const TAG`; each implementation gives its tag through a method that takes a private token, so only the crate can call it. `DatatypeTag` has no public path. The decision stands: a sealed trait family mapped at compile time to the C layer's closed tag set. The text above that names `const TAG: DatatypeTag` or `T::TAG` describes releases before 0.7.0.
+
 ---
 
 ## Status
 
-Accepted — 2026-05-17; amended 2026-09-24.
+Accepted — 2026-05-17; amended 2026-09-24 and 2026-10-29.

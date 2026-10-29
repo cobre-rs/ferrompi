@@ -1,6 +1,6 @@
 # ADR-0005: MPI_Op_create Safety Model — Closure Storage, C Trampoline, and Thread-Safety Contract
 
-**Status:** Accepted — 2026-05-17; amended 2026-09-24
+**Status:** Accepted — 2026-05-17; amended 2026-09-24 and 2026-10-29
 **Date:** 2026-05-17
 **Deciders:** Rogerio Alves
 
@@ -55,6 +55,8 @@ use-after-free), before implementation begins.
 DatatypeTag` that maps Rust types to C-side `FERROMPI_*` tag integers. The
   same `MpiDatatype` bound is used in the closure type constraint.
 
+> **Amended 2026-10-29 — Shared op registration; info table and TAG removed.** See [Amendments](#amendments).
+
 ---
 
 ## Decision
@@ -75,6 +77,8 @@ by a parallel `atomic_int op_used[MAX_OPS]` array using the C11 CAS strategy
 established in ADR-0002.
 
 > **Amended 2026-09-24 — Closure registry in Rust.** See [Amendments](#amendments).
+
+> **Amended 2026-10-29 — Shared op registration; info table and TAG removed.** See [Amendments](#amendments).
 
 **Rationale.** The slot table is the only closure-storage mechanism that
 satisfies both lifetime safety and clean deterministic reclamation. The Rust
@@ -438,8 +442,12 @@ Rejected due to non-standard MPI interface dependency.
 - Below `ThreadLevel::Serialized`, a `UserOp` dropped on a thread other than the one
   that initialised MPI aborts the process.
 
+### 2026-10-29 — Shared op registration; info table and TAG removed
+
+Decision 3's ordering now runs in `Drop for OpRegistration`, the registration that `UserOp` and every persistent reduction built with it share through an `Arc`. The op is freed when the last holder drops, and there is no `Drop for UserOp<T>`; the invariant of Decision 3 stands. The info table is gone, and `MpiDatatype` has no `const TAG` (ADR-0003, amended 2026-10-29).
+
 ---
 
 ## Status
 
-Accepted — 2026-05-17; amended 2026-09-24.
+Accepted — 2026-05-17; amended 2026-09-24 and 2026-10-29.
