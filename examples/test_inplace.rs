@@ -35,7 +35,7 @@
 //! Neither have `iallreduce_inplace` and `ireduce_inplace`.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_inplace
-// mpi-test: np=2.. skip-ok=mpich-4.2
+// mpi-test: np=2.. skip-ok=mpich-4.2 valgrind
 
 use ferrompi::{Communicator, Error, Mpi, ReduceOp, Result, UserOp};
 
