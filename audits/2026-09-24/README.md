@@ -282,7 +282,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | DOC-01 | `docs/architecture.md` false statements | major | 0.5.x | fixed (713cb4f) |
 | DOC-02 | ADR-0001 driver 1 false (= ABI-05) | minor | 0.5.x | fixed (03f01e8) |
 | DOC-03 | ADR-0002 claims that do not hold | minor | 0.5.x | fixed (605fd2d) |
-| DOC-04 | ADR-0004 lifetime rejection mis-argued; nonexistent variant | minor | 0.5.x note / 0.7.0 new ADR | fixed (134bfed): note; new ADR planned (ferrompi-0.7.0) |
+| DOC-04 | ADR-0004 lifetime rejection mis-argued; nonexistent variant | minor | 0.5.x note / 0.7.0 new ADR | fixed (134bfed, aaf3e9c): note; ADR-0007 |
 | DOC-05 | ADR-0005 Decision 7 describes the rejected design; plan sections | major | 0.5.x | fixed (134bfed) |
 | DOC-06 | Migration guide: nonexistent APIs, false safety claim | major | 0.5.x | fixed (eb63b5d) |
 | DOC-07 | `docs/mpi-compatibility.md` inaccuracies | minor | 0.5.x | fixed (98236f8) |
