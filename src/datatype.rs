@@ -268,12 +268,8 @@ pub(crate) fn buf_mut<T: MpiDatatype>(s: &mut [T]) -> (*mut c_void, i64, i32) {
 
 /// The addresses MPI gets in place of an empty buffer's own: the first for a
 /// buffer MPI reads, the second for one it writes, so that two substituted
-/// buffers of one call never share an address. [`buf_ptr`] substitutes them for
-/// every empty buffer of an alignment-1 type; its test costs a type with a
-/// larger alignment nothing at run time. [`empty_buf_ptr`] substitutes them for
-/// an empty buffer of any type, in the calls where a library refuses two equal
-/// addresses, and takes the other of the two when the call's other buffer is at
-/// the one it would take.
+/// buffers of one call never share an address. [`buf_ptr`] and
+/// [`empty_buf_ptr`] substitute them.
 static EMPTY: [u64; 2] = [0; 2];
 
 /// `ptr`, or the address of a private static when the buffer holds no bytes

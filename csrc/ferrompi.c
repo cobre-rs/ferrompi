@@ -589,7 +589,6 @@ static int32_t alloc_group(MPI_Group group) {
  * group_rank) correctly defer to MPI's own MPI_ERR_GROUP for invalid
  * handles. */
 static MPI_Group get_group(int32_t handle) {
-    // Handle 0 is MPI_GROUP_EMPTY (always valid post-init)
     if (handle == 0) {
         return MPI_GROUP_EMPTY;
     }

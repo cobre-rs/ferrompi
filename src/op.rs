@@ -669,7 +669,6 @@ impl<T: MpiDatatype> UserOp<T> {
 /// closure and gives the slot back. Called only under the in-flight token of
 /// a call the lifecycle guard admitted (see `UserOp::new_impl`).
 fn create_in_free_slot(closure: ByteClosure, commute: i32) -> Result<i32> {
-    // Step 1: allocate a slot in the C-side op table.
     let mut slot: i32 = -1;
     // SAFETY: slot is a local out-parameter written by ferrompi_op_alloc_slot
     // before this function reads it below (guarded by the `ret != 0` check).
@@ -680,7 +679,7 @@ fn create_in_free_slot(closure: ByteClosure, commute: i32) -> Result<i32> {
     let idx = slot as usize;
     debug_assert!(idx < MAX_OPS, "slot out of range");
 
-    // Step 2: publish the boxed closure to the registry.  A thin
+    // Publish the boxed closure to the registry.  A thin
     // `*mut ByteClosure` — no fat-pointer decomposition needed.  This
     // Release store, paired with the trampoline's Acquire load of the
     // same atomic, synchronizes-with that load directly (no external
@@ -688,7 +687,6 @@ fn create_in_free_slot(closure: ByteClosure, commute: i32) -> Result<i32> {
     let ptr: *mut ByteClosure = Box::into_raw(Box::new(closure));
     REGISTRY[idx].store(ptr, Ordering::Release);
 
-    // Step 3: call MPI_Op_create via the C shim.
     let mut handle: i32 = -1;
     // SAFETY: handle is a local out-parameter written by
     // ferrompi_op_create_user before this function reads it below; slot is

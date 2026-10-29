@@ -6,7 +6,7 @@
 //! reduce_init_inplace and barrier_init refuse with Error::NotSupported
 //! instead of running the suite.
 //!
-//! Exercises 17 persistent collective `_init` methods in `Comm`:
+//! Exercises 17 persistent collective `_init` methods in `Communicator`:
 //! broadcast_init, allreduce_init, allreduce_init_inplace, gather_init,
 //! reduce_init, scatter_init, allgather_init, scan_init, exscan_init,
 //! alltoall_init, gatherv_init, scatterv_init, allgatherv_init,

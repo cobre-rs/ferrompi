@@ -1,7 +1,8 @@
 //! Integration test for MPI Group operations.
 //!
 //! Exercises `Communicator::group`, `Group::size`, `Group::rank`,
-//! `Group::include`, and `Group::exclude`. All assertions are guarded by
+//! `Group::include`, and `Group::exclude`, and checks that an empty group
+//! takes no slot of the group table. All assertions are guarded by
 //! a sentinel allreduce(Min) before any `process::exit` so that no rank
 //! exits while others are still inside MPI collective calls.
 //!
