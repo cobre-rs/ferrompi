@@ -21,6 +21,7 @@ modules under `ferrompi::doc::*`, so the same content is navigable from the
 
 - [Architecture](architecture.md) — Six-layer stack, handle tables, thread-safety model, C layer scope, FFI/ABI invariants, and generic `MpiDatatype` design. Start here if you are contributing to ferrompi internals.
 - [Migrating from rsmpi](migrating-from-rsmpi.md) — Function-for-function API mapping, migration cookbook examples, unsupported features, and API ergonomic differences for developers coming from rsmpi.
+- [Migrating from 0.6 to 0.7](migrating-0.6-to-0.7.md) — Every change that breaks 0.6 code, section by section, with the 0.6 code and its 0.7 form.
 - [MPI implementation compatibility](mpi-compatibility.md) — ferrompi's reference for selecting, building against, and running under an MPI library: the CI-tested feature table (MPICH 4.2.1, Open MPI 4.1.6, Open MPI 5.0.7), known implementation issues, and how to report new compatibility data.
 
 ## Architecture Decision Records

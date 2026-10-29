@@ -18,6 +18,9 @@ pub mod architecture {}
 )]
 pub mod migrating_from_rsmpi {}
 
+#[doc = include_str!("../docs/migrating-0.6-to-0.7.md")]
+pub mod migrating_0_6_to_0_7 {}
+
 #[doc = include_str!("../docs/mpi-compatibility.md")]
 pub mod mpi_compatibility {}
 

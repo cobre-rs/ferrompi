@@ -85,6 +85,7 @@ mpiexec -n 4 ./target/release/my_program
 - [docs.rs](https://docs.rs/ferrompi) — API reference, built with all features; feature-gated items carry a badge.
 - [examples/](examples/) — runnable examples for collectives, RMA windows, and hybrid MPI+threads.
 - [Migrating from rsmpi](docs/migrating-from-rsmpi.md)
+- [Migrating from 0.6 to 0.7](docs/migrating-0.6-to-0.7.md) — every breaking change, with 0.6 and 0.7 code.
 - [MPI compatibility](docs/mpi-compatibility.md) — build selection, platforms, running, and known issues.
 - [Architecture](docs/architecture.md)
 - [Changelog](CHANGELOG.md)
