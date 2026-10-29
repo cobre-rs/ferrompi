@@ -31,7 +31,7 @@
 //!    must return `Ok`.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_empty_buffers
-// mpi-test: np=2..
+// mpi-test: np=2.. release
 
 use ferrompi::{Error, Mpi, PersistentRequest, ReduceOp, Result};
 

@@ -91,7 +91,8 @@ Examples run in a build with debug assertions: an example may check debug-only
 diagnostics, and the runner refuses to run when cargo reports the `ferrompi`
 library built without them. `--release` builds in release and runs only the
 examples whose directive has the `release` flag, at every `np` the directive
-expands to; those examples must not depend on debug-only diagnostics.
+expands to; those examples must not depend on debug-only diagnostics. CI
+runs this mode with fat link-time optimization (`CARGO_PROFILE_RELEASE_LTO=fat`).
 
 Outcome rules:
 

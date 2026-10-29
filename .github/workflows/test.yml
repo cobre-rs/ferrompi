@@ -131,8 +131,10 @@ jobs:
           chmod +x tests/run_mpi_tests.sh
           MPI_NP_LIST="${{ matrix.np_list }}" ./tests/run_mpi_tests.sh "${{ matrix.features }}"
 
-      - name: MPI integration tests (release)
+      - name: MPI integration tests (release, fat LTO)
         if: matrix.mpi == 'mpich' && matrix.features == 'rma'
+        env:
+          CARGO_PROFILE_RELEASE_LTO: fat
         run: MPI_NP_LIST="${{ matrix.np_list }}" ./tests/run_mpi_tests.sh --release rma
 
   test-openmpi5:
