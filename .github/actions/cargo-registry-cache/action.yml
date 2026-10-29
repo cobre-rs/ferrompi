@@ -1,0 +1,21 @@
+name: Cache cargo registry
+description: Caches the cargo registry index, the downloaded crates and the git checkouts under a key of the job's choosing.
+
+inputs:
+  key:
+    description: The job's part of the cache key, between `cargo-` and the hash of Cargo.lock.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Cache cargo registry
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: ${{ runner.os }}-cargo-${{ inputs.key }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ inputs.key }}-
