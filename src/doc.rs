@@ -41,3 +41,6 @@ pub mod adr_0006_mpi5_abi_direction {}
 
 #[doc = include_str!("../docs/adr/0007-buffer-safety-and-handle-lifetimes.md")]
 pub mod adr_0007_buffer_safety_and_handle_lifetimes {}
+
+#[doc = include_str!("../docs/adr/0008-window-memory-access-model.md")]
+pub mod adr_0008_window_memory_access_model {}
