@@ -187,16 +187,13 @@ pub(crate) unsafe fn ferrompi_win_fence_close(assert_val: int32_t, win: int32_t)
         Err(code) => return code,
     };
     #[cfg(debug_assertions)]
-    let held = match crate::rt::begin_call() {
-        Ok(held) => held,
+    let _flag = match crate::rt::begin_call() {
+        Ok(flag) => flag,
         Err(code) => return code,
     };
     // SAFETY: the caller upholds the C function's contract, and the token keeps
     // `MPI_Finalize` from starting until this call returns.
-    let result = unsafe { raw::ferrompi_win_fence(assert_val, win) };
-    #[cfg(debug_assertions)]
-    crate::rt::end_call(held);
-    result
+    unsafe { raw::ferrompi_win_fence(assert_val, win) }
 }
 
 /// Wraps every other extern declaration in [`crate::rt::enter`]'s lifecycle
@@ -227,16 +224,13 @@ macro_rules! guarded_extern {
                     Err(code) => return code,
                 };
                 #[cfg(debug_assertions)]
-                let held = match crate::rt::begin_call() {
-                    Ok(held) => held,
+                let _flag = match crate::rt::begin_call() {
+                    Ok(flag) => flag,
                     Err(code) => return code,
                 };
                 // SAFETY: the wrapper forwards the caller's arguments unchanged;
                 // the caller upholds the C function's contract.
-                let result = unsafe { raw::$name($($arg),*) };
-                #[cfg(debug_assertions)]
-                crate::rt::end_call(held);
-                result
+                unsafe { raw::$name($($arg),*) }
             }
         )*
     };

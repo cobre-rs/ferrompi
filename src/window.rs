@@ -422,11 +422,11 @@ fn counted_window_call(
 ) -> Result<()> {
     let _call = rt::enter().map_err(|code| Error::from_code_with_op(code, op))?;
     #[cfg(debug_assertions)]
-    let held = rt::begin_call().map_err(|code| Error::from_code_with_op(code, op))?;
+    let flag = rt::begin_call().map_err(|code| Error::from_code_with_op(code, op))?;
     mark_window_alive();
     let ret = call(win_handle);
     #[cfg(debug_assertions)]
-    rt::end_call(held);
+    drop(flag);
     if ret != 0 && *win_handle != FERROMPI_WIN_LEAKED {
         mark_window_gone();
     }
@@ -3350,8 +3350,8 @@ impl<T: MpiDatatype> Win<T> {
         }
         let _call = rt::enter().map_err(|code| Error::from_code_with_op(code, "win_free"))?;
         #[cfg(debug_assertions)]
-        let held = match rt::begin_call() {
-            Ok(held) => held,
+        let flag = match rt::begin_call() {
+            Ok(flag) => flag,
             Err(code) => {
                 // Leak the window, still counted: dropping it would run `Drop`'s unchecked free.
                 std::mem::forget(self);
@@ -3363,7 +3363,7 @@ impl<T: MpiDatatype> Win<T> {
         // again.
         let ret = unsafe { ffi::ferrompi_win_free(self.win_handle) };
         #[cfg(debug_assertions)]
-        rt::end_call(held);
+        drop(flag);
         // The shim releases the table slot whatever MPI returned, so `Drop`
         // must not free again.
         self.win_handle = WIN_FREED;

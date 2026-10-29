@@ -454,6 +454,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both libraries accepted it. A tag that does not fit now returns
   `Error::InvalidArgument` with `arg: "stringtag"` before any MPI call. A
   tag of up to 62 bytes fits in every library.
+- **A panic that unwinds out of a call no longer leaves the overlap check
+  set.** In a debug build at `ThreadLevel::Serialized`, a call that panicked
+  while it held the check left it set: for example the `Drop` of a value that
+  the closure of `UserOp::new` captured, run when the table of user ops was
+  full. Every later call in the process then returned
+  `Error::ThreadLevelViolation`. The check is now released when the call
+  unwinds. Release builds were not affected.
 
 ## [0.6.0] - 2026-10-01
 

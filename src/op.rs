@@ -653,12 +653,10 @@ impl<T: MpiDatatype> UserOp<T> {
         // an op not yet created.
         let _call = rt::enter().map_err(|code| Error::from_code_with_op(code, "op_create"))?;
         #[cfg(debug_assertions)]
-        let held = rt::begin_call().map_err(|code| Error::from_code_with_op(code, "op_create"))?;
-        let slot = create_in_free_slot(typed_adapter::<T, F>(f), commute);
-        #[cfg(debug_assertions)]
-        rt::end_call(held);
+        let _flag = rt::begin_call().map_err(|code| Error::from_code_with_op(code, "op_create"))?;
+        let slot = create_in_free_slot(typed_adapter::<T, F>(f), commute)?;
         Ok(UserOp {
-            registration: Arc::new(OpRegistration { slot: slot? }),
+            registration: Arc::new(OpRegistration { slot }),
             _marker: PhantomData,
         })
     }

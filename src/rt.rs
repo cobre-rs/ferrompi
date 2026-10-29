@@ -769,33 +769,43 @@ fn release_in_call_flag() {
     SERIALIZED_IN_CALL.store(false, Ordering::Release);
 }
 
+/// The debug overlap check's hold on [`SERIALIZED_IN_CALL`], from
+/// [`begin_call`] until it drops. Dropping it releases the flag when it holds
+/// it, so a call that unwinds does not leave the flag set.
+#[cfg(debug_assertions)]
+#[must_use]
+pub(crate) struct CallFlag(bool);
+
+#[cfg(debug_assertions)]
+impl Drop for CallFlag {
+    fn drop(&mut self) {
+        if self.0 {
+            release_in_call_flag();
+        }
+    }
+}
+
 /// Called at the top of a guarded extern wrapper, after [`enter`] passes. At
 /// the `Serialized` level, in `Active` and also while `Finalizing`, takes
-/// [`SERIALIZED_IN_CALL`] and returns `Ok(true)`, or
+/// [`SERIALIZED_IN_CALL`] and returns the [`CallFlag`] that holds it, or
 /// `Err(FERROMPI_ERR_THREAD_LEVEL)` if another call already holds it. At every
-/// other level, returns `Ok(false)` without touching the flag.
+/// other level, returns a [`CallFlag`] that holds nothing and leaves the flag
+/// alone. A caller binds the result after its [`InFlight`] token, so the flag
+/// is released before the token.
 #[cfg(debug_assertions)]
-pub(crate) fn begin_call() -> std::result::Result<bool, c_int> {
+pub(crate) fn begin_call() -> std::result::Result<CallFlag, c_int> {
     // Relaxed: this runs after `enter` or `enter_completion` passed: on the
     // init thread, which stores `LEVEL` (`Single` until then), or on a thread
     // the counted path admitted, whose SeqCst load of `STATE` is ordered
     // after that store.
     if LEVEL.load(Ordering::Relaxed) == ThreadLevel::Serialized as u8 {
         if take_in_call_flag() {
-            Ok(true)
+            Ok(CallFlag(true))
         } else {
             Err(FERROMPI_ERR_THREAD_LEVEL)
         }
     } else {
-        Ok(false)
-    }
-}
-
-/// Releases the flag taken by [`begin_call`], when `held` is `true`.
-#[cfg(debug_assertions)]
-pub(crate) fn end_call(held: bool) {
-    if held {
-        release_in_call_flag();
+        Ok(CallFlag(false))
     }
 }
 
@@ -856,11 +866,18 @@ mod tests {
         IN_FLIGHT, LIVE_HANDLES, LIVE_SCOPES, ON_INIT_THREAD, SHARDS,
     };
     #[cfg(debug_assertions)]
-    use super::{release_in_call_flag, take_in_call_flag};
+    use super::{release_in_call_flag, take_in_call_flag, CallFlag};
+
+    /// The tests of the debug overlap flag share one process-wide flag.
+    #[cfg(debug_assertions)]
+    static IN_CALL_FLAG_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[cfg(debug_assertions)]
     #[test]
     fn in_call_flag_rejects_a_second_thread() {
+        let _serial = IN_CALL_FLAG_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(take_in_call_flag(), "first take must succeed");
 
         let overlapping_took = std::thread::scope(|s| {
@@ -884,6 +901,24 @@ mod tests {
             .expect("next thread panicked")
         });
         assert!(next_took, "take after release must succeed");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn in_call_flag_is_released_when_a_call_unwinds() {
+        let _serial = IN_CALL_FLAG_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(take_in_call_flag(), "first take must succeed");
+
+        let unwound = std::panic::catch_unwind(|| {
+            let _flag = CallFlag(true);
+            panic!("unwind through a held flag");
+        });
+        assert!(unwound.is_err(), "the closure must panic");
+
+        assert!(take_in_call_flag(), "take after the unwind must succeed");
+        release_in_call_flag();
     }
 
     #[test]
