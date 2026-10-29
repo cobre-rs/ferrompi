@@ -8,7 +8,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_persistent_bsend
 // mpi-test: np=2
 
-use ferrompi::{Mpi, ReduceOp};
+use ferrompi::{Error, Mpi, ReduceOp};
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -24,6 +24,21 @@ fn main() {
     const N: usize = 100;
     const ITERS: usize = 10;
     const TAG: i32 = 42;
+
+    // An empty buffer is refused before MPI sees it, with one error on every
+    // MPI.
+    let refused = mpi.buffer_attach(Box::new([]));
+    assert!(
+        matches!(
+            refused,
+            Err(Error::InvalidArgument {
+                arg: "buffer",
+                reason: "empty",
+                ..
+            })
+        ),
+        "expected Err(InvalidArgument) for an empty buffer, got: {refused:?}"
+    );
 
     // Attach a 64 KiB buffer on every rank (MPI_Buffer_attach is per-process;
     // only rank 0 will actually use it for sending, but attaching on all ranks

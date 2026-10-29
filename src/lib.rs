@@ -663,11 +663,13 @@ impl Mpi {
     /// Buffers larger than `i32::MAX` bytes are rejected with
     /// `Err(`[`Error::InvalidArgument`]`)` before the FFI call; the
     /// underlying `MPI_Buffer_attach` takes an `int` count and cannot
-    /// address larger buffers.
+    /// address larger buffers. An empty buffer is rejected the same way:
+    /// every MPI refuses it, each with an error of its own.
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidArgument`] if `buffer.len() > i32::MAX as usize`.
+    /// - [`Error::InvalidArgument`] if `buffer` is empty or
+    ///   `buffer.len() > i32::MAX as usize`.
     /// - [`Error::InvalidState`] if a buffer is already attached.
     /// - [`Error::Mpi`] if `MPI_Buffer_attach` fails.
     ///
@@ -687,6 +689,12 @@ impl Mpi {
         if guard.is_some() {
             return Err(Error::InvalidState {
                 reason: "a buffer is already attached",
+            });
+        }
+        if buffer.is_empty() {
+            return Err(Error::InvalidArgument {
+                arg: "buffer",
+                reason: "empty",
             });
         }
         if buffer.len() > i32::MAX as usize {
@@ -860,12 +868,13 @@ mod tests {
 
     // ── Mpi::buffer_attach / buffer_detach unit tests ─────────────────────
 
-    /// Both guard paths of the attached-buffer static in one test, so no other
+    /// Every guard path of the attached-buffer static in one test, so no other
     /// test can interleave with the shared state: detach with nothing attached
-    /// and attach while a buffer is attached both return `Err(InvalidState)`
+    /// and attach while a buffer is attached return `Err(InvalidState)`, and
+    /// an empty buffer returns `Err(InvalidArgument)` and is not stored, all
     /// without reaching MPI (the static is seeded directly).
     #[test]
-    fn buffer_attach_detach_guards_return_invalid_state() {
+    fn buffer_attach_detach_guards_refuse_misuse() {
         let mpi = stub_mpi();
 
         *ATTACHED_BUFFER.lock().unwrap() = None;
@@ -893,6 +902,21 @@ mod tests {
         );
 
         ATTACHED_BUFFER.lock().unwrap().take();
+        let result = mpi.buffer_attach(Box::new([]));
+        assert!(
+            matches!(
+                result,
+                Err(Error::InvalidArgument {
+                    arg: "buffer",
+                    reason: "empty"
+                })
+            ),
+            "expected Err(InvalidArgument) for an empty buffer, got: {result:?}"
+        );
+        assert!(
+            ATTACHED_BUFFER.lock().unwrap().is_none(),
+            "a refused buffer must not be stored"
+        );
     }
 
     // ── finalize_skip_reason unit tests ───────────────────────────────────
