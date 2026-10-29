@@ -25,8 +25,7 @@ fn main() {
     const ITERS: usize = 10;
     const TAG: i32 = 42;
 
-    // An empty buffer is refused before MPI sees it, with one error on every
-    // MPI.
+    // An empty buffer is refused before MPI sees it, with the same error on every MPI.
     let refused = mpi.buffer_attach(Box::new([]));
     assert!(
         matches!(
