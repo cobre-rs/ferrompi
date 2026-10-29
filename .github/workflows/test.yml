@@ -399,11 +399,13 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      - name: Package allow-list
+      - name: Package allow-list (all features)
         run: |
-          cargo package --locked
+          cargo package --locked --all-features
           cargo package --locked --list > "$RUNNER_TEMP/package-files"
-          if grep -E '^(examples|benches|audits|tests|\.github)/|^test\.sh$' "$RUNNER_TEMP/package-files"; then
+          grep -vxE 'examples/(shared_memory|rma_put|rma_get|rma_accumulate|rma_get_accumulate)\.rs' \
+            "$RUNNER_TEMP/package-files" > "$RUNNER_TEMP/package-rest"
+          if grep -E '^(examples|benches|audits|tests|\.github)/|^test\.sh$' "$RUNNER_TEMP/package-rest"; then
             exit 1
           fi
 

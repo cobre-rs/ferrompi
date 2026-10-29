@@ -14,6 +14,12 @@ include = [
     "/src/**",
     "/csrc/**",
     "/docs/**",
+    # The examples the rustdoc includes with `include_str!`.
+    "/examples/shared_memory.rs",
+    "/examples/rma_put.rs",
+    "/examples/rma_get.rs",
+    "/examples/rma_accumulate.rs",
+    "/examples/rma_get_accumulate.rs",
     "/build.rs",
     "/README.md",
     "/CHANGELOG.md",
