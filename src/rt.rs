@@ -178,7 +178,8 @@ impl Drop for HandleToken {
     fn drop(&mut self) {
         // Release: pairs with the SeqCst (hence acquiring) loads in
         // `live_handle_tokens`, so every MPI call that completed the request
-        // happens-before the `MPI_Finalize` that follows a sum of zero.
+        // or received the message happens-before the `MPI_Finalize` that
+        // follows a sum of zero.
         self.0 .0.fetch_sub(1, Ordering::Release);
     }
 }
@@ -352,7 +353,8 @@ pub(crate) fn scopes_on_this_thread() -> usize {
 /// the tokens, or `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or
 /// `Finalized`, or `Err(FERROMPI_ERR_THREAD_LEVEL)` on a thread other than the
 /// init thread at `Single`/`Funneled`, counting nothing. The count rises before
-/// the guarded start call, so that call's per-call release cannot precede it.
+/// the guarded call that starts the requests or probes for the message, so that
+/// call's per-call release cannot precede it.
 ///
 /// A token is counted on every thread and never takes [`open_scope`]'s uncounted
 /// branch: it can move to a thread whose own count `Mpi::drop` does not read.

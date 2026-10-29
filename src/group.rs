@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn group_drop_with_zero_handle_is_no_op() {
-        // Handle 0 corresponds to MPI_GROUP_EMPTY (reserved slot).
+        // Handle 0 is MPI_GROUP_EMPTY, which takes no table slot and is never freed.
         // The Drop impl guards against handle == 0, so this must not
         // call ferrompi_group_free and must not panic or segfault.
         let g = Group { handle: 0 };

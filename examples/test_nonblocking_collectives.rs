@@ -1,6 +1,6 @@
 //! Integration test for ALL nonblocking collective operations.
 //!
-//! Exercises all 15 nonblocking collective methods in `Comm`:
+//! Exercises all 15 nonblocking collective methods in `Communicator`:
 //! ibroadcast, iallreduce, ireduce, igather, iallgather, iscatter,
 //! ibarrier, iscan, iexscan, ialltoall, igatherv, iscatterv,
 //! iallgatherv, ialltoallv, and ireduce_scatter_block.
