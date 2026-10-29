@@ -63,7 +63,7 @@ Persistent collectives do not exist in rsmpi; the right column shows `_init` met
 | `(none — not available in rsmpi)`                                       | `comm.broadcast_init(buf, r)?`                         | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
 | `comm.process_at_rank(r).reduce_into(&send, op)`                        | `comm.reduce(&send, &mut recv, op, r)?`                | `recv` is checked only at the root; another rank may pass an empty slice            |
 | `comm.process_at_rank(r).reduce_into_root(&send, &mut recv, op)`        | `comm.reduce(&send, &mut recv, op, r)?`                | Same call for root and non-root                                                     |
-| `comm.process_at_rank(r).immediate_reduce_into(&send, op)`              | `comm.ireduce(s, &send, &mut recv, op, r)?`            | Inside `ferrompi::scope`; returns `Request<'s>`; `recv` is checked only at the root |
+| `comm.process_at_rank(r).immediate_reduce_into(scope, &send, op)`       | `comm.ireduce(s, &send, &mut recv, op, r)?`            | Inside `ferrompi::scope`; returns `Request<'s>`; `recv` is checked only at the root |
 | `(none — not available in rsmpi)`                                       | `comm.reduce_init(send, recv, op, r)?`                 | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
 | `comm.all_reduce_into(&send, &mut recv, op)`                            | `comm.allreduce(&send, &mut recv, op)?`                |                                                                                     |
 | `comm.all_reduce_into(&send, &mut recv, op)` (scalar)                   | `comm.allreduce_scalar(value, op)?`                    | Convenience: no buffers; returns `T`                                                |
@@ -71,14 +71,14 @@ Persistent collectives do not exist in rsmpi; the right column shows `_init` met
 | `(none — not available in rsmpi)`                                       | `comm.allreduce_init(send, recv, op)?`                 | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
 | `comm.process_at_rank(r).gather_into(&send)`                            | `comm.gather(&send, &mut recv, r)?`                    | `recv` ignored on non-root                                                          |
 | `comm.process_at_rank(r).gather_into_root(&send, &mut recv)`            | `comm.gather(&send, &mut recv, r)?`                    | Same call for root and non-root                                                     |
-| `comm.process_at_rank(r).immediate_gather_into(&send)`                  | `comm.igather(s, &send, &mut recv, r)?`                | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
+| `comm.process_at_rank(r).immediate_gather_into(scope, &send)`           | `comm.igather(s, &send, &mut recv, r)?`                | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
 | `(none — not available in rsmpi)`                                       | `comm.gather_init(send, recv, r)?`                     | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
 | `comm.all_gather_into(&send, &mut recv)`                                | `comm.allgather(&send, &mut recv)?`                    |                                                                                     |
 | `comm.immediate_all_gather_into(scope, &send, &mut recv)`               | `comm.iallgather(s, &send, &mut recv)?`                | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
 | `(none — not available in rsmpi)`                                       | `comm.allgather_init(send, recv)?`                     | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
 | `comm.process_at_rank(r).scatter_into(&mut recv)`                       | `comm.scatter(&send, &mut recv, r)?`                   | `send` ignored on non-root                                                          |
 | `comm.process_at_rank(r).scatter_into_root(&send, &mut recv)`           | `comm.scatter(&send, &mut recv, r)?`                   | Same call for root and non-root                                                     |
-| `comm.process_at_rank(r).immediate_scatter_into(&mut recv)`             | `comm.iscatter(s, &send, &mut recv, r)?`               | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
+| `comm.process_at_rank(r).immediate_scatter_into(scope, &mut recv)`      | `comm.iscatter(s, &send, &mut recv, r)?`               | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
 | `(none — not available in rsmpi)`                                       | `comm.scatter_init(send, recv, r)?`                    | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
 | `comm.all_to_all_into(&send, &mut recv)`                                | `comm.alltoall(&send, &mut recv)?`                     |                                                                                     |
 | `comm.immediate_all_to_all_into(scope, &send, &mut recv)`               | `comm.ialltoall(s, &send, &mut recv)?`                 | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
@@ -107,23 +107,23 @@ forms of these three modes are the persistent `*_init` requests: initialise once
 then call `.start()?` and `.wait()?` on the returned `PersistentRequest` for each
 message.
 
-| rsmpi expression                                                 | ferrompi expression                                       | Notes                                                                                                                     |
-| ---------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `comm.process_at_rank(dest).send(&buf)`                          | `comm.send(&buf, dest, tag)?`                             | Tag is explicit in ferrompi                                                                                               |
-| `comm.process_at_rank(dest).send_with_tag(&buf, tag)`            | `comm.send(&buf, dest, tag)?`                             |                                                                                                                           |
-| `comm.process_at_rank(dest).synchronous_send(&buf)`              | `comm.ssend_init(buf, dest, tag)?`                        | Persistent only; owns its `Vec`s (`buffer()`, `into_buffer()`)                                                            |
-| `comm.process_at_rank(dest).buffered_send(&buf)`                 | `comm.bsend_init(buf, dest, tag)?`                        | Persistent only; owns its `Vec`s (`buffer()`, `into_buffer()`); requires a buffer attached via `Mpi::buffer_attach`       |
-| `comm.process_at_rank(dest).ready_send(&buf)`                    | `comm.rsend_init(buf, dest, tag)?`                        | Persistent only; owns its `Vec`s (`buffer()`, `into_buffer()`); the receiver must have posted its recv before `.start()?` |
-| `comm.any_process().receive_into(&mut buf)`                      | `comm.recv(&mut buf, Source::Any, Tag::Any)?`             | Returns `Status`, with `source`, `tag` and `count` fields                                                                 |
-| `comm.process_at_rank(src).receive_into_with_tag(&mut buf, tag)` | `comm.recv(&mut buf, src, tag)?`                          | Returns `Status`                                                                                                          |
-| `comm.process_at_rank(dest).immediate_send(&buf)`                | `comm.isend(s, &buf, dest, tag)?`                         | Inside `ferrompi::scope`; returns `Request<'s>`                                                                           |
-| `comm.process_at_rank(src).immediate_receive_into(&mut buf)`     | `comm.irecv(s, &mut buf, src, tag)?`                      | Inside `ferrompi::scope`; returns `Request<'s>`                                                                           |
-| `comm.send_receive(sendbuf, dest, recvbuf, src)`                 | `comm.sendrecv(&send, dest, stag, &mut recv, src, rtag)?` | Returns `Status`                                                                                                          |
-| `comm.process_at_rank(src).probe()`                              | `comm.probe::<T>(src, tag)?`                              | Returns `Status`; blocks                                                                                                  |
-| `comm.process_at_rank(src).immediate_probe()`                    | `comm.iprobe::<T>(src, tag)?`                             | Returns `Option<Status>`                                                                                                  |
-| `comm.process_at_rank(src).matched_probe()`                      | `comm.mprobe::<T>(src, tag)?`                             | Returns `(Message, Status)`                                                                                               |
-| `comm.process_at_rank(src).immediate_matched_probe()`            | `comm.improbe::<T>(src, tag)?`                            | Returns `Option<(Message, Status)>`                                                                                       |
-| `msg.matched_receive_into(&mut buf)`                             | `msg.mrecv(&mut buf)?`                                    | Returns `Status`                                                                                                          |
+| rsmpi expression                                                    | ferrompi expression                                       | Notes                                                                                                                     |
+| ------------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `comm.process_at_rank(dest).send(&buf)`                             | `comm.send(&buf, dest, tag)?`                             | Tag is explicit in ferrompi                                                                                               |
+| `comm.process_at_rank(dest).send_with_tag(&buf, tag)`               | `comm.send(&buf, dest, tag)?`                             |                                                                                                                           |
+| `comm.process_at_rank(dest).synchronous_send(&buf)`                 | `comm.ssend_init(buf, dest, tag)?`                        | Persistent only; owns its `Vec`s (`buffer()`, `into_buffer()`)                                                            |
+| `comm.process_at_rank(dest).buffered_send(&buf)`                    | `comm.bsend_init(buf, dest, tag)?`                        | Persistent only; owns its `Vec`s (`buffer()`, `into_buffer()`); requires a buffer attached via `Mpi::buffer_attach`       |
+| `comm.process_at_rank(dest).ready_send(&buf)`                       | `comm.rsend_init(buf, dest, tag)?`                        | Persistent only; owns its `Vec`s (`buffer()`, `into_buffer()`); the receiver must have posted its recv before `.start()?` |
+| `comm.any_process().receive_into(&mut buf)`                         | `comm.recv(&mut buf, Source::Any, Tag::Any)?`             | Returns `Status`, with `source`, `tag` and `count` fields                                                                 |
+| `comm.process_at_rank(src).receive_into_with_tag(&mut buf, tag)`    | `comm.recv(&mut buf, src, tag)?`                          | Returns `Status`                                                                                                          |
+| `comm.process_at_rank(dest).immediate_send(scope, &buf)`            | `comm.isend(s, &buf, dest, tag)?`                         | Inside `ferrompi::scope`; returns `Request<'s>`                                                                           |
+| `comm.process_at_rank(src).immediate_receive_into(scope, &mut buf)` | `comm.irecv(s, &mut buf, src, tag)?`                      | Inside `ferrompi::scope`; returns `Request<'s>`                                                                           |
+| `comm.send_receive(sendbuf, dest, recvbuf, src)`                    | `comm.sendrecv(&send, dest, stag, &mut recv, src, rtag)?` | Returns `Status`                                                                                                          |
+| `comm.process_at_rank(src).probe()`                                 | `comm.probe::<T>(src, tag)?`                              | Returns `Status`; blocks                                                                                                  |
+| `comm.process_at_rank(src).immediate_probe()`                       | `comm.iprobe::<T>(src, tag)?`                             | Returns `Option<Status>`                                                                                                  |
+| `comm.process_at_rank(src).matched_probe()`                         | `comm.mprobe::<T>(src, tag)?`                             | Returns `(Message, Status)`                                                                                               |
+| `comm.process_at_rank(src).immediate_matched_probe()`               | `comm.improbe::<T>(src, tag)?`                            | Returns `Option<(Message, Status)>`                                                                                       |
+| `msg.matched_receive_into(&mut buf)`                                | `msg.mrecv(&mut buf)?`                                    | Returns `Status`                                                                                                          |
 
 ### 2c. Groups and Communicators
 
@@ -590,16 +590,16 @@ before any MPI call as `Error::InvalidArgument`, `Error::BufferSize` or
 rsmpi requires explicit calls to free some objects. ferrompi implements `Drop` on
 all handle-owning types:
 
-| Type                | What `Drop` does                                              |
-| ------------------- | ------------------------------------------------------------- |
-| `Communicator`      | `MPI_Comm_free`, except for the world communicator            |
-| `Group`             | `MPI_Group_free`                                              |
-| `Request`           | Nothing: the `scope` it belongs to completes it               |
-| `Message`           | Receives and discards the message                             |
-| `PersistentRequest` | `MPI_Wait` if started and not waited, then `MPI_Request_free` |
-| `Win<T>`            | `MPI_Win_free`                                                |
-| `CustomDatatype`    | `MPI_Type_free`                                               |
-| `UserOp<T>`         | `MPI_Op_free`                                                 |
+| Type                | What `Drop` does                                                                                            |
+| ------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `Communicator`      | `MPI_Comm_free`, except for the world communicator                                                          |
+| `Group`             | `MPI_Group_free`                                                                                            |
+| `Request`           | Nothing: the `scope` it belongs to completes it                                                             |
+| `Message`           | Receives and discards the message                                                                           |
+| `PersistentRequest` | `MPI_Wait` if started and not waited, then `MPI_Request_free`                                               |
+| `Win<T>`            | `MPI_Win_free` (collective); the buffer is leaked if the free is skipped or fails: see `Win`'s `# Dropping` |
+| `CustomDatatype`    | `MPI_Type_free`                                                                                             |
+| `UserOp<T>`         | `MPI_Op_free`                                                                                               |
 
 After the `Mpi` handle is dropped, none of these `Drop` impls make an MPI call —
 see the `Mpi` rustdoc for the full lifecycle.
