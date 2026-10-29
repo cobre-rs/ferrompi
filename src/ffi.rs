@@ -35,9 +35,12 @@ pub const FERROMPI_LOCK_SHARED: int32_t = 1;
 // Never routed through the `crate::rt` lifecycle guard: calls legal before
 // init or after finalize (init, lifecycle and version queries), calls that
 // make no MPI call (op-table bookkeeping, error-class mapping, the limit on a
-// string tag's length), `wtime`, which only a live `Mpi` reaches, and calls
-// made only from a `Drop` impl. The error lookup is guarded by hand after this
-// block: MPI 3.1 libraries need not allow it during or after `MPI_Finalize`.
+// string tag's length), `wtime`, which only a live `Mpi` reaches, calls made
+// only from a `Drop` impl, and the op-table calls of `UserOp`'s constructors,
+// which hold an in-flight token from before they take a slot until they have
+// created its op or given the slot back. The error lookup is guarded by hand
+// after this block: MPI 3.1 libraries need not allow it during or after
+// `MPI_Finalize`.
 extern "C" {
     pub fn ferrompi_init_thread(required: c_int, provided: *mut c_int) -> c_int;
     pub fn ferrompi_finalize() -> c_int;
@@ -53,7 +56,17 @@ extern "C" {
     /// Allocate a free slot in the op-slot table.
     /// Writes the slot index to `*out_slot`.
     /// Returns MPI_SUCCESS on success, FERROMPI_ERR_OPS_FULL if the table is full.
+    /// Call it only under an in-flight token, which orders the claim after
+    /// `Mpi::init`'s reset of the table.
     pub fn ferrompi_op_alloc_slot(out_slot: *mut int32_t) -> c_int;
+    /// Create an MPI_Op for the given slot.
+    /// `commute = 1` → commutative; `commute = 0` → non-commutative.
+    /// Writes the handle (same value as `slot`) to `*out_handle`.
+    pub fn ferrompi_op_create_user(
+        slot: int32_t,
+        commute: int32_t,
+        out_handle: *mut int32_t,
+    ) -> c_int;
     /// Free the MPI_Op and release the slot.
     /// Drop ordering: MPI_Op_free → ferrompi_op_drop_closure → free_op_slot.
     pub fn ferrompi_op_free(handle: int32_t) -> c_int;
@@ -1077,18 +1090,6 @@ guarded_extern! {
         tag: int32_t,
         comm: int32_t,
         request: *mut int64_t,
-    ) -> c_int;
-
-    // ============================================================
-    // User-Defined Reduction Op (MPI_Op_create)
-    // ============================================================
-    /// Create an MPI_Op for the given slot.
-    /// `commute = 1` → commutative; `commute = 0` → non-commutative.
-    /// Writes the handle (same value as `slot`) to `*out_handle`.
-    pub fn ferrompi_op_create_user(
-        slot: int32_t,
-        commute: int32_t,
-        out_handle: *mut int32_t,
     ) -> c_int;
 
     // ============================================================

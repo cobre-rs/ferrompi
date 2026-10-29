@@ -78,11 +78,10 @@ fn main() {
         "CustomDatatype::contiguous after finalize must return Err(Finalized)"
     );
 
-    // More than the 16 op-table slots: each call's create fails at the
-    // guarded ferrompi_op_create_user, and the rollback must release the
-    // slot it allocated. If the rollback leaked slots, the table would be
-    // exhausted well before the 17th call and this would observe
-    // Err(ResourceExhausted) instead of Err(Finalized).
+    // More than the 16 op-table slots: each call is refused before it takes
+    // a slot. Calls that took slots and kept them would exhaust the table
+    // before the 17th, which would then return Err(ResourceExhausted)
+    // instead of Err(Finalized).
     for i in 0..17 {
         let r = UserOp::<f64>::new(|a: &[f64], b: &mut [f64]| {
             b[0] += a[0];

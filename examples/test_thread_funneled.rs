@@ -31,9 +31,27 @@ fn main() {
         "init_thread provided Funneled",
     );
 
+    // The init thread takes all 16 slots of the op table, so a create on the
+    // worker below that took a slot before the thread check would report a
+    // full table instead.
+    let held_ops: Vec<UserOp<f64>> = (0..16)
+        .map(|_| {
+            UserOp::new(|a: &[f64], b: &mut [f64]| b[0] += a[0])
+                .expect("UserOp::new on the init thread failed")
+        })
+        .collect();
+    common::check(
+        &world,
+        matches!(
+            UserOp::<f64>::new(|a: &[f64], b: &mut [f64]| b[0] += a[0]),
+            Err(Error::ResourceExhausted { .. })
+        ),
+        "op table full on the init thread",
+    );
+
     // Every guarded call below must be rejected before touching MPI: no MPI
     // object is created or dropped on this worker thread.
-    let worker_ok = std::thread::scope(|s| {
+    let (worker_ok, worker_op_refused) = std::thread::scope(|s| {
         let world_ref = &world;
         s.spawn(move || {
             let mut ok = true;
@@ -67,22 +85,23 @@ fn main() {
                 CustomDatatype::contiguous::<f64>(2),
                 Err(Error::ThreadLevelViolation)
             );
-            // One more than the op table's 16 slots: a rejected create must
-            // not leak a slot, or the last attempt would fail differently.
-            const OP_SLOTS_PLUS_ONE: usize = 17;
-            for _ in 0..OP_SLOTS_PLUS_ONE {
-                let r = UserOp::<f64>::new(|a: &[f64], b: &mut [f64]| {
-                    b[0] += a[0];
-                });
-                ok &= matches!(r, Err(Error::ThreadLevelViolation));
-            }
+            let op_refused = matches!(
+                UserOp::<f64>::new(|a: &[f64], b: &mut [f64]| b[0] += a[0]),
+                Err(Error::ThreadLevelViolation)
+            );
 
-            ok
+            (ok, op_refused)
         })
         .join()
         .expect("worker thread panicked")
     });
     common::check(&world, worker_ok, "worker calls below Serialized rejected");
+    common::check(
+        &world,
+        worker_op_refused,
+        "worker's UserOp::new refused for the thread level, not for a full table",
+    );
+    drop(held_ops);
 
     // A wait() rejected by the thread check must leave `active` unchanged,
     // so a later wait() on the init thread still owns a live request.

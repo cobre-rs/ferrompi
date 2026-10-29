@@ -364,6 +364,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MPICH 4.2 and Open MPI 4.1 and 5.0 abort the process. They now return `Err`
   with the reason `MPI is not initialized` without calling MPI; so does a call
   another thread makes while `Mpi::init` is still running.
+- **`UserOp::new` and `UserOp::new_noncommutative` take a slot of the
+  user-op table only after the call has passed the checks of the
+  initialization state and the thread level.** Called on another thread
+  while `Mpi::init` was running, they could take a slot that `Mpi::init`
+  then marked free, so two user ops could share one slot and a reduction
+  could run the other op's closure on its buffers. A refused call now
+  touches no slot: it returns `Error::InvalidState`,
+  `Error::ThreadLevelViolation` or `Error::Finalized` even when the table is
+  full, where it returned the error of a full table.
 - **A full user-op table returns `Error::ResourceExhausted` with resource
   `Operation` instead of `Error::Mpi` with class `Other`; an
   `MPI_Init_thread` failure reports class `Unknown` instead of its return

@@ -24,7 +24,7 @@ fn refused_before_init<T>(what: &str, result: Result<T>) {
 fn main() {
     // Before Mpi::init, the constructors that take no handle return an error
     // without calling MPI. The op table holds 16 slots, so 20 refusals also
-    // show that a refused constructor gives its slot back.
+    // show that a refused constructor leaves no slot taken.
     assert!(
         !Mpi::is_initialized(),
         "is_initialized should be false before init"

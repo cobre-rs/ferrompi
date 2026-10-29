@@ -396,7 +396,7 @@ type ByteClosure = Box<dyn Fn(*const c_void, *mut c_void, usize) + Send + Sync +
 ///
 /// Each slot holds `Box::into_raw(Box::new(byte_closure))` — a thin
 /// `*mut ByteClosure` — or null.  Protocol:
-/// - `UserOp::new_impl` publishes a slot with `Ordering::Release` before
+/// - `create_in_free_slot` publishes a slot with `Ordering::Release` before
 ///   calling `MPI_Op_create`.
 /// - `rust_user_op_invoke` (the trampoline) loads a slot with
 ///   `Ordering::Acquire`.
@@ -418,7 +418,7 @@ static REGISTRY: [AtomicPtr<ByteClosure>; MAX_OPS] =
 ///
 /// # Safety
 ///
-/// * `slot` is in range `0..MAX_OPS` and was published by `UserOp::new_impl`
+/// * `slot` is in range `0..MAX_OPS` and was published by `create_in_free_slot`
 ///   before `MPI_Op_create` was called for it.
 /// * `invec` and `inoutvec` are the pointers MPI passed to the user
 ///   function, each to `len` elements of the datatype the op was applied
@@ -441,7 +441,7 @@ pub unsafe extern "C" fn rust_user_op_invoke(
         // the panic path below — abort rather than deref a null pointer.
         std::process::abort();
     }
-    // SAFETY: ptr is non-null, published by `new_impl` with `Ordering::Release`
+    // SAFETY: ptr is non-null, published by `create_in_free_slot` with `Ordering::Release`
     // before `MPI_Op_create`, and this `Ordering::Acquire` load of the same
     // atomic synchronizes-with that store.  `ferrompi_op_drop_closure` nulls
     // the slot only after `MPI_Op_free` returns, so no drop can race with
@@ -463,7 +463,7 @@ pub unsafe extern "C" fn rust_user_op_invoke(
 
 /// Called by `ferrompi_op_free` (in C) after `MPI_Op_free` returns — including
 /// when the `ferrompi_finalize` sweep invokes `ferrompi_op_free` on a still-used
-/// slot — and by `UserOp::new_impl`'s rollback path when `MPI_Op_create` fails.
+/// slot — and by `create_in_free_slot`'s rollback path when `MPI_Op_create` fails.
 ///
 /// Swaps the slot to null and, if it held a pointer, drops the boxed
 /// closure.  Idempotent: a second call on the same slot is a no-op — this is
@@ -474,7 +474,7 @@ pub unsafe extern "C" fn rust_user_op_invoke(
 ///
 /// * `slot` must be in range `0..MAX_OPS`.
 /// * If `REGISTRY[slot]` is non-null, it must point to a `ByteClosure`
-///   produced by `Box::into_raw` in `UserOp::new_impl` that has not yet been
+///   produced by `Box::into_raw` in `create_in_free_slot` that has not yet been
 ///   dropped, and no trampoline call for this slot may be in flight (i.e.
 ///   `MPI_Op_create` for this slot never succeeded, or `MPI_Op_free` for it
 ///   has already returned).
@@ -487,10 +487,10 @@ pub unsafe extern "C" fn ferrompi_op_drop_closure(slot: i32) {
     if ptr.is_null() {
         return;
     }
-    // SAFETY: ptr was produced by Box::into_raw in new_impl and has not been
-    // dropped; the swap above claimed sole ownership by nulling the slot,
-    // and the caller guarantees no trampoline call for this slot is in
-    // flight.
+    // SAFETY: ptr was produced by Box::into_raw in create_in_free_slot and
+    // has not been dropped; the swap above claimed sole ownership by nulling
+    // the slot, and the caller guarantees no trampoline call for this slot
+    // is in flight.
     drop(unsafe { Box::from_raw(ptr) });
 }
 
@@ -644,59 +644,77 @@ impl<T: MpiDatatype> UserOp<T> {
     where
         F: Fn(&[T], &mut [T]) + Send + Sync + 'static,
     {
-        // Step 1: allocate a slot in the C-side op table.
-        let mut slot: i32 = -1;
-        // SAFETY: slot is a local out-parameter written by ferrompi_op_alloc_slot
-        // before this function reads it below (guarded by the `ret != 0` check).
-        let ret = unsafe { ffi::ferrompi_op_alloc_slot(&mut slot) };
-        if ret != 0 {
-            return Err(Error::from_code_with_op(ret, "op_create"));
-        }
-        let idx = slot as usize;
-        debug_assert!(idx < MAX_OPS, "slot out of range");
-
-        // Step 2: wrap the typed closure in the type-erased adapter.
-        let byte_closure: ByteClosure = typed_adapter::<T, F>(f);
-
-        // Step 3: publish the boxed closure to the registry.  A thin
-        // `*mut ByteClosure` — no fat-pointer decomposition needed.  This
-        // Release store, paired with the trampoline's Acquire load of the
-        // same atomic, synchronizes-with that load directly (no external
-        // happens-before edge required).
-        let ptr: *mut ByteClosure = Box::into_raw(Box::new(byte_closure));
-        REGISTRY[idx].store(ptr, Ordering::Release);
-
-        // Step 4: call MPI_Op_create via the C shim.
-        let mut handle: i32 = -1;
-        // SAFETY: handle is a local out-parameter written by
-        // ferrompi_op_create_user before this function reads it below; slot is
-        // the value ferrompi_op_alloc_slot returned above.
-        let ret = unsafe { ffi::ferrompi_op_create_user(slot, commute, &mut handle) };
-        if ret != 0 {
-            // Rollback: MPI_Op_create failed so no MPI_Op was registered and
-            // no trampoline call for this slot can be in flight.  Use the
-            // same drop routine the C free path uses (ferrompi_op_drop_closure
-            // is idempotent and bounds-checked), then release the slot
-            // without calling MPI_Op_free — the slot never held a live
-            // MPI_Op, and MPI_Op_free on MPI_OP_NULL is implementation-defined.
-            // SAFETY: slot is in range (checked by ferrompi_op_alloc_slot
-            // above); the closure at REGISTRY[idx] was published above and no
-            // trampoline call for this slot has occurred, since
-            // ferrompi_op_create_user just returned failure.
-            unsafe { ferrompi_op_drop_closure(slot) };
-            // SAFETY: slot is the value ferrompi_op_alloc_slot returned above;
-            // the closure stored in it has just been dropped, so no dangling
-            // pointer remains for a later trampoline call to observe.
-            unsafe { ffi::ferrompi_op_free_slot_only(slot) };
-            return Err(Error::from_code_with_op(ret, "op_create"));
-        }
-        debug_assert_eq!(handle, slot);
-
+        // The guard admits the call before it takes a slot, and its token
+        // covers the claim, the create and any rollback. `Mpi::init` resets
+        // the op table before `MPI_Init_thread`, and the guard orders every
+        // call it admits after `MPI_Init_thread`, so no claim meets that
+        // reset. `Mpi::drop` frees the ops left in the table only when no
+        // admitted call is in progress, so it never meets a slot claimed for
+        // an op not yet created.
+        let _call = rt::enter().map_err(|code| Error::from_code_with_op(code, "op_create"))?;
+        #[cfg(debug_assertions)]
+        let held = rt::begin_call().map_err(|code| Error::from_code_with_op(code, "op_create"))?;
+        let slot = create_in_free_slot(typed_adapter::<T, F>(f), commute);
+        #[cfg(debug_assertions)]
+        rt::end_call(held);
         Ok(UserOp {
-            registration: Arc::new(OpRegistration { slot }),
+            registration: Arc::new(OpRegistration { slot: slot? }),
             _marker: PhantomData,
         })
     }
+}
+
+/// Takes a free slot of the op table, publishes `closure` to it and creates
+/// the MPI op that calls it; returns the slot. If the create fails, drops the
+/// closure and gives the slot back. Called only under the in-flight token of
+/// a call the lifecycle guard admitted (see `UserOp::new_impl`).
+fn create_in_free_slot(closure: ByteClosure, commute: i32) -> Result<i32> {
+    // Step 1: allocate a slot in the C-side op table.
+    let mut slot: i32 = -1;
+    // SAFETY: slot is a local out-parameter written by ferrompi_op_alloc_slot
+    // before this function reads it below (guarded by the `ret != 0` check).
+    let ret = unsafe { ffi::ferrompi_op_alloc_slot(&mut slot) };
+    if ret != 0 {
+        return Err(Error::from_code_with_op(ret, "op_create"));
+    }
+    let idx = slot as usize;
+    debug_assert!(idx < MAX_OPS, "slot out of range");
+
+    // Step 2: publish the boxed closure to the registry.  A thin
+    // `*mut ByteClosure` — no fat-pointer decomposition needed.  This
+    // Release store, paired with the trampoline's Acquire load of the
+    // same atomic, synchronizes-with that load directly (no external
+    // happens-before edge required).
+    let ptr: *mut ByteClosure = Box::into_raw(Box::new(closure));
+    REGISTRY[idx].store(ptr, Ordering::Release);
+
+    // Step 3: call MPI_Op_create via the C shim.
+    let mut handle: i32 = -1;
+    // SAFETY: handle is a local out-parameter written by
+    // ferrompi_op_create_user before this function reads it below; slot is
+    // the value ferrompi_op_alloc_slot returned above; the caller holds the
+    // in-flight token this unguarded MPI call needs.
+    let ret = unsafe { ffi::ferrompi_op_create_user(slot, commute, &mut handle) };
+    if ret != 0 {
+        // Rollback: MPI_Op_create failed so no MPI_Op was registered and
+        // no trampoline call for this slot can be in flight.  Use the
+        // same drop routine the C free path uses (ferrompi_op_drop_closure
+        // is idempotent and bounds-checked), then release the slot
+        // without calling MPI_Op_free — the slot never held a live
+        // MPI_Op, and MPI_Op_free on MPI_OP_NULL is implementation-defined.
+        // SAFETY: slot is in range (checked by ferrompi_op_alloc_slot
+        // above); the closure at REGISTRY[idx] was published above and no
+        // trampoline call for this slot has occurred, since
+        // ferrompi_op_create_user just returned failure.
+        unsafe { ferrompi_op_drop_closure(slot) };
+        // SAFETY: slot is the value ferrompi_op_alloc_slot returned above;
+        // the closure stored in it has just been dropped, so no dangling
+        // pointer remains for a later trampoline call to observe.
+        unsafe { ffi::ferrompi_op_free_slot_only(slot) };
+        return Err(Error::from_code_with_op(ret, "op_create"));
+    }
+    debug_assert_eq!(handle, slot);
+    Ok(slot)
 }
 
 /// Wraps a typed reduction closure in the type-erased form `REGISTRY` stores.
@@ -744,7 +762,7 @@ impl Drop for OpRegistration {
         // The slot is valid for the lifetime of this registration; it is freed
         // exactly once here.
         let ret = unsafe {
-            // SAFETY: self.slot was allocated by UserOp::new_impl and has
+            // SAFETY: self.slot was allocated by create_in_free_slot and has
             // not been freed.  Drop is called exactly once.
             ffi::ferrompi_op_free(self.slot)
         };
@@ -838,10 +856,10 @@ mod tests {
     /// `ferrompi_op_create_user` must reject a slot that was never allocated
     /// via `ferrompi_op_alloc_slot`, before it touches MPI.  Needs no MPI
     /// runtime: slot 0's `op_used` entry is zero-initialised static storage,
-    /// and this test never calls `ferrompi_op_alloc_slot`. The call goes to
-    /// the unguarded declaration, because the lifecycle guard refuses the
-    /// wrapper before `Mpi::init`; the second assertion fails if the call is
-    /// routed through the wrapper again.
+    /// and no lib test takes a slot. The declaration is not guarded, since
+    /// `UserOp`'s constructors call it under the token they already hold; the
+    /// second assertion fails if it is routed through the lifecycle guard
+    /// again, which refuses every call before `Mpi::init`.
     #[test]
     fn create_user_rejects_unallocated_slot() {
         let mut handle: i32 = -1;
@@ -849,7 +867,7 @@ mod tests {
         // op_used check must reject it before any MPI call; handle is a
         // valid i32 out-parameter that ferrompi_op_create_user only writes
         // on success.
-        let ret = unsafe { ffi::raw::ferrompi_op_create_user(0, 1, &mut handle) };
+        let ret = unsafe { ffi::ferrompi_op_create_user(0, 1, &mut handle) };
         assert_ne!(ret, 0, "must reject a slot that was never allocated");
         assert_ne!(
             ret, FERROMPI_ERR_NOT_INITIALIZED,

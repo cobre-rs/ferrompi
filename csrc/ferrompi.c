@@ -198,18 +198,17 @@ static _Atomic(MPI_Op) op_table[MAX_OPS];
 static atomic_int op_used[MAX_OPS];  // 1 if slot is in use
 static atomic_int next_op_hint;
 
-// Initialization guard.  CAS-based: exactly one thread performs the
-// atomic_init loops below; concurrent callers see the CAS fail and return
-// immediately.  Memory-ordering rationale: C11 §6.7.4 guarantees static
-// storage duration objects are zero-initialized at program load, so the
-// atomic_init loop only restates that zero state.  Losing threads return
-// after observing tables_initialized == 1 and rely on the pre-load static
-// zero-init as the baseline — no synchronizes-with edge is required for
-// the loop body's stores because the values being written are already the
-// observable state.  If any future revision ever writes a non-zero value
-// in the init loop, a release fence (e.g. atomic_thread_fence(release))
-// must be inserted before the CAS, or the non-zero init must move into
-// each call site of get_*.
+// Initialization guard.  CAS-based: the first call performs the loops below;
+// a later one, which can follow only a failed MPI_Init_thread, returns.
+// Memory-ordering rationale, for a process that calls MPI_Init_thread once,
+// as MPI requires: these stores need no order of their own, whatever value
+// they write.  Mpi::init and Mpi::drop run on the thread that makes these
+// stores; any other access from the Rust side is a call the lifecycle guard
+// admitted, a call under its token, or the Drop of an object such a call
+// made, and the guard admits a call on another thread only once Mpi::init
+// has stored the lifecycle state with release ordering, after
+// MPI_Init_thread returned.  So no other thread touches a table before these
+// stores, and every later access is ordered after them.
 static atomic_int tables_initialized;
 
 static void init_tables(void) {
