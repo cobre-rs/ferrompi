@@ -613,7 +613,7 @@ conversion reference.
 
 - [ ] Add `ferrompi = "0.6"` to `Cargo.toml`; remove `mpi` dependency.
 - [ ] Add `features = ["rma"]` if using shared memory windows; add `features =
-["numa"]` for SLURM helpers.
+["slurm"]` for SLURM helpers.
 - [ ] Replace `use mpi::traits::*` with `use ferrompi::{Mpi, ReduceOp}` (and
       other types as needed).
 - [ ] Replace `mpi::initialize()` with `Mpi::init()?`; change `fn main()` to

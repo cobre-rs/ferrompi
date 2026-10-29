@@ -112,12 +112,12 @@ jobs:
         if: matrix.features != ''
         run: cargo clippy --all-targets --features ${{ matrix.features }} -- -D warnings
 
-      - name: Clippy (numa feature)
+      - name: Clippy (slurm feature)
         if: matrix.mpi == 'mpich' && matrix.features == 'rma'
-        run: cargo clippy --all-targets --features numa -- -D warnings
+        run: cargo clippy --all-targets --features slurm -- -D warnings
 
       - name: Unit tests
-        run: cargo test --lib --features numa --verbose
+        run: cargo test --lib --features slurm,rma --verbose
 
       - name: Unit test that initializes MPI
         timeout-minutes: 5
@@ -348,9 +348,9 @@ jobs:
           # shellcheck source=/dev/null
           source <(cargo llvm-cov show-env --export-prefix)
           cargo llvm-cov clean --workspace
-          cargo test --lib --features numa
-          cargo test --lib --features numa -- --ignored
-          MPI_NP_LIST=4 ./tests/run_mpi_tests.sh numa
+          cargo test --lib --features slurm,rma
+          cargo test --lib --features slurm,rma -- --ignored
+          MPI_NP_LIST=4 ./tests/run_mpi_tests.sh slurm,rma
           cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov

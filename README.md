@@ -46,7 +46,7 @@ See [docs/mpi-compatibility.md](docs/mpi-compatibility.md) for build selection, 
 ferrompi = "0.6"
 ```
 
-Enable `rma` for shared-memory windows, or `numa` for the SLURM job-topology helpers (implies `rma`):
+Enable `rma` for shared-memory windows, or `slurm` for the SLURM job-topology helpers:
 
 ```toml
 [dependencies]

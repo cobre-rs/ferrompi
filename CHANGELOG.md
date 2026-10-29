@@ -322,6 +322,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of aborting the process; the window and its buffer are leaked, and
   `Mpi` then skips `MPI_Finalize`.
 
+### Deprecated
+
+- **The `numa` feature is renamed `slurm`**, after what it gates: the
+  `slurm` module and `SlurmInfo`. `slurm` does not imply `rma`. `numa` stays
+  for this release as an alias for `slurm` plus `rma`, its 0.6 meaning, and
+  is removed in 0.8.0. Migration: replace `features = ["numa"]` with
+  `features = ["slurm", "rma"]`, or with `["slurm"]` if the crate uses no
+  window.
+
 ### Removed
 
 - **`Error::InvalidBuffer` and `Error::InvalidOp`.** Migration: match

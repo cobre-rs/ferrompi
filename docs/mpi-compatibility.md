@@ -168,9 +168,8 @@ Cargo reruns `build.rs`, and therefore recompiles the C shim, whenever
 `module load` that only changes `PATH`.
 
 Two Cargo features gate optional functionality: `rma` enables RMA and
-shared-memory window operations; `numa` implies `rma` and adds the SLURM
-helpers (the `slurm` module and `SlurmInfo`), needing no extra system
-library.
+shared-memory window operations; `slurm` adds the SLURM helpers (the
+`slurm` module and `SlurmInfo`), needing no extra system library.
 
 ## Running
 
@@ -207,7 +206,7 @@ include:
 - MPI implementation and version: (output of `mpiexec --version`)
 - OS and distribution:
 - Compiler: (output of `mpicc --version`, or the wrapper named by MPICC)
-- Cargo features tested: (e.g., default, rma, numa)
+- Cargo features tested: (e.g., default, rma, slurm)
 - Test command: (e.g., `MPI_NP_LIST=4 ./tests/run_mpi_tests.sh rma`)
 - Test results: the runner's summary line, plus any `FAIL <example> (np=N)`
   lines

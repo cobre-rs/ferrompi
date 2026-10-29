@@ -27,7 +27,7 @@ impl Communicator {
     ///
     /// This is a **collective operation** — all ranks must call it.
     /// Every rank receives the complete [`TopologyInfo`], which includes the
-    /// rank-to-host mapping, MPI version metadata, and (with the `numa`
+    /// rank-to-host mapping, MPI version metadata, and (with the `slurm`
     /// feature) SLURM job information.
     ///
     /// [`TopologyInfo`]: crate::TopologyInfo

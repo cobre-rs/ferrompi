@@ -36,9 +36,9 @@ bash .github/scripts/check-no-plan-leaks.sh
 
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features rma -- -D warnings
-cargo clippy --all-targets --features numa -- -D warnings
+cargo clippy --all-targets --features slurm -- -D warnings
 
-cargo test --lib --features numa
+cargo test --lib --features slurm,rma
 cargo test --lib --features rma -- --ignored   # the one unit test that initializes MPI
 cargo test --doc
 cargo test --doc --all-features

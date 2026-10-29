@@ -38,7 +38,7 @@
 //!   `WinFenceAssert`, `WinPscwAssert`, and closure epochs over
 //!   `ActiveEpoch` and `PassiveEpoch`; `Win::allocate_shared` for intra-node
 //!   shared memory; `WinView` for access to a window's memory.
-//! - **SLURM helpers** (feature `numa`): Job topology queries via `slurm` module
+//! - **SLURM helpers** (feature `slurm`): Job topology queries via `slurm` module
 //! - **Rich error handling**: [`MpiErrorClass`] categorization with messages from the MPI runtime
 //!
 //! ## Supported Types
@@ -79,10 +79,10 @@
 //! | Feature | Description | Dependencies |
 //! |---------|-------------|--------------|
 //! | `rma`   | RMA and shared-memory windows (`Win`, epoch handles, views, RMA operations) | — |
-//! | `numa`  | The `slurm` module and `SlurmInfo` | `rma` |
+//! | `slurm` | The `slurm` module and `SlurmInfo` | — |
 //!
-//! `numa` needs no system library: it implies `rma` and adds only the SLURM
-//! job-topology helpers; it adds no NUMA code.
+//! `slurm` reads the job's SLURM environment variables and needs no system
+//! library.
 //!
 //! ## Thread Safety
 //!
@@ -124,7 +124,7 @@
 //! srun --cpu-bind=cores ./my_program
 //! ```
 //!
-//! Use the `slurm` module (with `numa` feature) to read these values at runtime.
+//! Use the `slurm` module (with the `slurm` feature) to read these values at runtime.
 //! See `examples/hybrid_openmp.rs` for the full pattern.
 //!
 //! ## Lifecycle
@@ -164,7 +164,7 @@ mod persistent;
 mod request;
 mod rt;
 mod scope;
-#[cfg(feature = "numa")]
+#[cfg(feature = "slurm")]
 pub mod slurm;
 mod status;
 mod topology;
@@ -195,7 +195,7 @@ pub use persistent::PersistentRequest;
 pub use request::Request;
 pub use scope::{scope, Scope};
 pub use status::{Source, Status, Tag};
-#[cfg(feature = "numa")]
+#[cfg(feature = "slurm")]
 pub use topology::SlurmInfo;
 pub use topology::{HostEntry, TopologyInfo};
 #[cfg(feature = "rma")]

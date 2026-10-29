@@ -198,5 +198,7 @@ harness = false
 default = []
 # Enable RMA (Remote Memory Access) shared memory window operations
 rma = []
-# SLURM helpers: the slurm module and SlurmInfo (implies rma)
-numa = ["rma"]
+# SLURM job-topology helpers: the slurm module and SlurmInfo
+slurm = []
+# Deprecated alias for the 0.6 meaning, `slurm` plus `rma`; removed in 0.8.0
+numa = ["slurm", "rma"]

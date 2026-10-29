@@ -349,8 +349,8 @@ check "classify: FAIL inside a longer word is not a FAIL line" \
 
 # --- feature_closure -------------------------------------------------------
 
-check "feature_closure: numa pulls in rma" \
-  "$(feature_closure "numa" '{"numa":["rma"],"rma":[]}')" "numa,rma"
+check "feature_closure: an alias pulls in the features it names" \
+  "$(feature_closure "alias" '{"alias":["slurm","rma"],"rma":[],"slurm":[]}')" "alias,rma,slurm"
 
 # --- lib_debug_assertions ---------------------------------------------------
 
@@ -393,8 +393,8 @@ check "main: --valgrind --release exits 2" "$rc|$out" "2|ERROR: --release and --
 # --- artifact_outcome (the missing-artifact replay) -----------------------
 
 check "artifact_outcome: required feature enabled -> missing binary" \
-  "$(artifact_outcome "rma" "rma,numa")" "FAIL missing binary"
+  "$(artifact_outcome "rma" "rma,slurm")" "FAIL missing binary"
 check "artifact_outcome: required feature outside closure -> skip" \
-  "$(artifact_outcome "numa" "rma")" "SKIP(feature)"
+  "$(artifact_outcome "slurm" "rma")" "SKIP(feature)"
 
 exit "$FAILED"

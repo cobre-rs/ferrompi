@@ -37,8 +37,8 @@ pub struct TopologyInfo {
     size: i32,
     /// Hosts and their assigned ranks, ordered by first rank on each host.
     hosts: Vec<HostEntry>,
-    /// SLURM job metadata, populated when running under SLURM with the `numa` feature.
-    #[cfg(feature = "numa")]
+    /// SLURM job metadata, populated when running under SLURM with the `slurm` feature.
+    #[cfg(feature = "slurm")]
     slurm: Option<SlurmInfo>,
 }
 
@@ -53,7 +53,7 @@ pub struct HostEntry {
 }
 
 /// SLURM job metadata.
-#[cfg(feature = "numa")]
+#[cfg(feature = "slurm")]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SlurmInfo {
@@ -104,8 +104,8 @@ impl TopologyInfo {
         self.hosts.len()
     }
 
-    /// SLURM job metadata, if running under SLURM with the `numa` feature.
-    #[cfg(feature = "numa")]
+    /// SLURM job metadata, if running under SLURM with the `slurm` feature.
+    #[cfg(feature = "slurm")]
     pub fn slurm(&self) -> Option<&SlurmInfo> {
         self.slurm.as_ref()
     }
@@ -189,7 +189,7 @@ pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<Topology
 
     let thread_level = mpi.thread_level();
 
-    #[cfg(feature = "numa")]
+    #[cfg(feature = "slurm")]
     let slurm = if crate::slurm::is_slurm_job() {
         Some(SlurmInfo {
             job_id: crate::slurm::job_id().unwrap_or_default(),
@@ -206,7 +206,7 @@ pub(crate) fn gather_topology(comm: &Communicator, mpi: &Mpi) -> Result<Topology
         thread_level,
         size,
         hosts,
-        #[cfg(feature = "numa")]
+        #[cfg(feature = "slurm")]
         slurm,
     })
 }
@@ -230,7 +230,7 @@ impl fmt::Display for TopologyInfo {
             node_word,
         )?;
 
-        #[cfg(feature = "numa")]
+        #[cfg(feature = "slurm")]
         if let Some(ref slurm) = self.slurm {
             writeln!(f, "SLURM Job: {}", slurm.job_id)?;
             if let Some(ref nl) = slurm.node_list {
@@ -265,7 +265,7 @@ impl fmt::Display for TopologyInfo {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "numa")]
+    #[cfg(feature = "slurm")]
     use super::SlurmInfo;
     use super::{hostname_slot, hosts_from_slots, Error, HostEntry, ThreadLevel, TopologyInfo};
 
@@ -285,7 +285,7 @@ mod tests {
                     ranks: vec![4, 5, 6, 7],
                 },
             ],
-            #[cfg(feature = "numa")]
+            #[cfg(feature = "slurm")]
             slurm: None,
         }
     }
@@ -337,7 +337,7 @@ mod tests {
                 hostname: "localhost".to_string(),
                 ranks: vec![0, 1, 2, 3],
             }],
-            #[cfg(feature = "numa")]
+            #[cfg(feature = "slurm")]
             slurm: None,
         };
         let output = format!("{topo}");
@@ -356,7 +356,7 @@ mod tests {
                 hostname: "localhost".to_string(),
                 ranks: vec![0],
             }],
-            #[cfg(feature = "numa")]
+            #[cfg(feature = "slurm")]
             slurm: None,
         };
         let output = format!("{topo}");
@@ -407,7 +407,7 @@ mod tests {
         assert!(m.contains("rank 1"));
     }
 
-    #[cfg(feature = "numa")]
+    #[cfg(feature = "slurm")]
     #[test]
     fn display_with_slurm_info() {
         let topo = TopologyInfo {
@@ -437,7 +437,7 @@ mod tests {
         assert!(output.contains("CPUs/Task: 4"));
     }
 
-    #[cfg(feature = "numa")]
+    #[cfg(feature = "slurm")]
     #[test]
     fn slurm_accessor_none_when_absent() {
         let topo = sample_topology();
