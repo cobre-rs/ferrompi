@@ -438,6 +438,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user must not free (MPI-4.1 §2.5.1). The crate stored it like any other
   group and freed it on drop. An empty group now takes no slot of the group
   table and is never freed.
+- **`Mpi::create_from_group` refuses a string tag longer than the library
+  allows.** MPI bounds the tag: with its terminating NUL it must fit in
+  `MPI_MAX_STRINGTAG_LEN` bytes (MPI-4.1 §7.4.2), 256 in MPICH 4.2 and, by
+  default, 1024 in Open MPI 5.0. The crate passed a tag of any length, and
+  both libraries accepted it. A tag that does not fit now returns
+  `Error::InvalidArgument` with `arg: "stringtag"` before any MPI call. A
+  tag of up to 62 bytes fits in every library.
 
 ## [0.6.0] - 2026-10-01
 

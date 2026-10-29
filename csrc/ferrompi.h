@@ -162,6 +162,15 @@ int ferrompi_comm_create_from_group(int32_t group_handle,
                                     const char* stringtag,
                                     int32_t* newcomm_handle);
 
+/**
+ * The most bytes the stringtag of ferrompi_comm_create_from_group may take,
+ * its terminating NUL included: the library's MPI_MAX_STRINGTAG_LEN
+ * (MPI-4.1 7.4.2). INT64_MAX when built against a library without
+ * MPI_Comm_create_from_group, which defines no such limit. Makes no MPI call.
+ * The caller checks the length against it; the shim above does not.
+ */
+int64_t ferrompi_max_stringtag_len(void);
+
 /* ============================================================
  * Synchronization
  * ============================================================ */

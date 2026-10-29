@@ -1126,6 +1126,14 @@ int ferrompi_comm_create_from_group(int32_t group_h,
 #endif
 }
 
+int64_t ferrompi_max_stringtag_len(void) {
+#ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
+    return MPI_MAX_STRINGTAG_LEN;
+#else
+    return INT64_MAX;  /* no MPI_Comm_create_from_group: no limit to check */
+#endif
+}
+
 /* ============================================================
  * Synchronization
  * ============================================================ */

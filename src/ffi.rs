@@ -34,10 +34,10 @@ pub const FERROMPI_LOCK_SHARED: int32_t = 1;
 
 // Never routed through the `crate::rt` lifecycle guard: calls legal before
 // init or after finalize (init, lifecycle and version queries), calls that
-// make no MPI call (op-table bookkeeping, error-class mapping), `wtime`, which
-// only a live `Mpi` reaches, and calls made only from a `Drop` impl. The error
-// lookup is guarded by hand after this block: MPI 3.1 libraries need not allow
-// it during or after `MPI_Finalize`.
+// make no MPI call (op-table bookkeeping, error-class mapping, the limit on a
+// string tag's length), `wtime`, which only a live `Mpi` reaches, and calls
+// made only from a `Drop` impl. The error lookup is guarded by hand after this
+// block: MPI 3.1 libraries need not allow it during or after `MPI_Finalize`.
 extern "C" {
     pub fn ferrompi_init_thread(required: c_int, provided: *mut c_int) -> c_int;
     pub fn ferrompi_finalize() -> c_int;
@@ -68,6 +68,11 @@ extern "C" {
     /// `MPI_ERR_*` constants and return a ferrompi-stable index in
     /// `MpiErrorClass`'s declaration order, or -1 if unrecognized.
     pub fn ferrompi_error_class_index(error_class: c_int) -> int32_t;
+    /// The most bytes the string tag of `ferrompi_comm_create_from_group` may
+    /// take, its terminating NUL included (the library's
+    /// `MPI_MAX_STRINGTAG_LEN`), or `i64::MAX` where the library lacks
+    /// `MPI_Comm_create_from_group` and so defines no limit. Makes no MPI call.
+    pub fn ferrompi_max_stringtag_len() -> int64_t;
 }
 
 // RMA counterpart of the block above: a non-status return with no MPI call

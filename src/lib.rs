@@ -562,8 +562,10 @@ impl Mpi {
     ///
     /// MPI bounds the length of `stringtag`: with its terminating NUL it must
     /// fit in `MPI_MAX_STRINGTAG_LEN` bytes, a limit of at least 63
-    /// (MPI-4.1 §7.4.2, p.339), so up to 62 bytes are portable. The length is
-    /// not checked here; MPICH 4.2 and Open MPI 5.0 accept longer tags.
+    /// (MPI-4.1 §7.4.2, p.339), so up to 62 bytes are portable. A tag that
+    /// does not fit in the linked library's limit is refused before any MPI
+    /// call: the limit is 256 in MPICH 4.2 and, unless the library was built
+    /// with another, 1024 in Open MPI 5.0.
     ///
     /// Returns `Ok(Some(comm))` to a member of `group`, and `Ok(None)` when
     /// MPI creates no communicator for the caller:
@@ -578,9 +580,11 @@ impl Mpi {
     /// # Errors
     ///
     /// - Returns `Err(`[`Error::InvalidArgument`]`)` if `stringtag` contains a
-    ///   NUL byte (the FFI call is never invoked in this case).
+    ///   NUL byte, or does not fit in the library's `MPI_MAX_STRINGTAG_LEN`
+    ///   bytes with its terminating NUL (no MPI call is made in either case).
     /// - Returns `Err(Error::NotSupported(_))` when ferrompi was built
-    ///   against an MPI older than 4.0 other than Open MPI 5.
+    ///   against an MPI older than 4.0 other than Open MPI 5, whatever the
+    ///   length of the tag: such a library defines no limit.
     /// - Returns `Err(Error::Mpi { .. })` if the underlying MPI call fails.
     /// - Returns `Err(`[`Error::ResourceExhausted`]`)` if the communicator
     ///   table is full.
@@ -609,6 +613,16 @@ impl Mpi {
             arg: "stringtag",
             reason: "contains a NUL byte",
         })?;
+        // SAFETY: the call takes no argument and makes no MPI call.
+        let limit = unsafe { ffi::ferrompi_max_stringtag_len() };
+        // The limit counts the terminating NUL (MPI-4.1 §19.3.9, p.847). An
+        // allocation is at most `isize::MAX` bytes, so the cast is exact.
+        if c_tag.as_bytes_with_nul().len() as i64 > limit {
+            return Err(Error::InvalidArgument {
+                arg: "stringtag",
+                reason: "longer than MPI_MAX_STRINGTAG_LEN allows",
+            });
+        }
         let mut new_handle: i32 = -1;
         // SAFETY: c_tag.as_ptr() is a valid, null-terminated C string that
         // lives for the duration of this call. group.handle is a valid group
@@ -1149,5 +1163,50 @@ mod tests {
             ),
             "expected Err(InvalidArgument) for a NUL byte in the tag"
         );
+    }
+
+    /// The longest `stringtag` the linked library allows passes the length
+    /// check, and one byte more is refused by it. MPI is never initialized
+    /// here: a tag that passes goes on to the lifecycle guard, which refuses
+    /// the call, so no MPI call is made either way.
+    #[test]
+    fn create_from_group_checks_the_length_of_the_tag() {
+        let mpi = stub_mpi();
+        let g = group::Group { handle: 0 };
+        // SAFETY: the call takes no argument and makes no MPI call.
+        let limit = unsafe { crate::ffi::ferrompi_max_stringtag_len() };
+        // Without `MPI_Comm_create_from_group` the library defines no limit,
+        // and no length is refused.
+        let longest = if limit == i64::MAX {
+            4096
+        } else {
+            assert!(limit >= 63, "MPI-4.1 requires at least 63, got {limit}");
+            usize::try_from(limit).expect("the limit is positive") - 1
+        };
+
+        let result = mpi.create_from_group(&g, &"t".repeat(longest));
+        assert!(
+            matches!(
+                result,
+                Err(Error::InvalidState {
+                    reason: "MPI is not initialized"
+                })
+            ),
+            "a tag of {longest} bytes passes the length check"
+        );
+        if limit != i64::MAX {
+            let result = mpi.create_from_group(&g, &"t".repeat(longest + 1));
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::InvalidArgument {
+                        arg: "stringtag",
+                        reason: "longer than MPI_MAX_STRINGTAG_LEN allows"
+                    })
+                ),
+                "a tag of {} bytes is refused",
+                longest + 1
+            );
+        }
     }
 }
