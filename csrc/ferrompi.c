@@ -153,9 +153,13 @@ static atomic_int next_group_hint;
 // create a communicator from a group, and builds a communicator's group on
 // the first MPI_Comm_group; Open MPI 4.1 resolves a group's process entries
 // in place in its group constructors. Neither locks the object. Every such
-// call is written through GROUP_CALL. The lock is held across one local group
-// call at a time, never across a collective or blocking call, and no other
-// lock is taken in this file. It is taken only when MPI granted
+// call is written through GROUP_CALL, except the calls that create a
+// communicator from a group (MPI_Comm_create, MPI_Comm_create_group and
+// MPI_Comm_create_from_group): they are collective, so they run outside the
+// lock, after check_group_in_comm or order_group_for_world has built, under
+// the lock, what they would otherwise build. The lock is held across one
+// local group call at a time, never across a collective or blocking call, and
+// no other lock is taken in this file. It is taken only when MPI granted
 // MPI_THREAD_SERIALIZED or MPI_THREAD_MULTIPLE: below that the Rust guard
 // admits one thread. group_calls_overlap is written once, by
 // ferrompi_init_thread, before a second thread can hold a handle.
@@ -553,9 +557,9 @@ static void free_win(int32_t handle) {
 }
 
 // Allocate a group handle (thread-safe via C11 CAS, mirrors alloc_win).
-// Slot 0 is reserved for MPI_GROUP_EMPTY and must NOT be allocated via this
-// path; alloc_group starts scanning from hint > 0 by construction, but the
-// hint wraps around, so we explicitly skip slot 0.
+// Handle 0 stands for MPI_GROUP_EMPTY and has no slot (see store_group); the
+// index below is always in 1..MAX_GROUPS-1, so it is never returned. The scan
+// starts after the slot taken last (the hint) and wraps from MAX_GROUPS-1 to 1.
 static int32_t alloc_group(MPI_Group group) {
     int hint = atomic_load_explicit(&next_group_hint, memory_order_relaxed);
     for (int i = 0; i < MAX_GROUPS - 1; i++) {
@@ -917,27 +921,32 @@ int ferrompi_comm_size(int32_t comm_handle, int32_t* size) {
     return ret;
 }
 
-/* A shim below that cannot hand a new communicator to Rust (MPI_ERRORS_RETURN
- * cannot be installed on it, or the handle table is full) returns the error
- * without freeing it: MPI created it on every rank that belongs to it,
- * MPI_Comm_free is collective over those ranks, and freeing it on this rank
- * alone can hang or mismatch collectives. It stays allocated until
- * MPI_Finalize. */
+/* Hand a communicator that MPI returned to Rust: -1 for MPI_COMM_NULL (this
+ * process is not in it), otherwise a table slot, after MPI_ERRORS_RETURN is
+ * installed on it. When that cannot be installed, or the table is full, the
+ * error is returned without freeing the communicator: MPI created it on every
+ * rank that belongs to it, MPI_Comm_free is collective over those ranks, and
+ * freeing it on this rank alone can hang or mismatch collectives. It stays
+ * allocated until MPI_Finalize. A full table leaves -1 in *out_h; a failed
+ * install leaves *out_h alone. */
+static int store_comm(MPI_Comm comm, int32_t* out_h) {
+    if (comm == MPI_COMM_NULL) {
+        *out_h = -1;
+        return MPI_SUCCESS;
+    }
+    int eh_ret = install_errors_return(comm);
+    if (eh_ret != MPI_SUCCESS) return eh_ret;
+    *out_h = alloc_comm(comm);
+    if (*out_h < 0) return FERROMPI_ERR_COMMS_FULL;
+    return MPI_SUCCESS;
+}
+
 int ferrompi_comm_dup(int32_t comm_handle, int32_t* newcomm_handle) {
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Comm newcomm;
     int ret = MPI_Comm_dup(comm, &newcomm);
-    if (ret == MPI_SUCCESS) {
-        int eh_ret = install_errors_return(newcomm);
-        if (eh_ret != MPI_SUCCESS) {
-            return eh_ret;
-        }
-        *newcomm_handle = alloc_comm(newcomm);
-        if (*newcomm_handle < 0) {
-            return FERROMPI_ERR_COMMS_FULL;
-        }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_comm(newcomm, newcomm_handle);
 }
 
 int ferrompi_comm_free(int32_t comm_handle) {
@@ -962,21 +971,8 @@ int ferrompi_comm_split(int32_t comm_handle, int32_t color, int32_t key, int32_t
     int mpi_color = (color == -1) ? MPI_UNDEFINED : color;
     MPI_Comm newcomm;
     int ret = MPI_Comm_split(comm, mpi_color, key, &newcomm);
-    if (ret == MPI_SUCCESS) {
-        if (newcomm == MPI_COMM_NULL) {
-            *newcomm_handle = -1;  // Process opted out
-        } else {
-            int eh_ret = install_errors_return(newcomm);
-            if (eh_ret != MPI_SUCCESS) {
-                return eh_ret;
-            }
-            *newcomm_handle = alloc_comm(newcomm);
-            if (*newcomm_handle < 0) {
-                return FERROMPI_ERR_COMMS_FULL;
-            }
-        }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_comm(newcomm, newcomm_handle);
 }
 
 int ferrompi_comm_split_type(int32_t comm_handle, int32_t split_type, int32_t key, int32_t* newcomm_handle) {
@@ -991,21 +987,8 @@ int ferrompi_comm_split_type(int32_t comm_handle, int32_t split_type, int32_t ke
     }
     MPI_Comm newcomm;
     int ret = MPI_Comm_split_type(comm, mpi_split_type, key, MPI_INFO_NULL, &newcomm);
-    if (ret == MPI_SUCCESS) {
-        if (newcomm == MPI_COMM_NULL) {
-            *newcomm_handle = -1;
-        } else {
-            int eh_ret = install_errors_return(newcomm);
-            if (eh_ret != MPI_SUCCESS) {
-                return eh_ret;
-            }
-            *newcomm_handle = alloc_comm(newcomm);
-            if (*newcomm_handle < 0) {
-                return FERROMPI_ERR_COMMS_FULL;
-            }
-        }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_comm(newcomm, newcomm_handle);
 }
 
 /* MPI_SUCCESS if every member of `group` is in `comm`, FERROMPI_ERR_GROUP_NOT_IN_COMM
@@ -1046,15 +1029,7 @@ int ferrompi_comm_create(int32_t comm_h,
     MPI_Comm new_comm;
     int ret = MPI_Comm_create(parent, g, &new_comm);
     if (ret != MPI_SUCCESS) return ret;
-    if (new_comm == MPI_COMM_NULL) {
-        *out_h = -1;  /* Caller is not in the group */
-        return MPI_SUCCESS;
-    }
-    int eh_ret = install_errors_return(new_comm);
-    if (eh_ret != MPI_SUCCESS) return eh_ret;
-    *out_h = alloc_comm(new_comm);
-    if (*out_h < 0) return FERROMPI_ERR_COMMS_FULL;
-    return MPI_SUCCESS;
+    return store_comm(new_comm, out_h);
 }
 
 int ferrompi_comm_create_group(int32_t comm_h,
@@ -1069,15 +1044,7 @@ int ferrompi_comm_create_group(int32_t comm_h,
     MPI_Comm new_comm;
     int ret = MPI_Comm_create_group(parent, g, tag, &new_comm);
     if (ret != MPI_SUCCESS) return ret;
-    if (new_comm == MPI_COMM_NULL) {
-        *out_h = -1;  /* Caller is not in the group */
-        return MPI_SUCCESS;
-    }
-    int eh_ret = install_errors_return(new_comm);
-    if (eh_ret != MPI_SUCCESS) return eh_ret;
-    *out_h = alloc_comm(new_comm);
-    if (*out_h < 0) return FERROMPI_ERR_COMMS_FULL;
-    return MPI_SUCCESS;
+    return store_comm(new_comm, out_h);
 }
 
 #ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
