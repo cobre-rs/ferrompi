@@ -158,7 +158,9 @@ not reference internal tracking IDs. The release commit renames that
 heading to `## [X.Y.Z] - YYYY-MM-DD`. `.github/scripts/release-notes.sh <version>`
 extracts that section; `publish.yml` runs it before publishing and fails the tag
 if the section is missing or empty, and a CI fixture test requires notes for
-every released heading.
+every released heading. `publish.yml` publishes through crates.io Trusted
+Publishing: its `publish` job exchanges the run's OIDC token for a crates.io
+token that lasts only for the job, so the repository stores no crates.io token.
 
 ## Adding features
 
