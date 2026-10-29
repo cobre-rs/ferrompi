@@ -77,15 +77,13 @@ let rank: Option<i32> = world.group()?.rank()?;
 # }
 ```
 
-A `-1` still compiles but now returns an error, so search your code for it instead of relying on compile errors. See [Changes that still compile](#changes-that-still-compile).
-
 ## Receive status
 
 `recv` and `sendrecv` return a `Status` instead of a `(source, tag, count)` tuple. `Status` is `#[non_exhaustive]` with typed fields: `source: Source`, `tag: Tag`, `count: Option<usize>` (`None` when the message is not a whole number of elements) and `error: Option<MpiErrorClass>`. A receive from `Source::ProcNull` reports `Source::ProcNull`, `Tag::Any` and `Some(0)` on every MPI.
 
 ```rust,ignore
 let (source, tag, count) = world.recv(&mut buf, -1, -1)?;
-if status.count < 0 {
+if count < 0 {
     eprintln!("partial element");
 }
 ```
@@ -113,7 +111,7 @@ if st.source == Source::Rank(0) && st.tag == Tag::Value(7) {
 
 The blocking reductions (`reduce`, `allreduce`, `scan`, `exscan`, `reduce_scatter_block` and their scalar and in-place forms) take `op: impl Into<CollectiveOp<T>>`, which accepts a `ReduceOp`, a `&UserOp<T>` or a `CollectiveOp`. A `ReduceOp` argument compiles unchanged, and `allreduce_with_op` is removed in favour of `allreduce`. A user op above `i32::MAX` elements returns `Error::Mpi` with class `Count` on every MPI version.
 
-`ReduceOp::Replace` and `ReduceOp::NoOp` are replaced by `AccumulateOp::REPLACE`, `FetchOp::REPLACE` and `FetchOp::NO_OP`, present with and without the `rma` feature. The RMA calls that take them are in [RMA epochs](#rma-epochs).
+`ReduceOp::Replace` and `ReduceOp::NoOp` are replaced by `AccumulateOp::REPLACE`, `FetchOp::REPLACE` and `FetchOp::NO_OP`, present with and without the `rma` feature. `accumulate` and `raccumulate` take `impl Into<AccumulateOp>` and `get_accumulate` and `fetch_and_op` take `impl Into<FetchOp>`, so a `ReduceOp` argument still compiles, but a user op in an accumulate, `NO_OP` in `accumulate`, or `REPLACE` in a collective is a compile error. The calls are in [RMA epochs](#rma-epochs).
 
 ```rust,ignore
 world.allreduce_indexed(&send, &mut recv, ReduceOp::MaxLoc)?;
@@ -203,7 +201,7 @@ ferrompi::scope(|s| {
 
 ## Persistent requests
 
-The persistent point-to-point requests (`send_init`, `bsend_init`, `rsend_init`, `ssend_init`, `recv_init`) and the persistent collectives (including the reductions, which also take `op: impl Into<CollectiveOp<T>>`) own their buffers. They take `Vec<T>` by value and return `PersistentRequest<T>`. `buffer()` and `buffer_mut()` reach the buffer while the request is inactive and return `Error::InvalidState` while it is active. `into_buffer()` returns the buffer, and `into_buffers()` returns both buffers of a two-buffer request. `send_buffer_mut()` reaches the send buffer of such a request. The v-forms copy their count and displacement arrays, which the caller may reuse. `start_all` and `wait_all` take requests of one element type: split a mixed batch by type.
+The persistent point-to-point requests (`send_init`, `bsend_init`, `rsend_init`, `ssend_init`, `recv_init`) and the persistent collectives (including the reductions, which also take `op: impl Into<CollectiveOp<T>>`) own their buffers. They take `Vec<T>` by value and return `PersistentRequest<T>`. `buffer()` and `buffer_mut()` reach the buffer while the request is inactive and return `Error::InvalidState` while it is active. `into_buffer()` returns the buffer, and `into_buffers()` returns both buffers of a two-buffer request. `send_buffer_mut()` reaches the send buffer of such a request while it is inactive, and returns `Error::InvalidState` while it is active. A `&UserOp` passed to a persistent reduction stays alive inside the request until the request is freed. The v-forms copy their count and displacement arrays, which the caller may reuse. `start_all` and `wait_all` take requests of one element type: split a mixed batch by type.
 
 `bcast_init` is renamed `broadcast_init`. `PersistentRequest::wait` returns `Status` and `test` returns `Option<Status>`, as `Request`'s do; a persistent receive reports the matched source, tag and count on every start, and a persistent send, collective or inactive request reports the empty status.
 
@@ -237,16 +235,16 @@ let totals: Vec<f64> = sums.into_buffer()?;
 
 ## RMA epochs
 
-Everything here needs the `rma` feature. A window owns its buffer: `Win<T>` has no lifetime parameter, `Win::create` takes a `Vec<T>`, and `Win::into_buffer` (collective) frees the window and returns the buffer (`None` for `Win::allocate` and `Win::allocate_shared`). A dropped or forgotten window never frees a buffer MPI may still use: the buffer is released only after a successful `MPI_Win_free`, and leaked otherwise.
+Everything here needs the `rma` feature. A window owns its buffer: `Win<T>` has no lifetime parameter, `Win::create` takes a `Vec<T>`, and `Win::into_buffer` (collective) frees the window and returns the buffer (`None` for `Win::allocate` and `Win::allocate_shared`). A window dropped or forgotten while MPI may still use its buffer leaks the buffer instead of freeing it ([ADR-0007](adr/0007-buffer-safety-and-handle-lifetimes.md)).
 
-Every access epoch is a closure that receives an epoch handle, and the crate always closes the epoch, even when the closure panics (a panic inside a fence or PSCW closure aborts the process).
+Every access epoch is a closure that receives an epoch handle, and the crate runs the closing call (fence, `MPI_Win_complete` or unlock) whether the closure returns `Ok` or `Err`; if the closure panics, `Win::lock` and `Win::lock_all` unlock and continue unwinding, while `Win::fence` and `Win::start` abort the process before any closing call.
 
 - `Win::fence(open, close, |e| ..)` and `Win::start(group, assert, |e| ..)` pass an `ActiveEpoch`. `Win::complete` is removed. `fence` rejects `no_succeed()` on the opening fence and `no_precede()` on the closing one with `Error::InvalidArgument`.
 - `Win::lock(kind, rank, |e| ..)` and `Win::lock_all(|e| ..)` pass a `PassiveEpoch`. `flush`, `flush_all`, `flush_local`, `flush_local_all` and `sync` are `PassiveEpoch` methods; `WinLockGuard`, `WinLockAllGuard` and the `Win` versions of the flushes and `sync` are removed.
 - `put`, `get`, `accumulate`, `get_accumulate`, `fetch_and_op` and `compare_and_swap` are epoch-handle methods. They borrow their buffers until the epoch closes and take their count from the slice, so the `target_count` argument is gone: pass a sub-slice for a shorter transfer. `get_accumulate` needs `result` as long as `origin`. Declare the buffers before the closure.
 - `fetch_and_op` and `compare_and_swap` take `origin: &T` (and `compare: &T`) and write into `result: &mut T`, then return `Result<()>`. `PendingFetchResult` is removed: read the result after the closure returns.
 - `rput`, `rget` and `raccumulate` exist only on `PassiveEpoch`, and return a `Request` that the epoch completes before it unlocks. `Win::rput`, `Win::rget` and `Win::raccumulate` are removed.
-- A transfer's target must be in its epoch's access set: any rank but the locked one is refused in `Win::lock`, and any rank outside the `group` of `Win::start`. A fence or `lock_all` epoch covers every rank. The refusal is `Error::InvalidArgument` with `arg: "target_rank"`, before any MPI call. `Win::start` also returns `InvalidArgument` with `arg: "group"` for a member outside the window's communicator. Open the epoch on the ranks the closure targets.
+- A transfer's target must be in its epoch's access set: any rank but the locked one is refused in `Win::lock`, and any rank outside the `group` of `Win::start`. A fence or `lock_all` epoch covers every rank, and `flush` and `flush_local` still take any rank of the window's communicator. The refusal is `Error::InvalidArgument` with `arg: "target_rank"`, before any MPI call. `Win::start` also returns `InvalidArgument` with `arg: "group"` for a member outside the window's communicator. Open the epoch on the ranks the closure targets.
 
 ```rust,ignore
 let mut buf = vec![0.0f64; 16];
@@ -362,7 +360,7 @@ if let Some(comm) = mpi.create_from_group(&group, "app.workers")? {
 
 ## Removed without replacement
 
-- `raw_handle()` on `Communicator`, `Group`, `Request`, `PersistentRequest`, `CustomDatatype` and `Win`. The value was an index into a private table that MPI could not use, and another object could get the same value after a drop. Delete the call, and keep your own identifier to tell two objects apart.
+- `raw_handle()` on `Communicator`, `Group`, `Request`, `PersistentRequest`, `CustomDatatype` and `Win`. The value was an index into a private table, not an MPI handle. Delete the call, and keep your own identifier to tell two objects apart.
 - `WinFenceAssert::bits()` and `WinPscwAssert::bits()`. They returned the library's `MPI_MODE_*` values, which differ between MPI implementations. Delete the call, and combine the named constructors with `|`.
 - `Info` and `ResourceKind::Info`. No ferrompi call took an `Info`, so no MPI hint could be set through it. Delete its uses and any match arm that names `ResourceKind::Info`. Every call with an MPI info argument passes `MPI_INFO_NULL`, as it always did.
 - The debug-build note `MPI_Finalize leaves N active request(s) unfreed`. No request can be left pending at finalize any more, so there is nothing to replace it with.
