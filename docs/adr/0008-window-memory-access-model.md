@@ -103,9 +103,12 @@ element, whose alignment is at most 8.
   the separate one.
 - A process that only polls makes no MPI progress: a peer's put or accumulate may not
   reach it until it calls MPI (MPI-4.1 §12.7.3, p.615-616).
-- The in-process half of aliasing is checked statically: the slices take `&self` and
-  `&mut self` on a window that is not `Sync`. The cross-process half is the written
-  contract of item 3.
+- The borrow checker enforces little of aliasing: a slice borrows the view it comes
+  from, and the view borrows its window or epoch handle, so a slice cannot outlive
+  either, and an epoch call, which borrows the window mutably, cannot run while it
+  lives. `as_mut_slice` also stops every other use of its own view. Another view of
+  the region, other processes, and RMA calls that target this process are covered
+  only by the written contract of item 3.
 
 ## Alternatives considered
 
