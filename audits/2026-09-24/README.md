@@ -215,11 +215,12 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | ARC-11 | Capability gaps (in-place nonblocking, mprobe, HW_GUIDED…) | minor | additive | 0.7.0 | fixed (26acc9d, dc72d70, a4bb43d, 604fc9a); HW_GUIDED wont-fix (D-31) |
 | ARC-12 | `Info` public but unused | minor | one-way | 0.7.0 (D-4) | fixed (f49b02a) |
 | ARC-13 | `SharedWindow` duplicates `Win`; `WinKind` dead | minor | one-way | 0.5.x WinKind / 0.7.0 (D-5) | fixed (b39adfb, f1765b3, 2b965c3) |
-| ARC-14 | `numa` feature has no NUMA code, implies `rma` | minor | one-way | 0.7.0 | planned (ferrompi-0.7.0) |
+| ARC-14 | `numa` feature has no NUMA code, implies `rma` | minor | one-way | 0.7.0 | fixed (d1239c1) |
 | ARC-15 | Naming/coverage asymmetries | minor | one-way | 0.7.0 | fixed (0e03028, e213b46, aa71f36, 7e1611d, e0dfdfc, ed3f133, 2b965c3, 6e9cc6d) |
 | ARC-16 | Magic `-1` sentinels; no typed source/tag | minor | one-way | 0.7.0 | fixed (7ebb70f, c894c2e, 73a8c06, 3784942, 9fc0266) |
 | ARC-17 | RMA redundant `target_count`, duplicate tags | minor | one-way | 0.7.0 | fixed (6db08bf, f5a5c55) |
 | ARC-18 | Open MPI 5 capabilities unused (persistent collectives, `create_from_group` gated on `MPI_VERSION >= 4`; OMPI 5 reports 3.1) | minor | two-way | 0.5.x | fixed (213cfd0, d555791, c58cd05) |
+| ARC-19 | The deprecated `numa` feature, an alias for `slurm` plus `rma` (`numa = ["slurm", "rma"]`), stays for one release; remove it | minor | one-way | 0.8.0 | open |
 
 ### MPI-5 ABI — [04](findings/04-mpi5-abi.md)
 
