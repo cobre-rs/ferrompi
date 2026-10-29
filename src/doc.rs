@@ -38,3 +38,6 @@ pub mod adr_0005_mpi_op_create {}
 
 #[doc = include_str!("../docs/adr/0006-mpi5-abi-direction.md")]
 pub mod adr_0006_mpi5_abi_direction {}
+
+#[doc = include_str!("../docs/adr/0007-buffer-safety-and-handle-lifetimes.md")]
+pub mod adr_0007_buffer_safety_and_handle_lifetimes {}
