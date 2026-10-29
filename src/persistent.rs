@@ -57,6 +57,19 @@ pub(crate) fn vec_buf_mut<T: MpiDatatype>(v: &mut Vec<T>) -> (*mut c_void, i64, 
 /// both. A request that owns one buffer (a point-to-point request, a
 /// broadcast or an in-place collective) has an empty send buffer.
 ///
+/// [`Communicator::barrier_init`](crate::Communicator::barrier_init) returns a
+/// `PersistentRequest<()>`, which owns no data. [`start_all`](Self::start_all)
+/// and [`wait_all`](Self::wait_all) take requests of one element type, so a
+/// barrier request is started and completed on its own, not in one slice with
+/// requests of another type.
+///
+/// Creating a persistent collective is itself a collective call. Every process
+/// of the communicator makes the same `*_init` call, ordered with its other
+/// collective calls on that communicator, and the call can block until the
+/// others make it (MPI-4.1 §6.13). The starts are not ordered: persistent
+/// collectives can be started in any order, and the order can differ between
+/// processes.
+///
 /// # Lifecycle
 ///
 /// 1. Create with `comm.send_init(vec, ..)`, `comm.recv_init(vec, ..)` or
@@ -184,22 +197,25 @@ pub(crate) fn vec_buf_mut<T: MpiDatatype>(v: &mut Vec<T>) -> (*mut c_void, i64, 
 /// # Dropping
 ///
 /// Dropping an active request completes it (`MPI_Wait`, which blocks until the
-/// peer operation completes), then frees it (`MPI_Request_free`), and only
-/// then frees the buffers.
+/// peer operation completes), then frees it (`MPI_Request_free`, which MPI does
+/// not allow on an active collective request), and only then frees the
+/// buffers, and after them the user op, which MPI may invoke at every start.
 ///
 /// - At `Single`/`Funneled`, drop it on the thread that initialized MPI;
 ///   another thread aborts the process.
 /// - At `Serialized` and `Multiple`, the drop is an MPI call, which the
 ///   program serializes like any other.
 /// - Once [`Mpi`](crate::Mpi) is being dropped, or after it was dropped, the
-///   drop makes no MPI call. It leaks the request handle, and also the buffers
-///   when the request is active, because MPI may still write into them. The
-///   buffers of an inactive request are freed normally.
+///   drop makes no MPI call. It leaks the request handle and, when the request
+///   is active, the send and receive buffers, the copy of a v-collective's
+///   count and displacement arrays, and the user op, because MPI may still use
+///   them. The buffers of an inactive request are freed normally.
 /// - A drop on another thread while `Mpi` is being dropped either completes
 ///   before `MPI_Finalize`, because it holds a per-call count the finalizer
 ///   waits for, or makes no MPI call and leaks as above. A drop that is blocked
 ///   in `MPI_Wait` for a peer that never arrives blocks `Mpi`'s drop the same
-///   way a blocked `wait()` does.
+///   way a blocked `wait()` does. MPI requires every call in flight to complete
+///   before `MPI_Finalize` (MPI-4.1 §11.2.2 and §11.6.2 p.516).
 /// - Dropping `Mpi` while the request is active skips `MPI_Finalize`, whatever
 ///   thread holds the request (see [`Mpi`](crate::Mpi)). The request can still
 ///   be completed with `wait` or `test` afterwards; dropping it then makes no
@@ -468,6 +484,11 @@ impl<T> PersistentRequest<T> {
     /// receive buffer and drops the send buffer after the free; use
     /// [`into_buffers`](Self::into_buffers) to keep both.
     ///
+    /// It discards the final [`Status`]: a `recv_init` caller that needs the
+    /// received count or source calls [`wait`](Self::wait) first, which returns
+    /// it, and then `into_buffer`. The same holds for
+    /// [`into_buffers`](Self::into_buffers).
+    ///
     /// # Errors
     ///
     /// Returns the error of [`wait`](Self::wait) if completing an active
@@ -549,8 +570,11 @@ impl<T> PersistentRequest<T> {
     /// class and code, and its message ends with `(request N)`, `N` being
     /// its index in `requests`.
     ///
-    /// This fills no status, like [`Request::wait_all`](crate::Request::wait_all);
-    /// use [`wait`](Self::wait) on a request to read its [`Status`].
+    /// This returns no status, like
+    /// [`Request::wait_all`](crate::Request::wait_all). A request it completed
+    /// is inactive, so a later [`wait`](Self::wait) on it returns the empty
+    /// status; to read a receive's [`Status`], complete that request with
+    /// `wait` or [`test`](Self::test) instead.
     pub fn wait_all(requests: &mut [PersistentRequest<T>]) -> Result<()> {
         if requests.is_empty() {
             return Ok(());
@@ -579,37 +603,8 @@ impl<T> PersistentRequest<T> {
 }
 
 impl<T> Drop for PersistentRequest<T> {
-    /// Complete any in-flight operation, free the persistent request handle,
-    /// then free the buffers and release the user op.
-    ///
-    /// When the request is active (i.e., `start()` was called but `wait()` has
-    /// not yet returned), this calls `MPI_Wait` before freeing the handle.
-    /// **`MPI_Wait` blocks** until the peer operation completes; if the peer is
-    /// unreachable, this deadlocks. This two-step sequence upholds the MPI
-    /// standard requirement that `MPI_Request_free` must not be called on an
-    /// active request. The buffers are freed last, once MPI is done with them,
-    /// and the user op after them: MPI may invoke it at every start.
-    ///
-    /// A drop that began before [`Mpi`](crate::Mpi) started to drop is an MPI
-    /// call in flight at `Serialized` and `Multiple`. MPI requires it to
-    /// complete before `MPI_Finalize` (MPI-4.1 §11.2.2 and §11.6.2 p.516), so
-    /// `Mpi`'s drop waits for it, and a blocked `MPI_Wait` here blocks that
-    /// drop, as a blocked `wait()` does.
-    ///
-    /// Once `Mpi` is being dropped, or after it was dropped, the drop makes no
-    /// MPI call and leaks the request handle. An active request's buffers are
-    /// leaked too, send and receive buffers and the copy of a v-collective's
-    /// count and displacement arrays, and so are its user op and the token that
-    /// made `Mpi`'s drop skip `MPI_Finalize`, because MPI may still use them; an
-    /// inactive request's are freed, because MPI uses them only after a new
-    /// start, and no start can be issued any more.
-    ///
-    /// The drop does not assume that a failed wait completed the request
-    /// (MPI-4.1 §9.4), unlike `wait`, `test` and `wait_all`, which trust the
-    /// completion MPI reports. It then leaks the same things, the token
-    /// included so that `Mpi`'s drop still skips `MPI_Finalize`, and skips
-    /// `MPI_Request_free`: freeing an active collective request is erroneous,
-    /// and a point-to-point request's buffer must outlive MPI's use of it.
+    /// Completes an active request, frees it, then frees its buffers and
+    /// releases its user op, as described under [Dropping](Self#dropping).
     fn drop(&mut self) {
         let Some(_call) = rt::drop_guard("PersistentRequest") else {
             if self.is_active() {

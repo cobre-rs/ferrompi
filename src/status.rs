@@ -107,19 +107,24 @@ impl Tag {
 /// Information about a probed or received MPI message.
 ///
 /// Returned by [`Communicator::recv`](crate::Communicator::recv),
-/// [`Communicator::sendrecv`](crate::Communicator::sendrecv) and
-/// [`Communicator::recv_custom`](crate::Communicator::recv_custom) to describe
-/// the message just received, by
-/// [`Communicator::probe`](crate::Communicator::probe) and
+/// [`Communicator::sendrecv`](crate::Communicator::sendrecv),
+/// [`Communicator::recv_custom`](crate::Communicator::recv_custom) and
+/// [`Message::mrecv`](crate::Message::mrecv) to describe the message just
+/// received; by [`Communicator::probe`](crate::Communicator::probe) and
 /// [`Communicator::iprobe`](crate::Communicator::iprobe) to describe an
-/// incoming message without consuming it, and by
-/// [`Request::wait`](crate::Request::wait),
+/// incoming message without consuming it; by
+/// [`Communicator::mprobe`](crate::Communicator::mprobe) and
+/// [`Communicator::improbe`](crate::Communicator::improbe) to describe the
+/// message they matched, which only the [`Message`](crate::Message) returned
+/// with it can receive; and by [`Request::wait`](crate::Request::wait),
 /// [`test`](crate::Request::test),
 /// [`wait_any`](crate::Request::wait_any),
 /// [`test_any`](crate::Request::test_any),
-/// [`wait_some`](crate::Request::wait_some) and
-/// [`test_some`](crate::Request::test_some) to describe the receive they
-/// completed.
+/// [`wait_some`](crate::Request::wait_some),
+/// [`test_some`](crate::Request::test_some),
+/// [`PersistentRequest::wait`](crate::PersistentRequest::wait) and
+/// [`PersistentRequest::test`](crate::PersistentRequest::test) to describe the
+/// receive they completed.
 ///
 /// # The empty status
 ///
