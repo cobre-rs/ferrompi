@@ -65,11 +65,11 @@ One item each: the symptom, the affected library, and what to do.
   To avoid it, use an MPICH 4.2.1 or later package;
   `.github/scripts/mpich-hotfix.sh` shows the exact packages CI installs.
 - MPICH's Hydra 4.2.3 launcher: when one rank exits without `MPI_Finalize`
-  (a leaked window, or a panic), a peer blocked in the collective free of
-  that window can keep running until the job's time limit. This happened in
-  3 of 37 runs on one host; Hydra 4.2.0 and the Open MPI launchers killed
-  the peer every time. Set a job time limit, and drop every window before a
-  rank can exit.
+  (a leaked window), a peer blocked in the collective free of that window
+  can keep running until something else kills it, such as the job's time
+  limit. This happened in 3 of 37 runs on one host; Hydra 4.2.0 and the
+  Open MPI launchers killed the peer in 20 of 20 runs each. Set a job time
+  limit, and drop every window before a rank can exit.
 - MPICH 4.2.3: a `Win::allocate` far beyond the node's memory (`1 << 52`
   `u64` elements, measured at one process on one host) aborts the process
   inside `MPI_Win_allocate` on an internal assertion instead of returning
@@ -136,10 +136,11 @@ One item each: the symptom, the affected library, and what to do.
   any case, so size every receive for the largest message; `--mca smsc ^cma`
   also avoids the corruption.
 - Open MPI 5.0.7: each persistent collective request that is created and
-  freed leaves about 150 to 270 bytes allocated in the library (about 160
-  for a barrier; for a reduce, about 145 at a non-root rank and 270 at the
-  root), measured in plain C at two ranks. MPICH 4.2.3 keeps nothing for
-  the barrier. Create a persistent collective once and reuse it.
+  freed leaves memory allocated in the library: about 160 bytes for a
+  barrier; for a reduce, about 145 at a non-root rank and 270 at the root
+  (measured for those two calls in plain C at two ranks on one host).
+  MPICH 4.2.3 keeps nothing for the barrier. Create a persistent collective
+  once and reuse it.
 
 ## Building
 
