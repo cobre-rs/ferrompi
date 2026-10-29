@@ -64,8 +64,8 @@ each use an `atomic_int` used-flag per slot, claimed by a compare-and-swap in
 the matching `alloc_*` function. The `request_table` instead tracks occupancy
 with a bitmap of 64-bit words (see "Request table" below). Slot 0 of
 `comm_table` is reserved for `MPI_COMM_WORLD` and excluded from allocation.
-Handle 0 of `group_table` stands for `MPI_GROUP_EMPTY`: no slot holds it, and allocation
-never returns 0.
+Handle 0 of `group_table` stands for `MPI_GROUP_EMPTY`: no slot holds it, and
+allocation never returns 0.
 
 Five of the six tables have both allocation and free helpers
 (`alloc_*`/`free_*`, `free_datatype_slot` and `free_op_slot` for the last
@@ -197,15 +197,15 @@ decides whether `MPI_Finalize` must be skipped: for a scope open on the
 dropping thread (`rt::scopes_on_this_thread`), a live `HandleToken`
 (`rt::live_handle_tokens`, which finalizing never waits for, because the
 thread that holds one may itself be waiting for the finalizer), or a live RMA
-window (`LIVE_WINDOWS` in `src/window.rs`). On a skip the state stays `Finalizing` for the rest
-of the process and MPI stays initialized, with a stderr warning. Otherwise
-`rt::end_finalize` stores `Finalized`, waits again (the second drain) for the
-completion calls admitted in between, and `ferrompi_finalize` runs. Because
-the state is already `Finalized`, a handle whose drop is nested inside the
-finalize sweep — a request or op the sweep itself frees — makes no MPI call.
-`ferrompi_finalize` frees every inactive persistent request, live user op,
-group, datatype and communicator still registered (slot 0,
-`MPI_COMM_WORLD`, is skipped).
+window (`LIVE_WINDOWS` in `src/window.rs`). On a skip the state stays
+`Finalizing` for the rest of the process and MPI stays initialized, with a
+stderr warning. Otherwise `rt::end_finalize` stores `Finalized`, waits again
+(the second drain) for the completion calls admitted in between, and
+`ferrompi_finalize` runs. Because the state is already `Finalized`, a handle
+whose drop is nested inside the finalize sweep — a request or op the sweep
+itself frees — makes no MPI call. `ferrompi_finalize` frees every inactive
+persistent request, live user op, group, datatype and communicator still
+registered (slot 0, `MPI_COMM_WORLD`, is skipped).
 
 ### `UserOp` closure thread-safety contract
 
@@ -340,8 +340,9 @@ The list below distinguishes what belongs in C from what belongs in Rust.
   the flushes (`flush`, `flush_all`, `flush_local`, `flush_local_all`). The
   closing call runs when the closure returns, so a safe caller cannot leave an
   epoch open. A panic in a `fence` or `start` closure aborts the process,
-  because the closing call is collective; one in a `lock` or `lock_all`
-  closure completes the pending requests, unlocks, and keeps unwinding. See
+  because the closing call is collective or synchronizing; one in a `lock` or
+  `lock_all` closure completes the pending requests, unlocks, and keeps
+  unwinding. See
   `adr/0008-window-memory-access-model.md`.
 
 ## FFI / ABI Invariants
