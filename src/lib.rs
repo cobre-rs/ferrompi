@@ -9,12 +9,14 @@
 //! - **Generic API**: All operations work with any [`MpiDatatype`] (`f32`, `f64`, `i32`, `i64`, `u8`, `u32`, `u64`)
 //! - **Blocking collectives**: barrier, broadcast, reduce, allreduce, gather, scatter, allgather,
 //!   alltoall, scan, exscan, reduce\_scatter\_block, plus V-variants (gatherv, scatterv, allgatherv, alltoallv)
-//! - **Nonblocking collectives**: all 15 `i`-prefixed variants, created inside a [`scope`]
+//! - **Nonblocking collectives**: all 15 `i`-prefixed variants, plus six in-place forms, created inside a [`scope`]
 //! - **Persistent collectives** (MPI 4.0, or Open MPI 5): `*_init` forms of every blocking collective,
 //!   plus six in-place forms, with [`PersistentRequest`] handles
 //! - **Large counts**: with an MPI 4.0 library, a count above `i32::MAX` uses MPI's `_c` call
 //!   (point-to-point, collectives including persistent ones, RMA); below
-//!   MPI 4.0 it returns [`Error::Mpi`] with class [`MpiErrorClass::Count`]. The V-collectives
+//!   MPI 4.0 it returns [`Error::Mpi`] with class [`MpiErrorClass::Count`]. On such a library, a
+//!   matched message above `i32::MAX` bytes cannot be discarded by dropping its [`Message`], and
+//!   [`Message::mrecv`] tells MPI of at most `i32::MAX` elements of room. The V-collectives
 //!   (`gatherv`, `scatterv`, `allgatherv`, `alltoallv`, and their persistent forms), which take
 //!   counts as `i32` arrays, and every reduction with a user op, whose user function takes an
 //!   `int` length, return that error on every MPI version.
@@ -226,7 +228,7 @@ static ATTACHED_BUFFER: Mutex<Option<Box<[u8]>>> = Mutex::new(None);
 /// | [`Single`](ThreadLevel::Single) | Only the thread that called [`Mpi::init_thread`] | N/A |
 /// | [`Funneled`](ThreadLevel::Funneled) | Only the thread that called [`Mpi::init_thread`] | N/A |
 /// | [`Serialized`](ThreadLevel::Serialized) | Any thread | Caller serializes; debug builds detect an overlap |
-/// | [`Multiple`](ThreadLevel::Multiple) | Any thread | None needed |
+/// | [`Multiple`](ThreadLevel::Multiple) | Any thread | Collective calls on one communicator or window must be ordered by the caller |
 ///
 /// A call from any other thread at [`Single`](ThreadLevel::Single) or
 /// [`Funneled`](ThreadLevel::Funneled) returns
@@ -239,6 +241,12 @@ static ATTACHED_BUFFER: Mutex<Option<Box<[u8]>>> = Mutex::new(None);
 /// [`Mpi::thread_level()`] reports the level MPI actually granted, which may
 /// be lower than the level requested to [`Mpi::init_thread`]; it is the
 /// granted level, not the requested one, that these rules apply to.
+///
+/// At [`Multiple`](ThreadLevel::Multiple), MPI matches collective calls on a
+/// communicator or window in the order each process issues them
+/// (MPI-4.1 §11.6.2). Two threads that call collectives on one communicator at
+/// the same time must order those calls themselves, for example with a mutex.
+/// `Communicator` is `Sync`, so the compiler does not prevent it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum ThreadLevel {
@@ -297,6 +305,11 @@ pub enum ThreadLevel {
 /// before `MPI_Finalize` (MPI-4.1 §11.2.2). It can still be received with
 /// `mrecv`, or dropped, afterwards.
 ///
+/// A `wait` or `test` of a persistent request, an `mrecv`, a [`Message`] drop
+/// or a probe that matches nothing, run on another thread while this handle is
+/// dropped, can make the drop skip `MPI_Finalize`,
+/// although nothing is left outstanding once that call returns.
+///
 /// When `MPI_Finalize` is skipped, MPI stays initialized: a `wait` or `test`
 /// on a request still pending completes it, a `cancel` on one still reaches
 /// MPI, a matched [`Message`] can still be received, an open RMA epoch still
@@ -323,8 +336,8 @@ pub enum ThreadLevel {
 /// completion, test or cancel call on a request that a scope open on another
 /// thread still holds, which the drop waits for. A `wait` or `test` on an
 /// active [`PersistentRequest`] is admitted too, and the drop does not wait for
-/// the request: it skips `MPI_Finalize` instead. So is the `mrecv` or the drop
-/// of a matched [`Message`]. The closing call of a fence,
+/// the request. So is the `mrecv` or the drop of a matched [`Message`]. The
+/// closing call of a fence,
 /// PSCW access or passive-target epoch (the unlock), `Win::wait_exposure` and
 /// `Win::test_exposure` (feature `rma`) are admitted too: the drop does not
 /// wait for an epoch, because the epoch's window keeps it on the skip path. A
