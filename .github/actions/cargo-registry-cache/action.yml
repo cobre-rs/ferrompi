@@ -1,5 +1,5 @@
 name: Cache cargo registry
-description: Caches the cargo registry index, the downloaded crates and the git checkouts under a key of the job's choosing.
+description: Caches the cargo registry index, the downloaded crates and the git dependencies' repositories under a key of the job's choosing.
 
 inputs:
   key:

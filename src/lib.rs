@@ -868,7 +868,7 @@ mod tests {
 
     // ── Mpi::buffer_attach / buffer_detach unit tests ─────────────────────
 
-    /// Every guard path of the attached-buffer static in one test, so no other
+    /// Three guard paths of the attached-buffer static in one test, so no other
     /// test can interleave with the shared state: detach with nothing attached
     /// and attach while a buffer is attached return `Err(InvalidState)`, and
     /// an empty buffer returns `Err(InvalidArgument)` and is not stored, all

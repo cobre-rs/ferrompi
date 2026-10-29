@@ -51,7 +51,7 @@ bash tests/build_probe.sh
 MPI_NP_LIST="2 3 4" ./tests/run_mpi_tests.sh
 MPI_NP_LIST="2 3 4" ./tests/run_mpi_tests.sh rma
 ./tests/run_mpi_tests.sh --valgrind rma   # optional, needs valgrind
-MPI_NP_LIST="2 3 4" ./tests/run_mpi_tests.sh --release rma
+MPI_NP_LIST="2 3 4" CARGO_PROFILE_RELEASE_LTO=fat ./tests/run_mpi_tests.sh --release rma
 
 cargo +1.85 build --locked --all-features --lib --tests --examples
 ```
@@ -161,7 +161,7 @@ extracts that section; `publish.yml` runs it before publishing and fails the tag
 if the section is missing or empty, and a CI fixture test requires notes for
 every released heading. `publish.yml` publishes through crates.io Trusted
 Publishing: its `publish` job exchanges the run's OIDC token for a crates.io
-token that lasts only for the job, so the repository stores no crates.io token.
+token that lasts only for the job, so publishing needs no stored crates.io token.
 
 ## Adding features
 
