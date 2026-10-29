@@ -18,22 +18,23 @@ function-for-function mapping as a conversion reference.
 The table below lists the dimensions that matter most during migration. See
 `docs/architecture.md` for the rationale behind each design choice.
 
-| Dimension                   | rsmpi 0.8                                    | ferrompi 0.6                                                                                                     |
-| ---------------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| MPI standard                 | 3.1                                            | MPI 3.1 library; MPI 4.0 operations when the library reports MPI 4.0 (persistent collectives also on Open MPI 5) |
-| Persistent collectives       | No                                             | Yes, with MPICH 4.x or Open MPI 5 (`_init` / `start` / `wait`)                                                   |
-| Large-count (>2³¹)           | No                                             | Yes, with an MPI 4.0 library (MPICH 4.x)                                                                         |
-| Thread safety                | `!Send` — communicators cannot cross threads | `Send + Sync` — hybrid MPI+threads                                                                               |
-| Generic API style            | Trait objects (`Buffer`, `BufferMut`)         | Sealed trait (`MpiDatatype`)                                                                                     |
-| Buffer wrapping              | `.buffer()` / `.buffer_mut()` required        | `&[T]` / `&mut [T]` directly                                                                                     |
-| Custom datatypes             | `Equivalence` derive macro                    | `CustomDatatype` builder + `BytePermutable`                                                                      |
-| Custom reductions            | `UserOperation` trait                         | `UserOp<T: MpiDatatype>` (16-slot registry)                                                                      |
-| Error handling                | Panics on MPI errors by default               | `Result<T, Error>` on every call                                                                                 |
-| RAII cleanup                  | Manual or partial                             | Full — `Drop` frees groups, comms, windows, datatypes, ops                                                       |
-| Shared memory / RMA windows   | No                                             | Yes — `SharedWindow<T>` and `Win<T>`, both behind the `rma` feature                                              |
-| Intercommunicators            | Yes                                            | No                                                                                                               |
-| Dynamic processes             | Yes (`spawn`, `accept`, `open_port`)          | No                                                                                                               |
-| MPI I/O                       | Yes (`MPI_File_*`)                            | No                                                                                                               |
+| Dimension                   | rsmpi 0.8                                    | ferrompi                                                                                                         |
+| --------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| MPI standard                | 3.1                                          | MPI 3.1 library; MPI 4.0 operations when the library reports MPI 4.0 (persistent collectives also on Open MPI 5) |
+| Persistent collectives      | No                                           | Yes, with MPICH 4.x or Open MPI 5 (`_init` / `start` / `wait`)                                                   |
+| Large-count (>2³¹)          | No                                           | Yes, with an MPI 4.0 library (MPICH 4.x)                                                                         |
+| Thread safety               | `!Send` — communicators cannot cross threads | `Send + Sync` — hybrid MPI+threads                                                                               |
+| Generic API style           | Trait objects (`Buffer`, `BufferMut`)        | Sealed trait (`MpiDatatype`)                                                                                     |
+| Buffer wrapping             | `.buffer()` / `.buffer_mut()` required       | `&[T]` / `&mut [T]` directly                                                                                     |
+| Nonblocking buffers         | `mpi::request::scope`                        | `ferrompi::scope`: each buffer is borrowed until the scope returns                                               |
+| Custom datatypes            | `Equivalence` derive macro                   | `CustomDatatype` builder + `BytePermutable`                                                                      |
+| Custom reductions           | `UserOperation` trait                        | `UserOp<T: MpiDatatype>` (16-slot registry)                                                                      |
+| Error handling              | Panics on MPI errors by default              | `Result<T, Error>` on every call                                                                                 |
+| RAII cleanup                | Manual or partial                            | Full — `Drop` frees groups, comms, windows, datatypes, ops                                                       |
+| Shared memory / RMA windows | No                                           | Yes — `Win<T>`, including shared-memory windows from `Win::allocate_shared`, behind the `rma` feature            |
+| Intercommunicators          | Yes                                          | No                                                                                                               |
+| Dynamic processes           | Yes (`spawn`, `accept`, `open_port`)         | No                                                                                                               |
+| MPI I/O                     | Yes (`MPI_File_*`)                           | No                                                                                                               |
 
 ferrompi is deliberately narrower than rsmpi. The trade-off is a smaller, more
 consistent API in exchange for dropping features that few HPC applications use.
@@ -55,71 +56,74 @@ Nonblocking rsmpi methods are prefixed `immediate_`; ferrompi uses `i` prefix.
 Persistent collectives do not exist in rsmpi; the right column shows `_init` methods
 (MPI 4.0+).
 
-| rsmpi expression                                                    | ferrompi expression                                     | Notes                                                  |
-| ------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------ |
-| `comm.process_at_rank(r).broadcast_into(&mut buf)`                  | `comm.broadcast(&mut buf, r)?`                          | Root and non-root use the same call                    |
-| `comm.process_at_rank(r).immediate_broadcast_into(scope, &mut buf)` | `comm.ibroadcast(&mut buf, r)?`                         | Returns `Request`; no scope needed                     |
-| `(none — not available in rsmpi)`                                   | `comm.bcast_init(&mut buf, r)?`                         | Persistent; call `.start()` + `.wait()` each iteration |
-| `comm.process_at_rank(r).reduce_into(&send, op)`                    | `comm.reduce(&send, &mut recv, op, r)?`                 | `recv` must have `send.len()` elements on every rank, including non-root |
-| `comm.process_at_rank(r).reduce_into_root(&send, &mut recv, op)`    | `comm.reduce(&send, &mut recv, op, r)?`                 | Same call for root and non-root                        |
-| `comm.process_at_rank(r).immediate_reduce_into(&send, op)`          | `comm.ireduce(&send, &mut recv, op, r)?`                | Returns `Request`                                      |
-| `(none — not available in rsmpi)`                                   | `comm.reduce_init(&send, &mut recv, op, r)?`            | Persistent                                             |
-| `comm.all_reduce_into(&send, &mut recv, op)`                        | `comm.allreduce(&send, &mut recv, op)?`                 |                                                        |
-| `comm.all_reduce_into(&send, &mut recv, op)` (scalar)               | `comm.allreduce_scalar(value, op)?`                     | Convenience: no buffers; returns `T`                   |
-| `comm.immediate_all_reduce_into(&send, &mut recv, op)`              | `comm.iallreduce(&send, &mut recv, op)?`                | Returns `Request`                                      |
-| `(none — not available in rsmpi)`                                   | `comm.allreduce_init(&send, &mut recv, op)?`            | Persistent                                             |
-| `comm.process_at_rank(r).gather_into(&send)`                        | `comm.gather(&send, &mut recv, r)?`                     | `recv` ignored on non-root                             |
-| `comm.process_at_rank(r).gather_into_root(&send, &mut recv)`        | `comm.gather(&send, &mut recv, r)?`                     | Same call for root and non-root                        |
-| `comm.process_at_rank(r).immediate_gather_into(&send)`              | `comm.igather(&send, &mut recv, r)?`                    | Returns `Request`                                      |
-| `(none — not available in rsmpi)`                                   | `comm.gather_init(&send, &mut recv, r)?`                | Persistent                                             |
-| `comm.all_gather_into(&send, &mut recv)`                            | `comm.allgather(&send, &mut recv)?`                     |                                                        |
-| `comm.immediate_all_gather_into(&send, &mut recv)`                  | `comm.iallgather(&send, &mut recv)?`                    | Returns `Request`                                      |
-| `(none — not available in rsmpi)`                                   | `comm.allgather_init(&send, &mut recv)?`                | Persistent                                             |
-| `comm.process_at_rank(r).scatter_into(&mut recv)`                   | `comm.scatter(&send, &mut recv, r)?`                    | `send` ignored on non-root                             |
-| `comm.process_at_rank(r).scatter_into_root(&send, &mut recv)`       | `comm.scatter(&send, &mut recv, r)?`                    | Same call for root and non-root                        |
-| `comm.process_at_rank(r).immediate_scatter_into(&mut recv)`         | `comm.iscatter(&send, &mut recv, r)?`                   | Returns `Request`                                      |
-| `(none — not available in rsmpi)`                                   | `comm.scatter_init(&send, &mut recv, r)?`               | Persistent                                             |
-| `comm.all_to_all_into(&send, &mut recv)`                            | `comm.alltoall(&send, &mut recv)?`                      |                                                        |
-| `comm.immediate_all_to_all_into(&send, &mut recv)`                  | `comm.ialltoall(&send, &mut recv)?`                     | Returns `Request`                                      |
-| `(none — not available in rsmpi)`                                   | `comm.alltoall_init(&send, &mut recv)?`                 | Persistent                                             |
-| `comm.scan_into(&send, &mut recv, op)`                              | `comm.scan(&send, &mut recv, op)?`                      | Inclusive prefix scan                                  |
-| `comm.immediate_scan_into(&send, &mut recv, op)`                    | `comm.iscan(&send, &mut recv, op)?`                     | Returns `Request`                                      |
-| `(none — not available in rsmpi)`                                   | `comm.scan_init(&send, &mut recv, op)?`                 | Persistent                                             |
-| `comm.exclusive_scan_into(&send, &mut recv, op)`                    | `comm.exscan(&send, &mut recv, op)?`                    | Exclusive prefix scan                                  |
-| `comm.immediate_exclusive_scan_into(&send, &mut recv, op)`          | `comm.iexscan(&send, &mut recv, op)?`                   | Returns `Request`                                      |
-| `(none — not available in rsmpi)`                                   | `comm.exscan_init(&send, &mut recv, op)?`               | Persistent                                             |
-| `comm.reduce_scatter_block_into(&send, &mut recv, op)`              | `comm.reduce_scatter_block(&send, &mut recv, op)?`      | Equal-block variant                                    |
-| `comm.immediate_reduce_scatter_block_into(&send, &mut recv, op)`    | `comm.ireduce_scatter_block(&send, &mut recv, op)?`     | Returns `Request`                                      |
-| `(none — not available in rsmpi)`                                   | `comm.reduce_scatter_block_init(&send, &mut recv, op)?` | Persistent                                             |
-| `comm.barrier()`                                                    | `comm.barrier()?`                                       | Returns `Result<()>` in ferrompi                       |
-| `comm.immediate_barrier()`                                          | `comm.ibarrier()?`                                      | Returns `Request`                                      |
+| rsmpi expression                                                        | ferrompi expression                                    | Notes                                                                               |
+| ----------------------------------------------------------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `comm.process_at_rank(r).broadcast_into(&mut buf)`                      | `comm.broadcast(&mut buf, r)?`                         | Root and non-root use the same call                                                 |
+| `comm.process_at_rank(r).immediate_broadcast_into(scope, &mut buf)`     | `comm.ibroadcast(s, &mut buf, r)?`                     | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
+| `(none — not available in rsmpi)`                                       | `comm.broadcast_init(buf, r)?`                         | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
+| `comm.process_at_rank(r).reduce_into(&send, op)`                        | `comm.reduce(&send, &mut recv, op, r)?`                | `recv` is checked only at the root; another rank may pass an empty slice            |
+| `comm.process_at_rank(r).reduce_into_root(&send, &mut recv, op)`        | `comm.reduce(&send, &mut recv, op, r)?`                | Same call for root and non-root                                                     |
+| `comm.process_at_rank(r).immediate_reduce_into(&send, op)`              | `comm.ireduce(s, &send, &mut recv, op, r)?`            | Inside `ferrompi::scope`; returns `Request<'s>`; `recv` is checked only at the root |
+| `(none — not available in rsmpi)`                                       | `comm.reduce_init(send, recv, op, r)?`                 | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
+| `comm.all_reduce_into(&send, &mut recv, op)`                            | `comm.allreduce(&send, &mut recv, op)?`                |                                                                                     |
+| `comm.all_reduce_into(&send, &mut recv, op)` (scalar)                   | `comm.allreduce_scalar(value, op)?`                    | Convenience: no buffers; returns `T`                                                |
+| `comm.immediate_all_reduce_into(scope, &send, &mut recv, op)`           | `comm.iallreduce(s, &send, &mut recv, op)?`            | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
+| `(none — not available in rsmpi)`                                       | `comm.allreduce_init(send, recv, op)?`                 | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
+| `comm.process_at_rank(r).gather_into(&send)`                            | `comm.gather(&send, &mut recv, r)?`                    | `recv` ignored on non-root                                                          |
+| `comm.process_at_rank(r).gather_into_root(&send, &mut recv)`            | `comm.gather(&send, &mut recv, r)?`                    | Same call for root and non-root                                                     |
+| `comm.process_at_rank(r).immediate_gather_into(&send)`                  | `comm.igather(s, &send, &mut recv, r)?`                | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
+| `(none — not available in rsmpi)`                                       | `comm.gather_init(send, recv, r)?`                     | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
+| `comm.all_gather_into(&send, &mut recv)`                                | `comm.allgather(&send, &mut recv)?`                    |                                                                                     |
+| `comm.immediate_all_gather_into(scope, &send, &mut recv)`               | `comm.iallgather(s, &send, &mut recv)?`                | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
+| `(none — not available in rsmpi)`                                       | `comm.allgather_init(send, recv)?`                     | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
+| `comm.process_at_rank(r).scatter_into(&mut recv)`                       | `comm.scatter(&send, &mut recv, r)?`                   | `send` ignored on non-root                                                          |
+| `comm.process_at_rank(r).scatter_into_root(&send, &mut recv)`           | `comm.scatter(&send, &mut recv, r)?`                   | Same call for root and non-root                                                     |
+| `comm.process_at_rank(r).immediate_scatter_into(&mut recv)`             | `comm.iscatter(s, &send, &mut recv, r)?`               | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
+| `(none — not available in rsmpi)`                                       | `comm.scatter_init(send, recv, r)?`                    | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
+| `comm.all_to_all_into(&send, &mut recv)`                                | `comm.alltoall(&send, &mut recv)?`                     |                                                                                     |
+| `comm.immediate_all_to_all_into(scope, &send, &mut recv)`               | `comm.ialltoall(s, &send, &mut recv)?`                 | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
+| `(none — not available in rsmpi)`                                       | `comm.alltoall_init(send, recv)?`                      | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
+| `comm.scan_into(&send, &mut recv, op)`                                  | `comm.scan(&send, &mut recv, op)?`                     | Inclusive prefix scan                                                               |
+| `comm.immediate_scan_into(scope, &send, &mut recv, op)`                 | `comm.iscan(s, &send, &mut recv, op)?`                 | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
+| `(none — not available in rsmpi)`                                       | `comm.scan_init(send, recv, op)?`                      | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
+| `comm.exclusive_scan_into(&send, &mut recv, op)`                        | `comm.exscan(&send, &mut recv, op)?`                   | Exclusive prefix scan                                                               |
+| `comm.immediate_exclusive_scan_into(scope, &send, &mut recv, op)`       | `comm.iexscan(s, &send, &mut recv, op)?`               | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
+| `(none — not available in rsmpi)`                                       | `comm.exscan_init(send, recv, op)?`                    | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
+| `comm.reduce_scatter_block_into(&send, &mut recv, op)`                  | `comm.reduce_scatter_block(&send, &mut recv, op)?`     | Equal-block variant                                                                 |
+| `comm.immediate_reduce_scatter_block_into(scope, &send, &mut recv, op)` | `comm.ireduce_scatter_block(s, &send, &mut recv, op)?` | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
+| `(none — not available in rsmpi)`                                       | `comm.reduce_scatter_block_init(send, recv, op)?`      | Persistent; owns its `Vec`s (`buffer()`, `into_buffer()`)                           |
+| `comm.barrier()`                                                        | `comm.barrier()?`                                      | Returns `Result<()>` in ferrompi                                                    |
+| `comm.immediate_barrier()`                                              | `comm.ibarrier(s)?`                                    | Inside `ferrompi::scope`; returns `Request<'s>`                                     |
 
 ### 2b. Point-to-Point
 
 In rsmpi, send and receive are called on `Process` handles obtained from
 `comm.process_at_rank(dest)` or `comm.any_process()`. In ferrompi, `dest`,
-`source`, and `tag` are plain `i32` parameters on `Communicator`. Use
-`MPI_ANY_SOURCE` (`-1`) and `MPI_ANY_TAG` (`-1`) as constants.
+`source`, and `tag` are parameters on `Communicator`. A source or tag is an `i32`,
+`Source::Any` or `Tag::Any`.
 
 ferrompi has no non-persistent synchronous, buffered, or ready send. The only
 forms of these three modes are the persistent `*_init` requests: initialise once,
 then call `.start()?` and `.wait()?` on the returned `PersistentRequest` for each
 message.
 
-| rsmpi expression                                                 | ferrompi expression                                        | Notes                                                                    |
-| ---------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `comm.process_at_rank(dest).send(&buf)`                          | `comm.send(&buf, dest, tag)?`                                | Tag is explicit in ferrompi                                             |
-| `comm.process_at_rank(dest).send_with_tag(&buf, tag)`             | `comm.send(&buf, dest, tag)?`                                |                                                                           |
-| `comm.process_at_rank(dest).synchronous_send(&buf)`               | `comm.ssend_init(&buf, dest, tag)?`                           | Persistent only — call `.start()?` then `.wait()?` each iteration      |
-| `comm.process_at_rank(dest).buffered_send(&buf)`                  | `comm.bsend_init(&buf, dest, tag)?`                           | Persistent only; requires a buffer attached via `Mpi::buffer_attach`   |
-| `comm.process_at_rank(dest).ready_send(&buf)`                     | `comm.rsend_init(&buf, dest, tag)?`                           | Persistent only; the receiver must have posted its recv before `.start()?` |
-| `comm.any_process().receive_into(&mut buf)`                      | `comm.recv(&mut buf, -1, -1)?`                               | Returns `(source, tag, count)` tuple                                    |
-| `comm.process_at_rank(src).receive_into_with_tag(&mut buf, tag)` | `comm.recv(&mut buf, src, tag)?`                              |                                                                           |
-| `comm.process_at_rank(dest).immediate_send(&buf)`                | `comm.isend(&buf, dest, tag)?`                                | Returns `Request`                                                       |
-| `comm.process_at_rank(src).immediate_receive_into(&mut buf)`      | `comm.irecv(&mut buf, src, tag)?`                             | Returns `Request`                                                       |
-| `comm.send_receive(sendbuf, dest, recvbuf, src)`                  | `comm.sendrecv(&send, dest, stag, &mut recv, src, rtag)?`    |                                                                           |
-| `comm.process_at_rank(src).probe()`                               | `comm.probe::<T>(src, tag)?`                                  | Returns `Status`; blocks                                                |
-| `comm.process_at_rank(src).immediate_probe()`                     | `comm.iprobe::<T>(src, tag)?`                                 | Returns `Option<Status>`                                                |
+| rsmpi expression                                                 | ferrompi expression                                       | Notes                                                                                                                     |
+| ---------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `comm.process_at_rank(dest).send(&buf)`                          | `comm.send(&buf, dest, tag)?`                             | Tag is explicit in ferrompi                                                                                               |
+| `comm.process_at_rank(dest).send_with_tag(&buf, tag)`            | `comm.send(&buf, dest, tag)?`                             |                                                                                                                           |
+| `comm.process_at_rank(dest).synchronous_send(&buf)`              | `comm.ssend_init(buf, dest, tag)?`                        | Persistent only; owns its `Vec`s (`buffer()`, `into_buffer()`)                                                            |
+| `comm.process_at_rank(dest).buffered_send(&buf)`                 | `comm.bsend_init(buf, dest, tag)?`                        | Persistent only; owns its `Vec`s (`buffer()`, `into_buffer()`); requires a buffer attached via `Mpi::buffer_attach`       |
+| `comm.process_at_rank(dest).ready_send(&buf)`                    | `comm.rsend_init(buf, dest, tag)?`                        | Persistent only; owns its `Vec`s (`buffer()`, `into_buffer()`); the receiver must have posted its recv before `.start()?` |
+| `comm.any_process().receive_into(&mut buf)`                      | `comm.recv(&mut buf, Source::Any, Tag::Any)?`             | Returns `Status`, with `source`, `tag` and `count` fields                                                                 |
+| `comm.process_at_rank(src).receive_into_with_tag(&mut buf, tag)` | `comm.recv(&mut buf, src, tag)?`                          | Returns `Status`                                                                                                          |
+| `comm.process_at_rank(dest).immediate_send(&buf)`                | `comm.isend(s, &buf, dest, tag)?`                         | Inside `ferrompi::scope`; returns `Request<'s>`                                                                           |
+| `comm.process_at_rank(src).immediate_receive_into(&mut buf)`     | `comm.irecv(s, &mut buf, src, tag)?`                      | Inside `ferrompi::scope`; returns `Request<'s>`                                                                           |
+| `comm.send_receive(sendbuf, dest, recvbuf, src)`                 | `comm.sendrecv(&send, dest, stag, &mut recv, src, rtag)?` | Returns `Status`                                                                                                          |
+| `comm.process_at_rank(src).probe()`                              | `comm.probe::<T>(src, tag)?`                              | Returns `Status`; blocks                                                                                                  |
+| `comm.process_at_rank(src).immediate_probe()`                    | `comm.iprobe::<T>(src, tag)?`                             | Returns `Option<Status>`                                                                                                  |
+| `comm.process_at_rank(src).matched_probe()`                      | `comm.mprobe::<T>(src, tag)?`                             | Returns `(Message, Status)`                                                                                               |
+| `comm.process_at_rank(src).immediate_matched_probe()`            | `comm.improbe::<T>(src, tag)?`                            | Returns `Option<(Message, Status)>`                                                                                       |
+| `msg.matched_receive_into(&mut buf)`                             | `msg.mrecv(&mut buf)?`                                    | Returns `Status`                                                                                                          |
 
 ### 2c. Groups and Communicators
 
@@ -128,25 +132,26 @@ functions or methods on the `Group` type. ferrompi uses the same structure but
 exposes everything as inherent methods on `Group` and `Communicator`. All
 group-creating calls return owned `Group` values that free their handle on drop.
 
-| rsmpi expression                             | ferrompi expression                       | Notes                                        |
-| --------------------------------------------- | -------------------------------------------- | ----------------------------------------------- |
-| `comm.rank()`                                | `comm.rank()`                             | ferrompi returns `i32` directly (not `Rank`) |
-| `comm.size()`                                | `comm.size()`                             | Returns `i32`                                |
-| `comm.group()`                               | `comm.group()?`                           | Returns `Result<Group>`                      |
-| `group.size()`                               | `group.size()?`                           | Returns `Result<i32>`                        |
-| `group.rank()`                               | `group.rank()?`                           | Returns `Result<i32>`                        |
-| `mpi::topology::Group::union(&a, &b)`        | `a.union(&b)?`                            | Returns new `Group`                          |
-| `mpi::topology::Group::intersection(&a, &b)` | `a.intersection(&b)?`                     | Returns new `Group`                          |
-| `mpi::topology::Group::difference(&a, &b)`   | `a.difference(&b)?`                       | Returns new `Group`                          |
-| `group.include(&ranks)`                      | `group.include(&ranks)?`                  | Subgroup from rank list                      |
-| `group.exclude(&ranks)`                      | `group.exclude(&ranks)?`                  | Subgroup excluding ranks                     |
-| `group.translate_rank(rank, &other)`         | `group.translate_ranks(&[rank], &other)?` | Returns `Vec<Option<i32>>`                   |
-| `comm.duplicate()`                           | `comm.duplicate()?`                       | Returns `Result<Communicator>`               |
-| `comm.split_by_color(color)`                 | `comm.split(color, key)?`                 | Returns `Result<Option<Communicator>>`       |
-| `comm.split_by_color_with_key(color, key)`   | `comm.split(color, key)?`                 | Same call                                    |
-| `comm.split_shared(key)`                     | `comm.split_shared()?`                    | Shared-memory subcommunicator                |
-| `comm.split_by_subgroup_collective(&group)`  | `comm.create_from_group(&group)?`         | Returns `Option<Communicator>`               |
-| `(none — MPI 4.0, not in rsmpi)`             | `mpi.create_from_group(&group, tag)?`     | Called on `Mpi` handle in ferrompi           |
+| rsmpi expression                             | ferrompi expression                       | Notes                                                                    |
+| -------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------ |
+| `comm.rank()`                                | `comm.rank()`                             | ferrompi returns `i32` directly (not `Rank`)                             |
+| `comm.size()`                                | `comm.size()`                             | Returns `i32`                                                            |
+| `comm.group()`                               | `comm.group()?`                           | Returns `Result<Group>`                                                  |
+| `group.size()`                               | `group.size()?`                           | Returns `Result<i32>`                                                    |
+| `group.rank()`                               | `group.rank()?`                           | Returns `Result<Option<i32>>` (`None` outside the group)                 |
+| `mpi::topology::Group::union(&a, &b)`        | `a.union(&b)?`                            | Returns new `Group`                                                      |
+| `mpi::topology::Group::intersection(&a, &b)` | `a.intersection(&b)?`                     | Returns new `Group`                                                      |
+| `mpi::topology::Group::difference(&a, &b)`   | `a.difference(&b)?`                       | Returns new `Group`                                                      |
+| `group.include(&ranks)`                      | `group.include(&ranks)?`                  | Subgroup from rank list                                                  |
+| `group.exclude(&ranks)`                      | `group.exclude(&ranks)?`                  | Subgroup excluding ranks                                                 |
+| `group.translate_rank(rank, &other)`         | `group.translate_ranks(&[rank], &other)?` | Returns `Vec<Option<i32>>`                                               |
+| `comm.duplicate()`                           | `comm.duplicate()?`                       | Returns `Result<Communicator>`                                           |
+| `comm.split_by_color(color)`                 | `comm.split(Some(color), key)?`           | Returns `Result<Option<Communicator>>`; `None` opts out                  |
+| `comm.split_by_color_with_key(color, key)`   | `comm.split(Some(color), key)?`           | Same call                                                                |
+| `comm.split_shared(key)`                     | `comm.split_shared()?`                    | Shared-memory subcommunicator                                            |
+| `comm.split_by_subgroup_collective(&group)`  | `comm.create(&group)?`                    | Returns `Result<Option<Communicator>>`                                   |
+| `comm.split_by_subgroup(&group)`             | `comm.create_group(&group, tag)?`         | Returns `Result<Option<Communicator>>`; only the group's members call it |
+| `(none — MPI 4.0, not in rsmpi)`             | `mpi.create_from_group(&group, "tag")?`   | Returns `Result<Option<Communicator>>`; called on `Mpi`                  |
 
 ---
 
@@ -234,9 +239,9 @@ object.
 ### 3b. Nonblocking Send and Receive with Wait
 
 rsmpi's `WaitGuard` wraps a `Request` and calls `MPI_Wait` on drop, making wait
-implicit. ferrompi's `Request::wait` is explicit and consumes the `Request` by
-value, but nothing ties the request to its buffer: do not read, write, or drop the
-buffer passed to `isend`/`irecv` until `wait` (or a successful `test`) returns.
+implicit. ferrompi creates requests inside `ferrompi::scope`. `isend` and `irecv`
+borrow their buffers for the scope, and the compiler rejects reading, writing or
+dropping a borrowed buffer before `scope` returns.
 
 <table>
 <tr>
@@ -315,20 +320,14 @@ fn main() -> ferrompi::Result<()> {
 </tr>
 </table>
 
-Key differences: ferrompi does not use lifetime scopes or guard wrappers for
-nonblocking operations — `Request::wait()` takes ownership, but the compiler does
-not tie the buffer's lifetime to the request, so you must not read, write, or drop
-the buffer until `wait()` (or a successful `test()`) returns. A `Request` dropped
-without calling `wait()` will **block in Drop** until the operation completes — the
-handle is not leaked, but the implicit wait may be surprising in latency-sensitive
-code, and can deadlock if the peer never matches the send/recv. For control flow
-that bypasses `wait()` (e.g., an early-return `?` on an error path, or a panic
-unwind), prefer explicit `wait()` or `test()` to keep failure modes observable.
+Key differences: `Request::wait()` takes ownership and is optional. Dropping a
+request does not wait, because the scope completes every request it holds when it
+returns. A request cannot leave its scope or its thread.
 
 ### 3c. Persistent Broadcast Loop
 
 rsmpi has no persistent collectives. The closest equivalent is a nonblocking
-`immediate_broadcast_into` inside a loop. ferrompi's `bcast_init` initialises the
+`immediate_broadcast_into` inside a loop. ferrompi's `broadcast_init` initialises the
 operation once and reuses it across thousands of iterations, amortising the setup
 overhead. This is the primary use case that motivates ferrompi's existence.
 
@@ -398,7 +397,8 @@ fn main() -> ferrompi::Result<()> {
 </tr>
 </table>
 
-Key differences: `bcast_init` calls `MPI_Bcast_init` once; each `start`/`wait` pair
+Key differences: `broadcast_init` takes the buffer by value, returns it through
+`buffer()`/`into_buffer()`, and calls `MPI_Bcast_init` once; each `start`/`wait` pair
 calls `MPI_Start`/`MPI_Wait` without reinitialising the request. On MPICH at 2
 ranks, a persistent allreduce was 20–58 % faster per call than `iallreduce` up to
 4 KiB, at most 8 % faster at 32 KiB, and no faster from 256 KiB (`benches/README.md`).
@@ -484,7 +484,7 @@ primitive types: `f32`, `f64`, `i32`, `i64`, `u8`, `u32`, and `u64`. Custom
 compound types have two routes:
 
 - **`CustomDatatype`**: build one with `CustomDatatype::contiguous`, `::vector`,
-  `::create_struct` (with `StructField` descriptors), or `::resized`, then pass it
+  `::create_struct` (fields built with `StructField::new::<T>(blocklength, displacement)`), or `::resized`, then pass it
   to `send_custom`, `recv_custom`, `isend_custom`, `irecv_custom`. Those four
   methods are generic over `T: PlainData`, an `unsafe trait` your own type opts
   into (see its rustdoc for the required invariants: `Copy + 'static`, no padding
@@ -581,7 +581,9 @@ where `class` is a `MpiErrorClass` enum, `code` is the raw MPI error integer,
 `message` is the string from `MPI_Error_string`, and `operation` is the ferrompi
 function name that failed (e.g., `"allreduce"`). This means that migrated code must
 handle errors explicitly — typically with `?` in `fn main() -> ferrompi::Result<()>`
-— instead of relying on process termination.
+— instead of relying on process termination. Argument and state errors are reported
+before any MPI call as `Error::InvalidArgument`, `Error::BufferSize` or
+`Error::InvalidState`, which name the argument or state.
 
 ### RAII Drop — No Manual Cleanup Needed
 
@@ -589,16 +591,15 @@ rsmpi requires explicit calls to free some objects. ferrompi implements `Drop` o
 all handle-owning types:
 
 | Type                | What `Drop` does                                              |
-| -------------------- | ----------------------------------------------------------------- |
-| `Communicator`      | `MPI_Comm_free`, except for the world communicator                |
-| `Group`             | `MPI_Group_free`                                                   |
-| `Request`           | `MPI_Wait` if the send/recv has not completed                     |
-| `PersistentRequest` | `MPI_Wait` if started and not waited, then `MPI_Request_free`     |
-| `Win<T>`            | `MPI_Win_free`                                                     |
-| `SharedWindow<T>`   | `MPI_Win_free`                                                     |
-| `CustomDatatype`    | `MPI_Type_free`                                                    |
-| `UserOp<T>`         | `MPI_Op_free`                                                       |
-| `Info`              | `MPI_Info_free`                                                     |
+| ------------------- | ------------------------------------------------------------- |
+| `Communicator`      | `MPI_Comm_free`, except for the world communicator            |
+| `Group`             | `MPI_Group_free`                                              |
+| `Request`           | Nothing: the `scope` it belongs to completes it               |
+| `Message`           | Receives and discards the message                             |
+| `PersistentRequest` | `MPI_Wait` if started and not waited, then `MPI_Request_free` |
+| `Win<T>`            | `MPI_Win_free`                                                |
+| `CustomDatatype`    | `MPI_Type_free`                                               |
+| `UserOp<T>`         | `MPI_Op_free`                                                 |
 
 After the `Mpi` handle is dropped, none of these `Drop` impls make an MPI call —
 see the `Mpi` rustdoc for the full lifecycle.
@@ -629,9 +630,8 @@ conversion reference.
 - [ ] Replace `comm.process_at_rank(dest).send(...)` and point-to-point calls
       using the P2P table in [Section 2b](#2b-point-to-point).
 - [ ] Note: `world.barrier()` now returns `Result<()>` — add `?`.
-- [ ] Replace `WaitGuard` wrapping with explicit `request.wait()?`. Verify that
-      the buffer is not accessed between the `isend`/`irecv` call and the
-      `wait()` call.
+- [ ] Replace `WaitGuard` and `mpi::request::scope` with `ferrompi::scope`;
+      requests not waited are completed when the scope returns.
 - [ ] Replace `Equivalence`-derived types with `CustomDatatype` or
       `BytePermutable` (see [Section 5](#5-api-ergonomic-differences)).
 - [ ] Remove manual `MPI_*_free` calls — ferrompi `Drop` handles cleanup.
