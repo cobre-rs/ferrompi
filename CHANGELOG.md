@@ -10,16 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Breaking Changes
 
 - **`Error` gains `InvalidArgument`, `BufferSize` and `InvalidState`, and
-  its struct variants are `#[non_exhaustive]`.** Migration: patterns on
-  `Error::Mpi { … }` and `Error::ResourceExhausted { … }` need a trailing
-  `..`.
+  its struct variants are `#[non_exhaustive]`.** Migration: see "Errors" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **Collective buffer-length errors are `Error::BufferSize { arg,
   required, actual }`** (or `Error::InvalidArgument` for a length that is
   not a multiple of the communicator size) instead of
   `Error::InvalidBuffer`; the variable-count collectives report `BufferSize`
   for a counts or displacements array of the wrong length or a block past
   the buffer, and `InvalidArgument` for a negative count or displacement.
-  Migration: match the new variants; `arg` names the parameter.
+  Migration: see "Errors" in `docs/migrating-0.6-to-0.7.md`.
 - **Derived datatypes take their base type as a type parameter:**
   `CustomDatatype::contiguous::<T>(count)`,
   `CustomDatatype::vector::<T>(count, blocklength, stride)` and
@@ -28,187 +27,173 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `StructField`'s fields are private: it is built only with
   `StructField::new` and has no accessors. A pair type as a base type is a
   compile error (it was `Error::InvalidOp`), and `MPI_BYTE` is no longer a
-  base type. Migration: `contiguous(10, DatatypeTag::F64)` becomes
-  `contiguous::<f64>(10)`; `StructField { blocklength: 1, displacement: 8,
-  basetype: DatatypeTag::I32 }` becomes `StructField::new::<i32>(1, 8)`; use
-  `u8` where `DatatypeTag::Byte` was the base type.
-- **The `*_custom` methods
-  reject a datatype that does not fit `T` with `Error::InvalidArgument {
-  arg: "datatype", .. }`** instead of `Error::InvalidBuffer`. Migration:
-  match `Error::InvalidArgument`; `reason` tells a wrong extent from data
-  outside one element.
+  base type. Migration: see "Derived datatypes" in
+  `docs/migrating-0.6-to-0.7.md`.
+- **The `*_custom` methods reject a datatype that does not fit `T` with
+  `Error::InvalidArgument { arg: "datatype", .. }`** instead of
+  `Error::InvalidBuffer`. Migration: see "Errors" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **RMA target and window-size checks return `Error::InvalidArgument` or
   `Error::BufferSize`** naming the argument (`target_rank`, `target_disp`,
   `target_count`, `origin`, `result`, `count`) instead of
-  `Error::InvalidBuffer`. Migration: match the new variants; `arg` names the
-  argument.
+  `Error::InvalidBuffer`. Migration: see "Errors" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **Misuse errors name the state or argument:**
   - `buffer_attach`/`buffer_detach` and `PersistentRequest::start`/`start_all`
     return `Error::InvalidState`;
   - an empty or oversized attach buffer, a NUL in `create_from_group`'s tag,
     and a wrong op for `allreduce_bytes` return `Error::InvalidArgument`;
 
-  these replace `InvalidOp`, `InvalidBuffer` and `Internal`. Migration: match
-  the new variants; `arg` names the argument.
+  these replace `InvalidOp`, `InvalidBuffer` and `Internal`. Migration: see
+  "Errors" in `docs/migrating-0.6-to-0.7.md`.
 - **Point-to-point sources, destinations and tags are typed:** receives and
   probes take `impl Into<Source>` (`Source::Any`, `Source::ProcNull`,
   `Source::Rank(r)`) and `impl Into<Tag>` (`Tag::Any`, `Tag::Value(t)`); sends
   take `dest: impl Into<Source>`. `PROC_NULL` behaves the same on every MPI.
-  Migration: replace `-1` sources and tags with `Source::Any`/`Tag::Any`; an
-  `i32` rank or tag still converts. A negative rank or tag, or `Source::Any` as
-  a destination, now returns `Error::InvalidArgument` before any MPI call,
-  whose reason names the replacement; a `-1` still compiles, so search for it
-  rather than relying on compile errors. A 0.6 `-1` destination, which meant
-  `MPI_PROC_NULL` on MPICH, becomes `Source::ProcNull`.
+  A negative rank or tag, or `Source::Any` as a destination, now returns
+  `Error::InvalidArgument` before any MPI call, whose reason names the
+  replacement; a `-1` still compiles, so search for it rather than relying on
+  compile errors. Migration: see "Sources, destinations and tags" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **`Communicator::split` takes `color: Option<i32>`** (`None` opts out) and
   **`Group::rank` returns `Result<Option<i32>>`** (`None` for a non-member);
   `Communicator::UNDEFINED` and `Group::undefined()` are removed. A negative
   `Some` color returns `Error::InvalidArgument` before any MPI call. Migration:
-  `split(Some(color), key)`, `split(None, key)` for `UNDEFINED`; match
-  `Some(rank)`.
+  see "Sources, destinations and tags" in `docs/migrating-0.6-to-0.7.md`.
 - **`Status` is `#[non_exhaustive]` with typed fields:** `source: Source`,
   `tag: Tag`, `count: Option<usize>` (`None` when the message is not a whole
   number of elements) and a new `error: Option<MpiErrorClass>`. A `PROC_NULL`
   receive reports `Source::ProcNull`, `Tag::Any`, `Some(0)` on every MPI.
-  Migration: compare against `Source::Rank(r)`/`Tag::Value(t)`; replace
-  `count < 0` checks with `count.is_none()`.
+  Migration: see "Receive status" in `docs/migrating-0.6-to-0.7.md`.
 - **`recv` and `sendrecv` return `Status`** instead of a `(source, tag,
-  count)` tuple. Migration: `let st = world.recv(...)?;` then `st.source`,
-  `st.tag`, `st.count`.
+  count)` tuple. Migration: see "Receive status" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **`ReduceOp::MaxLoc` and `ReduceOp::MinLoc` are replaced by
   `CollectiveOp::MAX_LOC` and `CollectiveOp::MIN_LOC`**, which exist only for
   the pair types; `allreduce_indexed` takes `impl Into<CollectiveOp<T>>`, so
   any other op on a pair type, or `MAX_LOC` on a primitive type, is a compile
-  error instead of an `Error::InvalidArgument` or an MPI error. Migration:
-  `world.allreduce_indexed(&send, &mut recv, CollectiveOp::MAX_LOC)`.
+  error instead of an `Error::InvalidArgument` or an MPI error. Migration: see
+  "Reduction operations" in `docs/migrating-0.6-to-0.7.md`.
 - **The blocking reductions take `op: impl Into<CollectiveOp<T>>`, and
   `allreduce_with_op` is removed:** `reduce`, `allreduce`, `scan`, `exscan`,
   `reduce_scatter_block` and their scalar and in-place forms accept a
-  `ReduceOp`, a `&UserOp<T>` or a `CollectiveOp`. Migration: a `ReduceOp`
-  argument still compiles; replace `allreduce_with_op(&send, &mut recv, &op)`
-  with `allreduce(&send, &mut recv, &op)`. A user op above `i32::MAX` elements
-  returns `Error::Mpi` with class `Count` on every MPI version.
+  `ReduceOp`, a `&UserOp<T>` or a `CollectiveOp`. A user op above `i32::MAX`
+  elements returns `Error::Mpi` with class `Count` on every MPI version.
+  Migration: see "Reduction operations" in `docs/migrating-0.6-to-0.7.md`.
 - **`ReduceOp::Replace` and `ReduceOp::NoOp` are replaced by
   `AccumulateOp::REPLACE`, `FetchOp::REPLACE` and `FetchOp::NO_OP`**, present
   with and without the `rma` feature; `accumulate`/`raccumulate` take `impl
   Into<AccumulateOp>` and `get_accumulate`/`fetch_and_op` take `impl
   Into<FetchOp>`, so a user op in an accumulate, `NO_OP` in `accumulate`, or
-  `REPLACE` in a collective is a compile error. Migration: a `ReduceOp`
-  argument still compiles; replace `ReduceOp::Replace` with
-  `AccumulateOp::REPLACE` (or `FetchOp::REPLACE`) and `ReduceOp::NoOp` with
-  `FetchOp::NO_OP`.
+  `REPLACE` in a collective is a compile error. Migration: see "Reduction
+  operations" in `docs/migrating-0.6-to-0.7.md`.
 - **A bitwise or logical op on `f32`/`f64` returns `Error::InvalidArgument {
   arg: "op", .. }` before any MPI call** in the blocking reductions and the RMA
   accumulate calls, instead of `Error::Mpi` with class `Op` (blocking
   reductions) or a hang or abort at the target (RMA accumulates on MPICH).
-  Migration: match `Error::InvalidArgument`.
+  Migration: see "Errors" in `docs/migrating-0.6-to-0.7.md`.
 - **`Request` has a lifetime (`Request<'s>`) and is no longer `Send`**, and
   **`ibarrier` takes the scope:** `world.ibarrier(s)` inside
-  `ferrompi::scope(|s| ...)`. Migration: wrap the code that creates and waits
-  the requests in `ferrompi::scope`, and keep each request on the thread that
-  created it.
+  `ferrompi::scope(|s| ...)`. Migration: see "Nonblocking requests and scopes"
+  in `docs/migrating-0.6-to-0.7.md`.
 - **`Request::wait` returns `Status`, `test` returns `Option<Status>`, and
   `wait_any`/`test_any` return `Option<(usize, Status)>`.** A send, collective
   or RMA request reports the empty status (`Source::Any`, `Tag::Any`,
-  `count: Some(0)`). Migration: `while !req.test()? {}` becomes
-  `while req.test()?.is_none() {}`; take the index with `.map(|(i, _)| i)`.
+  `count: Some(0)`). Migration: see "Nonblocking requests and scopes" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **`Request::wait_some`/`test_some` return `Vec<(usize, Status)>`**, and a
   failed request in the batch is reported in its `Status.error` (an
-  `MpiErrorClass`) instead of failing the whole call. Migration: take the
-  indices with `.iter().map(|&(i, _)| i)`; check `status.error` for
-  per-request failures.
+  `MpiErrorClass`) instead of failing the whole call. Migration: see
+  "Nonblocking requests and scopes" in `docs/migrating-0.6-to-0.7.md`.
 - **`isend`, `irecv`, `isend_custom` and `irecv_custom` take the scope first
   and borrow their buffers (and datatype) for it:** `world.isend(s, &data,
   dest, tag)` inside `ferrompi::scope(|s| ...)`; the buffers are usable again
-  when `scope` returns. Migration: wrap the requests' code in
-  `ferrompi::scope` and read receive buffers after it.
+  when `scope` returns. Migration: see "Nonblocking requests and scopes" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **The nonblocking reductions take the scope and
   `op: impl Into<CollectiveOp<T>>`:** `iallreduce`, `ireduce`, `iscan`,
   `iexscan` and `ireduce_scatter_block` accept a `ReduceOp` or a `&UserOp<T>`
   (borrowed until the scope returns), and a bitwise or logical op on
-  `f32`/`f64` returns `Error::InvalidArgument` before MPI. Migration: call
-  them inside `ferrompi::scope` with `s` first; a `ReduceOp` argument still
-  compiles.
+  `f32`/`f64` returns `Error::InvalidArgument` before MPI. Migration: see
+  "Nonblocking requests and scopes" in `docs/migrating-0.6-to-0.7.md`.
 - **The non-reducing nonblocking collectives take the scope:** `ibroadcast`,
   `igather`, `iallgather`, `iscatter`, `ialltoall`, their in-place forms and
   `igatherv`, `iscatterv`, `iallgatherv`, `ialltoallv` take `s` first and
   borrow their buffers, and the v-forms their count and displacement arrays,
-  until the scope returns. Migration: call them inside `ferrompi::scope`.
+  until the scope returns. Migration: see "Nonblocking requests and scopes" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **`iscatterv` and `ialltoallv` take their parameters in the order of
   `scatterv` and `alltoallv`, which is MPI's:** `iscatterv(s, send,
   sendcounts, displs, recv, root)` and `ialltoallv(s, send, sendcounts,
   sdispls, recv, recvcounts, rdispls)`. `recv` came directly after `send`
-  before. Migration: move the `recv` argument behind the send displacements;
-  a call left in the old order passes a shared slice where `recv` is expected
-  and does not compile.
+  before. Migration: see "Nonblocking requests and scopes" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **Persistent point-to-point requests own their buffer:** `send_init`,
   `bsend_init`, `rsend_init`, `ssend_init` and `recv_init` take a `Vec<T>` and
   return `PersistentRequest<T>`. `buffer()`/`buffer_mut()` reach the buffer
   while the request is inactive (`Error::InvalidState` while active), and
   `into_buffer()` returns it. `start_all` and `wait_all` take requests of one
-  element type. Migration: pass the `Vec` by value and read results through
-  `buffer()`; a mixed-type batch is split by type.
+  element type. Migration: see "Persistent requests" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **The non-reducing persistent collectives own their buffers:**
   `broadcast_init`, `gather_init`, `scatter_init`, `allgather_init`,
   `alltoall_init`, their in-place forms and `gatherv_init`, `scatterv_init`,
   `allgatherv_init`, `alltoallv_init` take `Vec<T>` buffers by value.
   `send_buffer_mut()` reaches a two-buffer request's send buffer while it is
   inactive, and `into_buffers()` returns both. The v-forms copy their count and
-  displacement arrays, which the caller may reuse after the call. Migration:
-  pass the `Vec`s by value and read results through `buffer()`.
+  displacement arrays, which the caller may reuse after the call. Migration: see
+  "Persistent requests" in `docs/migrating-0.6-to-0.7.md`.
 - **`bcast_init` is renamed `broadcast_init`**, following `broadcast` and
-  `ibroadcast`. Migration: rename the call.
+  `ibroadcast`. Migration: see "Persistent requests" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **The persistent reductions own their buffers and take
   `op: impl Into<CollectiveOp<T>>`:** `allreduce_init`, `allreduce_init_inplace`,
   `reduce_init`, `scan_init`, `exscan_init` and `reduce_scatter_block_init`
   take `Vec<T>` buffers by value and accept a `ReduceOp` or a `&UserOp<T>`,
-  which the request keeps alive until it is freed. A bitwise or logical op on
-  `f32`/`f64` returns `Error::InvalidArgument` before MPI. Migration: pass the
-  `Vec`s by value; a `ReduceOp` argument still compiles.
+  which the request keeps alive until it is freed; the op keeps its slot (one of
+  the 16 user-op slots a process has) for that time. A bitwise or logical op on
+  `f32`/`f64` returns `Error::InvalidArgument` before MPI. Migration: see
+  "Persistent requests" in `docs/migrating-0.6-to-0.7.md`.
 - **`PersistentRequest::wait` returns `Status` and `test` returns
   `Option<Status>`**, as `Request`'s do. A persistent receive reports the
   matched source, tag and count on every start. A persistent send or
   collective reports the empty status, as does an inactive request.
-  Migration: `wait()?` still compiles where the value was discarded; replace
-  `test()? == true` with `test()?.is_some()`.
+  Migration: see "Persistent requests" in `docs/migrating-0.6-to-0.7.md`.
 - **`Win::create` takes ownership of its buffer:** `Win<T>` has no lifetime
   parameter, `Win::create` takes a `Vec<T>`, and `Win::into_buffer`
   (collective) frees the window and returns the buffer (`None` for
   `Win::allocate` and `Win::allocate_shared`). A dropped or forgotten window
   never frees a buffer MPI may still use: the buffer is released only after a
-  successful `MPI_Win_free`, and is leaked otherwise. Migration: pass the `Vec`
-  by value and take it back with `into_buffer()`.
+  successful `MPI_Win_free`, and is leaked otherwise. Migration: see "RMA
+  epochs" in `docs/migrating-0.6-to-0.7.md`.
 - **Fence and PSCW access epochs are closures:** `Win::fence(open, close,
   |e| ..)` and `Win::start(group, assert, |e| ..)` run the closure with an
   `ActiveEpoch` and always issue the closing fence or `MPI_Win_complete`;
   `Win::complete` is removed. A panic inside either closure aborts the
   process. `fence` rejects `no_succeed()` on the opening fence and
   `no_precede()` on the closing one with `Error::InvalidArgument`. Migration:
-  put the operations of each epoch in one closure and declare their buffers
-  before it.
+  see "RMA epochs" in `docs/migrating-0.6-to-0.7.md`.
 - **Passive-target epochs are closures:** `Win::lock(kind, rank, |e| ..)` and
   `Win::lock_all(|e| ..)` run the closure with a `PassiveEpoch` and always
   unlock, even when the closure panics. `flush`, `flush_all`, `flush_local`,
   `flush_local_all` and `sync` are `PassiveEpoch` methods; `Win::flush_local`,
   `Win::flush_local_all`, `Win::sync`, `WinLockGuard` and `WinLockAllGuard` are
-  removed. Migration: move the guard's scope into the closure and call the
-  flushes on its argument.
+  removed. Migration: see "RMA epochs" in `docs/migrating-0.6-to-0.7.md`.
 - **`put`, `get`, `accumulate` and `get_accumulate` are epoch-handle methods**
   (`ActiveEpoch`, `PassiveEpoch`) that borrow their buffers until the epoch
   closes and take their count from the slice: `e.put(&origin, rank, disp)`.
-  `get_accumulate` requires `result` as long as `origin`. Migration: drop the
-  `target_count` argument; pass a sub-slice for a shorter transfer; declare the
-  buffers before the epoch closure.
+  `get_accumulate` requires `result` as long as `origin`. Migration: see "RMA
+  epochs" in `docs/migrating-0.6-to-0.7.md`.
 - **`fetch_and_op` and `compare_and_swap` write into caller storage:** they
   are epoch-handle methods taking `origin: &T` (and `compare: &T`) and
   `result: &mut T`, borrowed until the epoch closes, and return `Result<()>`.
-  `PendingFetchResult` is removed. Migration: declare the result before the
-  epoch closure and read it after the closure returns.
+  `PendingFetchResult` is removed. Migration: see "RMA epochs" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **Request-based RMA is passive-epoch only:** `rput`, `rget` and `raccumulate`
   are `PassiveEpoch` methods that take their count from the slice and return a
   `Request` the epoch completes before it unlocks; `Win::rput`, `Win::rget` and
-  `Win::raccumulate` are removed. Migration: call them on the `lock`/`lock_all`
-  closure's argument and drop the `target_count` argument.
+  `Win::raccumulate` are removed. Migration: see "RMA epochs" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **A transfer's target must be in its epoch's access set:** `put`, `get`,
   `accumulate`, `get_accumulate`, `fetch_and_op`, `compare_and_swap` and the
   request calls return `Error::InvalidArgument` with `arg: "target_rank"`,
@@ -219,38 +204,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Win::start` translates its group into window ranks once, takes one
   group-table slot for that call, and returns `Error::InvalidArgument` with
   `arg: "group"`, before opening the epoch, for a member outside the window's
-  communicator. Migration: open the epoch on the ranks the closure targets.
+  communicator. Migration: see "RMA epochs" in `docs/migrating-0.6-to-0.7.md`.
 - **Window memory is reached through a view:** `Win::local_slice` and
   `Win::local_slice_mut` are removed. `win.local()`, and `e.local()` on
   `ActiveEpoch` and `PassiveEpoch`, return a `WinView` whose `read`, `write`,
   `copy_to_slice` and `copy_from_slice` are Relaxed atomic accesses that stay
-  sound while peers write the window. Migration: replace
-  `win.local_slice()[i]` with `win.local().read(i)` and a slice copy with
-  `copy_to_slice`/`copy_from_slice`.
+  sound while peers write the window. Migration: see "Window memory and shared
+  windows" in `docs/migrating-0.6-to-0.7.md`.
 - **`SharedWindow`, `LockGuard` and `LockAllGuard` are removed:**
   `Win::allocate_shared` creates a shared-memory window as an ordinary `Win`.
-  Migration: replace `SharedWindow::allocate` with `Win::allocate_shared`,
-  slices with views, `remote_slice(r)` with `remote(r)`, a guard with a
-  `lock`/`lock_all` closure, and separate a fence from a following lock with
-  `WinFenceAssert::no_succeed()` and a barrier.
+  Migration: see "Window memory and shared windows" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **`MpiErrorClass`, `ResourceKind`, `ReduceOp` and `SplitType` are
   `#[non_exhaustive]`, and so are the structs `HostEntry` and `SlurmInfo`.**
   `ThreadLevel`, `GroupComparison`, `Source`, `Tag` and `LockType` stay
   exhaustive, and `RankRange` keeps its three public fields: MPI fixes
-  them. Migration: add a wildcard arm to a `match` on one of the four enums;
-  a pattern on `HostEntry` or `SlurmInfo` needs a trailing `..`, and neither
-  can be built with a struct literal.
+  them. Migration: see "Non-exhaustive enums" in `docs/migrating-0.6-to-0.7.md`.
 - **`Communicator::create_from_group` is renamed `Communicator::create`.**
   It wraps `MPI_Comm_create`, and shared its name with
   `Mpi::create_from_group`, which wraps `MPI_Comm_create_from_group`. Each
   method now has the name of its MPI call, and an error from `create` names
-  the operation `comm_create`. Migration: `comm.create(&group)`;
-  `Mpi::create_from_group` keeps its name.
+  the operation `comm_create`. Migration: see "Communicators from groups" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **`Mpi::create_from_group` returns `Result<Option<Communicator>>`.** A rank
   outside the group, and every rank with the empty group, gets `Ok(None)`,
   as from `Communicator::create` and `create_group`; it used to get an
-  `Error::Mpi` with class `Other`. Migration: handle the `Option`, for
-  example `mpi.create_from_group(&group, tag)?.expect("this rank is in the group")`.
+  `Error::Mpi` with class `Other`. Migration: see "Communicators from groups" in
+  `docs/migrating-0.6-to-0.7.md`.
 
 ### Added
 
@@ -278,15 +258,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MPI 5): the persistent in-place reduce and the persistent barrier. A
   barrier request is a `PersistentRequest<()>`, which owns no data. On a
   library without persistent collectives both return `Error::NotSupported`.
-- **Matched probes:** `Communicator::mprobe` and `improbe` take a message out
-  of the receive queue and return it as a `Message` with its `Status`;
+- **Matched probes:** `Communicator::mprobe` and `improbe` take a message out of
+  the receive queue as a `Message`: `mprobe` waits for a matching message and
+  returns it with its `Status`, and `improbe` returns `None` when none matches;
   `Message::mrecv` receives exactly that message, so probe-then-receive is
-  correct when several threads receive on one communicator. Dropping a
-  `Message` receives and discards it. While one is unreceived, dropping `Mpi`
-  skips `MPI_Finalize`.
+  correct when several threads receive on one communicator. Dropping a `Message`
+  receives and discards it. While one is unreceived, dropping `Mpi` skips
+  `MPI_Finalize`.
 - **`Communicator::create_group`** (`MPI_Comm_create_group`): creates a
   sub-communicator collectively over the members of the group only. A rank
-  outside the group gets `Ok(None)` from a call that is then local.
+  outside the group gets `Ok(None)` from a call that is then local. Like
+  `create`, it returns `Error::InvalidArgument` with `arg: "group"`, before the
+  MPI call, on a rank that passes a group with a member outside the
+  communicator.
+- **Documentation.** `docs/migrating-0.6-to-0.7.md`, ADR-0007 and ADR-0008,
+  published in rustdoc under `ferrompi::doc`.
 
 ### Changed
 
@@ -327,41 +313,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The `numa` feature is renamed `slurm`**, after what it gates: the
   `slurm` module and `SlurmInfo`. `slurm` does not imply `rma`. `numa` stays
   for this release as an alias for `slurm` plus `rma`, its 0.6 meaning, and
-  is removed in 0.8.0. Migration: replace `features = ["numa"]` with
-  `features = ["slurm", "rma"]`, or with `["slurm"]` if the crate uses no
-  window.
+  is removed in 0.8.0. Migration: see "The slurm feature" in
+  `docs/migrating-0.6-to-0.7.md`.
 
 ### Removed
 
-- **`Error::InvalidBuffer` and `Error::InvalidOp`.** Migration: match
-  `Error::BufferSize`, `Error::InvalidArgument` or `Error::InvalidState`;
-  each names the argument or state.
-- `PendingFetchResult`.
+- **`Error::InvalidBuffer` and `Error::InvalidOp`.** Migration: see "Errors" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **The debug-build note `MPI_Finalize leaves N active request(s) unfreed`**:
   no request can be left pending at finalize any more.
 - **`raw_handle()` on `Communicator`, `Group`, `Request`,
   `PersistentRequest`, `CustomDatatype` and `Win`.** The value was an index
   into a private table: it could not be passed to MPI, and another object
-  could get the same value after a drop. Migration: delete the call; to
-  tell two objects apart, keep your own identifier next to them.
+  could get the same value after a drop. Migration: see "Removed without
+  replacement" in `docs/migrating-0.6-to-0.7.md`.
 - **`Error::from_code`, `Error::from_code_with_op`, `Error::check` and
   `Error::check_with_op`.** They interpret return codes of the crate's own
-  C layer, which no code outside the crate can obtain. Migration: match on
-  the `Error` a ferrompi call returns.
+  C layer, which no code outside the crate can produce. Migration: see "Errors"
+  in `docs/migrating-0.6-to-0.7.md`.
 - **`MpiErrorClass::from_raw`.** It maps a class number of the linked MPI
-  library, which no ferrompi call returns. Migration: read the `class`
-  field of `Error::Mpi`.
+  library, which no ferrompi call returns. Migration: see "Errors" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **`WinFenceAssert::bits()` and `WinPscwAssert::bits()`.** They returned the
   library's `MPI_MODE_*` values, which differ between MPI implementations.
-  Migration: delete the call; build an assertion with the named
-  constructors and combine them with `|`.
+  Migration: see "Removed without replacement" in
+  `docs/migrating-0.6-to-0.7.md`.
 - **`Info` and `ResourceKind::Info`.** No ferrompi call took an `Info`, so it
   could only create, fill and read an info object, and no MPI hint could be
-  set through it. Migration: delete its uses, and any match arm that names
-  `ResourceKind::Info`. Every ferrompi call with an MPI info argument (the
-  window constructors, `split_type`, `split_shared`,
-  `Mpi::create_from_group` and the persistent collectives) passes
-  `MPI_INFO_NULL`, as it always did.
+  set through it. Every ferrompi call with an MPI info argument (the window
+  constructors, `split_type`, `split_shared`, `Mpi::create_from_group` and the
+  persistent collectives) passes `MPI_INFO_NULL`, as it always did. Migration:
+  see "Removed without replacement" in `docs/migrating-0.6-to-0.7.md`.
 
 ### Fixed
 
@@ -409,29 +391,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   except `exscan` and `iexscan`, returned `Error::Mpi` on every rank when all
   its buffers were empty `u8` buffers; `gatherv` with data on the other ranks
   returned it only on a non-root rank whose send buffer was empty; and on
-  Open MPI 5 so did every persistent collective except `exscan_init`. An
-  empty `u8` send buffer and an empty `u8` receive buffer now also reach MPI
-  at two different addresses: MPICH refused `alltoallv` and `ialltoallv` over
-  two empty `Vec<u8>` when one slice served as both count arrays.
+  Open MPI 5 so did every persistent collective except `exscan_init`.
 - **`Mpi::world()` makes no MPI call and can no longer panic.** It asked MPI
   for the rank and size on every call, and panicked when that call was
   refused: in a debug build at `ThreadLevel::Serialized`, while another
   thread's MPI call was in progress. The rank and size are now read once,
   when MPI is initialized; if that read fails, `Mpi::init` and
   `Mpi::init_thread` return its error and finalize MPI.
-- **`alltoallv`, `ialltoallv` and `reduce_init` accept two empty buffers of
-  any element type.** Two empty buffers of a type with alignment 2 or more,
-  such as `f64`, usually share one address. MPICH refused that in `alltoallv`
-  and `ialltoallv` when one slice served as both count arrays, and Open MPI 5
-  refused it in `reduce_init` at the root. The receive buffer of such a pair
-  now reaches MPI at a fixed address of its own.
-- **`alltoallv` and `ialltoallv` accept an empty buffer that starts where the
-  other buffer begins.** An empty slice of a type with alignment 2 or more
-  keeps its address, which can be the other buffer's: the two halves of
-  `split_at_mut(0)`, for example. MPICH refused such a pair with class
-  `Buffer` when one slice served as both count arrays. In the two methods an
-  empty buffer now reaches MPI at a fixed address that is never the other
-  buffer's.
+- **`alltoallv` and `ialltoallv` accept an empty buffer at the other buffer's
+  address, and `reduce_init` accepts two empty buffers.** An empty slice can
+  share its address with the other buffer: two empty buffers of one element type
+  usually do, and so do the two halves of `split_at_mut(0)`. MPICH refused such
+  a pair with class `Buffer` in `alltoallv` and `ialltoallv` when one slice
+  served as both count arrays, and Open MPI 5 refused two empty buffers in
+  `reduce_init` at the root. In `alltoallv` and `ialltoallv`, an empty buffer of
+  such a pair now reaches MPI at a fixed address that is never the other
+  buffer's; in `reduce_init` the receive buffer does.
 - **Group calls made by several threads on one group no longer race.**
   `Group` is `Sync`, and MPICH 4.2 builds a group's ordered member list on
   its first use by `difference`, `intersection`, `union`, `compare` or
@@ -441,16 +416,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Communicator::create`, `create_group` and `Mpi::create_from_group` are
   now serialised when MPI grants `Serialized` or `Multiple`. `Group::size`
   and `Group::rank` take no lock.
-- **`Communicator::create` and `create_group` refuse a group with a member
-  outside the communicator.** MPI requires the group to be a subset of the
-  communicator's, and a library need not check it: with such a group
-  `MPI_Comm_create_group` ended the process of a member that called it, on
-  MPICH and on Open MPI, and `MPI_Comm_create` returned class `Group` to a
-  member on MPICH and a communicator on Open MPI. Both methods now return
-  `Error::InvalidArgument` with `arg: "group"` on every rank that passes
-  such a group, before the MPI call. The same check ends a crash of
-  `create_group` on MPICH 4.2.3 for a valid group of two or more members,
-  on a communicator whose group had never been asked for.
+- **`Communicator::create` refuses a group with a member outside the
+  communicator.** MPI requires the group to be a subset of the communicator's,
+  and a library need not check it: with such a group `MPI_Comm_create` returned
+  class `Group` to a member on MPICH and a communicator on Open MPI. `create`
+  now returns `Error::InvalidArgument` with `arg: "group"` on every rank that
+  passes such a group, before the MPI call.
 - **An empty `Group` is no longer passed to `MPI_Group_free`.** A group call
   with an empty result returns MPI's predefined `MPI_GROUP_EMPTY`, which the
   user must not free (MPI-4.1 §2.5.1). The crate stored it like any other
