@@ -321,7 +321,7 @@ Target: the release the fix belongs to. Open rows name the release (`0.6.0`, `0.
 | INF-20 | CI covers MPICH 4.2 + Open MPI 4.x only (no Open MPI 5) | minor | reading | 0.5.x | fixed (3f8ec50) |
 | INF-21 | Unit tests mutate a global static (latent) | nit | stress test | 0.7.0 | fixed (2ecf734) |
 | INF-22 | Third-party GitHub Actions pinned by tag, not commit SHA | minor | reading | 0.5.x | fixed (1dfc61f) |
-| INF-23 | Publishing uses a long-lived crates.io token (no Trusted Publishing) | minor | reading | 0.7.0 | planned (ferrompi-0.7.0) |
+| INF-23 | Publishing uses a long-lived crates.io token (no Trusted Publishing) | minor | reading | 0.7.0 | fixed (4e37611) |
 | INF-24 | `examples/test_rma_rget.rs`, `test_rma_raccumulate.rs`, `test_rma_win_lock.rs` and `test_rma_win_flush_sync.rs` open a passive-target lock right after a `Win::fence` with no assert (no `MPI_MODE_NOSUCCEED`, no barrier), unlike the `Win::raccumulate` rustdoc pattern; works on MPICH and Open MPI | nit | reading | 0.6.0 | fixed (cfb67b4) |
 | INF-25 | The cargo-registry cache step is repeated in 8 `test.yml` jobs (per-job keys, so a shared composite action would need an input) | nit | reading | 0.7.0 | fixed (ce85b4b) |
 | INF-26 | `examples/test_rma_window.rs` and `examples/shared_memory.rs` take a passive-target lock after a `SharedWindow::fence()` and before the next one, with no `MPI_MODE_NOSUCCEED` and no barrier between the fence and the lock (in `shared_memory.rs` a read of a peer's segment comes between them), unlike the `Win::raccumulate` rustdoc pattern; `SharedWindow::fence` takes no assert argument, so the pattern cannot be expressed until `SharedWindow` merges into `Win`; works on MPICH and Open MPI | nit | reading | 0.7.0 | fixed (2b965c3) |
