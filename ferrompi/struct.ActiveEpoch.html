@@ -1,0 +1,491 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="The handle an active-target access epoch gives its closure."><title>ActiveEpoch in ferrompi - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-009149e2.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.101.0-nightly (92b5b8c87 2026-10-29)" data-channel="nightly" data-search-js="search-835b9732.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-9b351432.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc struct"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">ActiveEpoch</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../ferrompi/index.html">ferrompi</a><span class="version">0.7.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Active<wbr>Epoch</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#lifetimes" title="Lifetimes">Lifetimes</a></li><li><a href="#access-set" title="Access set">Access set</a></li><li><a href="#thread-safety" title="Thread safety">Thread safety</a></li></ul><h3><a href="#implementations">Methods</a></h3><ul class="block method"><li><a href="#method.accumulate" title="accumulate">accumulate</a></li><li><a href="#method.compare_and_swap" title="compare_and_swap">compare_and_swap</a></li><li><a href="#method.fetch_and_op" title="fetch_and_op">fetch_and_op</a></li><li><a href="#method.get" title="get">get</a></li><li><a href="#method.get_accumulate" title="get_accumulate">get_accumulate</a></li><li><a href="#method.local" title="local">local</a></li><li><a href="#method.put" title="put">put</a></li><li><a href="#method.remote" title="remote">remote</a></li></ul><h3><a href="#synthetic-implementations">Auto Trait Implementations</a></h3><ul class="block synthetic-implementation"><li><a href="#impl-RefUnwindSafe-for-ActiveEpoch%3C's,+'env,+T%3E" title="!RefUnwindSafe">!RefUnwindSafe</a></li><li><a href="#impl-Send-for-ActiveEpoch%3C's,+'env,+T%3E" title="!Send">!Send</a></li><li><a href="#impl-Sync-for-ActiveEpoch%3C's,+'env,+T%3E" title="!Sync">!Sync</a></li><li><a href="#impl-UnwindSafe-for-ActiveEpoch%3C's,+'env,+T%3E" title="!UnwindSafe">!UnwindSafe</a></li><li><a href="#impl-Freeze-for-ActiveEpoch%3C's,+'env,+T%3E" title="Freeze">Freeze</a></li><li><a href="#impl-Unpin-for-ActiveEpoch%3C's,+'env,+T%3E" title="Unpin">Unpin</a></li><li><a href="#impl-UnsafeUnpin-for-ActiveEpoch%3C's,+'env,+T%3E" title="UnsafeUnpin">UnsafeUnpin</a></li></ul><h3><a href="#blanket-implementations">Blanket Implementations</a></h3><ul class="block blanket-implementation"><li><a href="#impl-Any-for-T" title="Any">Any</a></li><li><a href="#impl-Borrow%3CT%3E-for-T" title="Borrow&#60;T&#62;">Borrow&#60;T&#62;</a></li><li><a href="#impl-BorrowMut%3CT%3E-for-T" title="BorrowMut&#60;T&#62;">BorrowMut&#60;T&#62;</a></li><li><a href="#impl-From%3CT%3E-for-T" title="From&#60;T&#62;">From&#60;T&#62;</a></li><li><a href="#impl-Into%3CU%3E-for-T" title="Into&#60;U&#62;">Into&#60;U&#62;</a></li><li><a href="#impl-TryFrom%3CU%3E-for-T" title="TryFrom&#60;U&#62;">TryFrom&#60;U&#62;</a></li><li><a href="#impl-TryInto%3CU%3E-for-T" title="TryInto&#60;U&#62;">TryInto&#60;U&#62;</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="index.html">In crate ferrompi</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="index.html">ferrompi</a></div><h1>Struct <span class="struct">Active<wbr>Epoch</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/ferrompi/window.rs.html#1849-1854">Source</a> </span></div><pre class="rust item-decl"><code>pub struct ActiveEpoch&lt;'s, 'env: 's, T: <a class="trait" href="trait.MpiDatatype.html" title="trait ferrompi::MpiDatatype">MpiDatatype</a>&gt; { <span class="comment">/* private fields */</span> }</code></pre><span class="item-info"><div class="stab portability">Available on <strong>crate feature <code>rma</code></strong> only.</div></span><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>The handle an active-target access epoch gives its closure.</p>
+<p><a href="struct.Win.html#method.fence" title="method ferrompi::Win::fence"><code>Win::fence</code></a> and <a href="struct.Win.html#method.start" title="method ferrompi::Win::start"><code>Win::start</code></a> open an epoch, run a closure with this
+handle, and close the epoch when the closure returns, whether it returned
+<code>Ok</code> or <code>Err</code>, with the epoch’s closing call: the closing fence of
+<a href="struct.Win.html#method.fence" title="method ferrompi::Win::fence"><code>Win::fence</code></a>, or <code>MPI_Win_complete</code> of <a href="struct.Win.html#method.start" title="method ferrompi::Win::start"><code>Win::start</code></a>. The epoch is open
+exactly while the closure runs, and the window is mutably borrowed for that
+time.</p>
+<h2 id="lifetimes"><a class="doc-anchor" href="#lifetimes">§</a>Lifetimes</h2>
+<p>The handle carries the invariant lifetimes of <a href="struct.Scope.html" title="struct ferrompi::Scope"><code>Scope</code></a>: <code>'s</code>
+is the epoch, and <code>'env</code> outlives it. <a href="struct.ActiveEpoch.html#method.put" title="method ferrompi::ActiveEpoch::put"><code>put</code></a>,
+<a href="struct.ActiveEpoch.html#method.get" title="method ferrompi::ActiveEpoch::get"><code>get</code></a>, <a href="struct.ActiveEpoch.html#method.accumulate" title="method ferrompi::ActiveEpoch::accumulate"><code>accumulate</code></a>,
+<a href="struct.ActiveEpoch.html#method.get_accumulate" title="method ferrompi::ActiveEpoch::get_accumulate"><code>get_accumulate</code></a>,
+<a href="struct.ActiveEpoch.html#method.fetch_and_op" title="method ferrompi::ActiveEpoch::fetch_and_op"><code>fetch_and_op</code></a> and
+<a href="struct.ActiveEpoch.html#method.compare_and_swap" title="method ferrompi::ActiveEpoch::compare_and_swap"><code>compare_and_swap</code></a> borrow their buffers for <code>'s</code>,
+so a buffer outlives the closing call, which is when MPI stops using it, and
+cannot be dropped or written before then. A buffer MPI writes (a <code>get</code>
+destination or a <code>result</code>) cannot be read before then either. These six
+methods reject a buffer declared inside the closure, because it is freed
+before then. Declare buffers before the call to <code>fence</code> or <code>start</code>.
+<a href="struct.ActiveEpoch.html#method.local" title="method ferrompi::ActiveEpoch::local"><code>local</code></a> and <a href="struct.ActiveEpoch.html#method.remote" title="method ferrompi::ActiveEpoch::remote"><code>remote</code></a> return views that borrow
+the handle, so they cannot leave the closure.</p>
+<h2 id="access-set"><a class="doc-anchor" href="#access-set">§</a>Access set</h2>
+<p>A transfer’s <code>target_rank</code> must be a rank the epoch gives access to: every
+rank of the window’s communicator for <a href="struct.Win.html#method.fence" title="method ferrompi::Win::fence"><code>Win::fence</code></a>, the members of the
+<code>group</code> for <a href="struct.Win.html#method.start" title="method ferrompi::Win::start"><code>Win::start</code></a>. Any other rank returns
+<a href="enum.Error.html#variant.InvalidArgument" title="variant ferrompi::Error::InvalidArgument"><code>Error::InvalidArgument</code></a> with <code>arg: "target_rank"</code> and makes no MPI call,
+because MPI-4.1 §12.5 makes such a transfer erroneous and its closing call
+would not complete it.</p>
+<h2 id="thread-safety"><a class="doc-anchor" href="#thread-safety">§</a>Thread safety</h2>
+<p><code>ActiveEpoch</code> is neither <code>Send</code> nor <code>Sync</code>: it borrows a <a href="struct.Win.html" title="struct ferrompi::Win"><code>Win</code></a>, which is
+neither.</p>
+</div></details><h2 id="implementations" class="section-header">Implementations<a href="#implementations" class="anchor">§</a></h2><div id="implementations-list"><details class="toggle implementors-toggle" open><summary><section id="impl-ActiveEpoch%3C's,+'_,+T%3E" class="impl"><a class="src rightside" href="../src/ferrompi/window.rs.html#1856-2195">Source</a><a href="#impl-ActiveEpoch%3C's,+'_,+T%3E" class="anchor">§</a><h3 class="code-header">impl&lt;'s, T: <a class="trait" href="trait.MpiDatatype.html" title="trait ferrompi::MpiDatatype">MpiDatatype</a>&gt; <a class="struct" href="struct.ActiveEpoch.html" title="struct ferrompi::ActiveEpoch">ActiveEpoch</a>&lt;'s, '_, T&gt;</h3></section></summary><div class="impl-items"><details class="toggle method-toggle" open><summary><section id="method.local" class="method"><a class="src rightside" href="../src/ferrompi/window.rs.html#1863-1865">Source</a><h4 class="code-header">pub fn <a href="#method.local" class="fn">local</a>(&amp;self) -&gt; <a class="struct" href="struct.WinView.html" title="struct ferrompi::WinView">WinView</a>&lt;'_, T&gt;</h4></section></summary><div class="docblock"><p>A view of this process’s window memory, as <a href="struct.Win.html#method.local" title="method ferrompi::Win::local"><code>Win::local</code></a>, taken through
+the handle: the window itself is borrowed mutably while the closure runs.</p>
+<p>The view borrows the handle, so it cannot leave the closure. An access
+that conflicts with a peer’s put or accumulate to the same location has
+an unspecified result, as <a href="struct.WinView.html" title="struct ferrompi::WinView"><code>WinView</code></a> describes.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.remote" class="method"><a class="src rightside" href="../src/ferrompi/window.rs.html#1883-1885">Source</a><h4 class="code-header">pub fn <a href="#method.remote" class="fn">remote</a>(&amp;self, rank: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i32.html">i32</a>) -&gt; <a class="type" href="type.Result.html" title="type ferrompi::Result">Result</a>&lt;<a class="struct" href="struct.WinView.html" title="struct ferrompi::WinView">WinView</a>&lt;'_, T&gt;&gt;</h4></section></summary><div class="docblock"><p>A view of <code>rank</code>’s region of a shared window, as <a href="struct.Win.html#method.remote" title="method ferrompi::Win::remote"><code>Win::remote</code></a>, taken
+through the handle: the window itself is borrowed mutably while the
+closure runs.</p>
+<p>The view borrows the handle, so it cannot leave the closure. It makes no
+MPI call, and the epoch’s access set does not restrict it: loads and
+stores of shared memory need no access epoch to that rank. What publishes a
+peer’s writes is described under <a href="struct.Win.html#method.remote" title="method ferrompi::Win::remote"><code>Win::remote</code></a>’s <code># Publication</code>. Inside a
+fence epoch, the view reads what was written before the fence that preceded
+this epoch’s opening fence (in an earlier fence epoch, say), provided the
+opening fence does not carry <code>MPI_MODE_NOPRECEDE</code>. A peer’s stores made
+inside this epoch are not ordered with this process’s loads.</p>
+<h5 id="errors"><a class="doc-anchor" href="#errors">§</a>Errors</h5>
+<p>As <a href="struct.Win.html#method.remote" title="method ferrompi::Win::remote"><code>Win::remote</code></a>.</p>
+</div></details><details class="toggle method-toggle" open><summary><section id="method.put" class="method"><a class="src rightside" href="../src/ferrompi/window.rs.html#1918-1926">Source</a><h4 class="code-header">pub fn <a href="#method.put" class="fn">put</a>(
+    &amp;self,
+    origin: &amp;'s <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.slice.html">[T]</a>,
+    target_rank: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i32.html">i32</a>,
+    target_disp: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i64.html">i64</a>,
+) -&gt; <a class="type" href="type.Result.html" title="type ferrompi::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>One-sided write: copy <code>origin</code> into the remote rank’s window memory.</p>
+<p>Wraps <code>MPI_Put</code>. The operation is posted at once, but it completes only
+when the epoch’s closing call returns, and the data is visible at the
+target once the target’s own closing call returns.</p>
+<p>The count is <code>origin.len()</code>; pass a sub-slice for a shorter transfer.</p>
+<h5 id="arguments"><a class="doc-anchor" href="#arguments">§</a>Arguments</h5>
+<ul>
+<li><code>origin</code>      — Local buffer whose contents are written to the target.</li>
+<li><code>target_rank</code> — Destination rank (0-based, within this window’s
+communicator).</li>
+<li><code>target_disp</code> — Displacement at the target, measured in units of
+<code>disp_unit</code> (i.e., multiples of <code>size_of::&lt;T&gt;()</code>).</li>
+</ul>
+<h5 id="errors-1"><a class="doc-anchor" href="#errors-1">§</a>Errors</h5>
+<ul>
+<li><a href="enum.Error.html#variant.InvalidArgument" title="variant ferrompi::Error::InvalidArgument"><code>Error::InvalidArgument</code></a> — if <code>target_rank</code> is not a rank of the
+window’s communicator (including -1) or of the epoch’s access set
+(<code>arg: "target_rank"</code>), <code>target_disp</code> is negative, or the access does
+not fit in the target rank’s window; no MPI call is made.</li>
+<li><a href="enum.Error.html#variant.Finalized" title="variant ferrompi::Error::Finalized"><code>Error::Finalized</code></a> — once <a href="struct.Mpi.html" title="struct ferrompi::Mpi"><code>Mpi</code></a> is being dropped.</li>
+<li><a href="enum.Error.html#variant.Mpi" title="variant ferrompi::Error::Mpi"><code>Error::Mpi</code></a> — if <code>MPI_Put</code> fails; on MPI before 4.0 this includes
+class <code>Count</code> for an <code>origin</code> of more than <code>i32::MAX</code> elements.</li>
+</ul>
+<h5 id="example"><a class="doc-anchor" href="#example">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::{Mpi, Win, WinFenceAssert};
+
+<span class="kw">fn </span>main() -&gt; ferrompi::Result&lt;()&gt; {
+    <span class="kw">let </span>mpi = Mpi::init()<span class="question-mark">?</span>;
+    <span class="kw">let </span>world = mpi.world();
+    <span class="kw">let </span><span class="kw-2">mut </span>win = Win::&lt;f64&gt;::allocate(<span class="kw-2">&amp;</span>world, <span class="number">4</span>)<span class="question-mark">?</span>;
+    <span class="kw">let </span>buf = [<span class="number">1.0f64</span>, <span class="number">2.0</span>, <span class="number">3.0</span>, <span class="number">4.0</span>];
+
+    <span class="comment">// `buf` is declared before the epoch: MPI may read it until the
+    // closing fence returns
+    </span>win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+        <span class="comment">// Rank 0 puts four elements into rank 1's window at displacement 0
+        </span><span class="kw">if </span>world.rank() == <span class="number">0 </span>{
+            e.put(<span class="kw-2">&amp;</span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+        }
+        <span class="prelude-val">Ok</span>(())
+    })<span class="question-mark">?</span>;
+
+    <span class="comment">// The epoch is closed: rank 1's window holds the data
+    </span><span class="kw">if </span>world.rank() == <span class="number">1 </span>{
+        <span class="kw">let </span><span class="kw-2">mut </span>seen = [<span class="number">0.0f64</span>; <span class="number">4</span>];
+        win.local().copy_to_slice(<span class="kw-2">&amp;mut </span>seen);
+        <span class="macro">assert_eq!</span>(seen, buf);
+    }
+    <span class="prelude-val">Ok</span>(())
+}
+<span class="comment">// mpi-test: np=2 release</span></code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.get" class="method"><a class="src rightside" href="../src/ferrompi/window.rs.html#1960-1968">Source</a><h4 class="code-header">pub fn <a href="#method.get" class="fn">get</a>(
+    &amp;self,
+    origin: &amp;'s mut <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.slice.html">[T]</a>,
+    target_rank: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i32.html">i32</a>,
+    target_disp: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i64.html">i64</a>,
+) -&gt; <a class="type" href="type.Result.html" title="type ferrompi::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>One-sided read: copy data from a remote rank’s window memory into
+<code>origin</code>.</p>
+<p>Wraps <code>MPI_Get</code>. The operation is posted at once, but <code>origin</code> holds
+the data only after the epoch’s closing call returns, and stays borrowed
+until then, so it cannot be read earlier.</p>
+<p>The count is <code>origin.len()</code>; pass a sub-slice for a shorter transfer.</p>
+<h5 id="arguments-1"><a class="doc-anchor" href="#arguments-1">§</a>Arguments</h5>
+<ul>
+<li><code>origin</code>      — Local destination buffer filled by the remote read.</li>
+<li><code>target_rank</code> — Source rank (0-based, within this window’s
+communicator).</li>
+<li><code>target_disp</code> — Displacement at the target, measured in units of
+<code>disp_unit</code> (i.e., multiples of <code>size_of::&lt;T&gt;()</code>).</li>
+</ul>
+<h5 id="errors-2"><a class="doc-anchor" href="#errors-2">§</a>Errors</h5>
+<ul>
+<li><a href="enum.Error.html#variant.InvalidArgument" title="variant ferrompi::Error::InvalidArgument"><code>Error::InvalidArgument</code></a> — if <code>target_rank</code> is not a rank of the
+window’s communicator (including -1) or of the epoch’s access set
+(<code>arg: "target_rank"</code>), <code>target_disp</code> is negative, or the access does
+not fit in the target rank’s window; no MPI call is made.</li>
+<li><a href="enum.Error.html#variant.Finalized" title="variant ferrompi::Error::Finalized"><code>Error::Finalized</code></a> — once <a href="struct.Mpi.html" title="struct ferrompi::Mpi"><code>Mpi</code></a> is being dropped.</li>
+<li><a href="enum.Error.html#variant.Mpi" title="variant ferrompi::Error::Mpi"><code>Error::Mpi</code></a> — if <code>MPI_Get</code> fails; on MPI before 4.0 this includes
+class <code>Count</code> for an <code>origin</code> of more than <code>i32::MAX</code> elements.</li>
+</ul>
+<h5 id="example-1"><a class="doc-anchor" href="#example-1">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::{Mpi, Win, WinFenceAssert};
+
+<span class="kw">fn </span>main() -&gt; ferrompi::Result&lt;()&gt; {
+    <span class="kw">let </span>mpi = Mpi::init()<span class="question-mark">?</span>;
+    <span class="kw">let </span>world = mpi.world();
+    <span class="kw">let </span><span class="kw-2">mut </span>win = Win::&lt;f64&gt;::allocate(<span class="kw-2">&amp;</span>world, <span class="number">4</span>)<span class="question-mark">?</span>;
+    <span class="kw">let </span><span class="kw-2">mut </span>buf = [<span class="number">0.0f64</span>; <span class="number">4</span>];
+
+    <span class="comment">// Rank 1 initialises its window
+    </span><span class="kw">if </span>world.rank() == <span class="number">1 </span>{
+        win.local().copy_from_slice(<span class="kw-2">&amp;</span>[<span class="number">1.0</span>, <span class="number">2.0</span>, <span class="number">3.0</span>, <span class="number">4.0</span>]);
+    }
+
+    <span class="comment">// `buf` is declared before the epoch: MPI may write it until the
+    // closing fence returns
+    </span>win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+        <span class="comment">// Rank 0 reads four elements from rank 1's window at displacement 0
+        </span><span class="kw">if </span>world.rank() == <span class="number">0 </span>{
+            e.get(<span class="kw-2">&amp;mut </span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+        }
+        <span class="prelude-val">Ok</span>(())
+    })<span class="question-mark">?</span>;
+
+    <span class="comment">// The epoch is closed: rank 0's buffer holds the data
+    </span><span class="kw">if </span>world.rank() == <span class="number">0 </span>{
+        <span class="macro">assert_eq!</span>(buf, [<span class="number">1.0</span>, <span class="number">2.0</span>, <span class="number">3.0</span>, <span class="number">4.0</span>]);
+    }
+    <span class="prelude-val">Ok</span>(())
+}
+<span class="comment">// mpi-test: np=2 release</span></code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.accumulate" class="method"><a class="src rightside" href="../src/ferrompi/window.rs.html#2015-2029">Source</a><h4 class="code-header">pub fn <a href="#method.accumulate" class="fn">accumulate</a>(
+    &amp;self,
+    origin: &amp;'s <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.slice.html">[T]</a>,
+    target_rank: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i32.html">i32</a>,
+    target_disp: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i64.html">i64</a>,
+    op: impl <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html" title="trait core::convert::Into">Into</a>&lt;<a class="struct" href="struct.AccumulateOp.html" title="struct ferrompi::AccumulateOp">AccumulateOp</a>&gt;,
+) -&gt; <a class="type" href="type.Result.html" title="type ferrompi::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>One-sided reduce-accumulate: combine data from a local origin buffer
+with a remote rank’s window memory using a reduction operation.</p>
+<p>Wraps <code>MPI_Accumulate</code>. The operation is posted at once, but its effect
+at the target is visible only after the epoch’s closing call returns and
+the target’s own closing call returns.</p>
+<p><code>op</code> is a <a href="enum.ReduceOp.html" title="enum ferrompi::ReduceOp"><code>ReduceOp</code></a> or <a href="struct.AccumulateOp.html#associatedconstant.REPLACE" title="associated constant ferrompi::AccumulateOp::REPLACE"><code>AccumulateOp::REPLACE</code></a>
+(like <code>MPI_Put</code>, but element-wise atomic); a user op is not accepted
+(MPI-4.1 §12.3.4). Under the default <code>accumulate_ops</code> window info value,
+<code>same_op_no_op</code> (MPI-4.1 §12.2.1), concurrent accumulates to one target
+location must use the same op or <code>MPI_NO_OP</code>, so mixing
+<a href="struct.AccumulateOp.html#associatedconstant.REPLACE" title="associated constant ferrompi::AccumulateOp::REPLACE"><code>AccumulateOp::REPLACE</code></a> and <a href="enum.ReduceOp.html#variant.Sum" title="variant ferrompi::ReduceOp::Sum"><code>ReduceOp::Sum</code></a> on
+one location is erroneous, and no type prevents it.</p>
+<p>The count is <code>origin.len()</code>; pass a sub-slice for a shorter transfer.</p>
+<h5 id="arguments-2"><a class="doc-anchor" href="#arguments-2">§</a>Arguments</h5>
+<ul>
+<li><code>origin</code>      — Local source buffer (read-only).</li>
+<li><code>target_rank</code> — Destination rank (0-based, within this window’s
+communicator).</li>
+<li><code>target_disp</code> — Displacement at the target, measured in units of
+<code>disp_unit</code> (i.e., multiples of <code>size_of::&lt;T&gt;()</code>).</li>
+<li><code>op</code>          — Reduction operation to apply.</li>
+</ul>
+<h5 id="errors-3"><a class="doc-anchor" href="#errors-3">§</a>Errors</h5>
+<ul>
+<li><a href="enum.Error.html#variant.InvalidArgument" title="variant ferrompi::Error::InvalidArgument"><code>Error::InvalidArgument</code></a> with <code>arg: "op"</code> — if <code>op</code> is a predefined
+op MPI does not define on <code>T</code> (a bitwise or logical op on
+<code>f32</code>/<code>f64</code>); no MPI call is made.</li>
+<li><a href="enum.Error.html#variant.InvalidArgument" title="variant ferrompi::Error::InvalidArgument"><code>Error::InvalidArgument</code></a> — if <code>target_rank</code> is not a rank of the
+window’s communicator (including -1) or of the epoch’s access set
+(<code>arg: "target_rank"</code>), <code>target_disp</code> is negative, or the access does
+not fit in the target rank’s window; no MPI call is made.</li>
+<li><a href="enum.Error.html#variant.Finalized" title="variant ferrompi::Error::Finalized"><code>Error::Finalized</code></a> — once <a href="struct.Mpi.html" title="struct ferrompi::Mpi"><code>Mpi</code></a> is being dropped.</li>
+<li><a href="enum.Error.html#variant.Mpi" title="variant ferrompi::Error::Mpi"><code>Error::Mpi</code></a> — if <code>MPI_Accumulate</code> fails for any other reason; on
+MPI before 4.0 this includes class <code>Count</code> for an <code>origin</code> of more
+than <code>i32::MAX</code> elements.</li>
+</ul>
+<h5 id="example-2"><a class="doc-anchor" href="#example-2">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
+
+<span class="kw">fn </span>main() -&gt; ferrompi::Result&lt;()&gt; {
+    <span class="kw">let </span>mpi = Mpi::init()<span class="question-mark">?</span>;
+    <span class="kw">let </span>world = mpi.world();
+    <span class="kw">let </span><span class="kw-2">mut </span>win = Win::&lt;f64&gt;::allocate(<span class="kw-2">&amp;</span>world, <span class="number">4</span>)<span class="question-mark">?</span>;
+    <span class="kw">let </span>buf = [<span class="number">10.0f64</span>, <span class="number">20.0</span>, <span class="number">30.0</span>, <span class="number">40.0</span>];
+
+    <span class="comment">// Rank 1 initialises its window
+    </span><span class="kw">if </span>world.rank() == <span class="number">1 </span>{
+        win.local().copy_from_slice(<span class="kw-2">&amp;</span>[<span class="number">1.0</span>, <span class="number">2.0</span>, <span class="number">3.0</span>, <span class="number">4.0</span>]);
+    }
+
+    <span class="comment">// `buf` is declared before the epoch: MPI may read it until the
+    // closing fence returns
+    </span>win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+        <span class="comment">// Rank 0 adds [10, 20, 30, 40] to rank 1's window
+        </span><span class="kw">if </span>world.rank() == <span class="number">0 </span>{
+            e.accumulate(<span class="kw-2">&amp;</span>buf, <span class="number">1</span>, <span class="number">0</span>, ReduceOp::Sum)<span class="question-mark">?</span>;
+        }
+        <span class="prelude-val">Ok</span>(())
+    })<span class="question-mark">?</span>;
+
+    <span class="comment">// The epoch is closed: rank 1's window holds the sums
+    </span><span class="kw">if </span>world.rank() == <span class="number">1 </span>{
+        <span class="kw">let </span><span class="kw-2">mut </span>seen = [<span class="number">0.0f64</span>; <span class="number">4</span>];
+        win.local().copy_to_slice(<span class="kw-2">&amp;mut </span>seen);
+        <span class="macro">assert_eq!</span>(seen, [<span class="number">11.0</span>, <span class="number">22.0</span>, <span class="number">33.0</span>, <span class="number">44.0</span>]);
+    }
+    <span class="prelude-val">Ok</span>(())
+}
+<span class="comment">// mpi-test: np=2 release</span></code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.get_accumulate" class="method"><a class="src rightside" href="../src/ferrompi/window.rs.html#2086-2101">Source</a><h4 class="code-header">pub fn <a href="#method.get_accumulate" class="fn">get_accumulate</a>(
+    &amp;self,
+    origin: &amp;'s <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.slice.html">[T]</a>,
+    result: &amp;'s mut <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.slice.html">[T]</a>,
+    target_rank: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i32.html">i32</a>,
+    target_disp: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i64.html">i64</a>,
+    op: impl <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html" title="trait core::convert::Into">Into</a>&lt;<a class="struct" href="struct.FetchOp.html" title="struct ferrompi::FetchOp">FetchOp</a>&gt;,
+) -&gt; <a class="type" href="type.Result.html" title="type ferrompi::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Atomic read-modify-write: fetch the pre-update remote value into
+<code>result</code>, then apply <code>op(origin, target_old)</code> at the target, each element
+atomically with respect to other accumulate operations on that location
+(MPI-4.1 §12.7.1).</p>
+<p>Wraps <code>MPI_Get_accumulate</code>. The operation is posted at once, but <code>result</code>
+holds the fetched values only after the epoch’s closing call returns, and
+the update is visible at the target once the target’s own closing call
+returns. <code>result</code> stays borrowed until then, so it cannot be read earlier.</p>
+<p><code>op</code> is a <a href="enum.ReduceOp.html" title="enum ferrompi::ReduceOp"><code>ReduceOp</code></a>, <a href="struct.FetchOp.html#associatedconstant.NO_OP" title="associated constant ferrompi::FetchOp::NO_OP"><code>FetchOp::NO_OP</code></a> or
+<a href="struct.FetchOp.html#associatedconstant.REPLACE" title="associated constant ferrompi::FetchOp::REPLACE"><code>FetchOp::REPLACE</code></a>; a user op is not accepted (MPI-4.1 §12.3.4).
+<a href="struct.FetchOp.html#associatedconstant.NO_OP" title="associated constant ferrompi::FetchOp::NO_OP"><code>FetchOp::NO_OP</code></a> is the canonical “atomic get” pattern: <code>result</code>
+receives the target’s current value and the target memory is left
+unchanged; <code>origin</code>’s contents are ignored, but its length is the
+count. <a href="struct.FetchOp.html#associatedconstant.REPLACE" title="associated constant ferrompi::FetchOp::REPLACE"><code>FetchOp::REPLACE</code></a> replaces the target value and also
+returns the pre-update value in <code>result</code>. Concurrent accumulates to one
+target location must use the same op or <code>MPI_NO_OP</code>, as for
+<a href="struct.ActiveEpoch.html#method.accumulate" title="method ferrompi::ActiveEpoch::accumulate"><code>accumulate</code></a> (MPI-4.1 §12.2.1).</p>
+<p>The count is <code>origin.len()</code>, and <code>result</code> must be as long as <code>origin</code>;
+pass sub-slices for a shorter transfer.</p>
+<h5 id="arguments-3"><a class="doc-anchor" href="#arguments-3">§</a>Arguments</h5>
+<ul>
+<li><code>origin</code>      — Local input buffer (read-only).</li>
+<li><code>result</code>      — Local destination for the pre-update remote value,
+as long as <code>origin</code>.</li>
+<li><code>target_rank</code> — Target rank (0-based, within this window’s
+communicator).</li>
+<li><code>target_disp</code> — Displacement at the target, measured in units of
+<code>disp_unit</code> (i.e., multiples of <code>size_of::&lt;T&gt;()</code>).</li>
+<li><code>op</code>          — Reduction operation to apply.</li>
+</ul>
+<h5 id="errors-4"><a class="doc-anchor" href="#errors-4">§</a>Errors</h5>
+<ul>
+<li><a href="enum.Error.html#variant.InvalidArgument" title="variant ferrompi::Error::InvalidArgument"><code>Error::InvalidArgument</code></a> with <code>arg: "op"</code> — if <code>op</code> is a predefined
+op MPI does not define on <code>T</code> (a bitwise or logical op on
+<code>f32</code>/<code>f64</code>); no MPI call is made.</li>
+<li><a href="enum.Error.html#variant.InvalidArgument" title="variant ferrompi::Error::InvalidArgument"><code>Error::InvalidArgument</code></a> — if <code>target_rank</code> is not a rank of the
+window’s communicator (including -1) or of the epoch’s access set
+(<code>arg: "target_rank"</code>), <code>target_disp</code> is negative, or the access does
+not fit in the target rank’s window; no MPI call is made.</li>
+<li><a href="enum.Error.html#variant.BufferSize" title="variant ferrompi::Error::BufferSize"><code>Error::BufferSize</code></a> with <code>arg: "result"</code> — if <code>result</code> is not as
+long as <code>origin</code>; no MPI call is made.</li>
+<li><a href="enum.Error.html#variant.Finalized" title="variant ferrompi::Error::Finalized"><code>Error::Finalized</code></a> — once <a href="struct.Mpi.html" title="struct ferrompi::Mpi"><code>Mpi</code></a> is being dropped.</li>
+<li><a href="enum.Error.html#variant.Mpi" title="variant ferrompi::Error::Mpi"><code>Error::Mpi</code></a> — if <code>MPI_Get_accumulate</code> fails for any other reason;
+on MPI before 4.0 this includes class <code>Count</code> for an <code>origin</code> of more
+than <code>i32::MAX</code> elements.</li>
+</ul>
+<h5 id="example-3"><a class="doc-anchor" href="#example-3">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
+
+<span class="kw">fn </span>main() -&gt; ferrompi::Result&lt;()&gt; {
+    <span class="kw">let </span>mpi = Mpi::init()<span class="question-mark">?</span>;
+    <span class="kw">let </span>world = mpi.world();
+    <span class="kw">let </span><span class="kw-2">mut </span>win = Win::&lt;i32&gt;::allocate(<span class="kw-2">&amp;</span>world, <span class="number">4</span>)<span class="question-mark">?</span>;
+    <span class="kw">let </span>origin = [<span class="number">1i32</span>, <span class="number">2</span>, <span class="number">3</span>, <span class="number">4</span>];
+    <span class="kw">let </span><span class="kw-2">mut </span>result = [<span class="number">0i32</span>; <span class="number">4</span>];
+
+    <span class="comment">// Rank 1 initialises its window
+    </span><span class="kw">if </span>world.rank() == <span class="number">1 </span>{
+        win.local().copy_from_slice(<span class="kw-2">&amp;</span>[<span class="number">10</span>, <span class="number">20</span>, <span class="number">30</span>, <span class="number">40</span>]);
+    }
+
+    <span class="comment">// `origin` and `result` are declared before the epoch: MPI uses them
+    // until the closing fence returns
+    </span>win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+        <span class="comment">// Rank 0 atomically fetches rank 1's values and adds [1, 2, 3, 4]
+        </span><span class="kw">if </span>world.rank() == <span class="number">0 </span>{
+            e.get_accumulate(<span class="kw-2">&amp;</span>origin, <span class="kw-2">&amp;mut </span>result, <span class="number">1</span>, <span class="number">0</span>, ReduceOp::Sum)<span class="question-mark">?</span>;
+        }
+        <span class="prelude-val">Ok</span>(())
+    })<span class="question-mark">?</span>;
+
+    <span class="comment">// The epoch is closed: rank 0 holds the values from before the update,
+    // and rank 1's window holds the sums
+    </span><span class="kw">if </span>world.rank() == <span class="number">0 </span>{
+        <span class="macro">assert_eq!</span>(result, [<span class="number">10</span>, <span class="number">20</span>, <span class="number">30</span>, <span class="number">40</span>]);
+    }
+    <span class="kw">if </span>world.rank() == <span class="number">1 </span>{
+        <span class="kw">let </span><span class="kw-2">mut </span>seen = [<span class="number">0i32</span>; <span class="number">4</span>];
+        win.local().copy_to_slice(<span class="kw-2">&amp;mut </span>seen);
+        <span class="macro">assert_eq!</span>(seen, [<span class="number">11</span>, <span class="number">22</span>, <span class="number">33</span>, <span class="number">44</span>]);
+    }
+    <span class="prelude-val">Ok</span>(())
+}
+<span class="comment">// mpi-test: np=2 release</span></code></pre></div></div></details><details class="toggle method-toggle" open><summary><section id="method.fetch_and_op" class="method"><a class="src rightside" href="../src/ferrompi/window.rs.html#2179-2194">Source</a><h4 class="code-header">pub fn <a href="#method.fetch_and_op" class="fn">fetch_and_op</a>(
+    &amp;self,
+    origin: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.reference.html">&amp;'s T</a>,
+    result: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.reference.html">&amp;'s mut T</a>,
+    target_rank: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i32.html">i32</a>,
+    target_disp: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i64.html">i64</a>,
+    op: impl <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html" title="trait core::convert::Into">Into</a>&lt;<a class="struct" href="struct.FetchOp.html" title="struct ferrompi::FetchOp">FetchOp</a>&gt;,
+) -&gt; <a class="type" href="type.Result.html" title="type ferrompi::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Single-element atomic fetch-and-update: fetch the pre-update remote
+value into <code>result</code>, then apply <code>op(origin, target_old)</code> at the target,
+atomically with respect to other accumulate operations on that location
+(MPI-4.1 §12.7.1).</p>
+<p>Wraps <code>MPI_Fetch_and_op</code>. Restricted to predefined MPI datatypes (no
+derived or custom datatypes); the <code>T: MpiDatatype</code> bound enforces this at
+compile time. The operation is posted at once, but <code>result</code> holds the
+fetched value only after the epoch’s closing call returns, and the update
+is visible at the target once the target’s own closing call returns.
+<code>result</code> stays borrowed until then: read it after the closure returns.</p>
+<p><code>op</code> is a <a href="enum.ReduceOp.html" title="enum ferrompi::ReduceOp"><code>ReduceOp</code></a>, <a href="struct.FetchOp.html#associatedconstant.NO_OP" title="associated constant ferrompi::FetchOp::NO_OP"><code>FetchOp::NO_OP</code></a> (an atomic
+get, which ignores <code>origin</code>’s value) or <a href="struct.FetchOp.html#associatedconstant.REPLACE" title="associated constant ferrompi::FetchOp::REPLACE"><code>FetchOp::REPLACE</code></a> (a swap); a
+user op is not accepted (MPI-4.1 §12.3.4). Concurrent accumulates to one
+target location must use the same op or <code>MPI_NO_OP</code>, as for
+<a href="struct.ActiveEpoch.html#method.accumulate" title="method ferrompi::ActiveEpoch::accumulate"><code>accumulate</code></a> (MPI-4.1 §12.2.1).</p>
+<h5 id="arguments-4"><a class="doc-anchor" href="#arguments-4">§</a>Arguments</h5>
+<ul>
+<li><code>origin</code>      — The value to combine with the remote element.</li>
+<li><code>result</code>      — Local destination for the pre-update remote value.</li>
+<li><code>target_rank</code> — Target rank (0-based, within this window’s
+communicator).</li>
+<li><code>target_disp</code> — Displacement at the target, measured in units of
+<code>disp_unit</code> (i.e., multiples of <code>size_of::&lt;T&gt;()</code>).</li>
+<li><code>op</code>          — Reduction operation to apply.</li>
+</ul>
+<h5 id="errors-5"><a class="doc-anchor" href="#errors-5">§</a>Errors</h5>
+<ul>
+<li><a href="enum.Error.html#variant.InvalidArgument" title="variant ferrompi::Error::InvalidArgument"><code>Error::InvalidArgument</code></a> with <code>arg: "op"</code> — if <code>op</code> is a predefined
+op MPI does not define on <code>T</code> (a bitwise or logical op on
+<code>f32</code>/<code>f64</code>); no MPI call is made.</li>
+<li><a href="enum.Error.html#variant.InvalidArgument" title="variant ferrompi::Error::InvalidArgument"><code>Error::InvalidArgument</code></a> — if <code>target_rank</code> is not a rank of the
+window’s communicator (including -1) or of the epoch’s access set
+(<code>arg: "target_rank"</code>), <code>target_disp</code> is negative, or the access does
+not fit in the target rank’s window; no MPI call is made.</li>
+<li><a href="enum.Error.html#variant.Finalized" title="variant ferrompi::Error::Finalized"><code>Error::Finalized</code></a> — once <a href="struct.Mpi.html" title="struct ferrompi::Mpi"><code>Mpi</code></a> is being dropped.</li>
+<li><a href="enum.Error.html#variant.Mpi" title="variant ferrompi::Error::Mpi"><code>Error::Mpi</code></a> — if <code>MPI_Fetch_and_op</code> fails for any other reason.</li>
+</ul>
+<p>A call refused before MPI runs writes nothing into <code>result</code>, which
+stays borrowed until the epoch closes. After <a href="enum.Error.html#variant.Mpi" title="variant ferrompi::Error::Mpi"><code>Error::Mpi</code></a>, <code>result</code>
+holds an unspecified value (MPI-4.1 §9.4).</p>
+<h5 id="example-4"><a class="doc-anchor" href="#example-4">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
+
+<span class="kw">let </span>mpi = Mpi::init().unwrap();
+<span class="kw">let </span>world = mpi.world();
+<span class="kw">let </span><span class="kw-2">mut </span>win = Win::&lt;i32&gt;::allocate(<span class="kw-2">&amp;</span>world, <span class="number">1</span>).unwrap();
+
+<span class="comment">// Rank 1 initialises its window slot 0 to 100
+</span><span class="kw">if </span>world.rank() == <span class="number">1 </span>{
+    win.local().write(<span class="number">0</span>, <span class="number">100</span>);
+}
+
+<span class="comment">// `origin` and `old` are declared before the epoch: MPI uses them until
+// the closing fence returns
+</span><span class="kw">let </span>origin = <span class="number">1i32</span>;
+<span class="kw">let </span><span class="kw-2">mut </span>old = <span class="number">0i32</span>;
+win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+    <span class="comment">// Rank 0 atomically adds 1 to rank 1's slot 0 and fetches the old value
+    </span><span class="kw">if </span>world.rank() == <span class="number">0 </span>{
+        e.fetch_and_op(<span class="kw-2">&amp;</span>origin, <span class="kw-2">&amp;mut </span>old, <span class="number">1</span>, <span class="number">0</span>, ReduceOp::Sum)<span class="question-mark">?</span>;
+    }
+    <span class="prelude-val">Ok</span>(())
+})
+.unwrap();
+
+<span class="comment">// The epoch is closed: old is now valid
+</span><span class="kw">if </span>world.rank() == <span class="number">0 </span>{
+    <span class="macro">assert_eq!</span>(old, <span class="number">100</span>); <span class="comment">// pre-update value; rank 1's slot 0 is now 101
+</span>}</code></pre></div></div></details></div></details><details class="toggle implementors-toggle" open><summary><section id="impl-ActiveEpoch%3C's,+'_,+T%3E-1" class="impl"><a class="src rightside" href="../src/ferrompi/window.rs.html#2197-2298">Source</a><a href="#impl-ActiveEpoch%3C's,+'_,+T%3E-1" class="anchor">§</a><h3 class="code-header">impl&lt;'s, T: <a class="trait" href="trait.AtomicMpiDatatype.html" title="trait ferrompi::AtomicMpiDatatype">AtomicMpiDatatype</a> + <a class="trait" href="trait.MpiDatatype.html" title="trait ferrompi::MpiDatatype">MpiDatatype</a>&gt; <a class="struct" href="struct.ActiveEpoch.html" title="struct ferrompi::ActiveEpoch">ActiveEpoch</a>&lt;'s, '_, T&gt;</h3></section></summary><div class="impl-items"><details class="toggle method-toggle" open><summary><section id="method.compare_and_swap" class="method"><a class="src rightside" href="../src/ferrompi/window.rs.html#2276-2297">Source</a><h4 class="code-header">pub fn <a href="#method.compare_and_swap" class="fn">compare_and_swap</a>(
+    &amp;self,
+    origin: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.reference.html">&amp;'s T</a>,
+    compare: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.reference.html">&amp;'s T</a>,
+    result: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.reference.html">&amp;'s mut T</a>,
+    target_rank: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i32.html">i32</a>,
+    target_disp: <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.i64.html">i64</a>,
+) -&gt; <a class="type" href="type.Result.html" title="type ferrompi::Result">Result</a>&lt;<a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.unit.html">()</a>&gt;</h4></section></summary><div class="docblock"><p>Single-element atomic compare-and-swap: replace the remote element with
+<code>origin</code> if it equals <code>compare</code>, and fetch the pre-swap remote value into
+<code>result</code>.</p>
+<p>Wraps <code>MPI_Compare_and_swap</code>. <code>result</code> is <strong>always</strong> the pre-swap remote
+value, whether or not the swap happened; the swap happened if <code>result</code>
+equals <code>compare</code>. The operation is posted at once, but <code>result</code> holds
+that value only after the epoch’s closing call returns, and the update is
+visible at the target once the target’s own closing call returns.
+<code>result</code> stays borrowed until then: read it after the closure returns.</p>
+<p>This method exists only for the integer and byte types of
+<a href="trait.AtomicMpiDatatype.html" title="trait ferrompi::AtomicMpiDatatype"><code>AtomicMpiDatatype</code></a>, the ones MPI-4.1 §12.3.4 allows, so <code>f32</code> and
+<code>f64</code> are excluded.</p>
+<h5 id="arguments-5"><a class="doc-anchor" href="#arguments-5">§</a>Arguments</h5>
+<ul>
+<li><code>origin</code>      — The new value to swap in if <code>compare</code> matches the
+remote element.</li>
+<li><code>compare</code>     — The expected current remote value. The swap occurs
+only if <code>remote_value == compare</code>.</li>
+<li><code>result</code>      — Local destination for the pre-swap remote value.</li>
+<li><code>target_rank</code> — Target rank (0-based, within this window’s
+communicator).</li>
+<li><code>target_disp</code> — Displacement at the target, measured in units of
+<code>disp_unit</code> (i.e., multiples of <code>size_of::&lt;T&gt;()</code>).</li>
+</ul>
+<h5 id="errors-6"><a class="doc-anchor" href="#errors-6">§</a>Errors</h5>
+<ul>
+<li><a href="enum.Error.html#variant.InvalidArgument" title="variant ferrompi::Error::InvalidArgument"><code>Error::InvalidArgument</code></a> — if <code>target_rank</code> is not a rank of the
+window’s communicator (including -1) or of the epoch’s access set
+(<code>arg: "target_rank"</code>), <code>target_disp</code> is negative, or the access does
+not fit in the target rank’s window; no MPI call is made.</li>
+<li><a href="enum.Error.html#variant.Finalized" title="variant ferrompi::Error::Finalized"><code>Error::Finalized</code></a> — once <a href="struct.Mpi.html" title="struct ferrompi::Mpi"><code>Mpi</code></a> is being dropped.</li>
+<li><a href="enum.Error.html#variant.Mpi" title="variant ferrompi::Error::Mpi"><code>Error::Mpi</code></a> — if <code>MPI_Compare_and_swap</code> fails (for example, the MPI
+version is below 3).</li>
+</ul>
+<p>A call refused before MPI runs writes nothing into <code>result</code>, which
+stays borrowed until the epoch closes. After <a href="enum.Error.html#variant.Mpi" title="variant ferrompi::Error::Mpi"><code>Error::Mpi</code></a>, <code>result</code>
+holds an unspecified value (MPI-4.1 §9.4).</p>
+<h5 id="example-5"><a class="doc-anchor" href="#example-5">§</a>Example</h5>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::{Mpi, Win, WinFenceAssert};
+
+<span class="kw">let </span>mpi = Mpi::init().unwrap();
+<span class="kw">let </span>world = mpi.world();
+<span class="kw">let </span><span class="kw-2">mut </span>win = Win::&lt;i32&gt;::allocate(<span class="kw-2">&amp;</span>world, <span class="number">1</span>).unwrap();
+
+<span class="comment">// Rank 1 initialises its window slot 0 to 100
+</span><span class="kw">if </span>world.rank() == <span class="number">1 </span>{
+    win.local().write(<span class="number">0</span>, <span class="number">100</span>);
+}
+
+<span class="comment">// `new_value`, `expected` and `old` are declared before the epoch: MPI
+// uses them until the closing fence returns
+</span><span class="kw">let </span>new_value = <span class="number">200i32</span>;
+<span class="kw">let </span>expected = <span class="number">100i32</span>;
+<span class="kw">let </span><span class="kw-2">mut </span>old = <span class="number">0i32</span>;
+win.fence(WinFenceAssert::none(), WinFenceAssert::none(), |e| {
+    <span class="comment">// Rank 0: swap in 200 only if rank 1's slot 0 is 100
+    </span><span class="kw">if </span>world.rank() == <span class="number">0 </span>{
+        e.compare_and_swap(<span class="kw-2">&amp;</span>new_value, <span class="kw-2">&amp;</span>expected, <span class="kw-2">&amp;mut </span>old, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+    }
+    <span class="prelude-val">Ok</span>(())
+})
+.unwrap();
+
+<span class="comment">// The epoch is closed: old is now valid
+</span><span class="kw">if </span>world.rank() == <span class="number">0 </span>{
+    <span class="macro">assert_eq!</span>(old, <span class="number">100</span>); <span class="comment">// pre-swap value; rank 1's slot 0 is now 200
+    </span><span class="kw">let </span>swapped = old == expected;
+    <span class="macro">assert!</span>(swapped);
+}</code></pre></div></div></details></div></details></div><h2 id="synthetic-implementations" class="section-header">Auto Trait Implementations<a href="#synthetic-implementations" class="anchor">§</a></h2><div id="synthetic-implementations-list"><section id="impl-RefUnwindSafe-for-ActiveEpoch%3C's,+'env,+T%3E" class="impl"><a href="#impl-RefUnwindSafe-for-ActiveEpoch%3C's,+'env,+T%3E" class="anchor">§</a><h3 class="code-header">impl&lt;'s, 'env, T&gt; !<a class="trait" href="https://doc.rust-lang.org/nightly/core/panic/unwind_safe/trait.RefUnwindSafe.html" title="trait core::panic::unwind_safe::RefUnwindSafe">RefUnwindSafe</a> for <a class="struct" href="struct.ActiveEpoch.html" title="struct ferrompi::ActiveEpoch">ActiveEpoch</a>&lt;'s, 'env, T&gt;</h3></section><section id="impl-Send-for-ActiveEpoch%3C's,+'env,+T%3E" class="impl"><a href="#impl-Send-for-ActiveEpoch%3C's,+'env,+T%3E" class="anchor">§</a><h3 class="code-header">impl&lt;'s, 'env, T&gt; !<a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Send.html" title="trait core::marker::Send">Send</a> for <a class="struct" href="struct.ActiveEpoch.html" title="struct ferrompi::ActiveEpoch">ActiveEpoch</a>&lt;'s, 'env, T&gt;</h3></section><section id="impl-Sync-for-ActiveEpoch%3C's,+'env,+T%3E" class="impl"><a href="#impl-Sync-for-ActiveEpoch%3C's,+'env,+T%3E" class="anchor">§</a><h3 class="code-header">impl&lt;'s, 'env, T&gt; !<a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Sync.html" title="trait core::marker::Sync">Sync</a> for <a class="struct" href="struct.ActiveEpoch.html" title="struct ferrompi::ActiveEpoch">ActiveEpoch</a>&lt;'s, 'env, T&gt;</h3></section><section id="impl-UnwindSafe-for-ActiveEpoch%3C's,+'env,+T%3E" class="impl"><a href="#impl-UnwindSafe-for-ActiveEpoch%3C's,+'env,+T%3E" class="anchor">§</a><h3 class="code-header">impl&lt;'s, 'env, T&gt; !<a class="trait" href="https://doc.rust-lang.org/nightly/core/panic/unwind_safe/trait.UnwindSafe.html" title="trait core::panic::unwind_safe::UnwindSafe">UnwindSafe</a> for <a class="struct" href="struct.ActiveEpoch.html" title="struct ferrompi::ActiveEpoch">ActiveEpoch</a>&lt;'s, 'env, T&gt;</h3></section><section id="impl-Freeze-for-ActiveEpoch%3C's,+'env,+T%3E" class="impl"><a href="#impl-Freeze-for-ActiveEpoch%3C's,+'env,+T%3E" class="anchor">§</a><h3 class="code-header">impl&lt;'s, 'env, T&gt; <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Freeze.html" title="trait core::marker::Freeze">Freeze</a> for <a class="struct" href="struct.ActiveEpoch.html" title="struct ferrompi::ActiveEpoch">ActiveEpoch</a>&lt;'s, 'env, T&gt;<div class="where">where
+    &amp;'s <a class="struct" href="struct.Win.html" title="struct ferrompi::Win">Win</a>&lt;T&gt;: <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Freeze.html" title="trait core::marker::Freeze">Freeze</a>,</div></h3></section><section id="impl-Unpin-for-ActiveEpoch%3C's,+'env,+T%3E" class="impl"><a href="#impl-Unpin-for-ActiveEpoch%3C's,+'env,+T%3E" class="anchor">§</a><h3 class="code-header">impl&lt;'s, 'env, T&gt; <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Unpin.html" title="trait core::marker::Unpin">Unpin</a> for <a class="struct" href="struct.ActiveEpoch.html" title="struct ferrompi::ActiveEpoch">ActiveEpoch</a>&lt;'s, 'env, T&gt;<div class="where">where
+    &amp;'s <a class="struct" href="struct.Win.html" title="struct ferrompi::Win">Win</a>&lt;T&gt;: <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Unpin.html" title="trait core::marker::Unpin">Unpin</a>,</div></h3></section><section id="impl-UnsafeUnpin-for-ActiveEpoch%3C's,+'env,+T%3E" class="impl"><a href="#impl-UnsafeUnpin-for-ActiveEpoch%3C's,+'env,+T%3E" class="anchor">§</a><h3 class="code-header">impl&lt;'s, 'env, T&gt; <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.UnsafeUnpin.html" title="trait core::marker::UnsafeUnpin">UnsafeUnpin</a> for <a class="struct" href="struct.ActiveEpoch.html" title="struct ferrompi::ActiveEpoch">ActiveEpoch</a>&lt;'s, 'env, T&gt;<div class="where">where
+    &amp;'s <a class="struct" href="struct.Win.html" title="struct ferrompi::Win">Win</a>&lt;T&gt;: <a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.UnsafeUnpin.html" title="trait core::marker::UnsafeUnpin">UnsafeUnpin</a>,</div></h3></section></div><h2 id="blanket-implementations" class="section-header">Blanket Implementations<a href="#blanket-implementations" class="anchor">§</a></h2><div id="blanket-implementations-list"><details class="toggle implementors-toggle"><summary><section id="impl-Any-for-T" class="impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/any.rs.html#142">Source</a><a href="#impl-Any-for-T" class="anchor">§</a><h3 class="code-header">impl&lt;T&gt; <a class="trait" href="https://doc.rust-lang.org/nightly/core/any/trait.Any.html" title="trait core::any::Any">Any</a> for T<div class="where">where
+    T: 'static + ?<a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a>,</div></h3></section></summary><div class="impl-items"><details class="toggle method-toggle" open><summary><section id="method.type_id" class="method trait-impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/any.rs.html#143">Source</a><a href="#method.type_id" class="anchor">§</a><h4 class="code-header">fn <a href="https://doc.rust-lang.org/nightly/core/any/trait.Any.html#tymethod.type_id" class="fn">type_id</a>(&amp;self) -&gt; <a class="struct" href="https://doc.rust-lang.org/nightly/core/any/struct.TypeId.html" title="struct core::any::TypeId">TypeId</a></h4></section></summary><div class='docblock'>Gets the <code>TypeId</code> of <code>self</code>. <a href="https://doc.rust-lang.org/nightly/core/any/trait.Any.html#tymethod.type_id">Read more</a></div></details></div></details><details class="toggle implementors-toggle"><summary><section id="impl-Borrow%3CT%3E-for-T" class="impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/borrow.rs.html#212">Source</a><a href="#impl-Borrow%3CT%3E-for-T" class="anchor">§</a><h3 class="code-header">impl&lt;T&gt; <a class="trait" href="https://doc.rust-lang.org/nightly/core/borrow/trait.Borrow.html" title="trait core::borrow::Borrow">Borrow</a>&lt;T&gt; for T<div class="where">where
+    T: ?<a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a>,</div></h3></section></summary><div class="impl-items"><details class="toggle method-toggle" open><summary><section id="method.borrow" class="method trait-impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/borrow.rs.html#214">Source</a><a href="#method.borrow" class="anchor">§</a><h4 class="code-header">fn <a href="https://doc.rust-lang.org/nightly/core/borrow/trait.Borrow.html#tymethod.borrow" class="fn">borrow</a>(&amp;self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.reference.html">&amp;T</a></h4></section></summary><div class='docblock'>Immutably borrows from an owned value. <a href="https://doc.rust-lang.org/nightly/core/borrow/trait.Borrow.html#tymethod.borrow">Read more</a></div></details></div></details><details class="toggle implementors-toggle"><summary><section id="impl-BorrowMut%3CT%3E-for-T" class="impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/borrow.rs.html#221">Source</a><a href="#impl-BorrowMut%3CT%3E-for-T" class="anchor">§</a><h3 class="code-header">impl&lt;T&gt; <a class="trait" href="https://doc.rust-lang.org/nightly/core/borrow/trait.BorrowMut.html" title="trait core::borrow::BorrowMut">BorrowMut</a>&lt;T&gt; for T<div class="where">where
+    T: ?<a class="trait" href="https://doc.rust-lang.org/nightly/core/marker/trait.Sized.html" title="trait core::marker::Sized">Sized</a>,</div></h3></section></summary><div class="impl-items"><details class="toggle method-toggle" open><summary><section id="method.borrow_mut" class="method trait-impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/borrow.rs.html#222">Source</a><a href="#method.borrow_mut" class="anchor">§</a><h4 class="code-header">fn <a href="https://doc.rust-lang.org/nightly/core/borrow/trait.BorrowMut.html#tymethod.borrow_mut" class="fn">borrow_mut</a>(&amp;mut self) -&gt; <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.reference.html">&amp;mut T</a></h4></section></summary><div class='docblock'>Mutably borrows from an owned value. <a href="https://doc.rust-lang.org/nightly/core/borrow/trait.BorrowMut.html#tymethod.borrow_mut">Read more</a></div></details></div></details><details class="toggle implementors-toggle"><summary><section id="impl-From%3CT%3E-for-T" class="impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/convert/mod.rs.html#787">Source</a><a href="#impl-From%3CT%3E-for-T" class="anchor">§</a><h3 class="code-header">impl&lt;T&gt; <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html" title="trait core::convert::From">From</a>&lt;T&gt; for T</h3></section></summary><div class="impl-items"><details class="toggle method-toggle" open><summary><section id="method.from" class="method trait-impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/convert/mod.rs.html#790">Source</a><a href="#method.from" class="anchor">§</a><h4 class="code-header">fn <a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html#tymethod.from" class="fn">from</a>(t: T) -&gt; T</h4></section></summary><div class="docblock"><p>Returns the argument unchanged.</p>
+</div></details></div></details><details class="toggle implementors-toggle"><summary><section id="impl-Into%3CU%3E-for-T" class="impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/convert/mod.rs.html#769-771">Source</a><a href="#impl-Into%3CU%3E-for-T" class="anchor">§</a><h3 class="code-header">impl&lt;T, U&gt; <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html" title="trait core::convert::Into">Into</a>&lt;U&gt; for T<div class="where">where
+    U: <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html" title="trait core::convert::From">From</a>&lt;T&gt;,</div></h3></section></summary><div class="impl-items"><details class="toggle method-toggle" open><summary><section id="method.into" class="method trait-impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/convert/mod.rs.html#779">Source</a><a href="#method.into" class="anchor">§</a><h4 class="code-header">fn <a href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html#tymethod.into" class="fn">into</a>(self) -&gt; U</h4></section></summary><div class="docblock"><p>Calls <code>U::from(self)</code>.</p>
+<p>That is, this conversion is whatever the implementation of
+<code><a href="https://doc.rust-lang.org/nightly/core/convert/trait.From.html" title="trait core::convert::From">From</a>&lt;T&gt; for U</code> chooses to do.</p>
+</div></details></div></details><details class="toggle implementors-toggle"><summary><section id="impl-TryFrom%3CU%3E-for-T" class="impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/convert/mod.rs.html#814-816">Source</a><a href="#impl-TryFrom%3CU%3E-for-T" class="anchor">§</a><h3 class="code-header">impl&lt;T, U&gt; <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.TryFrom.html" title="trait core::convert::TryFrom">TryFrom</a>&lt;U&gt; for T<div class="where">where
+    U: <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.Into.html" title="trait core::convert::Into">Into</a>&lt;T&gt;,</div></h3></section></summary><div class="impl-items"><details class="toggle" open><summary><section id="associatedtype.Error" class="associatedtype trait-impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/convert/mod.rs.html#818">Source</a><a href="#associatedtype.Error" class="anchor">§</a><h4 class="code-header">type <a href="https://doc.rust-lang.org/nightly/core/convert/trait.TryFrom.html#associatedtype.Error" class="associatedtype">Error</a> = <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.never.html">!</a></h4></section></summary><div class='docblock'>The type returned in the event of a conversion error.</div></details><details class="toggle method-toggle" open><summary><section id="method.try_from" class="method trait-impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/convert/mod.rs.html#821">Source</a><a href="#method.try_from" class="anchor">§</a><h4 class="code-header">fn <a href="https://doc.rust-lang.org/nightly/core/convert/trait.TryFrom.html#tymethod.try_from" class="fn">try_from</a>(value: U) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;T, <a class="primitive" href="https://doc.rust-lang.org/nightly/std/primitive.never.html">!</a>&gt;</h4></section></summary><div class='docblock'>Performs the conversion.</div></details></div></details><details class="toggle implementors-toggle"><summary><section id="impl-TryInto%3CU%3E-for-T" class="impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/convert/mod.rs.html#798-800">Source</a><a href="#impl-TryInto%3CU%3E-for-T" class="anchor">§</a><h3 class="code-header">impl&lt;T, U&gt; <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.TryInto.html" title="trait core::convert::TryInto">TryInto</a>&lt;U&gt; for T<div class="where">where
+    U: <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.TryFrom.html" title="trait core::convert::TryFrom">TryFrom</a>&lt;T&gt;,</div></h3></section></summary><div class="impl-items"><details class="toggle" open><summary><section id="associatedtype.Error-1" class="associatedtype trait-impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/convert/mod.rs.html#802">Source</a><a href="#associatedtype.Error-1" class="anchor">§</a><h4 class="code-header">type <a href="https://doc.rust-lang.org/nightly/core/convert/trait.TryInto.html#associatedtype.Error" class="associatedtype">Error</a> = &lt;U as <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.TryFrom.html" title="trait core::convert::TryFrom">TryFrom</a>&lt;T&gt;&gt;::<a class="associatedtype" href="https://doc.rust-lang.org/nightly/core/convert/trait.TryFrom.html#associatedtype.Error" title="type core::convert::TryFrom::Error">Error</a></h4></section></summary><div class='docblock'>The type returned in the event of a conversion error.</div></details><details class="toggle method-toggle" open><summary><section id="method.try_into" class="method trait-impl"><a class="src rightside" href="https://doc.rust-lang.org/nightly/src/core/convert/mod.rs.html#805">Source</a><a href="#method.try_into" class="anchor">§</a><h4 class="code-header">fn <a href="https://doc.rust-lang.org/nightly/core/convert/trait.TryInto.html#tymethod.try_into" class="fn">try_into</a>(self) -&gt; <a class="enum" href="https://doc.rust-lang.org/nightly/core/result/enum.Result.html" title="enum core::result::Result">Result</a>&lt;U, &lt;U as <a class="trait" href="https://doc.rust-lang.org/nightly/core/convert/trait.TryFrom.html" title="trait core::convert::TryFrom">TryFrom</a>&lt;T&gt;&gt;::<a class="associatedtype" href="https://doc.rust-lang.org/nightly/core/convert/trait.TryFrom.html#associatedtype.Error" title="type core::convert::TryFrom::Error">Error</a>&gt;</h4></section></summary><div class='docblock'>Performs the conversion.</div></details></div></details></div></section></div></main></body></html>

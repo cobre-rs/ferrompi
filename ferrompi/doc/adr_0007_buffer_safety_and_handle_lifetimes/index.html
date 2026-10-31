@@ -1,0 +1,148 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="ADR-0007: Buffer Safety and Handle Lifetimes"><title>ferrompi::doc::adr_0007_buffer_safety_and_handle_lifetimes - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-009149e2.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.101.0-nightly (92b5b8c87 2026-10-29)" data-channel="nightly" data-search-js="search-835b9732.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-9b351432.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module adr_0007_buffer_safety_and_handle_lifetimes</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../ferrompi/index.html">ferrompi</a><span class="version">0.7.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module adr_<wbr>0007_<wbr>buffer_<wbr>safety_<wbr>and_<wbr>handle_<wbr>lifetimes</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#adr-0007-buffer-safety-and-handle-lifetimes" title="ADR-0007: Buffer Safety and Handle Lifetimes">ADR-0007: Buffer Safety and Handle Lifetimes</a><ul><li><a href="#context" title="Context">Context</a></li><li><a href="#decision" title="Decision">Decision</a></li><li><a href="#consequences" title="Consequences">Consequences</a></li><li><a href="#alternatives-considered" title="Alternatives considered">Alternatives considered</a></li><li><a href="#status" title="Status">Status</a></li></ul></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In ferrompi::<wbr>doc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">ferrompi</a>::<wbr><a href="../index.html">doc</a></div><h1>Module <span>adr_<wbr>0007_<wbr>buffer_<wbr>safety_<wbr>and_<wbr>handle_<wbr>lifetimes</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/ferrompi/doc.rs.html#46">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="adr-0007-buffer-safety-and-handle-lifetimes"><a class="doc-anchor" href="#adr-0007-buffer-safety-and-handle-lifetimes">§</a>ADR-0007: Buffer Safety and Handle Lifetimes</h2>
+<p><strong>Status:</strong> Accepted — 2026-10-29
+<strong>Date:</strong> 2026-10-29
+<strong>Deciders:</strong> Rogerio Alves
+<strong>Supersedes:</strong> the buffer-lifetime invariants of ADR-0004 (<code>docs/adr/0004-persistent-collective-approach.md</code>) and its argument against lifetime-bound requests</p>
+<h3 id="context"><a class="doc-anchor" href="#context">§</a>Context</h3>
+<p>MPI reads and writes the memory a nonblocking call names until the request completes
+(MPI-4.1 §3.7). Rust’s borrow checker knows nothing about that. In 0.6 safe code could
+leave a buffer in use by MPI in four ways:</p>
+<ul>
+<li>forget a nonblocking <code>Request</code>: <code>std::mem::forget</code> ends the buffer’s borrow while MPI
+keeps writing to the buffer;</li>
+<li>borrow a persistent request’s buffer for a lifetime that <code>std::mem::forget</code> could end;</li>
+<li>borrow a window’s buffer through <code>Win&lt;'a, T&gt;</code>;</li>
+<li>forget an RMA lock guard, so the closing <code>MPI_Win_unlock</code> never ran.</li>
+</ul>
+<p>A borrow alone cannot make a nonblocking buffer sound, because a borrow ends when the
+borrowing value is forgotten, not when MPI stops using the memory. Soundness needs an
+owner that outlives the operation, or a scope that cannot be left before the operation
+completes.</p>
+<p>ADR-0004 rejected lifetime-bound persistent
+requests (its Option C) with two arguments: the lifetime parameter spreads through every
+type that holds a request, and a single lifetime cannot describe a collective with
+separate send and receive buffers. The second argument does not hold. One lifetime can
+bound several borrows in one signature (<code>&amp;'a [T]</code> and <code>&amp;'a mut [T]</code>), and a lifetime
+limits how long a borrow lasts, not what it points to. The first argument concerns
+handles that live as long as the program, which is a real cost, but not one that a
+scope-shaped borrow has.</p>
+<p>The 0.6 audit proposed a lifetime parameter on every handle to tie it to <code>Mpi</code>. A
+long-lived struct that owns <code>Mpi</code> together with its communicators and windows compiles
+only if handles carry no borrow of <code>Mpi</code>, and that struct is the shape of a solver
+(<code>examples/sddp_pattern.rs</code>).</p>
+<h3 id="decision"><a class="doc-anchor" href="#decision">§</a>Decision</h3>
+<ol>
+<li>
+<p><strong>Nonblocking operations run inside a scope.</strong> <code>ferrompi::scope(|s| ...)</code> is shaped
+like <code>std::thread::scope</code>: <code>Scope&lt;'s, 'env&gt;</code> is invariant in its lifetimes. The
+constructors stay <code>Communicator</code> methods, take <code>s</code> first and borrow their buffers for
+<code>'s</code>. <code>Request&lt;'s&gt;</code> has no <code>Drop</code> and is not <code>Send</code>. <code>Request::wait</code> returns <code>Status</code>
+and <code>Request::test</code> returns <code>Option&lt;Status&gt;</code>. The scope returns, or continues
+unwinding, only when no request is pending: its end runs <code>MPI_Waitall</code> on every live
+request, and waits again on the requests MPI reports as <code>MPI_ERR_PENDING</code>. If it
+cannot establish that every request completed, it prints a message and aborts the
+process, because the <code>'env</code> borrows cannot be leaked. The guarantee: a buffer lent to
+a nonblocking call stays borrowed until its request completes, and forgetting a
+<code>Request</code> does not end the borrow early because the scope, not the request, completes
+it.</p>
+</li>
+<li>
+<p><strong>A persistent request owns its buffers.</strong> <code>PersistentRequest&lt;T&gt;</code> holds one or two
+<code>Vec&lt;T&gt;</code> and gives access to them only while it is inactive: the accessors return
+<code>Error::InvalidState</code> while it is active. <code>into_buffer</code> returns the buffer, waiting
+first if the request is active; a <code>PersistentRequest</code> dropped while active waits
+before <code>MPI_Request_free</code>. It holds an in-flight token from <code>start</code> to completion
+and stays <code>Send</code>. When it is dropped after a skipped <code>MPI_Finalize</code>, it leaks the
+request handle, and while active its buffers too. <code>start_all</code> and <code>wait_all</code> take
+requests of one <code>T</code>. The guarantee: the memory MPI uses cannot be freed or aliased
+while the request is active, and no lifetime appears on the type.</p>
+</li>
+<li>
+<p><strong>A window owns its buffer.</strong> <code>Win&lt;T&gt;</code> has no lifetime. <code>Win::create</code> takes a
+<code>Vec&lt;T&gt;</code>, and the collective <code>into_buffer</code> returns it. The buffer is released only
+after a successful <code>MPI_Win_free</code>, and is leaked whenever the free is skipped or
+fails. The guarantee: no safe code can free a window’s memory while MPI can still
+address it.</p>
+</li>
+<li>
+<p><strong>Epochs are closures.</strong> <code>Win::fence</code>, <code>Win::start</code> (the PSCW access epoch),
+<code>Win::lock</code> and <code>Win::lock_all</code> borrow the window mutably, run a closure that receives
+the epoch handle, and always issue the closing call. The epoch handles, <code>ActiveEpoch</code>
+and <code>PassiveEpoch</code>, carry the scope’s invariant lifetime, so a transfer’s buffers
+outlive the closing call and must be declared before the epoch call, and a view cannot
+leave its epoch’s closure. Only the passive-target handle carries <code>flush</code>,
+<code>flush_local</code>, <code>sync</code> and request-based RMA, and its requests complete before the
+unlock. The guarantee: an epoch cannot be left open by forgetting a guard, because no
+guard exists.</p>
+</li>
+<li>
+<p><strong>Panics during unwind follow the closing call.</strong> A nonblocking scope waits for its
+outstanding requests while unwinding, as <code>std::thread::scope</code> does. A fence or
+<code>start</code> epoch still open during a panic aborts the process, because its closing call
+is collective or synchronizing and a panicking rank cannot take part in it alone. A
+<code>lock</code> or <code>lock_all</code> closure unwinds after the unlock. All of this relies on
+unwinding: under <code>panic = "abort"</code> the process stops at the panic itself.</p>
+</li>
+<li>
+<p><strong>Handles stay <code>'static</code>, and run-time accounting covers the rest.</strong> <code>Communicator</code>,
+<code>Group</code>, <code>Win</code>, <code>PersistentRequest</code>, <code>CustomDatatype</code> and <code>UserOp</code> carry no <code>'mpi</code>
+lifetime. Only the buffer-safety scopes carry lifetimes. Every method that calls MPI
+passes a lifecycle guard: <code>Error::Finalized</code> after <code>Mpi</code> is dropped, and
+<code>Error::ThreadLevelViolation</code> on a thread the thread level does not allow. A live
+nonblocking scope, an active persistent request and a matched but unreceived
+<code>Message</code> each hold an in-flight token. <code>Mpi</code>’s drop moves to a finalizing state that
+refuses new calls but admits the completion and closing calls, waits for every
+in-flight call, and skips <code>MPI_Finalize</code> while a token or a live window remains. The
+guarantee: a handle that outlives <code>Mpi</code> returns <code>Error::Finalized</code> instead of
+calling MPI, and finalization cannot run under an operation in flight.</p>
+</li>
+</ol>
+<h3 id="consequences"><a class="doc-anchor" href="#consequences">§</a>Consequences</h3>
+<ul>
+<li><strong>The compiler checks:</strong> a buffer is borrowed until its request completes; a
+transfer’s buffers outlive the epoch’s closing call; a view cannot leave its epoch’s
+closure; a handle never borrows <code>Mpi</code>, so owning structs compile.</li>
+<li><strong>Run time checks:</strong> <code>Error::Finalized</code> after <code>Mpi</code> is dropped,
+<code>Error::ThreadLevelViolation</code> on a thread the level does not allow,
+<code>Error::InvalidState</code> for a persistent request’s buffer while it is active, and the
+skipped <code>MPI_Finalize</code> while a token or a window remains. A skipped <code>MPI_Finalize</code>
+leaves the process to exit without finalizing MPI; stderr carries a warning.</li>
+<li><strong>What stays the caller’s:</strong> the zero-copy slice contracts of window memory, which
+ADR-0008 (<code>docs/adr/0008-window-memory-access-model.md</code>) records; the RMA assertions <code>NOPUT</code>,
+<code>NOSTORE</code> and <code>NOCHECK</code> (MPI-4.1 §12.5.5); and a peer that blocks in a collective free
+or a synchronizing close when a rank leaks its window or stops calling MPI.</li>
+<li><strong>Costs:</strong> one in-flight token per scope, per active persistent request and per
+matched message; a scope keeps a 64-slot inline registry before it spills to the heap.
+<code>benches/README.md</code> holds the measured tables.</li>
+<li><strong>Migration:</strong> nonblocking code moves into a scope closure, persistent code reads its
+buffers through the request, and window code takes a <code>Vec&lt;T&gt;</code>. The migration guide
+lists each change.</li>
+<li><strong>ADR-0004</strong> stands for the <code>*_init</code> / <code>start</code> / <code>wait</code> design. Its buffer-lifetime
+invariants and <code>Drop</code> description are those of 0.6.</li>
+</ul>
+<h3 id="alternatives-considered"><a class="doc-anchor" href="#alternatives-considered">§</a>Alternatives considered</h3>
+<ul>
+<li><strong>Option A: a lifetime on every handle</strong> (<code>Communicator&lt;'mpi&gt;</code>, <code>Win&lt;'mpi, T&gt;</code>).
+Rejected: handles would borrow <code>Mpi</code>, so a long-lived struct that owns <code>Mpi</code> and its
+communicators and windows would not compile, and the parameter would spread through
+every type that holds a handle. Run-time guards and in-flight accounting give the same
+protection against use after finalize.</li>
+<li><strong>Option B: <code>unsafe</code> request constructors.</strong> Rejected: they leave the obligation with
+the caller of each constructor and keep every later call on the request safe-looking
+while it depends on that promise. The scope moves the obligation into a single place
+that the compiler checks.</li>
+<li><strong>Option C: RAII guards for requests and epochs, the 0.6 design.</strong> Rejected: a guard
+can be forgotten, and <code>std::mem::forget</code> leaves the buffer in use or the epoch open
+without any signal. Safe code must not be able to cause that.</li>
+<li><strong>Option D: run-time checks alone, without a scope.</strong> Rejected: a check can refuse a
+call, but it cannot stop a buffer from being freed while MPI writes to it. Only
+ownership or a borrow that outlasts the operation can.</li>
+<li><strong>Option E: lifetime-bound persistent requests, ADR-0004’s Option C.</strong> Not taken:
+owning the buffers gives the same guarantee without a lifetime on the type, and
+<code>std::mem::forget</code> on a borrowed request would still end the borrow.</li>
+</ul>
+<h3 id="status"><a class="doc-anchor" href="#status">§</a>Status</h3>
+<p>Accepted — 2026-10-29. The implementation lives in <code>src/scope.rs</code>, <code>src/request.rs</code>,
+<code>src/persistent.rs</code>, <code>src/window.rs</code> and <code>src/message.rs</code>; the run-time accounting of
+Decision 6 lives in <code>src/rt.rs</code> and in <code>Mpi</code>’s drop in <code>src/lib.rs</code>.</p>
+</div></details></section></div></main></body></html>

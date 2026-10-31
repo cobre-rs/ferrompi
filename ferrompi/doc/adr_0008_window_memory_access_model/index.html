@@ -1,0 +1,139 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="ADR-0008: Window Memory Access Model"><title>ferrompi::doc::adr_0008_window_memory_access_model - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-009149e2.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.101.0-nightly (92b5b8c87 2026-10-29)" data-channel="nightly" data-search-js="search-835b9732.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-9b351432.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module adr_0008_window_memory_access_model</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../ferrompi/index.html">ferrompi</a><span class="version">0.7.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module adr_<wbr>0008_<wbr>window_<wbr>memory_<wbr>access_<wbr>model</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#adr-0008-window-memory-access-model" title="ADR-0008: Window Memory Access Model">ADR-0008: Window Memory Access Model</a><ul><li><a href="#context" title="Context">Context</a></li><li><a href="#decision" title="Decision">Decision</a></li><li><a href="#consequences" title="Consequences">Consequences</a></li><li><a href="#alternatives-considered" title="Alternatives considered">Alternatives considered</a></li></ul></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In ferrompi::<wbr>doc</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">ferrompi</a>::<wbr><a href="../index.html">doc</a></div><h1>Module <span>adr_<wbr>0008_<wbr>window_<wbr>memory_<wbr>access_<wbr>model</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/ferrompi/doc.rs.html#49">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="adr-0008-window-memory-access-model"><a class="doc-anchor" href="#adr-0008-window-memory-access-model">§</a>ADR-0008: Window Memory Access Model</h2>
+<p><strong>Status:</strong> Accepted — 2026-10-29
+<strong>Date:</strong> 2026-10-29
+<strong>Deciders:</strong> Rogerio Alves</p>
+<h3 id="context"><a class="doc-anchor" href="#context">§</a>Context</h3>
+<p>Window memory can change while a reference to it lives: a peer’s put or accumulate
+writes it, a peer stores into it through a shared mapping, and a fence lands remote
+writes in it. A safe <code>&amp;[T]</code> or <code>&amp;mut [T]</code> over that memory promises the compiler that
+nothing else writes it, so a release build can hoist a load out of a polling loop and
+never see the peer’s write. The 0.6 accessors did exactly that: <code>Win::local_slice</code>,
+<code>Win::local_slice_mut</code> and the guards of <code>SharedWindow</code>.</p>
+<p>GitHub issue #28 proposed per-region borrow guards on shared windows. It raised the
+whole-window borrow problem, and its point that a remote zero-copy view has to be
+<code>unsafe</code>, because the library cannot verify that the owner stays read-only, is part of
+this design. ADR-0007 (<code>docs/adr/0007-buffer-safety-and-handle-lifetimes.md</code>) records the other
+side of windows, who owns the buffer and how epochs close.</p>
+<p>Two facts from the verification stacks shape the decisions. <code>MPI_Win_allocate_shared</code>,
+<code>MPI_Win_allocate</code> and <code>MPI_Win_create</code> report <code>MPI_WIN_UNIFIED</code> on MPICH 4.2.3, MPICH
+4.2.1 with UCX, Open MPI 4.1.6 and Open MPI 5.0.7, at 2 and 4 ranks. And Open MPI 4.1.6
+aligns the first shared segment to 8 bytes only (8 mod 16 in every run), which is below
+the “any predefined datatype” bound of MPI-4.1 §9.2 (p.447) but enough for every window
+element, whose alignment is at most 8.</p>
+<h3 id="decision"><a class="doc-anchor" href="#decision">§</a>Decision</h3>
+<ol>
+<li>
+<p><strong>A view on every window.</strong> <code>local()</code> exists on every <code>Win</code> and on both epoch
+handles, <code>ActiveEpoch</code> and <code>PassiveEpoch</code>. <code>remote(rank)</code> exists on windows made by
+<code>Win::allocate_shared</code> and on their epoch handles; on any other window it returns
+<code>Error::NotSupported</code>, and no marker type distinguishes the two. Both return
+<code>WinView</code>, which is neither <code>Send</code> nor <code>Sync</code> and claims no exclusivity: <code>write</code>
+takes <code>&amp;self</code>, and views of the local and a remote region coexist. The 0.6
+<code>Win::local_slice</code> and <code>Win::local_slice_mut</code> are gone, and so is <code>SharedWindow</code>.</p>
+</li>
+<li>
+<p><strong>Element access is one <code>Relaxed</code> atomic.</strong> A load or store goes through
+<code>AtomicUN::from_ptr</code>, so a concurrent write by a peer, by MPI or by another view
+never makes an access undefined behaviour. Elements are the <code>MpiDatatype</code> set. A
+compile-time assertion fails the build unless <code>size_of::&lt;T&gt;()</code> is 1, 2, 4 or 8,
+<code>align_of::&lt;T&gt;()</code> is at least the atomic’s alignment, and <code>cfg(target_has_atomic)</code>
+holds for that width. There is no volatile fallback. The bulk copies,
+<code>copy_to_slice</code> and <code>copy_from_slice</code>, go element by element: no tearing between
+views, and the copy as a whole is not atomic. The view panics on an out-of-range
+index or a length mismatch, as slices do. It is the one ferrompi API that panics on
+caller input; every other call returns an <code>Error</code>.</p>
+</li>
+<li>
+<p><strong>Zero-copy slices are <code>unsafe</code> and carry a written contract.</strong> <code>WinView::as_slice</code>
+and <code>WinView::as_mut_slice</code> serve a caller that knows its phase structure. The
+rustdoc of <code>src/window.rs</code> is the normative text; the <code># Safety</code> paragraphs below
+are quoted from it verbatim. For <code>as_slice</code>:</p>
+</li>
+</ol>
+<blockquote>
+<p>No process writes the region by store, put or accumulate while the slice lives, and the writes it must observe were published before it was created, either by a fence or <code>MPI_Win_wait</code> at this process that completed them, or by process synchronization after they completed, then <code>MPI_Win_sync</code> at this process inside a passive-target epoch.</p>
+<p>A store through any view of the region counts, this view’s <code>write</code> and <code>copy_from_slice</code> included: the borrow checker does not stop them while the slice lives.</p>
+</blockquote>
+<p>For <code>as_mut_slice</code>:</p>
+<blockquote>
+<p>No process writes the region by store, put or accumulate while the slice lives, and the writes it must observe were published before it was created, either by a fence or <code>MPI_Win_wait</code> at this process that completed them, or by process synchronization after they completed, then <code>MPI_Win_sync</code> at this process inside a passive-target epoch. No other access to the region, read or write, happens while the slice lives: by any process, by MPI on this process’s behalf, or by any other view or slice in this process, including <code>remote(own rank)</code>, which aliases <code>local()</code>.</p>
+<p>The reasons are those of <code>as_slice</code>, and a <code>&amp;mut [T]</code> must also be unique. Writes through the slice itself, including by an MPI call it is lent to, are the one exception to the first sentence. <code>&amp;mut self</code> enforces uniqueness only against the view it is taken from: another view of the region, or an RMA call that targets this process, is not stopped by it.</p>
+</blockquote>
+<ol start="4">
+<li><strong>Publication is MPI synchronization.</strong> What a reader of a peer’s region may rely on
+is quoted from the rustdoc of <code>Win::remote</code>:</li>
+</ol>
+<blockquote>
+<p>A store, put or accumulate by another process is guaranteed to be visible to this process’s loads of the region only after MPI synchronization; on coherent hardware it may be seen earlier. <code>MPI_Win_wait</code> at this process never publishes a peer’s region: it completes the exposure epoch of this process’s own region. A fence publishes what was written before the previous fence. That fence completes puts and accumulates at the region’s owner, and makes stores to shared memory visible, before it returns there (MPI-4.1 §12.5.1, p.591; §12.7, rule 2, p.606). The next fence synchronizes unless it carries <code>MPI_MODE_NOPRECEDE</code> (p.592), so it returns at this process only after the owner has entered it. Otherwise a reader needs the passive-target route: the writer’s <code>sync</code> after its stores, or its unlock or flush after its puts and accumulates, then process synchronization, then <code>sync</code> at this process inside a passive-target epoch (MPI-4.1 §12.5.4, p.603; the advice to users after rule U5, MPI-4.1 §12.7, p.609; Example 12.23, p.622). The same holds for a slice of the view, <a href="https://docs.rs/ferrompi/latest/ferrompi/struct.WinView.html#method.as_slice"><code>WinView::as_slice</code></a>.</p>
+</blockquote>
+<p>Publishing through a lock on one’s own rank (the “self-lock route”) is deliberately
+outside the contract. Its routes are a fence, <code>MPI_Win_wait</code> at this process, or
+process synchronization followed by <code>MPI_Win_sync</code> inside a passive-target epoch.</p>
+<ol start="5">
+<li>
+<p><strong>Shared windows are ordinary windows.</strong> <code>Win::allocate_shared</code> makes a <code>Win&lt;T&gt;</code>, so
+epochs, views and transfers are one API for every window kind.</p>
+<ul>
+<li>It queries every rank’s base and length once, at creation, with
+<code>MPI_Win_shared_query</code>, so <code>remote</code> makes no MPI call.</li>
+<li>Every rank must pass an element type of one size. A mismatch is refused on every
+rank before any window exists, with <code>Error::InvalidArgument</code> and <code>arg: "T"</code>.</li>
+<li><code>remote</code> returns <code>Error::NotSupported</code> unless MPI reports <code>MPI_WIN_UNIFIED</code>,
+because MPI defines no semantics for direct access to shared window memory in the
+separate model (MPI-4.1 §12.2.3, p.558). <code>local</code> works in either model.</li>
+<li>MPI aligns the first non-empty segment for any predefined datatype and places the
+others after it (MPI-4.1 §9.2, p.447; §12.2.3, p.555-556). Open MPI 4.1.6 meets
+only the 8-byte floor of Context, which suffices because the element assertion of
+item 2 caps element alignment at 8.</li>
+</ul>
+</li>
+<li>
+<p><strong>A publish-then-read-only window is deferred.</strong> A collective freeze after which
+the window yields a safe <code>&amp;[T]</code> would add a read-only phase without the <code>unsafe</code>
+contract. It is not built: no consumer needs it, and adding it later breaks nothing.</p>
+</li>
+</ol>
+<h3 id="consequences"><a class="doc-anchor" href="#consequences">§</a>Consequences</h3>
+<ul>
+<li>Polling a flag is safe: each poll is an atomic load, and the compiler cannot hoist it.</li>
+<li>Indexing and <code>Deref</code> are lost on the safe path. The bulk copies and the <code>unsafe</code>
+slices replace them. The window is stored in long-lived state, and a view or slice is
+derived per phase: a view is a pointer and a length, with no MPI call.</li>
+<li>What a load returns follows MPI’s memory model (MPI-4.1 §12.7). In the unified model
+a load that races a put or accumulate is valid and returns an implementation-dependent
+value, so poll for a change from zero to nonzero, not for a relative magnitude. In the
+separate model this process’s window synchronization calls would access the region on
+its behalf; every verification stack reports the unified model, so <code>remote</code> refuses
+the separate one.</li>
+<li>A process that only polls makes no MPI progress: a peer’s put or accumulate may not
+reach it until it calls MPI (MPI-4.1 §12.7.3, p.615-616).</li>
+<li>The borrow checker enforces little of aliasing: a slice borrows the view it comes
+from, and the view borrows its window or epoch handle, so a slice cannot outlive
+either, and an epoch call, which borrows the window mutably, cannot run while it
+lives. <code>as_mut_slice</code> also stops every other use of its own view. Another view of
+the region, other processes, and RMA calls that target this process are covered
+only by the written contract of item 3.</li>
+</ul>
+<h3 id="alternatives-considered"><a class="doc-anchor" href="#alternatives-considered">§</a>Alternatives considered</h3>
+<ul>
+<li><strong>Option A: safe slice guards over window memory</strong> (issue #28’s <code>SharedArray</code> and
+<code>SharedArrayMut</code>). Rejected: a safe <code>&amp;[T]</code> or <code>&amp;mut [T]</code> over memory that another
+process can write is undefined behaviour the moment a peer writes, whatever the
+in-process borrow state. The local region has the same problem, so it is not a
+shared-window-only fix.</li>
+<li><strong>Option B: per-region <code>RefCell</code> tracking</strong>, also from issue #28. Rejected: a token in
+one process cannot exclude writes by another process, and the view claims no
+exclusivity, so no in-process claim is left to police. A per-access flag would cost
+every access and still leave the cross-process case to a written contract.</li>
+<li><strong>Option C: volatile access.</strong> Rejected: volatile loads and stores are not atomic, so
+a racing write can tear an element and the access is still undefined behaviour in
+Rust. A fallback for elements without a matching atomic would hide that gap, so the
+build fails there instead.</li>
+<li><strong>Option D: a lazy per-rank <code>MPI_Win_shared_query</code> cache.</strong> Rejected: it would make
+<code>remote</code> an MPI call on first use. Creation is already collective over a small
+node-local communicator, and the eager query costs 16 bytes per rank.</li>
+<li><strong>Option E: a marker type for shared windows.</strong> Rejected: a second window type
+splits epochs, views and transfers into two APIs. <code>remote</code> on a window that is not
+shared returns <code>Error::NotSupported</code> instead.</li>
+</ul>
+</div></details></section></div></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cpus_per_task","is_slurm_job","job_id","local_rank","local_size","node_list","node_name","num_nodes"]};

@@ -1,0 +1,181 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Runs `f` with a `Scope`, and returns only when every request created through that scope has completed."><title>scope in ferrompi - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-009149e2.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="ferrompi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.101.0-nightly (92b5b8c87 2026-10-29)" data-channel="nightly" data-search-js="search-835b9732.js" data-stringdex-js="stringdex-b5109af9.js" data-settings-js="settings-9b351432.js" ><script src="../static.files/storage-41dd4d93.js"></script><script defer src="sidebar-items.js"></script><script defer src="../static.files/main-1814ead3.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-9f56287d.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc fn"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">scope</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../ferrompi/index.html">ferrompi</a><span class="version">0.7.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">scope</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#examples" title="Examples">Examples</a></li><li><a href="#compile-time-guarantees" title="Compile-time guarantees">Compile-time guarantees</a></li><li><a href="#panics-and-errors" title="Panics and errors">Panics and errors</a></li><li><a href="#thread-level" title="Thread level">Thread level</a></li><li><a href="#finalize" title="Finalize">Finalize</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="index.html">In crate ferrompi</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="index.html">ferrompi</a></div><h1>Function <span class="fn">scope</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../src/ferrompi/scope.rs.html#351-366">Source</a> </span></div><pre class="rust item-decl"><code>pub fn scope&lt;'env, R&gt;(
+    f: impl for&lt;'s&gt; <a class="trait" href="https://doc.rust-lang.org/nightly/core/ops/function/trait.FnOnce.html" title="trait core::ops::function::FnOnce">FnOnce</a>(&amp;'s <a class="struct" href="struct.Scope.html" title="struct ferrompi::Scope">Scope</a>&lt;'s, 'env&gt;) -&gt; <a class="type" href="type.Result.html" title="type ferrompi::Result">Result</a>&lt;R&gt;,
+) -&gt; <a class="type" href="type.Result.html" title="type ferrompi::Result">Result</a>&lt;R&gt;</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Runs <code>f</code> with a <a href="struct.Scope.html" title="struct ferrompi::Scope"><code>Scope</code></a>, and returns only when every request created
+through that scope has completed.</p>
+<p>Requests are created with the scope as their first argument, for example
+<a href="struct.Communicator.html#method.ibarrier" title="method ferrompi::Communicator::ibarrier"><code>Communicator::ibarrier</code></a>. A request needs
+no completion call of its own: whatever is still pending when <code>f</code> returns
+is completed by the scope, and <code>wait</code>, <code>test</code> and the batch completions are
+for the caller who needs the result earlier. A request belongs to the thread
+that created it.</p>
+<h2 id="examples"><a class="doc-anchor" href="#examples">§</a>Examples</h2>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">use </span>ferrompi::Mpi;
+
+<span class="kw">let </span>mpi = Mpi::init()<span class="question-mark">?</span>;
+<span class="kw">let </span>world = mpi.world();
+
+ferrompi::scope(|s| {
+    <span class="kw">let </span>req = world.ibarrier(s)<span class="question-mark">?</span>;
+    req.wait()<span class="question-mark">?</span>;
+
+    <span class="comment">// Completed when the scope ends.
+    </span>world.ibarrier(s)<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div><h2 id="compile-time-guarantees"><a class="doc-anchor" href="#compile-time-guarantees">§</a>Compile-time guarantees</h2>
+<p>A request borrows its buffers, and a user op, for the scope’s lifetime <code>'s</code>.
+<code>'s</code> is invariant, so the compiler can neither shorten it to end before the
+scope completes the request nor stretch it past the scope. Each program
+below does not compile, and is followed by the same program made correct.</p>
+<p>A buffer declared inside the closure would be freed before the scope’s final
+wait, so the first program is rejected; the second declares the buffer
+outside. The rejection also shows that <code>'s</code> is invariant: were <code>'s</code>
+covariant, the compiler could shorten it to the buffer’s lifetime and accept
+the first program.</p>
+
+<div class="example-wrap compile_fail"><a href="#" class="tooltip" title="This example deliberately fails to compile">ⓘ</a><pre class="rust rust-example-rendered"><code>ferrompi::scope(|s| {
+    <span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0u8</span>; <span class="number">4</span>];
+    world.irecv(s, <span class="kw-2">&amp;mut </span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0u8</span>; <span class="number">4</span>];
+ferrompi::scope(|s| {
+    world.irecv(s, <span class="kw-2">&amp;mut </span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div>
+<p>A buffer cannot be dropped while a request borrows it:</p>
+
+<div class="example-wrap compile_fail"><a href="#" class="tooltip" title="This example deliberately fails to compile">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0u8</span>; <span class="number">4</span>];
+ferrompi::scope(|s| {
+    world.irecv(s, <span class="kw-2">&amp;mut </span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+    drop(buf);
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0u8</span>; <span class="number">4</span>];
+ferrompi::scope(|s| {
+    world.irecv(s, <span class="kw-2">&amp;mut </span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;
+drop(buf);</code></pre></div>
+<p>Nor can a receive buffer be written while a request borrows it:</p>
+
+<div class="example-wrap compile_fail"><a href="#" class="tooltip" title="This example deliberately fails to compile">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0u8</span>; <span class="number">4</span>];
+ferrompi::scope(|s| {
+    world.irecv(s, <span class="kw-2">&amp;mut </span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+    buf[<span class="number">0</span>] = <span class="number">1</span>;
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0u8</span>; <span class="number">4</span>];
+ferrompi::scope(|s| {
+    world.irecv(s, <span class="kw-2">&amp;mut </span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;
+buf[<span class="number">0</span>] = <span class="number">1</span>;</code></pre></div>
+<p>Or read, even after the request was waited, because the borrow lasts until
+the scope returns:</p>
+
+<div class="example-wrap compile_fail"><a href="#" class="tooltip" title="This example deliberately fails to compile">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0u8</span>; <span class="number">4</span>];
+ferrompi::scope(|s| {
+    <span class="kw">let </span>req = world.irecv(s, <span class="kw-2">&amp;mut </span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+    req.wait()<span class="question-mark">?</span>;
+    <span class="kw">let </span>x = buf[<span class="number">0</span>];
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0u8</span>; <span class="number">4</span>];
+ferrompi::scope(|s| {
+    <span class="kw">let </span>req = world.irecv(s, <span class="kw-2">&amp;mut </span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>;
+    req.wait()<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;
+<span class="kw">let </span>x = buf[<span class="number">0</span>];</code></pre></div>
+<p>A request cannot leave the closure, because it borrows the scope:</p>
+
+<div class="example-wrap compile_fail"><a href="#" class="tooltip" title="This example deliberately fails to compile">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0u8</span>; <span class="number">4</span>];
+<span class="kw">let </span><span class="kw-2">mut </span>keep = <span class="prelude-val">None</span>;
+ferrompi::scope(|s| {
+    keep = <span class="prelude-val">Some</span>(world.irecv(s, <span class="kw-2">&amp;mut </span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>);
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span><span class="kw-2">mut </span>buf = <span class="macro">vec!</span>[<span class="number">0u8</span>; <span class="number">4</span>];
+ferrompi::scope(|s| {
+    <span class="kw">let </span><span class="kw-2">mut </span>keep = <span class="prelude-val">None</span>;
+    keep = <span class="prelude-val">Some</span>(world.irecv(s, <span class="kw-2">&amp;mut </span>buf, <span class="number">1</span>, <span class="number">0</span>)<span class="question-mark">?</span>);
+    <span class="kw">if let </span><span class="prelude-val">Some</span>(req) = keep {
+        req.wait()<span class="question-mark">?</span>;
+    }
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div>
+<p>Neither can the scope itself:</p>
+
+<div class="example-wrap compile_fail"><a href="#" class="tooltip" title="This example deliberately fails to compile">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">let </span><span class="kw-2">mut </span>keep = <span class="prelude-val">None</span>;
+ferrompi::scope(|s| {
+    keep = <span class="prelude-val">Some</span>(s);
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code>ferrompi::scope(|s| {
+    <span class="kw">let </span><span class="kw-2">mut </span>keep = <span class="prelude-val">None</span>;
+    keep = <span class="prelude-val">Some</span>(s);
+    <span class="kw">if let </span><span class="prelude-val">Some</span>(s) = keep {
+        world.ibarrier(s)<span class="question-mark">?</span>;
+    }
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div>
+<p>A <a href="struct.UserOp.html" title="struct ferrompi::UserOp"><code>UserOp</code></a> is borrowed by a nonblocking reduction in the
+same way, so the op cannot be dropped while the reduction is pending:</p>
+
+<div class="example-wrap compile_fail"><a href="#" class="tooltip" title="This example deliberately fails to compile">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">let </span>op: UserOp&lt;f64&gt; = UserOp::new(|a: <span class="kw-2">&amp;</span>[f64], b: <span class="kw-2">&amp;mut </span>[f64]| {
+    <span class="kw">for </span>(x, y) <span class="kw">in </span>a.iter().zip(b.iter_mut()) {
+        <span class="kw-2">*</span>y += x;
+    }
+})<span class="question-mark">?</span>;
+<span class="kw">let </span>send = [<span class="number">1.0f64</span>; <span class="number">4</span>];
+<span class="kw">let </span><span class="kw-2">mut </span>recv = [<span class="number">0.0f64</span>; <span class="number">4</span>];
+ferrompi::scope(|s| {
+    world.iallreduce(s, <span class="kw-2">&amp;</span>send, <span class="kw-2">&amp;mut </span>recv, <span class="kw-2">&amp;</span>op)<span class="question-mark">?</span>;
+    drop(op);
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;</code></pre></div>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="kw">let </span>op: UserOp&lt;f64&gt; = UserOp::new(|a: <span class="kw-2">&amp;</span>[f64], b: <span class="kw-2">&amp;mut </span>[f64]| {
+    <span class="kw">for </span>(x, y) <span class="kw">in </span>a.iter().zip(b.iter_mut()) {
+        <span class="kw-2">*</span>y += x;
+    }
+})<span class="question-mark">?</span>;
+<span class="kw">let </span>send = [<span class="number">1.0f64</span>; <span class="number">4</span>];
+<span class="kw">let </span><span class="kw-2">mut </span>recv = [<span class="number">0.0f64</span>; <span class="number">4</span>];
+ferrompi::scope(|s| {
+    world.iallreduce(s, <span class="kw-2">&amp;</span>send, <span class="kw-2">&amp;mut </span>recv, <span class="kw-2">&amp;</span>op)<span class="question-mark">?</span>;
+    <span class="prelude-val">Ok</span>(())
+})<span class="question-mark">?</span>;
+drop(op);</code></pre></div>
+<p>A <a href="struct.Request.html" title="struct ferrompi::Request"><code>Request</code></a> cannot be sent to another thread; the
+documentation of <code>Request</code> has that fence.</p>
+<h2 id="panics-and-errors"><a class="doc-anchor" href="#panics-and-errors">§</a>Panics and errors</h2>
+<ul>
+<li>If <code>f</code> panics, the scope waits for every request, then resumes the panic.</li>
+<li>If <code>f</code> returns an error, the scope waits for every request and returns
+that error. Otherwise an error from completing the requests at the end is
+returned in place of the value.</li>
+<li>Opening a scope after <a href="struct.Mpi.html" title="struct ferrompi::Mpi"><code>Mpi</code></a> began to drop fails with
+<a href="enum.Error.html#variant.Finalized" title="variant ferrompi::Error::Finalized"><code>Error::Finalized</code></a> without running <code>f</code>.</li>
+<li>If the scope cannot establish that its requests completed, it prints a
+message and aborts the process: the buffers it lent cannot be leaked.
+That is the case when MPI refuses the final wait, and when an error
+leaves the state of every request unknown.</li>
+</ul>
+<h2 id="thread-level"><a class="doc-anchor" href="#thread-level">§</a>Thread level</h2>
+<p>A scope that ends with requests pending makes <code>MPI_Waitall</code> calls on the
+thread that opened it: one, repeated after a partial failure. At
+<a href="enum.ThreadLevel.html#variant.Serialized" title="variant ferrompi::ThreadLevel::Serialized"><code>ThreadLevel::Serialized</code></a> the program must
+serialize them with its other MPI calls, as for any other call; in a debug
+build, an overlap with another thread’s MPI call makes the scope print a
+message and abort the process.</p>
+<h2 id="finalize"><a class="doc-anchor" href="#finalize">§</a>Finalize</h2>
+<p><a href="struct.Mpi.html" title="struct ferrompi::Mpi"><code>Mpi</code></a>’s drop waits for a scope open on another thread, with
+no timeout, so a scope that never ends (for example one blocked on a peer
+that is itself finalizing) blocks the drop. A scope open on the thread that
+drops <code>Mpi</code> makes the drop skip <code>MPI_Finalize</code>, with a warning on stderr.
+MPI then stays initialized, and the scope still completes its requests when
+it ends. While <code>Mpi</code> is dropping, and after it skipped <code>MPI_Finalize</code>, a
+request the scope already holds can still be waited for, tested or
+cancelled, so a scope that holds a receive nothing will match can cancel it
+and end; any other call returns <a href="enum.Error.html#variant.Finalized" title="variant ferrompi::Error::Finalized"><code>Error::Finalized</code></a>.</p>
+</div></details></section></div></main></body></html>
