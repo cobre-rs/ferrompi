@@ -13,6 +13,8 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stddef.h>
+#include <pthread.h>
 
 // Every int32_t* to int* cast below (count, displacement and rank-array
 // arguments passed to the underlying MPI call, and the rank-range triples
@@ -61,9 +63,6 @@ _Static_assert(MAX_REQUESTS % 64 == 0,
 #if MPI_VERSION >= 4 || (defined(OMPI_MAJOR_VERSION) && OMPI_MAJOR_VERSION >= 5)
 #define FERROMPI_HAVE_MPI4_COLLECTIVES 1
 #endif
-
-// Maximum number of concurrent MPI_Info objects
-#define MAX_INFOS 64
 
 // Maximum number of concurrent MPI_Group objects
 #define MAX_GROUPS 64
@@ -122,27 +121,57 @@ static uint8_t request_state[MAX_REQUESTS];
 #define REQUEST_PERSISTENT 1
 #define REQUEST_ACTIVE     2
 
+// Per-slot receive datatype, a column of the request table like
+// request_state: the datatype a receive was posted with, MPI_DATATYPE_NULL
+// for every other request (send, collective, RMA). It is the request's kind,
+// recorded at creation: only a receive has a source, tag and count to
+// report. A persistent receive records it at recv_init, and it is kept across
+// starts until the slot is freed. Read before free_request releases the slot.
+static MPI_Datatype request_dtype[MAX_REQUESTS];
+
 // Window table
 // win_used uses C11 atomics to eliminate data races under MPI_THREAD_MULTIPLE.
 // alloc_win uses a CAS loop; free_win uses atomic_store (release); readers use
 // atomic_load (acquire).  Mirrors the comm_used/alloc_comm pattern.  (Unlike
 // the request table, the small fixed tables — windows, comms, datatypes, ops,
-// groups, infos — keep the dense per-slot used-flag scan.)
+// groups — keep the dense per-slot used-flag scan.)
 static MPI_Win win_table[MAX_WINDOWS];
 static atomic_int win_used[MAX_WINDOWS];  // 1 if slot is in use
 static atomic_int next_win_hint;
 
-// Info table
-// info_used uses C11 atomics for the same reason as win_used above.
-static MPI_Info info_table[MAX_INFOS];
-static atomic_int info_used[MAX_INFOS];  // 1 if slot is in use
-static atomic_int next_info_hint;
-
-// Group table (slot 0 reserved for MPI_GROUP_EMPTY, lazily populated)
+// Group table. Handle 0 stands for MPI_GROUP_EMPTY and has no slot of its
+// own to free; no slot holds MPI_GROUP_EMPTY (store_group).
 // group_used uses C11 atomics for the same reason as win_used above.
 static MPI_Group group_table[MAX_GROUPS];
 static atomic_int group_used[MAX_GROUPS];  // 1 if slot is in use
 static atomic_int next_group_hint;
+
+// Serialises the MPI group calls that can write an object two threads share.
+// MPICH 4.2 builds a group's ordered member list on first use, inside
+// MPI_Group_compare, MPI_Group_difference, MPI_Group_intersection,
+// MPI_Group_union and MPI_Group_translate_ranks and inside the calls that
+// create a communicator from a group, and builds a communicator's group on
+// the first MPI_Comm_group; Open MPI 4.1 resolves a group's process entries
+// in place in its group constructors. Neither locks the object. Every such
+// call is written through GROUP_CALL, except the calls that create a
+// communicator from a group (MPI_Comm_create, MPI_Comm_create_group and
+// MPI_Comm_create_from_group): they are collective, so they run outside the
+// lock, after check_group_in_comm or order_group_for_world has built, under
+// the lock, what they would otherwise build. The lock is held across one
+// local group call at a time, never across a collective or blocking call, and
+// no other lock is taken in this file. It is taken only when MPI granted
+// MPI_THREAD_SERIALIZED or MPI_THREAD_MULTIPLE: below that the Rust guard
+// admits one thread. group_calls_overlap is written once, by
+// ferrompi_init_thread, before a second thread can hold a handle.
+static pthread_mutex_t group_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int group_calls_overlap;
+
+#define GROUP_CALL(ret, call)                                      \
+    do {                                                           \
+        if (group_calls_overlap) pthread_mutex_lock(&group_mutex); \
+        (ret) = (call);                                            \
+        if (group_calls_overlap) pthread_mutex_unlock(&group_mutex); \
+    } while (0)
 
 // Custom (derived) datatype table
 // datatype_used uses C11 atomics for the same reason as win_used above.
@@ -163,8 +192,8 @@ static atomic_int next_datatype_hint;
 //     sweep):
 //       stages through a local; loads (acquire), invokes MPI_Op_free
 //       on the local, stores (release) the result back.
-//   - READER ferrompi_allreduce_user_op:
-//       atomic_load_explicit(acquire) before the MPI_Allreduce call.
+//   - READER get_op, for a user op code:
+//       atomic_load_explicit(acquire) before the MPI call.
 // The acquire/release pairing guarantees that any thread observing
 // op_used[h] == 1 (via the existing op_used acquire protocol) and then
 // loading op_table[h] sees either the valid post-create MPI_Op or
@@ -173,18 +202,17 @@ static _Atomic(MPI_Op) op_table[MAX_OPS];
 static atomic_int op_used[MAX_OPS];  // 1 if slot is in use
 static atomic_int next_op_hint;
 
-// Initialization guard.  CAS-based: exactly one thread performs the
-// atomic_init loops below; concurrent callers see the CAS fail and return
-// immediately.  Memory-ordering rationale: C11 §6.7.4 guarantees static
-// storage duration objects are zero-initialized at program load, so the
-// atomic_init loop only restates that zero state.  Losing threads return
-// after observing tables_initialized == 1 and rely on the pre-load static
-// zero-init as the baseline — no synchronizes-with edge is required for
-// the loop body's stores because the values being written are already the
-// observable state.  If any future revision ever writes a non-zero value
-// in the init loop, a release fence (e.g. atomic_thread_fence(release))
-// must be inserted before the CAS, or the non-zero init must move into
-// each call site of get_*.
+// Initialization guard.  CAS-based: the first call performs the loops below;
+// a later one, which can follow only a failed MPI_Init_thread, returns.
+// Memory-ordering rationale, for a process that calls MPI_Init_thread once,
+// as MPI requires: these stores need no order of their own, whatever value
+// they write.  Mpi::init and Mpi::drop run on the thread that makes these
+// stores; any other access from the Rust side is a call the lifecycle guard
+// admitted, a call under its token, or the Drop of an object such a call
+// made, and the guard admits a call on another thread only once Mpi::init
+// has stored the lifecycle state with release ordering, after
+// MPI_Init_thread returned.  So no other thread touches a table before these
+// stores, and every later access is ordered after them.
 static atomic_int tables_initialized;
 
 static void init_tables(void) {
@@ -216,13 +244,8 @@ static void init_tables(void) {
         atomic_init(&win_used[i], 0);
     }
     atomic_init(&next_win_hint, 0);
-    for (int i = 0; i < MAX_INFOS; i++) {
-        info_table[i] = MPI_INFO_NULL;
-        atomic_init(&info_used[i], 0);
-    }
-    atomic_init(&next_info_hint, 0);
     for (int i = 0; i < MAX_GROUPS; i++) {
-        group_table[i] = MPI_GROUP_EMPTY;
+        group_table[i] = MPI_GROUP_NULL;
         atomic_init(&group_used[i], 0);
     }
     atomic_init(&next_group_hint, 0);
@@ -328,6 +351,7 @@ static int64_t alloc_request(MPI_Request req, int persistent) {
                 int64_t idx = (int64_t)widx * 64 + bit;
                 request_table[idx] = req;
                 request_state[idx] = persistent ? REQUEST_PERSISTENT : 0;
+                request_dtype[idx] = MPI_DATATYPE_NULL;
                 // Relaxed: sequenced after the acq_rel fetch_or above, whose
                 // acquire component already synchronizes-with the release
                 // fetch_and of whichever free_request last vacated this slot,
@@ -415,6 +439,12 @@ static void mark_inactive(int64_t handle) {
         return;
     }
     request_state[slot] &= (uint8_t)~REQUEST_ACTIVE;
+}
+
+// Record the datatype a receive was posted with. handle is the one
+// alloc_request just returned, so it names a live slot: the low 32 bits.
+static void set_recv_dtype(int64_t handle, MPI_Datatype dt) {
+    request_dtype[(uint64_t)handle & 0xffffffffu] = dt;
 }
 
 #if defined(MPIX_ERR_PROC_FAILED_PENDING)
@@ -526,46 +556,10 @@ static void free_win(int32_t handle) {
     }
 }
 
-// Allocate an info handle (thread-safe via C11 CAS, mirrors alloc_win).
-static int32_t alloc_info(MPI_Info info) {
-    int hint = atomic_load_explicit(&next_info_hint, memory_order_relaxed);
-    for (int i = 0; i < MAX_INFOS; i++) {
-        int idx = (hint + i) % MAX_INFOS;
-        int expected = 0;
-        if (atomic_compare_exchange_strong_explicit(
-                &info_used[idx], &expected, 1,
-                memory_order_acq_rel, memory_order_relaxed)) {
-            info_table[idx] = info;
-            atomic_store_explicit(&next_info_hint,
-                (idx + 1) % MAX_INFOS, memory_order_relaxed);
-            return (int32_t)idx;
-        }
-    }
-    return -1;  // No space
-}
-
-// Get MPI_Info from handle (thread-safe: acquire load pairs with release store
-// in free_info).
-static MPI_Info get_info(int32_t handle) {
-    if (handle < 0 || handle >= MAX_INFOS ||
-            !atomic_load_explicit(&info_used[handle], memory_order_acquire)) {
-        return MPI_INFO_NULL;
-    }
-    return info_table[handle];
-}
-
-// Free an info handle (thread-safe: release store to info_used).
-static void free_info(int32_t handle) {
-    if (handle >= 0 && handle < MAX_INFOS) {
-        info_table[handle] = MPI_INFO_NULL;
-        atomic_store_explicit(&info_used[handle], 0, memory_order_release);
-    }
-}
-
 // Allocate a group handle (thread-safe via C11 CAS, mirrors alloc_win).
-// Slot 0 is reserved for MPI_GROUP_EMPTY and must NOT be allocated via this
-// path; alloc_group starts scanning from hint > 0 by construction, but the
-// hint wraps around, so we explicitly skip slot 0.
+// Handle 0 stands for MPI_GROUP_EMPTY and has no slot (see store_group); the
+// index below is always in 1..MAX_GROUPS-1, so it is never returned. The scan
+// starts after the slot taken last (the hint) and wraps from MAX_GROUPS-1 to 1.
 static int32_t alloc_group(MPI_Group group) {
     int hint = atomic_load_explicit(&next_group_hint, memory_order_relaxed);
     for (int i = 0; i < MAX_GROUPS - 1; i++) {
@@ -586,20 +580,19 @@ static int32_t alloc_group(MPI_Group group) {
 /* Get MPI_Group from handle (thread-safe: acquire load).
  *
  * Sentinel contract (depended on by all callers in this file):
- *   handle == 0                → MPI_GROUP_EMPTY (the reserved lazy slot)
+ *   handle == 0                → MPI_GROUP_EMPTY (the reserved handle)
  *   handle out of range        → MPI_GROUP_NULL  (invalid handle error)
  *   handle in range, unused    → MPI_GROUP_NULL  (handle was freed)
  *   handle in range, used      → group_table[handle]
  *
  * The MPI_GROUP_NULL sentinel pairs with the
  *   `if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;`
- * guards at ferrompi_comm_create_from_group_parent,
+ * guards at ferrompi_comm_create, ferrompi_comm_create_group,
  * ferrompi_comm_create_from_group, and the group-operation shims.
  * Callers without that guard (group_incl, group_excl, group_size,
  * group_rank) correctly defer to MPI's own MPI_ERR_GROUP for invalid
  * handles. */
 static MPI_Group get_group(int32_t handle) {
-    // Slot 0: lazily return MPI_GROUP_EMPTY (always valid post-init)
     if (handle == 0) {
         return MPI_GROUP_EMPTY;
     }
@@ -612,10 +605,27 @@ static MPI_Group get_group(int32_t handle) {
     return group_table[handle];
 }
 
+/* Hand a group that MPI returned to Rust: handle 0 for MPI_GROUP_EMPTY, a
+ * predefined object that the user must not free (MPI-4.1 2.5.1), otherwise a
+ * table slot. With the table full, frees the group and returns
+ * FERROMPI_ERR_GROUPS_FULL. */
+static int store_group(MPI_Group group, int32_t* out_h) {
+    if (group == MPI_GROUP_EMPTY) {
+        *out_h = 0;
+        return MPI_SUCCESS;
+    }
+    *out_h = alloc_group(group);
+    if (*out_h < 0) {
+        MPI_Group_free(&group);
+        return FERROMPI_ERR_GROUPS_FULL;
+    }
+    return MPI_SUCCESS;
+}
+
 // Free a group handle (thread-safe: release store; does NOT call MPI_Group_free).
 static void free_group(int32_t handle) {
     if (handle > 0 && handle < MAX_GROUPS) {
-        group_table[handle] = MPI_GROUP_EMPTY;
+        group_table[handle] = MPI_GROUP_NULL;
         atomic_store_explicit(&group_used[handle], 0, memory_order_release);
     }
 }
@@ -658,7 +668,11 @@ static void free_datatype_slot(int32_t handle) {
     }
 }
 
-// Map operation code to MPI_Op
+// Map operation code to MPI_Op.  A code in [FERROMPI_OP_USER_BASE,
+// FERROMPI_OP_USER_BASE + MAX_OPS) names the user op in that slot.  A slot
+// that holds MPI_OP_NULL yields MPI_OP_NULL, which MPI reports as class Op;
+// Rust cannot reach this, since a borrowed UserOp keeps its slot live for
+// the call.
 static MPI_Op get_op(int32_t op) {
     switch (op) {
         case 0: return MPI_SUM;
@@ -675,9 +689,19 @@ static MPI_Op get_op(int32_t op) {
         case 11: return MPI_MINLOC;
         case 12: return MPI_REPLACE;
         case 13: return MPI_NO_OP;
-        default: return MPI_OP_NULL;
+        default:
+            if (op >= FERROMPI_OP_USER_BASE && op < FERROMPI_OP_USER_BASE + MAX_OPS) {
+                return atomic_load_explicit(&op_table[op - FERROMPI_OP_USER_BASE],
+                                            memory_order_acquire);
+            }
+            return MPI_OP_NULL;
     }
 }
+
+// A user op is a classic MPI_User_function with an int length; MPICH narrows a
+// larger count into it without splitting the reduction, so a user op above
+// INT_MAX elements is refused on every MPI version, never sent to a _c call.
+static int is_user_op(int32_t op) { return op >= FERROMPI_OP_USER_BASE; }
 
 // MPI_LONG_INT / MPI_LONG_DOUBLE_INT are exposed only where their C layout is
 // verified against the Rust LongInt / LongDoubleInt structs.
@@ -769,6 +793,7 @@ int ferrompi_init_thread(int required, int* provided) {
     
     // Initialize COMM_WORLD after MPI_Init and install the error handler
     if (ret == MPI_SUCCESS) {
+        group_calls_overlap = mpi_provided >= MPI_THREAD_SERIALIZED;
         comm_table[0] = MPI_COMM_WORLD;
         atomic_store_explicit(&comm_used[0], 1, memory_order_release);
         int eh_ret = install_errors_return(MPI_COMM_WORLD);
@@ -800,64 +825,48 @@ int ferrompi_init_thread(int required, int* provided) {
     return ret;
 }
 
-int ferrompi_finalize(int32_t* active_requests) {
+int ferrompi_finalize(void) {
     // Clean up requests first (they may reference communicators).
     // Acquire/release here is defensive: MPI_Finalize is called after all
     // concurrent MPI operations are complete, but the consistent access
     // pattern avoids spurious TSan warnings in the finalizer check.
     //
-    // Only an inactive persistent request is freed here. Freeing an active
-    // point-to-point request, persistent included, is legal, but this table
-    // does not distinguish point-to-point from collective requests: freeing
-    // a nonblocking-collective request or an active persistent collective is
-    // erroneous (Open MPI returns MPI_ERR_REQUEST). Leaving a request
-    // pending at MPI_Finalize is itself non-conforming but tolerated by
-    // MPICH and Open MPI, which progress it inside MPI_Finalize, so the
-    // sweep takes that as the lesser error: every other occupied slot is
-    // left for MPI to tear down and counted instead, so the caller can
-    // report it.
-    int32_t active = 0;
+    // Only an inactive persistent request is freed here. This table does not
+    // distinguish point-to-point from collective requests, and freeing a
+    // nonblocking-collective request or an active persistent collective is
+    // erroneous (Open MPI returns MPI_ERR_REQUEST). No other request can be
+    // pending when this runs, because the Rust side never finalizes with one
+    // (MPI-4.1 11.2.2): a scope completes its requests before it returns, a
+    // passive epoch before it unlocks, an epoch still open when Mpi drops keeps
+    // its window alive, which skips MPI_Finalize, and an active persistent
+    // request skips it through its token.
     for (int i = 0; i < MAX_REQUESTS; i++) {
         unsigned widx = (unsigned)(i / 64);
         uint64_t mask = (uint64_t)1 << (i % 64);
         if ((atomic_load_explicit(&request_bits[widx], memory_order_acquire) & mask) &&
-                request_table[i] != MPI_REQUEST_NULL) {
-            if (request_state[i] == REQUEST_PERSISTENT) {
-                MPI_Request_free(&request_table[i]);
-            } else {
-                active++;
-            }
+                request_table[i] != MPI_REQUEST_NULL &&
+                request_state[i] == REQUEST_PERSISTENT) {
+            MPI_Request_free(&request_table[i]);
         }
     }
     for (int w = 0; w < REQUEST_BITS_WORDS; w++) {
         atomic_store_explicit(&request_bits[w], (uint64_t)0, memory_order_release);
     }
-    *active_requests = active;
 
     // Free every live user op: frees the MPI op and drops the Rust closure
-    // through the same path as UserOp's Drop; a failed MPI_Op_free keeps both.
+    // through the same path as OpRegistration's Drop; a failed MPI_Op_free keeps both.
     for (int i = 0; i < MAX_OPS; i++) {
         if (atomic_load_explicit(&op_used[i], memory_order_acquire)) {
             ferrompi_op_free(i);
         }
     }
 
-    // Clean up any remaining group objects (skip slot 0, which is MPI_GROUP_EMPTY)
+    // Clean up any remaining group objects (slot 0 is never allocated)
     for (int i = 1; i < MAX_GROUPS; i++) {
-        if (atomic_load_explicit(&group_used[i], memory_order_acquire) &&
-                group_table[i] != MPI_GROUP_EMPTY) {
+        if (atomic_load_explicit(&group_used[i], memory_order_acquire)) {
             MPI_Group_free(&group_table[i]);
         }
         atomic_store_explicit(&group_used[i], 0, memory_order_release);
-    }
-
-    // Clean up any remaining info objects
-    for (int i = 0; i < MAX_INFOS; i++) {
-        if (atomic_load_explicit(&info_used[i], memory_order_acquire) &&
-                info_table[i] != MPI_INFO_NULL) {
-            MPI_Info_free(&info_table[i]);
-        }
-        atomic_store_explicit(&info_used[i], 0, memory_order_release);
     }
 
     // Clean up any remaining custom datatypes
@@ -869,11 +878,8 @@ int ferrompi_finalize(int32_t* active_requests) {
         atomic_store_explicit(&datatype_used[i], 0, memory_order_release);
     }
 
-    // Mpi skips MPI_Finalize while any window is alive, so this point is
-    // never reached with a live window; just reset the table.
-    for (int i = 0; i < MAX_WINDOWS; i++) {
-        atomic_store_explicit(&win_used[i], 0, memory_order_release);
-    }
+    // No window slot is occupied here: Mpi skips MPI_Finalize while any window
+    // is alive, and every occupied slot belongs to a window still counted.
 
     // Clean up any remaining communicators (skip slot 0, which is MPI_COMM_WORLD)
     for (int i = 1; i < MAX_COMMS; i++) {
@@ -915,26 +921,32 @@ int ferrompi_comm_size(int32_t comm_handle, int32_t* size) {
     return ret;
 }
 
-/* A shim below that cannot hand a new communicator to Rust (MPI_ERRORS_RETURN
- * cannot be installed on it, or the handle table is full) returns the error
- * without freeing it: MPI created it on every rank, MPI_Comm_free is
- * collective, and freeing it on this rank alone can hang or mismatch
- * collectives. It stays allocated until MPI_Finalize. */
+/* Hand a communicator that MPI returned to Rust: -1 for MPI_COMM_NULL (this
+ * process is not in it), otherwise a table slot, after MPI_ERRORS_RETURN is
+ * installed on it. When that cannot be installed, or the table is full, the
+ * error is returned without freeing the communicator: MPI created it on every
+ * rank that belongs to it, MPI_Comm_free is collective over those ranks, and
+ * freeing it on this rank alone can hang or mismatch collectives. It stays
+ * allocated until MPI_Finalize. A full table leaves -1 in *out_h; a failed
+ * install leaves *out_h alone. */
+static int store_comm(MPI_Comm comm, int32_t* out_h) {
+    if (comm == MPI_COMM_NULL) {
+        *out_h = -1;
+        return MPI_SUCCESS;
+    }
+    int eh_ret = install_errors_return(comm);
+    if (eh_ret != MPI_SUCCESS) return eh_ret;
+    *out_h = alloc_comm(comm);
+    if (*out_h < 0) return FERROMPI_ERR_COMMS_FULL;
+    return MPI_SUCCESS;
+}
+
 int ferrompi_comm_dup(int32_t comm_handle, int32_t* newcomm_handle) {
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Comm newcomm;
     int ret = MPI_Comm_dup(comm, &newcomm);
-    if (ret == MPI_SUCCESS) {
-        int eh_ret = install_errors_return(newcomm);
-        if (eh_ret != MPI_SUCCESS) {
-            return eh_ret;
-        }
-        *newcomm_handle = alloc_comm(newcomm);
-        if (*newcomm_handle < 0) {
-            return FERROMPI_ERR_COMMS_FULL;
-        }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_comm(newcomm, newcomm_handle);
 }
 
 int ferrompi_comm_free(int32_t comm_handle) {
@@ -959,21 +971,8 @@ int ferrompi_comm_split(int32_t comm_handle, int32_t color, int32_t key, int32_t
     int mpi_color = (color == -1) ? MPI_UNDEFINED : color;
     MPI_Comm newcomm;
     int ret = MPI_Comm_split(comm, mpi_color, key, &newcomm);
-    if (ret == MPI_SUCCESS) {
-        if (newcomm == MPI_COMM_NULL) {
-            *newcomm_handle = -1;  // Process opted out
-        } else {
-            int eh_ret = install_errors_return(newcomm);
-            if (eh_ret != MPI_SUCCESS) {
-                return eh_ret;
-            }
-            *newcomm_handle = alloc_comm(newcomm);
-            if (*newcomm_handle < 0) {
-                return FERROMPI_ERR_COMMS_FULL;
-            }
-        }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_comm(newcomm, newcomm_handle);
 }
 
 int ferrompi_comm_split_type(int32_t comm_handle, int32_t split_type, int32_t key, int32_t* newcomm_handle) {
@@ -988,42 +987,84 @@ int ferrompi_comm_split_type(int32_t comm_handle, int32_t split_type, int32_t ke
     }
     MPI_Comm newcomm;
     int ret = MPI_Comm_split_type(comm, mpi_split_type, key, MPI_INFO_NULL, &newcomm);
-    if (ret == MPI_SUCCESS) {
-        if (newcomm == MPI_COMM_NULL) {
-            *newcomm_handle = -1;
-        } else {
-            int eh_ret = install_errors_return(newcomm);
-            if (eh_ret != MPI_SUCCESS) {
-                return eh_ret;
-            }
-            *newcomm_handle = alloc_comm(newcomm);
-            if (*newcomm_handle < 0) {
-                return FERROMPI_ERR_COMMS_FULL;
-            }
-        }
-    }
-    return ret;
+    if (ret != MPI_SUCCESS) return ret;
+    return store_comm(newcomm, newcomm_handle);
 }
 
-int ferrompi_comm_create_from_group_parent(int32_t comm_h,
-                                           int32_t group_h,
-                                           int32_t* out_h) {
+/* MPI_SUCCESS if every member of `group` is in `comm`, FERROMPI_ERR_GROUP_NOT_IN_COMM
+ * if one is not, or the error of a group call. MPI requires the subset
+ * (MPI-4.1 7.4.2) and need not check it: with a group that has a member outside
+ * the communicator, MPI_Comm_create_group ends the process in MPICH 4.2 and in
+ * Open MPI 4.1 and 5.0, and MPI_Comm_create returns a communicator in Open MPI.
+ * The group calls go through GROUP_CALL, and they leave two things built
+ * before the creating call of MPICH 4.2: the communicator's group, which its
+ * MPI_Comm_create_group reads without building and without which it ends the
+ * process for any group of two or more members, and the ordered member lists
+ * of both groups, which it would otherwise build on first use inside the
+ * call. The work is local: in MPICH 4.2 it is linear in the two group sizes
+ * once the lists exist; in Open MPI it is the product of the two sizes. */
+static int check_group_in_comm(MPI_Comm comm, MPI_Group group) {
+    MPI_Group comm_group, outside;
+    int ret;
+    GROUP_CALL(ret, MPI_Comm_group(comm, &comm_group));
+    if (ret != MPI_SUCCESS) return ret;
+    GROUP_CALL(ret, MPI_Group_difference(group, comm_group, &outside));
+    MPI_Group_free(&comm_group);
+    if (ret != MPI_SUCCESS) return ret;
+    int outside_size = 0;
+    ret = MPI_Group_size(outside, &outside_size);
+    if (outside != MPI_GROUP_EMPTY) MPI_Group_free(&outside);
+    if (ret != MPI_SUCCESS) return ret;
+    return outside_size == 0 ? MPI_SUCCESS : FERROMPI_ERR_GROUP_NOT_IN_COMM;
+}
+
+int ferrompi_comm_create(int32_t comm_h,
+                         int32_t group_h,
+                         int32_t* out_h) {
     MPI_Comm parent = get_comm(comm_h);
     MPI_Group g = get_group(group_h);
     if (parent == MPI_COMM_NULL || g == MPI_GROUP_NULL) return MPI_ERR_ARG;
+    int in_ret = check_group_in_comm(parent, g);
+    if (in_ret != MPI_SUCCESS) return in_ret;
     MPI_Comm new_comm;
     int ret = MPI_Comm_create(parent, g, &new_comm);
     if (ret != MPI_SUCCESS) return ret;
-    if (new_comm == MPI_COMM_NULL) {
-        *out_h = -1;  /* Caller is not in the group */
-        return MPI_SUCCESS;
-    }
-    int eh_ret = install_errors_return(new_comm);
-    if (eh_ret != MPI_SUCCESS) return eh_ret;
-    *out_h = alloc_comm(new_comm);
-    if (*out_h < 0) return FERROMPI_ERR_COMMS_FULL;
-    return MPI_SUCCESS;
+    return store_comm(new_comm, out_h);
 }
+
+int ferrompi_comm_create_group(int32_t comm_h,
+                               int32_t group_h,
+                               int32_t tag,
+                               int32_t* out_h) {
+    MPI_Comm parent = get_comm(comm_h);
+    MPI_Group g = get_group(group_h);
+    if (parent == MPI_COMM_NULL || g == MPI_GROUP_NULL) return MPI_ERR_ARG;
+    int in_ret = check_group_in_comm(parent, g);
+    if (in_ret != MPI_SUCCESS) return in_ret;
+    MPI_Comm new_comm;
+    int ret = MPI_Comm_create_group(parent, g, tag, &new_comm);
+    if (ret != MPI_SUCCESS) return ret;
+    return store_comm(new_comm, out_h);
+}
+
+#ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
+/* MPI_Comm_create_from_group has no parent communicator to check the group
+ * against, and needs no check: every group this crate hands out is made of
+ * processes of the world communicator. MPICH 4.2 runs the call on the world
+ * communicator, and builds that communicator's group and the ordered member
+ * list of `group` on first use inside it. Both are built here instead, through
+ * GROUP_CALL, so that the creating call only reads them. */
+static int order_group_for_world(MPI_Group group) {
+    MPI_Group world_group;
+    int ret;
+    GROUP_CALL(ret, MPI_Comm_group(MPI_COMM_WORLD, &world_group));
+    if (ret != MPI_SUCCESS) return ret;
+    MPI_Group_free(&world_group);
+    int same;
+    GROUP_CALL(ret, MPI_Group_compare(group, group, &same));
+    return ret;
+}
+#endif
 
 int ferrompi_comm_create_from_group(int32_t group_h,
                                     const char* stringtag,
@@ -1031,13 +1072,15 @@ int ferrompi_comm_create_from_group(int32_t group_h,
 #ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
     MPI_Group g = get_group(group_h);
     if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;
+    int order_ret = order_group_for_world(g);
+    if (order_ret != MPI_SUCCESS) return order_ret;
     MPI_Comm new_comm;
     int ret = MPI_Comm_create_from_group(g, stringtag, MPI_INFO_NULL,
                                          MPI_ERRORS_RETURN, &new_comm);
     if (ret != MPI_SUCCESS) return ret;
-    /* MPI_COMM_NULL is returned on ranks outside the group */
     if (new_comm == MPI_COMM_NULL) {
-        return MPI_ERR_OTHER;
+        *out_h = -1;  /* Empty group, or caller is not in the group */
+        return MPI_SUCCESS;
     }
     *out_h = alloc_comm(new_comm);
     if (*out_h < 0) return FERROMPI_ERR_COMMS_FULL;
@@ -1045,6 +1088,14 @@ int ferrompi_comm_create_from_group(int32_t group_h,
 #else
     (void)group_h; (void)stringtag; (void)out_h;
     return FERROMPI_ERR_NOT_SUPPORTED;  /* needs MPI 4.0, or Open MPI 5 */
+#endif
+}
+
+int64_t ferrompi_max_stringtag_len(void) {
+#ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
+    return MPI_MAX_STRINGTAG_LEN;
+#else
+    return INT64_MAX;  /* no MPI_Comm_create_from_group: no limit to check */
 #endif
 }
 
@@ -1074,46 +1125,129 @@ static int get_count64(const MPI_Status* status, MPI_Datatype dt, int64_t* count
     return ret;
 }
 
+_Static_assert(sizeof(ferrompi_status) == 24, "ferrompi_status layout");
+_Static_assert(offsetof(ferrompi_status, source) == 0, "ferrompi_status.source offset");
+_Static_assert(offsetof(ferrompi_status, tag) == 4, "ferrompi_status.tag offset");
+_Static_assert(offsetof(ferrompi_status, count) == 8, "ferrompi_status.count offset");
+_Static_assert(offsetof(ferrompi_status, error) == 16, "ferrompi_status.error offset");
+
+// Fills the status of a single-request receive or probe. The linked MPI's
+// MPI_PROC_NULL, MPI_ANY_SOURCE and MPI_ANY_TAG are translated back to the
+// private codes in ferrompi.h, the inverse of source_to_mpi and tag_to_mpi. MPI
+// leaves MPI_Status.MPI_ERROR unset for those calls, so error is MPI_SUCCESS.
+static int fill_status(const MPI_Status* st, MPI_Datatype dt, ferrompi_status* out) {
+    if (st->MPI_SOURCE == MPI_PROC_NULL) {
+        out->source = FERROMPI_PROC_NULL;
+    } else if (st->MPI_SOURCE == MPI_ANY_SOURCE) {
+        out->source = FERROMPI_ANY_SOURCE;
+    } else {
+        out->source = st->MPI_SOURCE;
+    }
+    out->tag = (st->MPI_TAG == MPI_ANY_TAG) ? FERROMPI_ANY_TAG : st->MPI_TAG;
+    out->error = MPI_SUCCESS;
+    return get_count64(st, dt, &out->count);
+}
+
+// Fills the status a completed single-request call reports. dt is the
+// request's request_dtype. A request without a datatype (send, collective,
+// RMA) leaves source, tag and count undefined (MPI-4.1 3.7.3, 6.12), so st is
+// not read; neither does a cancelled receive (3.8.4), which is why
+// MPI_Test_cancelled is evaluated before any other field. Both report the
+// empty status. MPI_ERROR is never read here: MPI sets it only when a
+// multi-request call returns MPI_ERR_IN_STATUS (3.2.5, 3.7.5), and
+// ferrompi_waitsome and ferrompi_testsome read it themselves. A completed
+// request is never reported failed because MPI_Get_count did: count then
+// stays -1.
+static void completion_status(MPI_Datatype dt, const MPI_Status* st, ferrompi_status* out) {
+    if (dt != MPI_DATATYPE_NULL) {
+        int cancelled = 0;
+        (void)MPI_Test_cancelled(st, &cancelled);
+        if (!cancelled) {
+            (void)fill_status(st, dt, out);
+            // A completed receive reports the sender of the message it matched
+            // (MPI-4.1 3.2.5, p.39), or MPI_PROC_NULL for a receive from
+            // MPI_PROC_NULL (3.10, p.111, l.13-16), never MPI_ANY_SOURCE. MPICH
+            // completes a persistent receive from MPI_PROC_NULL with the empty
+            // status, because MPIDI_prequest_start returns early for it, so an
+            // MPI_ANY_SOURCE source here is that receive's MPI_PROC_NULL. A
+            // persistent receive that MPI never started (left active by a
+            // failed MPI_Startall) completes with the empty status too, and is
+            // reported the same way.
+            if (out->source == FERROMPI_ANY_SOURCE) out->source = FERROMPI_PROC_NULL;
+            return;
+        }
+    }
+    out->source = FERROMPI_ANY_SOURCE;
+    out->tag = FERROMPI_ANY_TAG;
+    out->count = 0;
+    out->error = MPI_SUCCESS;
+}
+
+// The error class of an MPI error code, MPI_ERR_UNKNOWN when MPI_Error_class
+// itself fails. MPI_Status.MPI_ERROR holds a code, and a code is not its class
+// on MPICH, so ferrompi_status.error never takes the raw code.
+static int32_t error_class_of(int code) {
+    int cls;
+    return MPI_Error_class(code, &cls) == MPI_SUCCESS ? (int32_t)cls : (int32_t)MPI_ERR_UNKNOWN;
+}
+
+// Translates the private source and tag codes (FERROMPI_ANY_SOURCE,
+// FERROMPI_PROC_NULL and FERROMPI_ANY_TAG in ferrompi.h) to the linked MPI's
+// constants; any other value is a rank or tag and passes through.
+static int source_to_mpi(int32_t s) {
+    if (s == FERROMPI_ANY_SOURCE) return MPI_ANY_SOURCE;
+    if (s == FERROMPI_PROC_NULL) return MPI_PROC_NULL;
+    return s;
+}
+
+static int tag_to_mpi(int32_t t) {
+    return (t == FERROMPI_ANY_TAG) ? MPI_ANY_TAG : t;
+}
+
+// Translates the private destination code FERROMPI_PROC_NULL to the linked
+// MPI's MPI_PROC_NULL; any other value is a rank and passes through.
+static int dest_to_mpi(int32_t d) {
+    return (d == FERROMPI_PROC_NULL) ? MPI_PROC_NULL : d;
+}
+
 static int send_typed(const void* buf, int64_t count, MPI_Datatype dt,
                        int32_t dest, int32_t tag, int32_t comm_handle) {
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Comm comm = get_comm(comm_handle);
+    int mpi_dest = dest_to_mpi(dest);
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        return MPI_Send_c(buf, (MPI_Count)count, dt, dest, tag, comm);
+        return MPI_Send_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm);
 #else
         return MPI_ERR_COUNT;
 #endif
     }
-    return MPI_Send(buf, (int)count, dt, dest, tag, comm);
+    return MPI_Send(buf, (int)count, dt, mpi_dest, tag, comm);
 }
 
 static int recv_typed(void* buf, int64_t count, MPI_Datatype dt,
                        int32_t source, int32_t tag, int32_t comm_handle,
-                       int32_t* actual_source, int32_t* actual_tag,
-                       int64_t* actual_count) {
+                       ferrompi_status* status) {
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Comm comm = get_comm(comm_handle);
-    MPI_Status status;
+    MPI_Status st;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
+    int mpi_source = source_to_mpi(source);
+    int mpi_tag = tag_to_mpi(tag);
 
     int ret;
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Recv_c(buf, (MPI_Count)count, dt, mpi_source, mpi_tag, comm, &status);
+        ret = MPI_Recv_c(buf, (MPI_Count)count, dt, mpi_source, mpi_tag, comm, &st);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Recv(buf, (int)count, dt, mpi_source, mpi_tag, comm, &status);
+        ret = MPI_Recv(buf, (int)count, dt, mpi_source, mpi_tag, comm, &st);
     }
 
     if (ret == MPI_SUCCESS) {
-        *actual_source = status.MPI_SOURCE;
-        *actual_tag = status.MPI_TAG;
-        ret = get_count64(&status, dt, actual_count);
+        ret = fill_status(&st, dt, status);
     }
 
     return ret;
@@ -1125,16 +1259,17 @@ static int isend_typed(const void* buf, int64_t count, MPI_Datatype dt,
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Request req;
+    int mpi_dest = dest_to_mpi(dest);
     int ret;
 
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Isend_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
+        ret = MPI_Isend_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Isend(buf, (int)count, dt, dest, tag, comm, &req);
+        ret = MPI_Isend(buf, (int)count, dt, mpi_dest, tag, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {
@@ -1155,8 +1290,8 @@ static int irecv_typed(void* buf, int64_t count, MPI_Datatype dt,
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Request req;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
+    int mpi_source = source_to_mpi(source);
+    int mpi_tag = tag_to_mpi(tag);
 
     int ret;
     if (count > INT_MAX) {
@@ -1175,6 +1310,7 @@ static int irecv_typed(void* buf, int64_t count, MPI_Datatype dt,
             complete_unregistered_request(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
         }
+        set_recv_dtype(*request_handle, dt);
     }
 
     return ret;
@@ -1198,12 +1334,9 @@ int ferrompi_recv(
     int32_t source,
     int32_t tag,
     int32_t comm_handle,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* actual_count
+    ferrompi_status* status
 ) {
-    return recv_typed(buf, count, get_datatype(datatype_tag), source, tag, comm_handle,
-                       actual_source, actual_tag, actual_count);
+    return recv_typed(buf, count, get_datatype(datatype_tag), source, tag, comm_handle, status);
 }
 
 int ferrompi_isend(
@@ -1242,38 +1375,35 @@ int ferrompi_sendrecv(
     int32_t source,
     int32_t recvtag,
     int32_t comm_handle,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* actual_count
+    ferrompi_status* status
 ) {
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Datatype send_dt = get_datatype(send_datatype_tag);
     MPI_Datatype recv_dt = get_datatype(recv_datatype_tag);
     if (send_dt == MPI_DATATYPE_NULL || recv_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Status status;
+    MPI_Status st;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_recvtag = (recvtag == -1) ? MPI_ANY_TAG : recvtag;
+    int mpi_dest = dest_to_mpi(dest);
+    int mpi_source = source_to_mpi(source);
+    int mpi_recvtag = tag_to_mpi(recvtag);
 
     int ret;
     if (sendcount > INT_MAX || recvcount > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Sendrecv_c(sendbuf, (MPI_Count)sendcount, send_dt, dest, sendtag,
+        ret = MPI_Sendrecv_c(sendbuf, (MPI_Count)sendcount, send_dt, mpi_dest, sendtag,
                              recvbuf, (MPI_Count)recvcount, recv_dt, mpi_source, mpi_recvtag,
-                             comm, &status);
+                             comm, &st);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Sendrecv(sendbuf, (int)sendcount, send_dt, dest, sendtag,
+        ret = MPI_Sendrecv(sendbuf, (int)sendcount, send_dt, mpi_dest, sendtag,
                            recvbuf, (int)recvcount, recv_dt, mpi_source, mpi_recvtag,
-                           comm, &status);
+                           comm, &st);
     }
 
     if (ret == MPI_SUCCESS) {
-        *actual_source = status.MPI_SOURCE;
-        *actual_tag = status.MPI_TAG;
-        ret = get_count64(&status, recv_dt, actual_count);
+        ret = fill_status(&st, recv_dt, status);
     }
 
     return ret;
@@ -1284,45 +1414,133 @@ int ferrompi_sendrecv(
  * ============================================================ */
 
 int ferrompi_probe(int32_t source, int32_t tag, int32_t comm_handle,
-                   int32_t* actual_source, int32_t* actual_tag,
-                   int64_t* count, int32_t datatype_tag) {
+                   ferrompi_status* status, int32_t datatype_tag) {
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
+    int mpi_source = source_to_mpi(source);
+    int mpi_tag = tag_to_mpi(tag);
 
-    MPI_Status status;
-    int ret = MPI_Probe(mpi_source, mpi_tag, comm, &status);
+    MPI_Status st;
+    int ret = MPI_Probe(mpi_source, mpi_tag, comm, &st);
     if (ret == MPI_SUCCESS) {
-        *actual_source = status.MPI_SOURCE;
-        *actual_tag = status.MPI_TAG;
-        ret = get_count64(&status, dt, count);
+        ret = fill_status(&st, dt, status);
     }
     return ret;
 }
 
 int ferrompi_iprobe(int32_t source, int32_t tag, int32_t comm_handle,
-                    int32_t* flag, int32_t* actual_source, int32_t* actual_tag,
-                    int64_t* count, int32_t datatype_tag) {
+                    int32_t* flag, ferrompi_status* status, int32_t datatype_tag) {
     MPI_Comm comm = get_comm(comm_handle);
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
+    int mpi_source = source_to_mpi(source);
+    int mpi_tag = tag_to_mpi(tag);
 
-    MPI_Status status;
+    MPI_Status st;
     int f;
-    int ret = MPI_Iprobe(mpi_source, mpi_tag, comm, &f, &status);
+    int ret = MPI_Iprobe(mpi_source, mpi_tag, comm, &f, &st);
     if (ret == MPI_SUCCESS) {
         *flag = f;
         if (f) {
-            *actual_source = status.MPI_SOURCE;
-            *actual_tag = status.MPI_TAG;
-            ret = get_count64(&status, dt, count);
+            ret = fill_status(&st, dt, status);
         }
+    }
+    return ret;
+}
+
+/* ============================================================
+ * Matched Probe and Receive
+ * ============================================================ */
+
+// An MPI_Message crosses to Rust by value in an int64_t: an integer handle in
+// MPICH, a pointer in Open MPI and in the MPI 5.0 ABI.
+_Static_assert(sizeof(MPI_Message) <= sizeof(int64_t),
+               "MPI_Message must fit in the int64_t that carries it");
+
+static int64_t message_to_i64(MPI_Message m) {
+    int64_t v = 0;
+    memcpy(&v, &m, sizeof m);
+    return v;
+}
+
+static MPI_Message message_from_i64(int64_t v) {
+    MPI_Message m;
+    memcpy(&m, &v, sizeof m);
+    return m;
+}
+
+// Fills what a matched probe returns: the message, its status counted in dt
+// elements, and its length in bytes (-1 if MPI cannot report it), which a later
+// discard needs. The message is matched whatever MPI_Get_count answers, so a
+// failed count is an unknown count, never a failed probe.
+static void fill_matched(MPI_Message m, const MPI_Status* st, MPI_Datatype dt,
+                         int64_t* message, int64_t* bytes, ferrompi_status* status) {
+    *message = message_to_i64(m);
+    (void)get_count64(st, MPI_BYTE, bytes);
+    (void)fill_status(st, dt, status);
+}
+
+int ferrompi_mprobe(int32_t source, int32_t tag, int32_t comm_handle, int64_t* message,
+                    int64_t* bytes, ferrompi_status* status, int32_t datatype_tag) {
+    MPI_Comm comm = get_comm(comm_handle);
+    MPI_Datatype dt = get_datatype(datatype_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+
+    MPI_Message m;
+    MPI_Status st;
+    int ret = MPI_Mprobe(source_to_mpi(source), tag_to_mpi(tag), comm, &m, &st);
+    if (ret == MPI_SUCCESS) {
+        fill_matched(m, &st, dt, message, bytes, status);
+    }
+    return ret;
+}
+
+int ferrompi_improbe(int32_t source, int32_t tag, int32_t comm_handle, int32_t* flag,
+                     int64_t* message, int64_t* bytes, ferrompi_status* status,
+                     int32_t datatype_tag) {
+    MPI_Comm comm = get_comm(comm_handle);
+    MPI_Datatype dt = get_datatype(datatype_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+
+    MPI_Message m;
+    MPI_Status st;
+    int f;
+    int ret = MPI_Improbe(source_to_mpi(source), tag_to_mpi(tag), comm, &f, &m, &st);
+    if (ret == MPI_SUCCESS) {
+        *flag = f;
+        if (f) {
+            fill_matched(m, &st, dt, message, bytes, status);
+        }
+    }
+    return ret;
+}
+
+int ferrompi_mrecv(void* buf, int64_t count, int32_t datatype_tag, int64_t message,
+                   ferrompi_status* status) {
+    MPI_Datatype dt = get_datatype(datatype_tag);
+    // The one return that leaves the message matched. Rust never takes it: it
+    // passes only tags that get_datatype maps.
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Message m = message_from_i64(message);
+    MPI_Status st;
+    int ret;
+    if (count > INT_MAX) {
+#if MPI_VERSION >= 4
+        ret = MPI_Mrecv_c(buf, (MPI_Count)count, dt, &m, &st);
+#else
+        // A receive buffer may be longer than the message. Without the
+        // large-count call the room is stated as INT_MAX elements, so that
+        // every return below is MPI's own and the message was consumed.
+        ret = MPI_Mrecv(buf, INT_MAX, dt, &m, &st);
+#endif
+    } else {
+        ret = MPI_Mrecv(buf, (int)count, dt, &m, &st);
+    }
+    if (ret == MPI_SUCCESS && status) {
+        ret = fill_status(&st, dt, status);
     }
     return ret;
 }
@@ -1360,6 +1578,7 @@ int ferrompi_reduce(
     MPI_Op mpi_op = get_op(op);
     const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         return MPI_Reduce_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm);
 #else
@@ -1383,6 +1602,7 @@ int ferrompi_allreduce(
     MPI_Op mpi_op = get_op(op);
     const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         return MPI_Allreduce_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, comm);
 #else
@@ -1405,6 +1625,7 @@ int ferrompi_scan(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         return MPI_Scan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm);
 #else
@@ -1427,6 +1648,7 @@ int ferrompi_exscan(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         return MPI_Exscan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm);
 #else
@@ -1540,6 +1762,20 @@ int ferrompi_alltoall(
                         recvbuf, (int)recvcount, dt, comm);
 }
 
+// The user-op count checks of the three reduce-scatter-block calls:
+// MPI_ERR_COUNT when op is a user op and recvcount, or the reduced span
+// recvcount * size, exceeds INT_MAX; otherwise MPI_SUCCESS, or the error of
+// MPI_Comm_size.
+static int check_user_op_span(int32_t op, int64_t recvcount, MPI_Comm comm) {
+    if (!is_user_op(op)) return MPI_SUCCESS;
+    if (recvcount > INT_MAX) return MPI_ERR_COUNT;          /* no MPI call: unit-tested */
+    int size;
+    int r = MPI_Comm_size(comm, &size);
+    if (r != MPI_SUCCESS) return r;
+    if (recvcount > INT_MAX / size) return MPI_ERR_COUNT;    /* reduced span recvcount * size */
+    return MPI_SUCCESS;
+}
+
 int ferrompi_reduce_scatter_block(
     const void* sendbuf,
     void* recvbuf,
@@ -1552,6 +1788,8 @@ int ferrompi_reduce_scatter_block(
     MPI_Datatype dt = get_datatype(datatype_tag);
     MPI_Op mpi_op = get_op(op);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    int r = check_user_op_span(op, recvcount, comm);
+    if (r != MPI_SUCCESS) return r;
     if (recvcount > INT_MAX) {
 #if MPI_VERSION >= 4
         return MPI_Reduce_scatter_block_c(sendbuf, recvbuf, (MPI_Count)recvcount, dt, mpi_op, comm);
@@ -1679,17 +1917,19 @@ int ferrompi_iallreduce(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
+    const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     MPI_Request req;
     int ret;
     
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
-        ret = MPI_Iallreduce_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
+        ret = MPI_Iallreduce_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Iallreduce(sendbuf, recvbuf, (int)count, dt, mpi_op, comm, &req);
+        ret = MPI_Iallreduce(sb, recvbuf, (int)count, dt, mpi_op, comm, &req);
     }
     
     if (ret == MPI_SUCCESS) {
@@ -1717,17 +1957,19 @@ int ferrompi_ireduce(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
+    const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     MPI_Request req;
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
-        ret = MPI_Ireduce_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm, &req);
+        ret = MPI_Ireduce_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Ireduce(sendbuf, recvbuf, (int)count, dt, mpi_op, root, comm, &req);
+        ret = MPI_Ireduce(sb, recvbuf, (int)count, dt, mpi_op, root, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {
@@ -1902,6 +2144,7 @@ int ferrompi_iscan(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Iscan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
 #else
@@ -1939,6 +2182,7 @@ int ferrompi_iexscan(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Iexscan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm, &req);
 #else
@@ -2121,7 +2365,8 @@ int ferrompi_ireduce_scatter_block(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
     MPI_Request req;
-    int ret;
+    int ret = check_user_op_span(op, recvcount, comm);
+    if (ret != MPI_SUCCESS) return ret;
 
     if (recvcount > INT_MAX) {
 #if MPI_VERSION >= 4
@@ -2161,16 +2406,17 @@ int ferrompi_send_init(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
+    int mpi_dest = dest_to_mpi(dest);
     int ret;
 
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Send_init_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
+        ret = MPI_Send_init_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Send_init(buf, (int)count, dt, dest, tag, comm, &req);
+        ret = MPI_Send_init(buf, (int)count, dt, mpi_dest, tag, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {
@@ -2198,8 +2444,8 @@ int ferrompi_recv_init(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
 
-    int mpi_source = (source == -1) ? MPI_ANY_SOURCE : source;
-    int mpi_tag = (tag == -1) ? MPI_ANY_TAG : tag;
+    int mpi_source = source_to_mpi(source);
+    int mpi_tag = tag_to_mpi(tag);
 
     int ret;
     if (count > INT_MAX) {
@@ -2218,6 +2464,7 @@ int ferrompi_recv_init(
             MPI_Request_free(&req);
             return FERROMPI_ERR_REQUESTS_FULL;
         }
+        set_recv_dtype(*request_handle, dt);
     }
 
     return ret;
@@ -2236,16 +2483,17 @@ int ferrompi_rsend_init(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
+    int mpi_dest = dest_to_mpi(dest);
     int ret;
 
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Rsend_init_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
+        ret = MPI_Rsend_init_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Rsend_init(buf, (int)count, dt, dest, tag, comm, &req);
+        ret = MPI_Rsend_init(buf, (int)count, dt, mpi_dest, tag, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {
@@ -2272,16 +2520,17 @@ int ferrompi_ssend_init(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
+    int mpi_dest = dest_to_mpi(dest);
     int ret;
 
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Ssend_init_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
+        ret = MPI_Ssend_init_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Ssend_init(buf, (int)count, dt, dest, tag, comm, &req);
+        ret = MPI_Ssend_init(buf, (int)count, dt, mpi_dest, tag, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {
@@ -2326,16 +2575,17 @@ int ferrompi_bsend_init(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
+    int mpi_dest = dest_to_mpi(dest);
     int ret;
 
     if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Bsend_init_c(buf, (MPI_Count)count, dt, dest, tag, comm, &req);
+        ret = MPI_Bsend_init_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Bsend_init(buf, (int)count, dt, dest, tag, comm, &req);
+        ret = MPI_Bsend_init(buf, (int)count, dt, mpi_dest, tag, comm, &req);
     }
 
     if (ret == MPI_SUCCESS) {
@@ -2354,6 +2604,25 @@ int ferrompi_bsend_init(
  * ============================================================ */
 
 #ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
+
+int ferrompi_barrier_init(
+    int32_t comm_handle,
+    int64_t* request_handle
+) {
+    MPI_Comm comm = get_comm(comm_handle);
+    MPI_Request req;
+    int ret = MPI_Barrier_init(comm, MPI_INFO_NULL, &req);
+
+    if (ret == MPI_SUCCESS) {
+        *request_handle = alloc_request(req, 1);
+        if (*request_handle < 0) {
+            MPI_Request_free(&req);
+            return FERROMPI_ERR_REQUESTS_FULL;
+        }
+    }
+
+    return ret;
+}
 
 int ferrompi_bcast_init(
     void* buf,
@@ -2408,6 +2677,7 @@ int ferrompi_allreduce_init(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Allreduce_init_c(sb, recvbuf, (MPI_Count)count, dt,
                                     mpi_op, comm, MPI_INFO_NULL, &req);
@@ -2486,18 +2756,20 @@ int ferrompi_reduce_init(
     MPI_Datatype dt = get_datatype(datatype_tag);
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
+    const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
     MPI_Request req;
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
-        ret = MPI_Reduce_init_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm,
+        ret = MPI_Reduce_init_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, root, comm,
                                  MPI_INFO_NULL, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Reduce_init(sendbuf, recvbuf, (int)count, dt, mpi_op, root, comm,
+        ret = MPI_Reduce_init(sb, recvbuf, (int)count, dt, mpi_op, root, comm,
                               MPI_INFO_NULL, &req);
     }
 
@@ -2612,6 +2884,7 @@ int ferrompi_scan_init(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Scan_init_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm,
                                MPI_INFO_NULL, &req);
@@ -2651,6 +2924,7 @@ int ferrompi_exscan_init(
     int ret;
 
     if (count > INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
 #if MPI_VERSION >= 4
         ret = MPI_Exscan_init_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm,
                                  MPI_INFO_NULL, &req);
@@ -2860,7 +3134,8 @@ int ferrompi_reduce_scatter_block_init(
     if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op);
     MPI_Request req;
-    int ret;
+    int ret = check_user_op_span(op, recvcount, comm);
+    if (ret != MPI_SUCCESS) return ret;
 
     if (recvcount > INT_MAX) {
 #if MPI_VERSION >= 4
@@ -2886,6 +3161,11 @@ int ferrompi_reduce_scatter_block_init(
 }
 
 #else /* !FERROMPI_HAVE_MPI4_COLLECTIVES */
+
+int ferrompi_barrier_init(int32_t comm_handle, int64_t* request_handle) {
+    (void)comm_handle; (void)request_handle;
+    return FERROMPI_ERR_NOT_SUPPORTED;
+}
 
 int ferrompi_bcast_init(void* buf, int64_t count, int32_t datatype_tag, int32_t root,
                         int32_t comm_handle, int64_t* request_handle) {
@@ -2991,60 +3271,6 @@ int ferrompi_reduce_scatter_block_init(const void* sendbuf, void* recvbuf, int64
 #endif /* FERROMPI_HAVE_MPI4_COLLECTIVES */
 
 /* ============================================================
- * Info Object Operations
- * ============================================================ */
-
-int ferrompi_info_create(int32_t* info_handle) {
-    MPI_Info info;
-    int ret = MPI_Info_create(&info);
-    if (ret == MPI_SUCCESS) {
-        *info_handle = alloc_info(info);
-        if (*info_handle < 0) {
-            MPI_Info_free(&info);
-            return FERROMPI_ERR_INFOS_FULL;
-        }
-    }
-    return ret;
-}
-
-int ferrompi_info_free(int32_t info_handle) {
-    if (info_handle < 0 || info_handle >= MAX_INFOS ||
-            !atomic_load_explicit(&info_used[info_handle],
-                                  memory_order_acquire)) {
-        return MPI_SUCCESS;
-    }
-    int ret = MPI_Info_free(&info_table[info_handle]);
-    free_info(info_handle);
-    return ret;
-}
-
-int ferrompi_info_set(int32_t info_handle, const char* key, const char* value) {
-    MPI_Info info = get_info(info_handle);
-    if (info == MPI_INFO_NULL) return MPI_ERR_INFO;
-    return MPI_Info_set(info, key, value);
-}
-
-int ferrompi_info_get(int32_t info_handle, const char* key, char* value, int32_t* valuelen, int32_t* flag) {
-    MPI_Info info = get_info(info_handle);
-    if (info == MPI_INFO_NULL) return MPI_ERR_INFO;
-    int f;
-#if MPI_VERSION >= 4
-    int ret = MPI_Info_get_string(info, key, valuelen, value, &f);
-#else
-    /* MPI 3.x fallback: MPI_Info_get uses (info, key, valuelen, value, &flag) */
-    /* where valuelen is input max length, value is output buffer */
-    int vlen = *valuelen - 1;  /* MPI_Info_get expects max value length excluding null */
-    if (vlen < 0) vlen = 0;
-    int ret = MPI_Info_get(info, key, vlen, value, &f);
-    if (f) {
-        *valuelen = (int32_t)strlen(value);
-    }
-#endif
-    *flag = f;
-    return ret;
-}
-
-/* ============================================================
  * Group Operations
  * ============================================================ */
 
@@ -3052,15 +3278,10 @@ int ferrompi_comm_group(int32_t comm_handle, int32_t* group_handle) {
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
     MPI_Group g;
-    int ret = MPI_Comm_group(comm, &g);
-    if (ret == MPI_SUCCESS) {
-        *group_handle = alloc_group(g);
-        if (*group_handle < 0) {
-            MPI_Group_free(&g);
-            return FERROMPI_ERR_GROUPS_FULL;
-        }
-    }
-    return ret;
+    int ret;
+    GROUP_CALL(ret, MPI_Comm_group(comm, &g));
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(g, group_handle);
 }
 
 int ferrompi_group_incl(int32_t group_handle, int32_t n, const int32_t* ranks, int32_t* newgroup_handle) {
@@ -3069,15 +3290,10 @@ int ferrompi_group_incl(int32_t group_handle, int32_t n, const int32_t* ranks, i
     }
     MPI_Group group = get_group(group_handle);
     MPI_Group newgroup;
-    int ret = MPI_Group_incl(group, (int)n, (const int*)ranks, &newgroup);
-    if (ret == MPI_SUCCESS) {
-        *newgroup_handle = alloc_group(newgroup);
-        if (*newgroup_handle < 0) {
-            MPI_Group_free(&newgroup);
-            return FERROMPI_ERR_GROUPS_FULL;
-        }
-    }
-    return ret;
+    int ret;
+    GROUP_CALL(ret, MPI_Group_incl(group, (int)n, (const int*)ranks, &newgroup));
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(newgroup, newgroup_handle);
 }
 
 int ferrompi_group_excl(int32_t group_handle, int32_t n, const int32_t* ranks, int32_t* newgroup_handle) {
@@ -3086,19 +3302,14 @@ int ferrompi_group_excl(int32_t group_handle, int32_t n, const int32_t* ranks, i
     }
     MPI_Group group = get_group(group_handle);
     MPI_Group newgroup;
-    int ret = MPI_Group_excl(group, (int)n, (const int*)ranks, &newgroup);
-    if (ret == MPI_SUCCESS) {
-        *newgroup_handle = alloc_group(newgroup);
-        if (*newgroup_handle < 0) {
-            MPI_Group_free(&newgroup);
-            return FERROMPI_ERR_GROUPS_FULL;
-        }
-    }
-    return ret;
+    int ret;
+    GROUP_CALL(ret, MPI_Group_excl(group, (int)n, (const int*)ranks, &newgroup));
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(newgroup, newgroup_handle);
 }
 
 int ferrompi_group_free(int32_t group_handle) {
-    // Slot 0 is reserved for MPI_GROUP_EMPTY — never free it.
+    // Handle 0 is MPI_GROUP_EMPTY, which is never freed.
     if (group_handle <= 0) {
         return MPI_SUCCESS;
     }
@@ -3138,12 +3349,10 @@ int ferrompi_group_union(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     MPI_Group g2 = get_group(g2_h);
     if (g1 == MPI_GROUP_NULL || g2 == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    int ret = MPI_Group_union(g1, g2, &new_grp);
-    if (ret == MPI_SUCCESS) {
-        *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
-    }
-    return ret;
+    int ret;
+    GROUP_CALL(ret, MPI_Group_union(g1, g2, &new_grp));
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(new_grp, out_h);
 }
 
 int ferrompi_group_intersection(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
@@ -3151,12 +3360,10 @@ int ferrompi_group_intersection(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     MPI_Group g2 = get_group(g2_h);
     if (g1 == MPI_GROUP_NULL || g2 == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    int ret = MPI_Group_intersection(g1, g2, &new_grp);
-    if (ret == MPI_SUCCESS) {
-        *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
-    }
-    return ret;
+    int ret;
+    GROUP_CALL(ret, MPI_Group_intersection(g1, g2, &new_grp));
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(new_grp, out_h);
 }
 
 int ferrompi_group_difference(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
@@ -3164,12 +3371,10 @@ int ferrompi_group_difference(int32_t g1_h, int32_t g2_h, int32_t* out_h) {
     MPI_Group g2 = get_group(g2_h);
     if (g1 == MPI_GROUP_NULL || g2 == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    int ret = MPI_Group_difference(g1, g2, &new_grp);
-    if (ret == MPI_SUCCESS) {
-        *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
-    }
-    return ret;
+    int ret;
+    GROUP_CALL(ret, MPI_Group_difference(g1, g2, &new_grp));
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(new_grp, out_h);
 }
 
 int ferrompi_group_range_incl(int32_t g_h, int32_t n,
@@ -3179,12 +3384,10 @@ int ferrompi_group_range_incl(int32_t g_h, int32_t n,
     MPI_Group g = get_group(g_h);
     if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    int ret = MPI_Group_range_incl(g, n, (int (*)[3])ranges_flat, &new_grp);
-    if (ret == MPI_SUCCESS) {
-        *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
-    }
-    return ret;
+    int ret;
+    GROUP_CALL(ret, MPI_Group_range_incl(g, n, (int (*)[3])ranges_flat, &new_grp));
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(new_grp, out_h);
 }
 
 int ferrompi_group_range_excl(int32_t g_h, int32_t n,
@@ -3194,12 +3397,10 @@ int ferrompi_group_range_excl(int32_t g_h, int32_t n,
     MPI_Group g = get_group(g_h);
     if (g == MPI_GROUP_NULL) return MPI_ERR_ARG;
     MPI_Group new_grp;
-    int ret = MPI_Group_range_excl(g, n, (int (*)[3])ranges_flat, &new_grp);
-    if (ret == MPI_SUCCESS) {
-        *out_h = alloc_group(new_grp);
-        if (*out_h < 0) { MPI_Group_free(&new_grp); return FERROMPI_ERR_GROUPS_FULL; }
-    }
-    return ret;
+    int ret;
+    GROUP_CALL(ret, MPI_Group_range_excl(g, n, (int (*)[3])ranges_flat, &new_grp));
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(new_grp, out_h);
 }
 
 int ferrompi_group_compare(int32_t g1_h, int32_t g2_h, int32_t* result) {
@@ -3207,7 +3408,8 @@ int ferrompi_group_compare(int32_t g1_h, int32_t g2_h, int32_t* result) {
     MPI_Group g2 = get_group(g2_h);
     if (g1 == MPI_GROUP_NULL || g2 == MPI_GROUP_NULL) return MPI_ERR_ARG;
     int mpi_result;
-    int ret = MPI_Group_compare(g1, g2, &mpi_result);
+    int ret;
+    GROUP_CALL(ret, MPI_Group_compare(g1, g2, &mpi_result));
     if (ret != MPI_SUCCESS) return ret;
     if (mpi_result == MPI_IDENT)        *result = 0;
     else if (mpi_result == MPI_SIMILAR) *result = 1;
@@ -3223,7 +3425,8 @@ int ferrompi_group_translate_ranks(int32_t g1_h, int32_t n,
     MPI_Group g1 = get_group(g1_h);
     MPI_Group g2 = get_group(g2_h);
     if (g1 == MPI_GROUP_NULL || g2 == MPI_GROUP_NULL) return MPI_ERR_ARG;
-    int ret = MPI_Group_translate_ranks(g1, n, ranks1, g2, ranks2);
+    int ret;
+    GROUP_CALL(ret, MPI_Group_translate_ranks(g1, n, ranks1, g2, ranks2));
     if (ret != MPI_SUCCESS) return ret;
     /* Normalize MPI_UNDEFINED to -1 so the Rust side has a single
      * portable sentinel. The MPI standard does not fix MPI_UNDEFINED's
@@ -3312,13 +3515,19 @@ static void write_back(int64_t count, const int64_t* handles,
     }
 }
 
-int ferrompi_wait(int64_t request_handle) {
-    MPI_Request* req = get_request_ptr(request_handle);
-    if (!req) {
+int ferrompi_wait(int64_t request_handle, ferrompi_status* status) {
+    int64_t slot = request_slot(request_handle);
+    if (slot < 0) {
         return MPI_ERR_REQUEST;
     }
-    int ret = MPI_Wait(req, MPI_STATUS_IGNORE);
+    MPI_Request* req = &request_table[slot];
+    MPI_Datatype dt = request_dtype[slot];
+    MPI_Status st;
+    int ret = MPI_Wait(req, status ? &st : MPI_STATUS_IGNORE);
     abort_if_pending_after_failure(ret);
+    if (status && ret == MPI_SUCCESS) {
+        completion_status(dt, &st, status);
+    }
     // MPI_Wait completed the request whatever it returned: a nonblocking
     // request is freed; a persistent one is inactive, or freed too by Open
     // MPI when it failed.
@@ -3330,14 +3539,20 @@ int ferrompi_wait(int64_t request_handle) {
     return ret;
 }
 
-int ferrompi_test(int64_t request_handle, int32_t* flag) {
-    MPI_Request* req = get_request_ptr(request_handle);
-    if (!req) {
+int ferrompi_test(int64_t request_handle, int32_t* flag, ferrompi_status* status) {
+    int64_t slot = request_slot(request_handle);
+    if (slot < 0) {
         return MPI_ERR_REQUEST;
     }
+    MPI_Request* req = &request_table[slot];
+    MPI_Datatype dt = request_dtype[slot];
+    MPI_Status st;
     int f = 0;
-    int ret = MPI_Test(req, &f, MPI_STATUS_IGNORE);
+    int ret = MPI_Test(req, &f, status ? &st : MPI_STATUS_IGNORE);
     abort_if_pending_after_failure(ret);
+    if (status && f && ret == MPI_SUCCESS) {
+        completion_status(dt, &st, status);
+    }
     // MPI frees a nonblocking request that completes whether or not MPI_Test
     // itself reports an error (e.g. a truncated receive still nulls the
     // request), so free the slot and report completion on that condition
@@ -3404,8 +3619,11 @@ int ferrompi_waitall(int64_t count, const int64_t* request_handles, uint8_t* don
 
     // Whatever ret is, mark done[i] for every request MPI completed: all of
     // them on success, or on MPI_ERR_IN_STATUS the ones whose own status
-    // error is not MPI_ERR_PENDING (MPICH stops at the first failure and
-    // reports the rest pending; Open MPI completes them all).
+    // error is not MPI_ERR_PENDING. After a failure the library reports the
+    // rest MPI_ERR_PENDING: Open MPI's MPI_Waitall returns at the first error,
+    // with those requests still incomplete; MPICH's returns only after every
+    // request completed, with its MPI_ERR_PENDING entry complete but not yet
+    // processed. A second MPI_Waitall over the remainder completes both.
     for (int64_t i = 0; i < count; i++) {
         done[i] = (ret == MPI_SUCCESS)
             || (ret == MPI_ERR_IN_STATUS && sts[i].MPI_ERROR != MPI_ERR_PENDING);
@@ -3523,7 +3741,7 @@ static int some_result_in_range(int64_t count, int out, const int* indices) {
 }
 
 int ferrompi_waitany(int64_t count, const int64_t* request_handles,
-                     int32_t* index, uint8_t* done) {
+                     int32_t* index, uint8_t* done, ferrompi_status* status) {
     *index = -1;
     if (count <= 0) { return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
@@ -3543,7 +3761,8 @@ int ferrompi_waitany(int64_t count, const int64_t* request_handles,
         reqs[i] = *req;
     }
     int idx = MPI_UNDEFINED;
-    int ret = MPI_Waitany((int)count, reqs, &idx, MPI_STATUS_IGNORE);
+    MPI_Status st;
+    int ret = MPI_Waitany((int)count, reqs, &idx, status ? &st : MPI_STATUS_IGNORE);
     abort_if_pending_after_failure(ret);
     // An index outside the list is treated as no completion reported.
     if (idx != MPI_UNDEFINED && (idx < 0 || idx >= count)) {
@@ -3554,6 +3773,12 @@ int ferrompi_waitany(int64_t count, const int64_t* request_handles,
         done[idx] = 1;
     }
     *index = (idx == MPI_UNDEFINED) ? -1 : (int32_t)idx;
+    // MPI fills only the status of the returned index (MPI-4.1 3.7.5). The
+    // slot is still live here: only write_back frees it.
+    if (status && ret == MPI_SUCCESS && idx != MPI_UNDEFINED) {
+        int64_t slot = request_slot(request_handles[idx]);
+        completion_status(slot < 0 ? MPI_DATATYPE_NULL : request_dtype[slot], &st, status);
+    }
     write_back(count, request_handles, reqs, done);
     if (reqs != stack_reqs) free(reqs);
     return ret;
@@ -3561,8 +3786,7 @@ int ferrompi_waitany(int64_t count, const int64_t* request_handles,
 
 int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
                       int64_t* outcount, int32_t* indices, uint8_t* done,
-                      int64_t* failed_index) {
-    *failed_index = -1;
+                      ferrompi_status* statuses) {
     if (count <= 0) { *outcount = -1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
@@ -3616,24 +3840,32 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
         *outcount = -1;
     } else {
         *outcount = (int64_t)out;
+        // MPI writes sts[0..out) for these two returns only (MPI-4.1 3.2.5,
+        // 3.7.5). statuses[k] belongs to request indices[k] (completion
+        // order, not caller order), and that request's slot is still live
+        // here: only write_back frees it.
+        int in_status = (ret == MPI_ERR_IN_STATUS);
+        int filled = in_status || ret == MPI_SUCCESS;
+        int any_failed = 0;
         for (int i = 0; i < out; i++) {
             indices[i] = (int32_t)tmp_indices[i];
             done[tmp_indices[i]] = 1;
-        }
-    }
-    write_back(count, request_handles, reqs, done);
-
-    // statuses[k] belongs to request indices[k] (completion order, not
-    // caller order); report the caller's index of the first real failure.
-    if (ret == MPI_ERR_IN_STATUS) {
-        for (int i = 0; i < out; i++) {
-            if (sts[i].MPI_ERROR != MPI_SUCCESS && sts[i].MPI_ERROR != MPI_ERR_PENDING) {
-                *failed_index = tmp_indices[i];
-                ret = sts[i].MPI_ERROR;
-                break;
+            if (!filled) continue;
+            int64_t slot = request_slot(request_handles[tmp_indices[i]]);
+            completion_status(slot < 0 ? MPI_DATATYPE_NULL : request_dtype[slot], &sts[i],
+                              &statuses[i]);
+            // MPI_ERROR holds a code and is valid only after MPI_ERR_IN_STATUS.
+            if (in_status && sts[i].MPI_ERROR != MPI_SUCCESS) {
+                statuses[i].error = error_class_of(sts[i].MPI_ERROR);
+                any_failed = 1;
             }
         }
+        // Every completed request is reported in statuses, failed ones included.
+        // MPI_ERR_IN_STATUS with no reported request failed names an error the
+        // statuses do not carry, so it stays an error.
+        if (in_status && any_failed) ret = MPI_SUCCESS;
     }
+    write_back(count, request_handles, reqs, done);
 
     if (sts != stack_sts) free(sts);
     if (tmp_indices != stack_idx) free(tmp_indices);
@@ -3642,7 +3874,8 @@ int ferrompi_waitsome(int64_t count, const int64_t* request_handles,
 }
 
 int ferrompi_testany(int64_t count, const int64_t* request_handles,
-                     int32_t* index, int32_t* flag, uint8_t* done) {
+                     int32_t* index, int32_t* flag, uint8_t* done,
+                     ferrompi_status* status) {
     *index = -1;
     if (count <= 0) { *flag = 1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
@@ -3663,7 +3896,8 @@ int ferrompi_testany(int64_t count, const int64_t* request_handles,
     }
     int idx = MPI_UNDEFINED;
     int f = 0;
-    int ret = MPI_Testany((int)count, reqs, &idx, &f, MPI_STATUS_IGNORE);
+    MPI_Status st;
+    int ret = MPI_Testany((int)count, reqs, &idx, &f, status ? &st : MPI_STATUS_IGNORE);
     abort_if_pending_after_failure(ret);
     if (idx != MPI_UNDEFINED && (idx < 0 || idx >= count)) {
         idx = MPI_UNDEFINED;
@@ -3674,6 +3908,12 @@ int ferrompi_testany(int64_t count, const int64_t* request_handles,
     }
     *flag = (int32_t)f;
     *index = (idx == MPI_UNDEFINED) ? -1 : (int32_t)idx;
+    // As in ferrompi_waitany: only the returned index has a status, and its
+    // slot is still live until write_back.
+    if (status && ret == MPI_SUCCESS && f && idx != MPI_UNDEFINED) {
+        int64_t slot = request_slot(request_handles[idx]);
+        completion_status(slot < 0 ? MPI_DATATYPE_NULL : request_dtype[slot], &st, status);
+    }
     write_back(count, request_handles, reqs, done);
     if (reqs != stack_reqs) free(reqs);
     return ret;
@@ -3681,8 +3921,7 @@ int ferrompi_testany(int64_t count, const int64_t* request_handles,
 
 int ferrompi_testsome(int64_t count, const int64_t* request_handles,
                       int64_t* outcount, int32_t* indices, uint8_t* done,
-                      int64_t* failed_index) {
-    *failed_index = -1;
+                      ferrompi_status* statuses) {
     if (count <= 0) { *outcount = -1; return MPI_SUCCESS; }
     if (count > INT_MAX) return MPI_ERR_COUNT;
     MPI_Request stack_reqs[FERROMPI_REQ_STACK];
@@ -3735,24 +3974,32 @@ int ferrompi_testsome(int64_t count, const int64_t* request_handles,
         *outcount = -1;
     } else {
         *outcount = (int64_t)out;
+        // MPI writes sts[0..out) for these two returns only (MPI-4.1 3.2.5,
+        // 3.7.5). statuses[k] belongs to request indices[k] (completion
+        // order, not caller order), and that request's slot is still live
+        // here: only write_back frees it.
+        int in_status = (ret == MPI_ERR_IN_STATUS);
+        int filled = in_status || ret == MPI_SUCCESS;
+        int any_failed = 0;
         for (int i = 0; i < out; i++) {
             indices[i] = (int32_t)tmp_indices[i];
             done[tmp_indices[i]] = 1;
-        }
-    }
-    write_back(count, request_handles, reqs, done);
-
-    // statuses[k] belongs to request indices[k] (completion order, not
-    // caller order); report the caller's index of the first real failure.
-    if (ret == MPI_ERR_IN_STATUS) {
-        for (int i = 0; i < out; i++) {
-            if (sts[i].MPI_ERROR != MPI_SUCCESS && sts[i].MPI_ERROR != MPI_ERR_PENDING) {
-                *failed_index = tmp_indices[i];
-                ret = sts[i].MPI_ERROR;
-                break;
+            if (!filled) continue;
+            int64_t slot = request_slot(request_handles[tmp_indices[i]]);
+            completion_status(slot < 0 ? MPI_DATATYPE_NULL : request_dtype[slot], &sts[i],
+                              &statuses[i]);
+            // MPI_ERROR holds a code and is valid only after MPI_ERR_IN_STATUS.
+            if (in_status && sts[i].MPI_ERROR != MPI_SUCCESS) {
+                statuses[i].error = error_class_of(sts[i].MPI_ERROR);
+                any_failed = 1;
             }
         }
+        // Every completed request is reported in statuses, failed ones included.
+        // MPI_ERR_IN_STATUS with no reported request failed names an error the
+        // statuses do not carry, so it stays an error.
+        if (in_status && any_failed) ret = MPI_SUCCESS;
     }
+    write_back(count, request_handles, reqs, done);
 
     if (sts != stack_sts) free(sts);
     if (tmp_indices != stack_idx) free(tmp_indices);
@@ -3819,15 +4066,21 @@ static int zero_own_segment(MPI_Win win, MPI_Comm comm, void* base, MPI_Aint siz
     return ret;
 }
 
-int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_handle,
-                                  int32_t comm_handle, void** baseptr, int32_t* win_handle) {
+int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t comm_handle,
+                                  void** baseptr, int32_t* win_handle, int32_t* unified) {
+    *unified = 0;
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
-    MPI_Info info = (info_handle < 0) ? MPI_INFO_NULL : get_info(info_handle);
     MPI_Win win;
-    int ret = MPI_Win_allocate_shared((MPI_Aint)size, disp_unit, info, comm, baseptr, &win);
+    int ret = MPI_Win_allocate_shared((MPI_Aint)size, disp_unit, MPI_INFO_NULL, comm, baseptr, &win);
     if (ret == MPI_SUCCESS) {
         install_errors_return_win(win);
+        /* The attribute value is a pointer to an int (MPI-4.1 Table 12.1). A failed or
+         * empty query leaves *unified 0, so the query adds no error path. */
+        int* model = NULL;
+        int flag = 0;
+        int r = MPI_Win_get_attr(win, MPI_WIN_MODEL, &model, &flag);
+        *unified = (r == MPI_SUCCESS && flag && *model == MPI_WIN_UNIFIED);
         ret = zero_own_segment(win, comm, *baseptr, (MPI_Aint)size);
         if (ret != MPI_SUCCESS) {
             *win_handle = FERROMPI_WIN_LEAKED;
@@ -3842,40 +4095,29 @@ int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info_h
     return ret;
 }
 
-int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t info_handle,
-                         int32_t comm_handle, int32_t* win_handle) {
+int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t comm_handle,
+                         int32_t* win_handle) {
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
-    MPI_Info info = (info_handle < 0) ? MPI_INFO_NULL : get_info(info_handle);
     MPI_Win win;
-    int ret = MPI_Win_create(base, (MPI_Aint)size, disp_unit, info, comm, &win);
+    int ret = MPI_Win_create(base, (MPI_Aint)size, disp_unit, MPI_INFO_NULL, comm, &win);
     if (ret == MPI_SUCCESS) {
         install_errors_return_win(win);
         *win_handle = alloc_win(win);
         if (*win_handle < 0) {
-            /* The window exposes the caller's buffer, which the caller gets
-             * back once this returns an error while peers can still reach
-             * it: it can be neither leaked nor freed on this rank alone
-             * (MPI_Win_free is collective). MPI_Abort is only required to
-             * make a "best attempt"; it can return (measured: MPICH before
-             * the launcher kills the other ranks), so this must not fall
-             * through to a return that hands the buffer back to Rust. */
-            fputs("ferrompi: window table full after MPI_Win_create; aborting "
-                  "because the window exposes the caller's buffer\n", stderr);
-            MPI_Abort(comm, MPI_ERR_OTHER);
-            abort();
+            *win_handle = FERROMPI_WIN_LEAKED;
+            return FERROMPI_ERR_WINDOWS_FULL;
         }
     }
     return ret;
 }
 
-int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info_handle,
-                           int32_t comm_handle, void** baseptr, int32_t* win_handle) {
+int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t comm_handle,
+                           void** baseptr, int32_t* win_handle) {
     MPI_Comm comm = get_comm(comm_handle);
     if (comm == MPI_COMM_NULL) return MPI_ERR_COMM;
-    MPI_Info info = (info_handle < 0) ? MPI_INFO_NULL : get_info(info_handle);
     MPI_Win win;
-    int ret = MPI_Win_allocate((MPI_Aint)size, disp_unit, info, comm, baseptr, &win);
+    int ret = MPI_Win_allocate((MPI_Aint)size, disp_unit, MPI_INFO_NULL, comm, baseptr, &win);
     if (ret == MPI_SUCCESS) {
         install_errors_return_win(win);
         ret = zero_own_segment(win, comm, *baseptr, (MPI_Aint)size);
@@ -3998,6 +4240,15 @@ int ferrompi_win_start(int32_t group_handle, int32_t assert_val, int32_t win_han
     return MPI_Win_start(group, assert_val, win);
 }
 
+int ferrompi_win_get_group(int32_t win_handle, int32_t* group_handle) {
+    MPI_Win win = get_win(win_handle);
+    if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
+    MPI_Group g;
+    int ret = MPI_Win_get_group(win, &g);
+    if (ret != MPI_SUCCESS) return ret;
+    return store_group(g, group_handle);
+}
+
 int ferrompi_win_complete(int32_t win_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
@@ -4025,52 +4276,47 @@ void ferrompi_win_pscw_mode_values(int32_t* out) {
     out[2] = MPI_MODE_NOPUT;
 }
 
-int ferrompi_put(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                 int32_t target_rank, int64_t target_disp, int64_t target_count,
-                 int32_t target_dt_tag, int32_t win_handle) {
+int ferrompi_put(const void* origin, int64_t count, int32_t dt_tag,
+                 int32_t target_rank, int64_t target_disp, int32_t win_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        return MPI_Put_c(origin, (MPI_Count)origin_count, origin_dt,
-                         target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                         target_dt, win);
+        return MPI_Put_c(origin, (MPI_Count)count, dt,
+                         target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                         dt, win);
 #else
         return MPI_ERR_COUNT;
 #endif
     }
-    return MPI_Put(origin, (int)origin_count, origin_dt,
-                   target_rank, (MPI_Aint)target_disp, (int)target_count,
-                   target_dt, win);
+    return MPI_Put(origin, (int)count, dt,
+                   target_rank, (MPI_Aint)target_disp, (int)count,
+                   dt, win);
 }
 
-int ferrompi_rput(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                  int32_t target_rank, int64_t target_disp, int64_t target_count,
-                  int32_t target_dt_tag, int32_t win_handle, int64_t* request_handle) {
+int ferrompi_rput(const void* origin, int64_t count, int32_t dt_tag,
+                  int32_t target_rank, int64_t target_disp, int32_t win_handle,
+                  int64_t* request_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
     int ret;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Rput_c(origin, (MPI_Count)origin_count, origin_dt,
-                         target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                         target_dt, win, &req);
+        ret = MPI_Rput_c(origin, (MPI_Count)count, dt,
+                         target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                         dt, win, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Rput(origin, (int)origin_count, origin_dt,
-                       target_rank, (MPI_Aint)target_disp, (int)target_count,
-                       target_dt, win, &req);
+        ret = MPI_Rput(origin, (int)count, dt,
+                       target_rank, (MPI_Aint)target_disp, (int)count,
+                       dt, win, &req);
     }
     if (ret == MPI_SUCCESS) {
         *request_handle = alloc_request(req, 0);
@@ -4082,52 +4328,47 @@ int ferrompi_rput(const void* origin, int64_t origin_count, int32_t origin_dt_ta
     return ret;
 }
 
-int ferrompi_get(void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                 int32_t target_rank, int64_t target_disp, int64_t target_count,
-                 int32_t target_dt_tag, int32_t win_handle) {
+int ferrompi_get(void* origin, int64_t count, int32_t dt_tag,
+                 int32_t target_rank, int64_t target_disp, int32_t win_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        return MPI_Get_c(origin, (MPI_Count)origin_count, origin_dt,
-                         target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                         target_dt, win);
+        return MPI_Get_c(origin, (MPI_Count)count, dt,
+                         target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                         dt, win);
 #else
         return MPI_ERR_COUNT;
 #endif
     }
-    return MPI_Get(origin, (int)origin_count, origin_dt,
-                   target_rank, (MPI_Aint)target_disp, (int)target_count,
-                   target_dt, win);
+    return MPI_Get(origin, (int)count, dt,
+                   target_rank, (MPI_Aint)target_disp, (int)count,
+                   dt, win);
 }
 
-int ferrompi_rget(void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                  int32_t target_rank, int64_t target_disp, int64_t target_count,
-                  int32_t target_dt_tag, int32_t win_handle, int64_t* request_handle) {
+int ferrompi_rget(void* origin, int64_t count, int32_t dt_tag,
+                  int32_t target_rank, int64_t target_disp, int32_t win_handle,
+                  int64_t* request_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Request req;
     int ret;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Rget_c(origin, (MPI_Count)origin_count, origin_dt,
-                         target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                         target_dt, win, &req);
+        ret = MPI_Rget_c(origin, (MPI_Count)count, dt,
+                         target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                         dt, win, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Rget(origin, (int)origin_count, origin_dt,
-                       target_rank, (MPI_Aint)target_disp, (int)target_count,
-                       target_dt, win, &req);
+        ret = MPI_Rget(origin, (int)count, dt,
+                       target_rank, (MPI_Aint)target_disp, (int)count,
+                       dt, win, &req);
     }
     if (ret == MPI_SUCCESS) {
         *request_handle = alloc_request(req, 0);
@@ -4139,57 +4380,52 @@ int ferrompi_rget(void* origin, int64_t origin_count, int32_t origin_dt_tag,
     return ret;
 }
 
-int ferrompi_accumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                        int32_t target_rank, int64_t target_disp, int64_t target_count,
-                        int32_t target_dt_tag, int32_t op_tag, int32_t win_handle) {
+int ferrompi_accumulate(const void* origin, int64_t count, int32_t dt_tag,
+                        int32_t target_rank, int64_t target_disp, int32_t op_tag,
+                        int32_t win_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op_tag);
     if (mpi_op == MPI_OP_NULL) return MPI_ERR_OP;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        return MPI_Accumulate_c(origin, (MPI_Count)origin_count, origin_dt,
-                                target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                                target_dt, mpi_op, win);
+        return MPI_Accumulate_c(origin, (MPI_Count)count, dt,
+                                target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                                dt, mpi_op, win);
 #else
         return MPI_ERR_COUNT;
 #endif
     }
-    return MPI_Accumulate(origin, (int)origin_count, origin_dt,
-                          target_rank, (MPI_Aint)target_disp, (int)target_count,
-                          target_dt, mpi_op, win);
+    return MPI_Accumulate(origin, (int)count, dt,
+                          target_rank, (MPI_Aint)target_disp, (int)count,
+                          dt, mpi_op, win);
 }
 
-int ferrompi_raccumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                         int32_t target_rank, int64_t target_disp, int64_t target_count,
-                         int32_t target_dt_tag, int32_t op_tag, int32_t win_handle,
-                         int64_t* request_handle) {
+int ferrompi_raccumulate(const void* origin, int64_t count, int32_t dt_tag,
+                         int32_t target_rank, int64_t target_disp, int32_t op_tag,
+                         int32_t win_handle, int64_t* request_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op_tag);
     if (mpi_op == MPI_OP_NULL) return MPI_ERR_OP;
     MPI_Request req;
     int ret;
-    if (origin_count > INT_MAX || target_count > INT_MAX) {
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        ret = MPI_Raccumulate_c(origin, (MPI_Count)origin_count, origin_dt,
-                                target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                                target_dt, mpi_op, win, &req);
+        ret = MPI_Raccumulate_c(origin, (MPI_Count)count, dt,
+                                target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                                dt, mpi_op, win, &req);
 #else
         return MPI_ERR_COUNT;
 #endif
     } else {
-        ret = MPI_Raccumulate(origin, (int)origin_count, origin_dt,
-                              target_rank, (MPI_Aint)target_disp, (int)target_count,
-                              target_dt, mpi_op, win, &req);
+        ret = MPI_Raccumulate(origin, (int)count, dt,
+                              target_rank, (MPI_Aint)target_disp, (int)count,
+                              dt, mpi_op, win, &req);
     }
     if (ret == MPI_SUCCESS) {
         *request_handle = alloc_request(req, 0);
@@ -4201,34 +4437,29 @@ int ferrompi_raccumulate(const void* origin, int64_t origin_count, int32_t origi
     return ret;
 }
 
-int ferrompi_get_accumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                            void* result, int64_t result_count, int32_t result_dt_tag,
-                            int32_t target_rank, int64_t target_disp, int64_t target_count,
-                            int32_t target_dt_tag, int32_t op_tag, int32_t win_handle) {
+int ferrompi_get_accumulate(const void* origin, void* result, int64_t count,
+                            int32_t dt_tag, int32_t target_rank, int64_t target_disp,
+                            int32_t op_tag, int32_t win_handle) {
     MPI_Win win = get_win(win_handle);
     if (win == MPI_WIN_NULL) return MPI_ERR_WIN;
-    MPI_Datatype origin_dt = get_datatype(origin_dt_tag);
-    if (origin_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype result_dt = get_datatype(result_dt_tag);
-    if (result_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    MPI_Datatype target_dt = get_datatype(target_dt_tag);
-    if (target_dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Datatype dt = get_datatype(dt_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
     MPI_Op mpi_op = get_op(op_tag);
     if (mpi_op == MPI_OP_NULL) return MPI_ERR_OP;
-    if (origin_count > INT_MAX || target_count > INT_MAX || result_count > INT_MAX) {
+    if (count > INT_MAX) {
 #if MPI_VERSION >= 4
-        return MPI_Get_accumulate_c(origin, (MPI_Count)origin_count, origin_dt,
-                                    result, (MPI_Count)result_count, result_dt,
-                                    target_rank, (MPI_Aint)target_disp, (MPI_Count)target_count,
-                                    target_dt, mpi_op, win);
+        return MPI_Get_accumulate_c(origin, (MPI_Count)count, dt,
+                                    result, (MPI_Count)count, dt,
+                                    target_rank, (MPI_Aint)target_disp, (MPI_Count)count,
+                                    dt, mpi_op, win);
 #else
         return MPI_ERR_COUNT;
 #endif
     }
-    return MPI_Get_accumulate(origin, (int)origin_count, origin_dt,
-                              result, (int)result_count, result_dt,
-                              target_rank, (MPI_Aint)target_disp, (int)target_count,
-                              target_dt, mpi_op, win);
+    return MPI_Get_accumulate(origin, (int)count, dt,
+                              result, (int)count, dt,
+                              target_rank, (MPI_Aint)target_disp, (int)count,
+                              dt, mpi_op, win);
 }
 
 int ferrompi_fetch_and_op(const void* origin, void* result, int32_t dt_tag,
@@ -4463,12 +4694,10 @@ int ferrompi_recv_custom(
     int32_t source,
     int32_t tag,
     int32_t comm_handle,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* actual_count
+    ferrompi_status* status
 ) {
     return recv_typed(buf, count, get_datatype_committed(datatype_handle), source, tag, comm_handle,
-                       actual_source, actual_tag, actual_count);
+                       status);
 }
 
 int ferrompi_isend_custom(
@@ -4500,8 +4729,8 @@ int ferrompi_irecv_custom(
 /* ============================================================
  * User-Defined Reduction Op — Trampolines and Shims
  *
- * Strategy: per-op static slot table following the group_table /
- * info_table pattern from ADR-0002.  MAX_OPS distinct trampoline
+ * Strategy: per-op static slot table following the group_table pattern
+ * from ADR-0002.  MAX_OPS distinct trampoline
  * functions are generated by the FERROMPI_DEFINE_OP_TRAMPOLINE macro
  * so that MPI_Op_create receives a unique function pointer per slot,
  * sidestepping the lack of a user-data parameter in the MPI user-
@@ -4628,19 +4857,21 @@ int ferrompi_op_create_user(int32_t slot, int32_t commute, int32_t* out_handle) 
 int ferrompi_op_free(int32_t handle) {
     if (handle < 0 || handle >= MAX_OPS) return MPI_ERR_ARG;
     if (!atomic_load_explicit(&op_used[handle], memory_order_acquire)) return MPI_SUCCESS;  /* already freed */
-    /* Step 1: MPI_Op_free — MPI will not invoke the trampoline after this.
+    /* Step 1: MPI_Op_free — MPI will not invoke the trampoline after this,
+     * because no pending operation references the op: the last OpRegistration
+     * holder is gone.
      * Stage through a local because MPI_Op_free takes a non-atomic MPI_Op*;
      * after it returns, tmp == MPI_OP_NULL, which we store back atomically. */
     MPI_Op tmp = atomic_load_explicit(&op_table[handle], memory_order_acquire);
     int ret = MPI_Op_free(&tmp);
     atomic_store_explicit(&op_table[handle], tmp, memory_order_release);
-    /* If MPI_Op_free failed (rare: MPI_ERR_OP on a predefined op, or an
-     * implementation rejecting a free while the op is referenced by an
-     * outstanding non-blocking collective), the op is still live and may
-     * be invoked.  Dropping the Rust closure now would leave the trampoline
-     * with dangling closure-data pointers (UB on next invocation).  Return
-     * the error without releasing closure or slot; the caller must retry
-     * the free after the offending collective completes. */
+    /* If MPI_Op_free failed (an MPI-internal error; op_table never holds a
+     * predefined op), the op is still live and may be invoked.  Dropping the
+     * Rust closure now would leave the trampoline with dangling closure-data
+     * pointers (UB on next invocation).  Return the error without releasing
+     * closure or slot.  Freeing a still-referenced op is legal (MPI-4.1
+     * section 2.5.1), so this is no retryable state; the callers, the last
+     * OpRegistration drop (which logs) and the finalize sweep, never retry. */
     if (ret != MPI_SUCCESS) {
         return ret;
     }
@@ -4664,25 +4895,3 @@ int ferrompi_op_free_slot_only(int32_t handle) {
     free_op_slot(handle);
     return MPI_SUCCESS;
 }
-
-/* MPI_Allreduce using a user-defined op identified by op_handle (slot). */
-int ferrompi_allreduce_user_op(
-    const void* sendbuf,
-    void* recvbuf,
-    int64_t count,
-    int32_t datatype_tag,
-    int32_t op_handle,
-    int32_t comm_handle
-) {
-    MPI_Comm comm = get_comm(comm_handle);
-    MPI_Datatype dt = get_datatype(datatype_tag);
-    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
-    if (op_handle < 0 || op_handle >= MAX_OPS) return MPI_ERR_ARG;
-    MPI_Op op = atomic_load_explicit(&op_table[op_handle], memory_order_acquire);
-    if (op == MPI_OP_NULL) return MPI_ERR_OP;
-    /* A user op is a classic MPI_User_function with an int length; MPICH
-     * narrows a larger count into it without splitting the reduction. */
-    if (count > INT_MAX) return MPI_ERR_COUNT;
-    return MPI_Allreduce(sendbuf, recvbuf, (int)count, dt, op, comm);
-}
-

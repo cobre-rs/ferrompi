@@ -1,12 +1,14 @@
-//! Integration test for `Communicator::create_from_group`.
+//! Integration test for `Communicator::create`.
 //!
-//! Exercises `MPI_Comm_create` via the `ferrompi_comm_create_from_group_parent`
-//! shim. Verifies that:
+//! Exercises `MPI_Comm_create` via the `ferrompi_comm_create` shim. Verifies
+//! that:
 //!
 //! - Ranks 0 and 2 receive `Ok(Some(comm))` with `comm.size() == 2`.
 //! - Ranks 1 and 3 receive `Ok(None)` (they are not in the sub-group).
 //! - The sub-communicator is functional: `allreduce_scalar(1.0, Sum)` returns
 //!   `2.0` on ranks that are members.
+//! - A group with a member outside the communicator is refused on every rank,
+//!   before the MPI call.
 //!
 //! All assertions are guarded by a sentinel `allreduce_scalar(Min)` before any
 //! `process::exit` so that no rank exits while others are still inside MPI
@@ -15,7 +17,7 @@
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_comm_from_group
 // mpi-test: np=4
 
-use ferrompi::{Mpi, ReduceOp};
+use ferrompi::{Error, Mpi, ReduceOp};
 
 mod common;
 
@@ -42,14 +44,14 @@ fn main() {
         .expect("group.include(&[0, 2]) failed");
 
     // ========================================================================
-    // Test 1: create_from_group — collective over all 4 ranks.
+    // Test 1: create — collective over all 4 ranks.
     //
     // Ranks 0 and 2 must receive Some(comm); ranks 1 and 3 must receive None.
     // ========================================================================
-    let sub_comm = match world.create_from_group(&sub_group) {
+    let sub_comm = match world.create(&sub_group) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("rank {rank}: FAIL: create_from_group returned error: {e}");
+            eprintln!("rank {rank}: FAIL: create returned error: {e}");
             common::check(&world, false, "test_comm_from_group");
             std::process::exit(1);
         }
@@ -111,6 +113,31 @@ fn main() {
             }
         } else {
             eprintln!("rank {rank}: FAIL Test 1a: expected None for non-member rank, got Some");
+            local_ok = false;
+        }
+    }
+
+    // ========================================================================
+    // Test 3: a group with a member outside the communicator is refused.
+    //
+    // Each half of the world holds two ranks and the world group four, so
+    // every rank is refused before the collective call.
+    // ========================================================================
+    let half = world
+        .split(Some(rank % 2), rank)
+        .expect("split failed")
+        .expect("every rank has a color");
+    match half.create(&world_group) {
+        Err(Error::InvalidArgument { arg: "group", .. }) => {
+            if rank == 0 {
+                println!("PASS: Test 3 — create refuses a group with a member outside");
+            }
+        }
+        other => {
+            eprintln!(
+                "rank {rank}: FAIL Test 3: expected a refusal of the group, got {:?}",
+                other.map(|comm| comm.is_some())
+            );
             local_ok = false;
         }
     }

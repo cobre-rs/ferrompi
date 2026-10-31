@@ -11,10 +11,17 @@
 # Usage:
 #   tests/run_mpi_tests.sh [features]
 #   tests/run_mpi_tests.sh --valgrind [features]
+#   tests/run_mpi_tests.sh --release [features]
 #
 # --valgrind selects only examples whose directive has the `valgrind` flag,
 # runs each once at its minimal np under `valgrind --error-exitcode=99`
 # with tests/valgrind/mpich.supp, and multiplies the per-run timeout by 10.
+#
+# --release builds the examples with `cargo build --release` and runs only
+# examples whose directive has the `release` flag, at every np the directive
+# expands to. It does not require debug assertions, so the examples it runs
+# must not depend on debug-only diagnostics. It cannot be combined with
+# --valgrind.
 #
 # Environment:
 #   MPI_NP_LIST       Space-separated process counts (default: 4)
@@ -28,7 +35,8 @@ MPIEXEC="${MPIEXEC:-mpiexec}"
 MPI_TEST_TIMEOUT="${MPI_TEST_TIMEOUT:-90}"
 
 # The warning Mpi's Drop prints when it skips MPI_Finalize because a window is
-# still alive. Only expect=unfinalized examples may print it.
+# still alive or a nonblocking scope is open on the dropping thread. Only
+# expect=unfinalized examples may print it.
 FINALIZE_SKIPPED_MARKER="MPI_Finalize skipped"
 
 # valgrind flags for --valgrind mode. classify reports exit 99 as
@@ -40,6 +48,7 @@ IMPL_ID=""
 FEATURE_CLOSURE=""
 TMPDIR_RUN=""
 VALGRIND_MODE=0
+RELEASE_MODE=0
 VALGRIND_SUPP=""
 declare -a MPI_NP_LIST_ARR=()
 declare -a MPIEXEC_ARGS=()
@@ -50,6 +59,7 @@ declare -A DIRECTIVE_SKIPOK=()
 declare -A DIRECTIVE_EXPECT=()
 declare -A DIRECTIVE_STDERR=()
 declare -A DIRECTIVE_VALGRIND=()
+declare -A DIRECTIVE_RELEASE=()
 declare -a DIRECTIVE_ORDER=()
 
 declare -A ARTIFACTS=()
@@ -77,13 +87,13 @@ die() {
 
 # parse_directive <line>
 # Parses the content of a `// mpi-test: ` line into
-# np/timeout/skip-ok/expect/valgrind fields. Prints
-# "<np>|<timeout>|<skip-ok>|<expect>|<valgrind>" (empty string for an absent
-# field, "1" for the valgrind flag) and returns 0, or prints a reason on
-# stderr and returns 1.
+# np/timeout/skip-ok/expect/valgrind/release fields. Prints
+# "<np>|<timeout>|<skip-ok>|<expect>|<valgrind>|<release>" (empty string for an
+# absent field, "1" for the valgrind and release flags) and returns 0, or
+# prints a reason on stderr and returns 1.
 parse_directive() {
   local line="$1"
-  local np="" tmo="" skip_ok="" expect="" valgrind=""
+  local np="" tmo="" skip_ok="" expect="" valgrind="" release=""
   local -a kvs
   read -ra kvs <<<"$line"
 
@@ -124,6 +134,9 @@ parse_directive() {
       valgrind)
         valgrind=1
         ;;
+      release)
+        release=1
+        ;;
       *)
         echo "unknown directive key: $kv" >&2
         return 1
@@ -136,7 +149,7 @@ parse_directive() {
     return 1
   fi
 
-  printf '%s|%s|%s|%s|%s\n' "$np" "$tmo" "$skip_ok" "$expect" "$valgrind"
+  printf '%s|%s|%s|%s|%s|%s\n' "$np" "$tmo" "$skip_ok" "$expect" "$valgrind" "$release"
 }
 
 # expand_np <spec> <np-list...>
@@ -242,6 +255,12 @@ feature_closure() {
 
 # classify <exit> <output-file> <skip-ok> <expect> <stderr-literal> <impl-id>
 # Prints one outcome line: "PASS", "SKIP <reasons>" or "FAIL <detail>".
+#
+# A run whose output has FAIL as a word fails in every mode, whatever the exit
+# status. Examples report a failed check as `FAIL: <name>`, `rank N: FAIL: ...`
+# or `rank N: FAIL Test N ...`, and exit nonzero, but mpiexec on some MPICH
+# stacks (hydra 4.2.0 with libmpich 4.2.1) returns 0 for a job whose every rank
+# exited nonzero, so the exit status alone cannot be trusted.
 classify() {
   local exit_code="$1" outfile="$2" skip_ok="$3" expect="$4" literal="$5" impl="$6"
 
@@ -255,6 +274,11 @@ classify() {
     return 0
   fi
 
+  if grep -qwF -- "FAIL" "$outfile"; then
+    echo "FAIL output contains a FAIL: line"
+    return 0
+  fi
+
   if [[ "$expect" != "unfinalized" ]] && grep -qF -- "$FINALIZE_SKIPPED_MARKER" "$outfile"; then
     echo "FAIL $FINALIZE_SKIPPED_MARKER without expect=unfinalized"
     return 0
@@ -265,8 +289,6 @@ classify() {
       echo "FAIL exited 0, abort expected"
     elif ! grep -qF -- "$literal" "$outfile"; then
       echo "FAIL abort marker missing"
-    elif grep -q '^FAIL: ' "$outfile"; then
-      echo "FAIL output contains a FAIL: line"
     else
       echo "PASS"
     fi
@@ -274,6 +296,8 @@ classify() {
   fi
 
   if [[ "$expect" == "unfinalized" ]]; then
+    # Open MPI turns an exit 0 without MPI_Finalize into 1, so a failing
+    # example must exit with another status (examples use 2).
     if [[ "$exit_code" != "0" && "$exit_code" != "1" ]]; then
       echo "FAIL exit $exit_code"
       return 0
@@ -350,6 +374,13 @@ lib_debug_assertions() {
   jq -r 'select(.reason=="compiler-artifact" and .target.name=="ferrompi" and (.target.kind|index("lib"))) | .profile.debug_assertions' "$1" | head -1
 }
 
+# lib_opt_level <cargo-json-file>
+# Prints the opt-level cargo reports for the ferrompi library artifact ("0",
+# "1", "2", "3", "s" or "z"), or nothing when the stream has no such artifact.
+lib_opt_level() {
+  jq -r 'select(.reason=="compiler-artifact" and .target.name=="ferrompi" and (.target.kind|index("lib"))) | .profile.opt_level' "$1" | head -1
+}
+
 # ==========================================================================
 # Discovery, build and execution
 # ==========================================================================
@@ -385,8 +416,8 @@ discover() {
     if ! parsed=$(parse_directive "$line"); then
       die "$f: invalid // mpi-test: directive: $line"
     fi
-    local np tmo skip_ok expect valgrind
-    IFS='|' read -r np tmo skip_ok expect valgrind <<<"$parsed"
+    local np tmo skip_ok expect valgrind release
+    IFS='|' read -r np tmo skip_ok expect valgrind release <<<"$parsed"
 
     if ((stderr_count > 1)); then
       die "$f: more than one // mpi-test-stderr line"
@@ -401,10 +432,6 @@ discover() {
       die "$f: expect=$expect requires a // mpi-test-stderr line"
     fi
 
-    if [[ "$expect" == "unfinalized" && "$np" != "1" ]]; then
-      die "$f: expect=unfinalized requires np=1"
-    fi
-
     DIRECTIVE_ORDER+=("$base")
     DIRECTIVE_NP["$base"]="$np"
     DIRECTIVE_TIMEOUT["$base"]="${tmo:-$MPI_TEST_TIMEOUT}"
@@ -412,18 +439,24 @@ discover() {
     DIRECTIVE_EXPECT["$base"]="$expect"
     DIRECTIVE_STDERR["$base"]="$stderr_literal"
     DIRECTIVE_VALGRIND["$base"]="$valgrind"
+    DIRECTIVE_RELEASE["$base"]="$release"
   done
 }
 
 # build <features>
-# Builds every example (dev profile only; refuses a build whose ferrompi
-# library has debug assertions off, since several examples check debug-only
-# diagnostics) and populates ARTIFACTS[name] with each built target's
+# Builds every example and populates ARTIFACTS[name] with each built target's
 # absolute executable path, resolved from cargo's JSON artifact stream so a
 # relocated CARGO_TARGET_DIR still works. Exits 2 on a build failure.
+# The default build is the dev profile and is refused when the ferrompi
+# library has debug assertions off, since several examples check debug-only
+# diagnostics. RELEASE_MODE builds with --release and is refused when cargo
+# reports the library's opt-level as 0.
 build() {
   local features="$1"
   local -a build_args=(build --examples --message-format=json-render-diagnostics)
+  if ((RELEASE_MODE)); then
+    build_args+=(--release)
+  fi
   if [[ -n "$features" ]]; then
     build_args+=(--features "$features")
   fi
@@ -433,7 +466,11 @@ build() {
     die "cargo build --examples failed"
   fi
 
-  if [[ "$(lib_debug_assertions "$json_file")" == "false" ]]; then
+  if ((RELEASE_MODE)); then
+    if [[ "$(lib_opt_level "$json_file")" == "0" ]]; then
+      die "ferrompi was built with opt-level 0 in release mode; the mode exists to test optimised code"
+    fi
+  elif [[ "$(lib_debug_assertions "$json_file")" == "false" ]]; then
     die "ferrompi was built without debug assertions; several examples check debug-only diagnostics"
   fi
 
@@ -447,11 +484,15 @@ build() {
 # Runs every discovered example (expanding np) through mpiexec, prints one
 # report line per run, and tallies PASS/SKIP/SKIP(feature)/FAIL. In
 # VALGRIND_MODE, only valgrind-tagged examples run, each once at its minimal
-# np under the valgrind prefix, with the timeout multiplied by 10.
+# np under the valgrind prefix, with the timeout multiplied by 10. In
+# RELEASE_MODE, only release-tagged examples run, at every np.
 run_all() {
   local name
   for name in "${DIRECTIVE_ORDER[@]}"; do
     if ((VALGRIND_MODE)) && [[ -z "${DIRECTIVE_VALGRIND[$name]}" ]]; then
+      continue
+    fi
+    if ((RELEASE_MODE)) && [[ -z "${DIRECTIVE_RELEASE[$name]}" ]]; then
       continue
     fi
 
@@ -538,9 +579,15 @@ run_all() {
 # ==========================================================================
 
 main() {
-  if [[ "${1:-}" == "--valgrind" ]]; then
-    VALGRIND_MODE=1
+  while [[ "${1:-}" == "--valgrind" || "${1:-}" == "--release" ]]; do
+    case "$1" in
+      --valgrind) VALGRIND_MODE=1 ;;
+      --release) RELEASE_MODE=1 ;;
+    esac
     shift
+  done
+  if ((VALGRIND_MODE && RELEASE_MODE)); then
+    die "--release and --valgrind cannot be combined"
   fi
   FEATURES="${1:-}"
 
@@ -581,6 +628,9 @@ main() {
   echo "  timeout:      ${MPI_TEST_TIMEOUT}s"
   if ((VALGRIND_MODE)); then
     echo "  mode:         valgrind (suppressions=$VALGRIND_SUPP)"
+  fi
+  if ((RELEASE_MODE)); then
+    echo "  mode:         release"
   fi
   echo
 

@@ -1,130 +1,687 @@
 //! Process-wide FFI lifecycle guard:
-//! `Uninit -> Initializing -> Active(level) -> Finalized`.
+//! `Uninit -> Initializing -> Active(level) -> Finalizing -> Finalized`.
 //!
 //! [`enter`] is called by every guarded extern wrapper in [`crate::ffi`] and
-//! rejects the call once state is `Finalized`, or once state is
-//! `Active(Single)`/`Active(Funneled)` and the caller is not the thread that
-//! called `activate`, without touching MPI. [`drop_guard`] is the equivalent
+//! rejects the call, without touching MPI: in `Uninit`; in `Initializing` on
+//! every thread but the one that called [`begin_init`]; once state is
+//! `Active(Single)`/`Active(Funneled)` and the caller is not that thread; and
+//! once state is `Finalizing` or `Finalized`. It returns an [`InFlight`]
+//! token that the wrapper holds for the whole call. At `Active(Serialized)`
+//! and `Active(Multiple)` the token counts the call in a per-thread shard of
+//! `IN_FLIGHT`; at `Single`/`Funneled` it is empty, and the check stays one
+//! relaxed load plus the init-thread test. [`drop_guard`] is the equivalent
 //! check for a `Drop` impl, which cannot return `Err`: it skips the MPI call
-//! silently after finalize, and aborts the process on a wrong-thread drop
+//! silently once finalizing, and aborts the process on a wrong-thread drop
 //! below `Serialized`. `Initializing` is a transient state held only between
-//! [`begin_init`] and [`activate`]/[`abandon_init`]; both `enter` and
-//! `drop_guard` pass it through like `Uninit` since no `Mpi` handle exists
-//! yet to call either.
+//! [`begin_init`] and [`activate`]/[`abandon_init`]: `Mpi::init_thread` reads
+//! the world's rank and size in it, so `enter` admits the initializing thread
+//! there. `drop_guard` passes `Uninit` and `Initializing` through: a handle
+//! reaches a caller only after [`activate`], so none exists yet for a `Drop`
+//! impl to free.
+//!
+//! Finalizing is two steps. [`begin_finalize`] stores `Finalizing`, which
+//! refuses new calls, waits for the nonblocking scopes open on other threads
+//! to close, and at `Serialized`/`Multiple` waits ([`drain_shards`]) until
+//! every counted call has returned; [`end_finalize`] then stores `Finalized`,
+//! just before `MPI_Finalize` runs, and waits again for the completion calls
+//! admitted in between. A skipped `MPI_Finalize` leaves the state `Finalizing`
+//! for the rest of the process.
+//!
+//! [`enter_completion`] and [`check_completion`] are the entry for the calls
+//! that complete, test or cancel a request that is already pending, receive a
+//! message that is already matched, or close an RMA epoch that is already open
+//! (the closing fence, `MPI_Win_complete`, `MPI_Win_unlock`/`MPI_Win_unlock_all`,
+//! and `MPI_Win_wait`/`MPI_Win_test` of an exposure epoch). They differ from
+//! [`enter`] and [`check`] only in admitting `Finalizing`, under the thread rule
+//! of the granted level, including a counted call that read an active state
+//! just before the `Finalizing` store. The error-code lookup behind
+//! `Error::from_code` takes the same entry, so it never overlaps `MPI_Finalize`.
+//!
+//! A nonblocking scope holds a [`ScopeToken`] for its whole extent, at every
+//! thread level: [`open_scope`] refuses once `Finalizing` is stored, and
+//! [`scopes_on_this_thread`] lets `Mpi::drop` skip `MPI_Finalize` for a scope
+//! open on its own thread, whose requests the scope still completes. A scope
+//! opened on the init thread at `Single`/`Funneled` is tracked only by that
+//! thread's own count, which costs no atomic operation; every other scope is
+//! also counted in its thread's shard of `LIVE_SCOPES`, which [`begin_finalize`]
+//! waits on.
+//!
+//! An active persistent request and a matched, unreceived message each hold a
+//! [`HandleToken`], counted in a shard of `LIVE_HANDLES` at every thread level,
+//! whatever thread holds the handle. [`begin_finalize`] never waits for it,
+//! because the handle can be held by a thread that is itself waiting for the
+//! finalizer; [`live_handle_tokens`] lets `Mpi::drop` skip `MPI_Finalize`
+//! instead while the sum is nonzero.
 
 use std::cell::Cell;
 use std::io::Write;
 use std::os::raw::c_int;
 #[cfg(debug_assertions)]
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
-use crate::error::{Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_THREAD_LEVEL};
+use crate::error::{
+    Error, Result, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_NOT_INITIALIZED, FERROMPI_ERR_THREAD_LEVEL,
+};
 use crate::ThreadLevel;
 
 const UNINIT: u8 = 0;
 const ACTIVE_SINGLE: u8 = 1;
 const ACTIVE_FUNNELED: u8 = 2;
+const ACTIVE_SERIALIZED: u8 = 3;
+const ACTIVE_MULTIPLE: u8 = 4;
 const FINALIZED: u8 = 5;
 const INITIALIZING: u8 = 6;
+const FINALIZING: u8 = 7;
 
 static STATE: AtomicU8 = AtomicU8::new(UNINIT);
 
+/// The granted [`ThreadLevel`] as a `u8`, stored by [`activate`] before
+/// `STATE`. Read once `STATE` is `FINALIZING`, which no longer records it, and
+/// by the debug overlap check of [`begin_call`].
+static LEVEL: AtomicU8 = AtomicU8::new(ThreadLevel::Single as u8);
+
 thread_local! {
-    /// Set by `activate` on the thread that calls it. `Mpi` is `!Send`, so
-    /// `STATE` and this flag are always written by the same single thread.
+    /// Set by `begin_init` on the thread that wins it and cleared by
+    /// `abandon_init`, so at most one thread has it set. `Mpi` is `!Send`, so
+    /// that thread also makes every later write of `STATE`.
     static ON_INIT_THREAD: Cell<bool> = const { Cell::new(false) };
+
+    /// This thread's index into `IN_FLIGHT`, `LIVE_SCOPES` and `LIVE_HANDLES`;
+    /// `usize::MAX` until its first counted use.
+    static SHARD: Cell<usize> = const { Cell::new(usize::MAX) };
+
+    /// How many nonblocking scopes are open on this thread.
+    static SCOPES_HERE: Cell<usize> = const { Cell::new(0) };
+
+    /// How many of those are also counted in a shard of `LIVE_SCOPES`.
+    static COUNTED_HERE: Cell<usize> = const { Cell::new(0) };
 }
 
-/// Move `Uninit` to `Initializing`, serialising concurrent
-/// `Mpi::init`/`init_thread` calls. Returns `Err(Error::Finalized)` once
-/// state is `Finalized`, and `Err(Error::AlreadyInitialized)` for any other
-/// state (an `Mpi` is alive, or another thread is already initialising).
+const SHARDS: usize = 64;
+
+/// One shard of `IN_FLIGHT`, `LIVE_SCOPES` or `LIVE_HANDLES`. 128-byte
+/// alignment keeps two shards off the same pair of cache lines, so threads
+/// counting on different shards do not contend.
+#[repr(align(128))]
+struct Shard(AtomicUsize);
+
+static IN_FLIGHT: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARDS];
+
+static NEXT_SHARD: AtomicUsize = AtomicUsize::new(0);
+
+/// How many nonblocking scopes are open on any thread, except those opened on
+/// the init thread at `Single`/`Funneled`, which only `SCOPES_HERE` counts. A
+/// scope counts in the shard its thread's `SHARD` index names, and the sum of
+/// the shards is the count.
+static LIVE_SCOPES: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARDS];
+
+/// How many persistent requests are active and matched messages are unreceived,
+/// on any thread and at any thread level. Each counts in the shard its opening
+/// thread's `SHARD` index names, and the token it holds subtracts from that
+/// same shard from whatever thread drops it; the sum of the shards is the
+/// count.
+static LIVE_HANDLES: [Shard; SHARDS] = [const { Shard(AtomicUsize::new(0)) }; SHARDS];
+
+/// Held by a guarded call or `Drop` path for as long as it may call MPI. At
+/// `Serialized`/`Multiple` it owns one count in a shard of `IN_FLIGHT`,
+/// which [`begin_finalize`] waits for; elsewhere it is empty.
+#[must_use]
+pub(crate) struct InFlight(Option<&'static Shard>);
+
+impl Drop for InFlight {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if let Some(shard) = self.0 {
+            // Release: pairs with the SeqCst (hence acquiring) loads in
+            // `drain_shards`, so every MPI call made under this token
+            // happens-before the `MPI_Finalize` that follows the drain.
+            shard.0.fetch_sub(1, Ordering::Release);
+        }
+    }
+}
+
+/// Held by a nonblocking scope for its whole extent, at every thread level.
+/// [`begin_finalize`] waits for the counted tokens of scopes on other threads,
+/// and [`scopes_on_this_thread`] feeds the skip decision for the finalizing
+/// thread. A token is counted unless it was opened on the init thread at
+/// `Single`/`Funneled`; a scope opened before `Mpi::init` stays counted, in the
+/// shard of `LIVE_SCOPES` the token holds.
+#[must_use]
+pub(crate) struct ScopeToken(Option<&'static Shard>);
+
+impl Drop for ScopeToken {
+    #[inline]
+    fn drop(&mut self) {
+        SCOPES_HERE.with(|here| here.set(here.get() - 1));
+        if let Some(shard) = self.0 {
+            COUNTED_HERE.with(|here| here.set(here.get() - 1));
+            // Release: pairs with the SeqCst (hence acquiring) load in
+            // `wait_for_other_scopes`, so every MPI call the scope made
+            // happens-before the `MPI_Finalize` that follows the wait.
+            shard.0.fetch_sub(1, Ordering::Release);
+        }
+    }
+}
+
+/// Held by an active persistent request, at every thread level, from before its
+/// start until MPI completed it, and by a matched message from before its probe
+/// until MPI received it. Unlike a [`ScopeToken`] it is movable: it keeps
+/// no thread-local count and can be dropped on any thread, so it always counts in
+/// its shard and [`begin_finalize`] never waits for it. [`live_handle_tokens`]
+/// feeds the skip decision of `Mpi::drop`.
+#[must_use]
+pub(crate) struct HandleToken(&'static Shard);
+
+impl Drop for HandleToken {
+    #[inline]
+    fn drop(&mut self) {
+        // Release: pairs with the SeqCst (hence acquiring) loads in
+        // `live_handle_tokens`, so every MPI call that completed the request
+        // or received the message happens-before the `MPI_Finalize` that
+        // follows a sum of zero.
+        self.0 .0.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// `n` tokens counted by one increment, from [`open_handle_tokens`]. Each
+/// [`take`](Self::take) hands out one; what is not handed out by the time this
+/// drops is released with it.
+#[must_use]
+pub(crate) struct HandleTokens {
+    shard: &'static Shard,
+    left: Cell<usize>,
+}
+
+impl HandleTokens {
+    /// The next token, or `None` once all were handed out.
+    #[inline]
+    pub(crate) fn take(&self) -> Option<HandleToken> {
+        let left = self.left.get().checked_sub(1)?;
+        self.left.set(left);
+        Some(HandleToken(self.shard))
+    }
+}
+
+impl Drop for HandleTokens {
+    #[inline]
+    fn drop(&mut self) {
+        let left = self.left.get();
+        if left > 0 {
+            // Release: as in `HandleToken`'s drop.
+            self.shard.0.fetch_sub(left, Ordering::Release);
+        }
+    }
+}
+
+/// This thread's shard of `shards`, taken round-robin on first use and kept.
+/// `IN_FLIGHT`, `LIVE_SCOPES` and `LIVE_HANDLES` all go through it, so a thread
+/// uses one index in all three.
+#[inline]
+fn shard(shards: &'static [Shard; SHARDS]) -> &'static Shard {
+    let index = SHARD.with(Cell::get);
+    if index < SHARDS {
+        &shards[index]
+    } else {
+        assign_shard(shards)
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn assign_shard(shards: &'static [Shard; SHARDS]) -> &'static Shard {
+    // Relaxed: the counter only spreads threads over shards; it orders
+    // nothing.
+    let index = NEXT_SHARD.fetch_add(1, Ordering::Relaxed) % SHARDS;
+    SHARD.with(|cell| cell.set(index));
+    &shards[index]
+}
+
+/// Move `Uninit` to `Initializing` and mark the calling thread as the init
+/// thread, serialising concurrent `Mpi::init`/`init_thread` calls. Returns
+/// `Err(Error::Finalized)` once state is `Finalizing` or `Finalized`, and
+/// `Err(Error::AlreadyInitialized)` for any other state (an `Mpi` is alive, or
+/// another thread is already initialising).
 /// Called once, at the top of `Mpi::init_thread`; every path out of that
 /// function afterward reaches either [`activate`] or [`abandon_init`].
 pub(crate) fn begin_init() -> Result<()> {
-    // Relaxed: a successful compare-exchange only ever transitions out of the
-    // initial zero state, which carries no prior writer to synchronize with;
-    // a losing thread returns without touching MPI, so it needs no ordering
-    // beyond observing the current value through this atomic's modification
-    // order, which the compare-exchange itself guarantees regardless of
-    // ordering annotation.
+    // Relaxed: the winner needs no order with an earlier writer of `Uninit`.
+    // That value is the initial one or `abandon_init`'s, and no later call
+    // rests on the calls an abandoned attempt made: `MPI_Finalized` may be
+    // called at any time and by several threads at once (MPI-4.1 §11.4.1),
+    // and after an `MPI_Init_thread` that failed a second one is erroneous
+    // whichever thread makes it (MPI-4.1 §11.2.1). A losing thread returns
+    // without calling MPI, whatever value its compare-exchange read.
     match STATE.compare_exchange(UNINIT, INITIALIZING, Ordering::Relaxed, Ordering::Relaxed) {
-        Ok(_) => Ok(()),
-        Err(FINALIZED) => Err(Error::Finalized),
+        Ok(_) => {
+            ON_INIT_THREAD.with(|c| c.set(true));
+            Ok(())
+        }
+        Err(FINALIZING | FINALIZED) => Err(Error::Finalized),
         Err(_) => Err(Error::AlreadyInitialized),
     }
 }
 
-/// Move `Initializing` back to `Uninit`. Called when `Mpi::init_thread` does
-/// not complete after [`begin_init`] succeeded: MPI turned out already
-/// finalized, or `MPI_Init_thread` itself failed. Only the thread that won
-/// `begin_init`'s compare-exchange calls this, so a plain store is safe.
+/// Take the init-thread mark off the calling thread and move `Initializing`
+/// back to `Uninit`. Called when `Mpi::init_thread` does not complete after
+/// [`begin_init`] succeeded: MPI turned out already finalized, or
+/// `MPI_Init_thread` itself failed. Only the thread that won `begin_init`'s
+/// compare-exchange calls this, so a plain store is safe.
 pub(crate) fn abandon_init() {
-    // Relaxed: only the calling thread can observe `Initializing` (it is the
-    // sole holder, per this function's contract), so there is no concurrent
-    // writer to synchronize with.
+    // The mark first: once the state is given back, another thread can win
+    // `begin_init` and set its own.
+    ON_INIT_THREAD.with(|c| c.set(false));
+    // Relaxed: no reader needs the store ordered. The guard refuses a thread
+    // without the mark in `Uninit` as in `Initializing`, and the next
+    // `begin_init` needs no order with this thread (see there).
     STATE.store(UNINIT, Ordering::Relaxed);
 }
 
-/// Move `Initializing` to `Active(level)` and record the calling thread as
-/// the init thread. Called once, from `Mpi::init_thread` after
-/// `MPI_Init_thread` succeeds.
+/// Move `Initializing` to `Active(level)`. Called once, from
+/// `Mpi::init_thread` after `MPI_Init_thread` succeeds, on the thread
+/// [`begin_init`] marked.
 pub(crate) fn activate(level: ThreadLevel) {
-    // Relaxed: `Mpi` is `!Send`/`!Sync`, so every later `enter()` load that
-    // must observe this store — whether on this thread or one that receives
-    // a `Communicator`/`Request` afterward — is already ordered by the
-    // synchronizing operation (thread spawn, channel, mutex, `Arc`) that
-    // thread used to obtain that handle; this store needs no ordering of
-    // its own to be visible through that chain.
-    STATE.store(1 + level as u8, Ordering::Relaxed);
-    ON_INIT_THREAD.with(|c| c.set(true));
+    // Relaxed: stored before `STATE` on this thread, so a load that acquires
+    // the store below is ordered after this one too.
+    LEVEL.store(level as u8, Ordering::Relaxed);
+    // Release: a thread other than this one that reads `Active(Serialized)`,
+    // `Active(Multiple)` or a later state is admitted by the guard to an MPI
+    // call only through `enter_counted`. Its SeqCst load of `STATE` reads this
+    // store or one of the two later ones, both SeqCst and both made by this
+    // thread, so the admitted call is ordered after `MPI_Init_thread` and
+    // after the `LEVEL` store. That holds for a thread that was handed no
+    // handle too (a constructor that takes none), which nothing else orders
+    // after them.
+    STATE.store(1 + level as u8, Ordering::Release);
 }
 
-/// Move an `Active` state to `Finalized`, returning `true`. Returns `false`
-/// and changes nothing in any other state, so a stub `Mpi` dropped without
-/// init (`Uninit`) — or a second drop after finalize — is a no-op.
-pub(crate) fn finalize() -> bool {
-    // Relaxed: `Mpi` is `!Send`, so this load only ever races with another
-    // thread's `enter()` load, never with a second write on this thread.
-    let prev = STATE.load(Ordering::Relaxed);
-    if (1..=4).contains(&prev) {
-        // Relaxed: no ordering on this store closes the window where a
-        // concurrent `enter()` on another thread reads `Active` just before
-        // this store and then calls MPI just after `ferrompi_finalize` runs
-        // below. No ordering on `STATE` can close that gap; until this crate
-        // tracks in-flight calls, it is instead a caller contract: `Mpi`
-        // must not be dropped while another thread is inside an MPI call
-        // through this crate.
-        STATE.store(FINALIZED, Ordering::Relaxed);
-        true
+/// Opens a nonblocking scope: returns its [`ScopeToken`], or
+/// `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or `Finalized`. A
+/// counted scope's count rises before its first request-creating call, so that
+/// call's per-call release cannot precede it; an uncounted scope relies on the
+/// skip path instead.
+#[inline]
+pub(crate) fn open_scope() -> std::result::Result<ScopeToken, c_int> {
+    // Relaxed: see `enter`'s comment.
+    let state = STATE.load(Ordering::Relaxed);
+    if state == FINALIZING || state == FINALIZED {
+        return Err(FERROMPI_ERR_FINALIZED);
+    }
+    let counted_in;
+    if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
+        if ON_INIT_THREAD.with(Cell::get) {
+            // Uncounted: at `Single`/`Funneled` only the init thread can create
+            // a request, and `Mpi` is `!Send`, so `Mpi::drop` runs on this very
+            // thread and skips `MPI_Finalize` while `scopes_on_this_thread()`
+            // is positive. No other thread's wait needs to see this scope.
+            SCOPES_HERE.with(|here| here.set(here.get() + 1));
+            return Ok(ScopeToken(None));
+        }
+        counted_in = shard(&LIVE_SCOPES);
+        // Relaxed: a scope on another thread holds no request at this level, so
+        // only its count matters, not its order.
+        counted_in.0.fetch_add(1, Ordering::Relaxed);
     } else {
-        false
+        counted_in = shard(&LIVE_SCOPES);
+        // SeqCst: the increment of the pair with `begin_finalize`'s
+        // `Finalizing` store, as in `enter_counted`. Either the wait sees this
+        // count or the re-check below sees that store. Every other state takes
+        // this path, `Uninit` and `Initializing` included: a thread may open a
+        // scope before `Mpi` is initialized and post its first request after,
+        // and only this pair orders that count before the finalizer's wait.
+        counted_in.0.fetch_add(1, Ordering::SeqCst);
+        // SeqCst: reads `Finalizing` or `Finalized` if that store precedes the
+        // increment in the SeqCst order.
+        let state = STATE.load(Ordering::SeqCst);
+        if state == FINALIZING || state == FINALIZED {
+            counted_in.0.fetch_sub(1, Ordering::Release);
+            return Err(FERROMPI_ERR_FINALIZED);
+        }
+    }
+    SCOPES_HERE.with(|here| here.set(here.get() + 1));
+    COUNTED_HERE.with(|here| here.set(here.get() + 1));
+    Ok(ScopeToken(Some(counted_in)))
+}
+
+/// How many nonblocking scopes are open on the calling thread.
+pub(crate) fn scopes_on_this_thread() -> usize {
+    SCOPES_HERE.with(Cell::get)
+}
+
+/// Counts `n` persistent requests about to start, or one message about to be
+/// probed for, with one increment: returns the tokens, or
+/// `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or
+/// `Finalized`, or `Err(FERROMPI_ERR_THREAD_LEVEL)` on a thread other than the
+/// init thread at `Single`/`Funneled`, counting nothing. The count rises before
+/// the guarded call that starts the requests or probes for the message, so that
+/// call's per-call release cannot precede it.
+///
+/// A token is counted on every thread and never takes [`open_scope`]'s uncounted
+/// branch: it can move to a thread whose own count `Mpi::drop` does not read.
+/// At `Single`/`Funneled` the increment is Relaxed, because every start,
+/// completion and release of a request runs on the init thread, where
+/// `Mpi::drop` reads the sum: another thread's start and completion are
+/// refused, and a drop there aborts while the request is active and, once
+/// `Finalizing`, leaks it with its token forgotten. A message's probe, receive
+/// and discard are refused there too, and a refused discard forgets the token.
+#[inline]
+pub(crate) fn open_handle_tokens(n: usize) -> std::result::Result<HandleTokens, c_int> {
+    // Relaxed: see `enter`'s comment.
+    let state = STATE.load(Ordering::Relaxed);
+    if state == FINALIZING || state == FINALIZED {
+        return Err(FERROMPI_ERR_FINALIZED);
+    }
+    let counted_in;
+    if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
+        if !ON_INIT_THREAD.with(Cell::get) {
+            return Err(FERROMPI_ERR_THREAD_LEVEL);
+        }
+        counted_in = shard(&LIVE_HANDLES);
+        // Relaxed: this thread is the only one that starts, completes or
+        // releases a request at this level (a drop elsewhere aborts in
+        // `Active` and leaks at `Finalizing`), and it reads the sum in
+        // `Mpi::drop`.
+        counted_in.0.fetch_add(n, Ordering::Relaxed);
+    } else {
+        counted_in = shard(&LIVE_HANDLES);
+        // SeqCst: the increment of the pair with `begin_finalize`'s
+        // `Finalizing` store, as in `open_scope`. Either the later sum sees this
+        // count or the re-check below sees that store. Every other state takes
+        // this path, `Uninit` and `Initializing` included.
+        counted_in.0.fetch_add(n, Ordering::SeqCst);
+        // SeqCst: reads `Finalizing` or `Finalized` if that store precedes the
+        // increment in the SeqCst order.
+        let state = STATE.load(Ordering::SeqCst);
+        if state == FINALIZING || state == FINALIZED {
+            counted_in.0.fetch_sub(n, Ordering::Release);
+            return Err(FERROMPI_ERR_FINALIZED);
+        }
+    }
+    Ok(HandleTokens {
+        shard: counted_in,
+        left: Cell::new(n),
+    })
+}
+
+/// Takes back one count a forgotten [`HandleToken`] left on this thread's shard,
+/// so a test that leaks a token on purpose does not keep the sum raised for the
+/// rest of the process.
+#[cfg(test)]
+pub(crate) fn release_forgotten_handle_token() {
+    shard(&LIVE_HANDLES).0.fetch_sub(1, Ordering::Release);
+}
+
+/// How many persistent requests are active and matched messages are unreceived,
+/// summed over the shards of `LIVE_HANDLES`. Read by `Mpi::drop` after
+/// [`begin_finalize`], which does not wait for them: a nonzero sum makes it
+/// skip `MPI_Finalize`.
+///
+/// The shards are read one after another, not as a snapshot, and a sum of zero
+/// is still exact:
+/// - A request adds one to a shard before its start call and takes one from that
+///   same shard once MPI completed it, so a shard never reads below its floor and
+///   the sum is zero only if every shard reads zero.
+/// - The `Finalizing` store precedes every load below. An open on the SeqCst path
+///   has its increment either before the load of its shard in the SeqCst order,
+///   so the load sees it unless it also sees the request's release, or after,
+///   and then its re-check reads `Finalizing`, the open fails and takes the count
+///   back. A back-out can only raise a reading, never hide a request: it can
+///   cause a skip that was not needed, never a missed one. So can a start or a
+///   probe the guarded call refuses after the open succeeded, and a probe that
+///   failed or matched nothing, each of which gives the count back after its
+///   call returned, and a `wait`, a `test`, an `mrecv` or the discard of a
+///   dropped message racing `Mpi::drop`, which releases its token after its own
+///   call returned.
+/// - Every write to a shard is a read-modify-write, so each Release decrement
+///   heads a release sequence holding all later writes, whichever thread made
+///   them. A load that sees a shard without a request's count read that
+///   request's release or a later write, and so acquires the `MPI_Wait`,
+///   `MPI_Test` or `MPI_Waitall` that completed it; for a message, the
+///   `MPI_Mrecv` that received it.
+pub(crate) fn live_handle_tokens() -> usize {
+    // SeqCst: the load of the pair with `open_handle_tokens`'s increment, and an
+    // acquire of the release sequence the value it reads belongs to.
+    LIVE_HANDLES
+        .iter()
+        .map(|shard| shard.0.load(Ordering::SeqCst))
+        .sum()
+}
+
+/// Waits until every counted scope open on another thread has closed. No
+/// timeout: a scope that never ends blocks this wait, as a blocked MPI call
+/// blocks [`drain_shards`].
+///
+/// It spins until the sum of the shards equals this thread's own counted
+/// scopes. Another thread's scope may be on any shard, this thread's own
+/// included, so the wait reads them all; the sum reaches that count only when
+/// every shard is at its floor. The shards are read one after another, not as a
+/// snapshot, and the sum is still exact:
+/// - A scope adds one to a shard and later takes one from that same shard. So
+///   by coherence a shard never reads below its floor, this thread's own
+///   scopes on it, the sum never reads below `here`, and it equals `here` only
+///   if no shard reads another thread's scope. A scope never moves between
+///   shards, so the reads need no common instant.
+/// - The `Finalizing` store precedes every load below. An open on the SeqCst
+///   path has its increment either before the load of its shard in the SeqCst
+///   order, so the load sees it unless it also sees the scope's decrement, or
+///   after, and then its re-check reads `Finalizing`, the open fails and takes
+///   the count back. A back-out only raises a reading for a moment: it can
+///   delay this wait, not end it early.
+/// - Every write to a shard is a read-modify-write, so each Release decrement
+///   heads a release sequence holding all later writes, whichever thread made
+///   them. A load that sees a shard without a scope's count read that scope's
+///   decrement or a later write, and so acquires every MPI call the scope made.
+/// - An open at `Single`/`Funneled` on another thread takes the Relaxed path
+///   with no re-check. It holds no request, so this wait need not see it.
+#[cold]
+fn wait_for_other_scopes() {
+    let here = COUNTED_HERE.with(Cell::get);
+    // SeqCst: the load of the pair with `open_scope`'s increment, and an
+    // acquire of the release sequence the value it reads belongs to.
+    while LIVE_SCOPES
+        .iter()
+        .map(|shard| shard.0.load(Ordering::SeqCst))
+        .sum::<usize>()
+        != here
+    {
+        for _ in 0..64 {
+            std::hint::spin_loop();
+        }
+        std::thread::yield_now();
     }
 }
 
-/// Returns `true` once state is `Finalized`. `Mpi::is_finalized()` uses this
-/// so it still reports `true` after a skipped `MPI_Finalize` (a live window
-/// kept `Mpi::drop` from calling it): `finalize()`
-/// already moved `STATE` to `Finalized` before that skip decision runs.
+/// Waits until every shard reads zero, that is, until every counted call and
+/// `Drop` path has returned. No timeout: a thread blocked forever inside an
+/// MPI call blocks this wait, as it would block `MPI_Finalize`.
+#[cold]
+fn drain_shards() {
+    for shard in &IN_FLIGHT {
+        // SeqCst: the shard load of the pair with `enter_counted`'s increment,
+        // and an acquire of the Release decrement it observes.
+        while shard.0.load(Ordering::SeqCst) != 0 {
+            for _ in 0..64 {
+                std::hint::spin_loop();
+            }
+            std::thread::yield_now();
+        }
+    }
+}
+
+/// Move an `Active` state to `Finalizing`, which refuses new calls and scope
+/// opens, then wait for the scopes open on other threads to close and, at
+/// `Serialized`/`Multiple`, for every counted call to return. Returns `true`.
+/// Returns `false` and changes nothing in any other state, so a stub `Mpi`
+/// dropped without init (`Uninit`) — or a second drop after finalize — is a
+/// no-op.
+pub(crate) fn begin_finalize() -> bool {
+    // Relaxed: `Mpi` is `!Send`, so this load only ever races with another
+    // thread's `enter()` load, never with a second write on this thread.
+    let prev = STATE.load(Ordering::Relaxed);
+    if !(ACTIVE_SINGLE..=ACTIVE_MULTIPLE).contains(&prev) {
+        return false;
+    }
+    // SeqCst: the store of the pair with `enter_counted`. A call whose
+    // increment precedes this store in the SeqCst order is seen by the drain
+    // below; a call whose increment follows it reads `Finalizing` and is
+    // refused. So no counted call can begin once `MPI_Finalize` does.
+    STATE.store(FINALIZING, Ordering::SeqCst);
+    // Scopes before calls: a scope's own calls are counted ones, so by the
+    // time the drain runs, no scope is still making them.
+    wait_for_other_scopes();
+    if prev >= ACTIVE_SERIALIZED {
+        drain_shards();
+    }
+    true
+}
+
+/// Move `Finalizing` to `Finalized`, then at `Serialized`/`Multiple` wait for
+/// the completion calls [`enter_completion`] admitted while `Finalizing`. Called
+/// by `Mpi::drop` after [`begin_finalize`] returned `true`, only on the path
+/// that goes on to call `MPI_Finalize`; a skipped `MPI_Finalize` never reaches
+/// it.
+pub(crate) fn end_finalize() {
+    // SeqCst: totally ordered after the `Finalizing` store and the first
+    // drain, and the store of the pair with `enter_counted`'s increment: a
+    // completion call whose increment precedes this store is seen by the
+    // drain below; one whose increment follows it reads `Finalized` and is
+    // refused.
+    STATE.store(FINALIZED, Ordering::SeqCst);
+    // Relaxed: this thread stored `LEVEL` in `activate`.
+    if LEVEL.load(Ordering::Relaxed) >= ThreadLevel::Serialized as u8 {
+        drain_shards();
+    }
+}
+
+/// Returns `true` once state is `Finalizing` or `Finalized`.
+/// `Mpi::is_finalized()` uses this so it reports `true` from the start of
+/// `Mpi::drop`, and still does after a skipped `MPI_Finalize` (a live window
+/// kept `Mpi::drop` from calling it): `begin_finalize()` already moved
+/// `STATE` to `Finalizing` before that skip decision runs, and it stays there.
 pub(crate) fn is_finalized() -> bool {
-    // Relaxed: see `enter`'s comment — visibility of the `Finalized` state
-    // set on another thread is carried by that thread's own handle hand-off,
-    // not by this load's ordering.
-    STATE.load(Ordering::Relaxed) == FINALIZED
+    // Relaxed: no call is admitted on this answer. A `false` that is out of
+    // date sends `Mpi::is_finalized` on to `MPI_Finalized`, which MPI allows
+    // at any time (MPI-4.1 §11.4.1).
+    matches!(STATE.load(Ordering::Relaxed), FINALIZING | FINALIZED)
 }
 
 /// Called at the top of every guarded extern wrapper. Returns
-/// `FERROMPI_ERR_FINALIZED` once state is `Finalized`;
-/// `FERROMPI_ERR_THREAD_LEVEL` once state is `Active(Single)` or
-/// `Active(Funneled)` and the caller is not the init thread; `0` otherwise.
+/// `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or `Finalized`;
+/// `Err(FERROMPI_ERR_THREAD_LEVEL)` once state is `Active(Single)` or
+/// `Active(Funneled)` and the caller is not the init thread;
+/// `Err(FERROMPI_ERR_NOT_INITIALIZED)` in `Uninit`, and in `Initializing` on
+/// every thread but the init thread; otherwise the [`InFlight`] token the
+/// caller holds until its MPI call returns.
 #[inline(always)]
-pub(crate) fn enter() -> c_int {
-    // Relaxed: see `activate`'s comment — visibility of an `Active`/`Finalized`
-    // state set on another thread is carried by that thread's own handle
-    // hand-off, not by this load's ordering.
+pub(crate) fn enter() -> std::result::Result<InFlight, c_int> {
+    // Relaxed: this load only picks the path. The init thread reads its own
+    // stores. Any other thread is refused or goes to the counted path, whose
+    // SeqCst load is what orders its MPI call after `activate` (see there),
+    // so an old value admits nothing. A thread that holds a handle reads no
+    // value older than `activate`'s store: its loads are ordered after it by
+    // the hand-off of the handle, or by the counted call that made the handle.
     let state = STATE.load(Ordering::Relaxed);
-    if state == FINALIZED {
+    if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
+        if ON_INIT_THREAD.with(Cell::get) {
+            return Ok(InFlight(None));
+        }
+        return Err(FERROMPI_ERR_THREAD_LEVEL);
+    }
+    enter_other(state)
+}
+
+/// [`enter`] for every state but `Active(Single)`/`Active(Funneled)`, kept out
+/// of line so the `Funneled` path stays the single range test and init-thread
+/// check it was before calls were counted.
+#[inline(never)]
+fn enter_other(state: u8) -> std::result::Result<InFlight, c_int> {
+    if state == ACTIVE_SERIALIZED || state == ACTIVE_MULTIPLE {
+        return enter_counted(false);
+    }
+    if state == FINALIZING || state == FINALIZED {
+        return Err(FERROMPI_ERR_FINALIZED);
+    }
+    enter_before_active()
+}
+
+/// [`enter`] for `Uninit` and `Initializing`: admits the init thread, which
+/// reads the world's rank and size while `Initializing` (`Mpi::init_thread`),
+/// and refuses every other call. Cold and out of line: a process leaves these
+/// two states once, and [`enter_other`] is the path of every call at
+/// `Serialized`/`Multiple`.
+#[cold]
+#[inline(never)]
+fn enter_before_active() -> std::result::Result<InFlight, c_int> {
+    // `begin_init` sets the mark and `abandon_init` clears it, so in these two
+    // states it is set only on the thread that holds `Initializing`. A thread
+    // without it that read one of them late, after `activate`'s store, holds
+    // no handle that would order the two: it is refused, never admitted.
+    if ON_INIT_THREAD.with(Cell::get) {
+        return Ok(InFlight(None));
+    }
+    Err(FERROMPI_ERR_NOT_INITIALIZED)
+}
+
+/// [`enter`] for the calls that complete, test or cancel a request that is
+/// already pending, receive a message that is already matched, or close an RMA
+/// epoch that is already open (the closing fence, `MPI_Win_complete`,
+/// `MPI_Win_unlock`/`MPI_Win_unlock_all`, and `MPI_Win_wait`/`MPI_Win_test` of
+/// an exposure epoch). It differs only in `Finalizing`, which it admits under
+/// the thread rule of the granted level: the init-thread check at
+/// `Single`/`Funneled`, the counted path at `Serialized`/`Multiple`. That
+/// includes a call that read an active state just before the `Finalizing`
+/// store. `Finalized` is still refused. Also the entry of the error-code lookup.
+#[inline(always)]
+pub(crate) fn enter_completion() -> std::result::Result<InFlight, c_int> {
+    // Relaxed: see `enter`'s comment.
+    let state = STATE.load(Ordering::Relaxed);
+    if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
+        if ON_INIT_THREAD.with(Cell::get) {
+            return Ok(InFlight(None));
+        }
+        return Err(FERROMPI_ERR_THREAD_LEVEL);
+    }
+    enter_other_completion(state)
+}
+
+/// [`enter_completion`] for every state but `Active(Single)`/`Active(Funneled)`,
+/// out of line for the same reason as [`enter_other`]. Outside `Finalizing` it
+/// matches [`enter`], except that a counted call's re-check admits `Finalizing`:
+/// a call that read an active state just before `begin_finalize` stored
+/// `Finalizing` is not refused.
+#[inline(never)]
+fn enter_other_completion(state: u8) -> std::result::Result<InFlight, c_int> {
+    if state == ACTIVE_SERIALIZED || state == ACTIVE_MULTIPLE {
+        return enter_counted(true);
+    }
+    if state != FINALIZING {
+        return enter_other(state);
+    }
+    // Relaxed: `LEVEL` is stored once, by `activate`, before `STATE`. The
+    // init thread reads its own store, and a thread that holds a handle or
+    // that the counted path admitted before is ordered after it. Any other
+    // thread may still read `Single`, the value `LEVEL` starts with, and is
+    // then refused below; with the stored level it is refused below as well
+    // or goes to `enter_counted`, which orders its call.
+    if LEVEL.load(Ordering::Relaxed) >= ThreadLevel::Serialized as u8 {
+        return enter_counted(true);
+    }
+    if ON_INIT_THREAD.with(Cell::get) {
+        return Ok(InFlight(None));
+    }
+    Err(FERROMPI_ERR_THREAD_LEVEL)
+}
+
+/// The state check of [`enter`] without a token, for a call on a request:
+/// counts nothing, and refuses the states `enter` refuses from `Active` on. A
+/// request exists only from `Active` on, so `Uninit` and `Initializing` are not
+/// tested here. [`check_completion`], for the two `wait` pre-checks, builds
+/// on it; their guarded `ffi` call takes the token.
+#[inline(always)]
+fn check() -> c_int {
+    // Relaxed: see `enter`'s comment.
+    let state = STATE.load(Ordering::Relaxed);
+    if state == FINALIZING || state == FINALIZED {
         return FERROMPI_ERR_FINALIZED;
     }
     if (state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED) && !ON_INIT_THREAD.with(Cell::get) {
@@ -133,8 +690,61 @@ pub(crate) fn enter() -> c_int {
     0
 }
 
-/// Set for the duration of one guarded FFI call while `STATE` is
-/// `Active(Serialized)`, to detect two such calls overlapping. Debug-only:
+/// [`check`] for the calls that [`enter_completion`] admits: the same result
+/// in every state but `Finalizing`, which it admits under the thread rule of
+/// the granted level.
+#[inline(always)]
+pub(crate) fn check_completion() -> c_int {
+    let code = check();
+    if code == FERROMPI_ERR_FINALIZED {
+        return check_finalized(code);
+    }
+    code
+}
+
+/// [`check_completion`] after [`check`] refused the state as finalized: still
+/// refused at `Finalized`, admitted at `Finalizing`.
+#[cold]
+#[inline(never)]
+fn check_finalized(code: c_int) -> c_int {
+    // Relaxed: see `check`'s comment. `Finalizing` is left only for
+    // `Finalized`, so a second load never admits what `check` refused.
+    if STATE.load(Ordering::Relaxed) != FINALIZING {
+        return code;
+    }
+    // Relaxed: see `enter_other_completion`'s comment.
+    if LEVEL.load(Ordering::Relaxed) < ThreadLevel::Serialized as u8
+        && !ON_INIT_THREAD.with(Cell::get)
+    {
+        return FERROMPI_ERR_THREAD_LEVEL;
+    }
+    0
+}
+
+/// The counted path, for `Active(Serialized)` and `Active(Multiple)`: take
+/// this thread's shard, increment it, then re-check `STATE`. With `completion`
+/// the re-check refuses only `Finalized`; otherwise `Finalizing` too.
+#[inline]
+fn enter_counted(completion: bool) -> std::result::Result<InFlight, c_int> {
+    let shard = shard(&IN_FLIGHT);
+    // SeqCst: the increment of the pair with `begin_finalize`'s `Finalizing`
+    // store and `end_finalize`'s `Finalized` store. It is ordered before the
+    // re-check below, so either the drain sees this count or the re-check
+    // sees that store.
+    shard.0.fetch_add(1, Ordering::SeqCst);
+    let token = InFlight(Some(shard));
+    // SeqCst: reads `Finalizing` or `Finalized` if that store precedes the
+    // increment in the SeqCst order.
+    let state = STATE.load(Ordering::SeqCst);
+    if state == FINALIZED || (state == FINALIZING && !completion) {
+        return Err(FERROMPI_ERR_FINALIZED);
+    }
+    Ok(token)
+}
+
+/// Set for the duration of one guarded FFI call at the `Serialized` level,
+/// including while `Finalizing` or after a skipped `MPI_Finalize`, to detect
+/// two such calls overlapping. Debug-only:
 /// `Serialized` requires the caller to serialize its own MPI calls, so this
 /// is a diagnostic, not a correctness mechanism release builds must pay for.
 #[cfg(debug_assertions)]
@@ -161,52 +771,67 @@ fn release_in_call_flag() {
     SERIALIZED_IN_CALL.store(false, Ordering::Release);
 }
 
-/// Called at the top of a guarded extern wrapper, after [`enter`] passes. At
-/// `Active(Serialized)`, takes [`SERIALIZED_IN_CALL`] and returns `Ok(true)`,
-/// or `Err(FERROMPI_ERR_THREAD_LEVEL)` if another call already holds it. In
-/// every other state, returns `Ok(false)` without touching the flag.
+/// The debug overlap check's hold on [`SERIALIZED_IN_CALL`], from
+/// [`begin_call`] until it drops. Dropping it releases the flag when it holds
+/// it, so a call that unwinds does not leave the flag set.
 #[cfg(debug_assertions)]
-pub(crate) fn begin_call() -> std::result::Result<bool, c_int> {
-    // Relaxed: see `enter`'s comment — visibility of the `Active` state set
-    // on another thread is carried by that thread's own handle hand-off,
-    // not by this load's ordering.
-    if STATE.load(Ordering::Relaxed) == 1 + ThreadLevel::Serialized as u8 {
+#[must_use]
+pub(crate) struct CallFlag(bool);
+
+#[cfg(debug_assertions)]
+impl Drop for CallFlag {
+    fn drop(&mut self) {
+        if self.0 {
+            release_in_call_flag();
+        }
+    }
+}
+
+/// Called at the top of a guarded extern wrapper, after [`enter`] passes. At
+/// the `Serialized` level, in `Active` and also while `Finalizing`, takes
+/// [`SERIALIZED_IN_CALL`] and returns the [`CallFlag`] that holds it, or
+/// `Err(FERROMPI_ERR_THREAD_LEVEL)` if another call already holds it. At every
+/// other level, returns a [`CallFlag`] that holds nothing and leaves the flag
+/// alone. A caller binds the result after its [`InFlight`] token, so the flag
+/// is released before the token.
+#[cfg(debug_assertions)]
+pub(crate) fn begin_call() -> std::result::Result<CallFlag, c_int> {
+    // Relaxed: this runs after `enter` or `enter_completion` passed: on the
+    // init thread, which stores `LEVEL` (`Single` until then), or on a thread
+    // the counted path admitted, whose SeqCst load of `STATE` is ordered
+    // after that store.
+    if LEVEL.load(Ordering::Relaxed) == ThreadLevel::Serialized as u8 {
         if take_in_call_flag() {
-            Ok(true)
+            Ok(CallFlag(true))
         } else {
             Err(FERROMPI_ERR_THREAD_LEVEL)
         }
     } else {
-        Ok(false)
-    }
-}
-
-/// Releases the flag taken by [`begin_call`], when `held` is `true`.
-#[cfg(debug_assertions)]
-pub(crate) fn end_call(held: bool) {
-    if held {
-        release_in_call_flag();
+        Ok(CallFlag(false))
     }
 }
 
 /// Called at the top of a `Drop` impl's MPI-calling path, in place of
-/// [`enter`] (a `Drop` impl cannot propagate an `Err`). Returns `false` once
-/// state is `Finalized`, so the caller skips its MPI call silently. Once
-/// state is `Active(Single)`/`Active(Funneled)` and the caller is not the
-/// init thread, this never returns: see [`drop_abort`]. Otherwise returns
-/// `true`.
-pub(crate) fn drop_guard(type_name: &'static str) -> bool {
-    // Relaxed: see `enter`'s comment — visibility of an `Active`/`Finalized`
-    // state set on another thread is carried by that thread's own handle
-    // hand-off, not by this load's ordering.
+/// [`enter`] (a `Drop` impl cannot propagate an `Err`). Returns `None` once
+/// state is `Finalizing` or `Finalized`, so the caller skips its MPI call
+/// silently. Once state is `Active(Single)`/`Active(Funneled)` and the caller
+/// is not the init thread, this never returns: see [`drop_abort`]. Otherwise
+/// returns the [`InFlight`] token, which the caller binds for the whole
+/// `drop` body so it covers every MPI call there.
+pub(crate) fn drop_guard(type_name: &'static str) -> Option<InFlight> {
+    // Relaxed: see `enter`'s comment.
     let state = STATE.load(Ordering::Relaxed);
-    if state == FINALIZED {
-        return false;
+    if state == FINALIZING || state == FINALIZED {
+        return None;
     }
-    if (state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED) && !ON_INIT_THREAD.with(Cell::get) {
-        drop_abort(type_name);
+    if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
+        if !ON_INIT_THREAD.with(Cell::get) {
+            drop_abort(type_name);
+        }
+    } else if state == ACTIVE_SERIALIZED || state == ACTIVE_MULTIPLE {
+        return enter_counted(false).ok();
     }
-    true
+    Some(InFlight(None))
 }
 
 /// Prints `ferrompi: <type_name> dropped on thread <label>` to stderr and
@@ -229,12 +854,32 @@ fn drop_abort(type_name: &'static str) -> ! {
     std::process::abort();
 }
 
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
 mod tests {
-    use super::{release_in_call_flag, take_in_call_flag};
+    use std::cell::Cell;
+    use std::os::raw::c_int;
+    use std::ptr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use super::{
+        abandon_init, begin_init, check, check_completion, drain_shards, enter, enter_completion,
+        live_handle_tokens, open_handle_tokens, open_scope, scopes_on_this_thread, shard,
+        HandleToken, HandleTokens, InFlight, Shard, COUNTED_HERE, FERROMPI_ERR_NOT_INITIALIZED,
+        IN_FLIGHT, LIVE_HANDLES, LIVE_SCOPES, ON_INIT_THREAD, SHARDS,
+    };
+    #[cfg(debug_assertions)]
+    use super::{release_in_call_flag, take_in_call_flag, CallFlag};
+
+    /// The tests of the debug overlap flag share one process-wide flag.
+    #[cfg(debug_assertions)]
+    static IN_CALL_FLAG_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(debug_assertions)]
     #[test]
     fn in_call_flag_rejects_a_second_thread() {
+        let _serial = IN_CALL_FLAG_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(take_in_call_flag(), "first take must succeed");
 
         let overlapping_took = std::thread::scope(|s| {
@@ -258,5 +903,209 @@ mod tests {
             .expect("next thread panicked")
         });
         assert!(next_took, "take after release must succeed");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn in_call_flag_is_released_when_a_call_unwinds() {
+        let _serial = IN_CALL_FLAG_TESTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(take_in_call_flag(), "first take must succeed");
+
+        let unwound = std::panic::catch_unwind(|| {
+            let _flag = CallFlag(true);
+            panic!("unwind through a held flag");
+        });
+        assert!(unwound.is_err(), "the closure must panic");
+
+        assert!(take_in_call_flag(), "take after the unwind must succeed");
+        release_in_call_flag();
+    }
+
+    #[test]
+    fn in_flight_token_drop_decrements_its_shard() {
+        static UNDER_TEST: Shard = Shard(AtomicUsize::new(0));
+
+        UNDER_TEST.0.fetch_add(1, Ordering::SeqCst);
+        let token = InFlight(Some(&UNDER_TEST));
+        assert_eq!(UNDER_TEST.0.load(Ordering::SeqCst), 1);
+        drop(token);
+        assert_eq!(UNDER_TEST.0.load(Ordering::SeqCst), 0);
+    }
+
+    fn index_of(shards: &'static [Shard; SHARDS]) -> usize {
+        let mine = shard(shards);
+        shards
+            .iter()
+            .position(|s| ptr::eq(s, mine))
+            .expect("a thread's shard is in its array")
+    }
+
+    #[test]
+    fn shard_is_stable_per_thread() {
+        let first = shard(&IN_FLIGHT);
+        assert!(ptr::eq(first, shard(&IN_FLIGHT)));
+        assert!(IN_FLIGHT.iter().any(|s| ptr::eq(s, first)));
+        assert_eq!(index_of(&IN_FLIGHT), index_of(&LIVE_SCOPES));
+        assert_eq!(index_of(&IN_FLIGHT), index_of(&LIVE_HANDLES));
+
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let mine = shard(&IN_FLIGHT);
+                assert!(ptr::eq(mine, shard(&IN_FLIGHT)));
+                assert!(IN_FLIGHT.iter().any(|s| ptr::eq(s, mine)));
+                assert_eq!(index_of(&IN_FLIGHT), index_of(&LIVE_SCOPES));
+                assert_eq!(index_of(&IN_FLIGHT), index_of(&LIVE_HANDLES));
+            })
+            .join()
+            .expect("shard thread panicked");
+        });
+        assert!(ptr::eq(first, shard(&IN_FLIGHT)));
+        assert_eq!(IN_FLIGHT.len(), SHARDS);
+    }
+
+    /// What `entry` returns: `Ok(counted)` for a token, `Err(code)` for a refusal.
+    fn outcome(entry: std::result::Result<InFlight, c_int>) -> std::result::Result<bool, c_int> {
+        entry.map(|token| token.0.is_some())
+    }
+
+    #[test]
+    fn enter_before_init_takes_no_count() {
+        assert_eq!(outcome(enter()), Err(FERROMPI_ERR_NOT_INITIALIZED));
+        assert!(IN_FLIGHT.iter().all(|s| s.0.load(Ordering::SeqCst) == 0));
+    }
+
+    #[test]
+    fn completion_entry_matches_enter_outside_finalizing() {
+        assert_eq!(outcome(enter()), Err(FERROMPI_ERR_NOT_INITIALIZED));
+        assert_eq!(outcome(enter_completion()), outcome(enter()));
+        assert_eq!(check_completion(), check());
+        assert_eq!(check_completion(), 0);
+    }
+
+    /// The one test of a default run that moves the state: no test that runs
+    /// beside it tells `Uninit` from `Initializing` on a thread that is not
+    /// initializing. The ignored test that initializes MPI runs alone.
+    #[test]
+    fn only_the_initializing_thread_is_admitted_while_initializing() {
+        fn elsewhere() -> std::result::Result<bool, c_int> {
+            std::thread::scope(|s| {
+                s.spawn(|| outcome(enter()))
+                    .join()
+                    .expect("second thread panicked")
+            })
+        }
+
+        begin_init().expect("no other test initializes MPI");
+        assert!(ON_INIT_THREAD.with(Cell::get));
+        assert_eq!(outcome(enter()), Ok(false));
+        assert_eq!(outcome(enter_completion()), Ok(false));
+        assert_eq!(elsewhere(), Err(FERROMPI_ERR_NOT_INITIALIZED));
+
+        abandon_init();
+        assert!(!ON_INIT_THREAD.with(Cell::get));
+        assert_eq!(outcome(enter()), Err(FERROMPI_ERR_NOT_INITIALIZED));
+        assert_eq!(elsewhere(), Err(FERROMPI_ERR_NOT_INITIALIZED));
+
+        begin_init().expect("abandon_init gave the state back");
+        abandon_init();
+    }
+
+    #[test]
+    fn drain_returns_when_shards_are_zero() {
+        drain_shards();
+    }
+
+    fn counted_here() -> usize {
+        COUNTED_HERE.with(Cell::get)
+    }
+
+    #[test]
+    fn scope_opened_before_init_is_counted() {
+        assert_eq!((scopes_on_this_thread(), counted_here()), (0, 0));
+        let token = open_scope().expect("an uninitialized process opens a scope");
+        assert_eq!((scopes_on_this_thread(), counted_here()), (1, 1));
+        // Other tests open scopes concurrently, so the sum of the shards is
+        // only bounded below by this thread's own.
+        let live: usize = LIVE_SCOPES.iter().map(|s| s.0.load(Ordering::SeqCst)).sum();
+        assert!(live >= counted_here());
+        drop(token);
+        assert_eq!((scopes_on_this_thread(), counted_here()), (0, 0));
+    }
+
+    #[test]
+    fn nested_scopes_balance_both_thread_counts() {
+        let outer = open_scope().expect("an uninitialized process opens a scope");
+        let inner = open_scope().expect("an uninitialized process opens a scope");
+        assert_eq!((scopes_on_this_thread(), counted_here()), (2, 2));
+        drop(inner);
+        assert_eq!((scopes_on_this_thread(), counted_here()), (1, 1));
+        drop(outer);
+        assert_eq!((scopes_on_this_thread(), counted_here()), (0, 0));
+    }
+
+    #[test]
+    fn handle_token_opened_before_init_is_counted() {
+        let tokens = open_handle_tokens(2).expect("an uninitialized process opens tokens");
+        // Other tests open tokens concurrently, so the sum of the shards is
+        // only bounded below by this thread's own.
+        assert!(live_handle_tokens() >= 2);
+        let first = tokens.take().expect("two tokens were opened");
+        let second = tokens.take().expect("two tokens were opened");
+        assert!(ptr::eq(first.0, shard(&LIVE_HANDLES)));
+        assert!(ptr::eq(second.0, shard(&LIVE_HANDLES)));
+        assert!(tokens.take().is_none());
+        drop(tokens);
+        assert!(live_handle_tokens() >= 2);
+        drop(first);
+        drop(second);
+    }
+
+    #[test]
+    fn handle_token_released_on_another_thread() {
+        static UNDER_TEST: Shard = Shard(AtomicUsize::new(0));
+
+        fn is_send<X: Send>() {}
+        is_send::<HandleToken>();
+
+        UNDER_TEST.0.fetch_add(1, Ordering::SeqCst);
+        let token = HandleToken(&UNDER_TEST);
+        assert_eq!(UNDER_TEST.0.load(Ordering::SeqCst), 1);
+        std::thread::scope(|s| {
+            s.spawn(move || drop(token))
+                .join()
+                .expect("release thread panicked");
+        });
+        assert_eq!(UNDER_TEST.0.load(Ordering::SeqCst), 0);
+
+        let moved = std::thread::scope(|s| {
+            s.spawn(|| {
+                open_handle_tokens(1)
+                    .expect("an uninitialized process opens a token")
+                    .take()
+                    .expect("one token was opened")
+            })
+            .join()
+            .expect("open thread panicked")
+        });
+        assert!(live_handle_tokens() >= 1);
+        drop(moved);
+    }
+
+    #[test]
+    fn handle_tokens_not_handed_out_are_released_with_the_batch() {
+        static UNDER_TEST: Shard = Shard(AtomicUsize::new(0));
+
+        UNDER_TEST.0.fetch_add(3, Ordering::SeqCst);
+        let tokens = HandleTokens {
+            shard: &UNDER_TEST,
+            left: Cell::new(3),
+        };
+        let token = tokens.take().expect("three tokens were opened");
+        drop(tokens);
+        assert_eq!(UNDER_TEST.0.load(Ordering::SeqCst), 1);
+        drop(token);
+        assert_eq!(UNDER_TEST.0.load(Ordering::SeqCst), 0);
     }
 }

@@ -21,9 +21,10 @@ that, Open MPI 5 included, a count above `i32::MAX` returns `Error::Mpi` with
 class `Count`. The variable-count collectives (`gatherv`, `scatterv`,
 `allgatherv`, `alltoallv` and their persistent forms) take their counts as
 `i32` arrays; a count above `i32::MAX` returns that same `Count` error on every
-MPI, including one with `MPI_VERSION >= 4`. `Communicator::allreduce_with_op`
-does too: a `UserOp` is a classic MPI user function with an `int` length, which
-MPICH narrows a larger count into without splitting.
+MPI, including one with `MPI_VERSION >= 4`. A reduction with a user op
+(`&UserOp<T>` passed as the op) does too: a `UserOp` is a classic MPI user
+function with an `int` length, which MPICH narrows a larger count into without
+splitting.
 
 The table below is the outcome of ferrompi's three CI builds: MPICH 4.2.1
 (`ubuntu-24.04`, the Noble package hotfixed to that version, np 2/3/4,
@@ -63,11 +64,16 @@ One item each: the symptom, the affected library, and what to do.
   ([Launchpad bug 2072338](https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338)).
   To avoid it, use an MPICH 4.2.1 or later package;
   `.github/scripts/mpich-hotfix.sh` shows the exact packages CI installs.
-- `Win::sync` outside a passive-target epoch is erroneous; MPICH returns an
-  error for it. Call it between `Win::lock`/`Win::lock_all` and the guard's
-  drop — see the `Win::sync` method's own documentation on docs.rs for the
-  full rule. Other libraries may accept it silently, so a program tested
-  only there can fail on MPICH.
+- MPICH's Hydra 4.2.3 launcher: when one rank exits without `MPI_Finalize`
+  (a leaked window), a peer blocked in the collective free of that window
+  can keep running until something else kills it, such as the job's time
+  limit. This happened in 3 of 37 runs on one host; Hydra 4.2.0 and the
+  Open MPI launchers killed the peer in 20 of 20 runs each. Set a job time
+  limit, and drop every window before a rank can exit.
+- MPICH 4.2.3: a `Win::allocate` far beyond the node's memory (`1 << 52`
+  `u64` elements, measured at one process on one host) aborts the process
+  inside `MPI_Win_allocate` on an internal assertion instead of returning
+  `Err`. Bound window sizes by the node's memory before allocating.
 - After a failed `wait_all`, which of the other requests are still pending
   depends on the library and on timing. On MPICH, the requests that come
   after the failed one in the slice stay pending. ferrompi's own rule — a
@@ -109,12 +115,16 @@ One item each: the symptom, the affected library, and what to do.
   newly created window (reported for Open MPI 4.x), ferrompi prints a
   warning to stderr, and RMA errors on that window then abort the process
   instead of returning `Err`.
-- When `MPI_Finalize` is skipped because a window is still alive — see the
-  `Mpi` type's own documentation for the full rule — MPICH's `mpiexec`
-  exits 0. Open MPI 4.1.6 and 5.0.7 instead exit 1 and print an "exiting
-  improperly" notice. On every library, drop all windows before the `Mpi`
-  handle so `MPI_Finalize` runs; under Open MPI, a skipped finalize makes
-  the job exit non-zero, which batch schedulers and CI treat as a failure.
+- When `MPI_Finalize` is skipped — a window still alive, a persistent
+  request still active, a matched `Message` not yet received, or a
+  nonblocking scope still open on the thread that drops `Mpi`; see the `Mpi`
+  type's own documentation for the full rule — MPICH's `mpiexec` exits 0.
+  Open MPI 4.1.6 and 5.0.7 instead exit 1 and print an "exiting improperly"
+  notice. On every library, drop every window, complete every persistent
+  request, receive or drop every `Message` and end every scope before
+  dropping the `Mpi` handle so `MPI_Finalize` runs; under Open MPI, a
+  skipped finalize makes the job exit non-zero, which batch schedulers and CI
+  treat as a failure.
 - Fault-tolerant MPI (ULFM): ferrompi exposes no failure-acknowledgement
   API. With the library's process-fault-tolerance mode enabled (Open MPI
   5: `mpiexec --with-ft ulfm`), a receive from any source that a process
@@ -124,6 +134,17 @@ One item each: the symptom, the affected library, and what to do.
   receive before returning `ResourceExhausted`) prints
   `ferrompi: receive pending after a process failure` to stderr and aborts
   the process instead of returning. Other failures return `Err` as usual.
+- Open MPI 5.0.7, shared-memory transport with CMA single-copy: a receive
+  truncated by a message above 4096 bytes corrupts the heap, in blocking and
+  persistent receives alike, and in plain C too. Truncation is erroneous in
+  any case, so size every receive for the largest message; `--mca smsc ^cma`
+  also avoids the corruption.
+- Open MPI 5.0.7: each persistent collective request that is created and
+  freed leaves memory allocated in the library: about 160 bytes for a
+  barrier; for a reduce, about 145 at a non-root rank and 270 at the root
+  (measured for those two calls in plain C at two ranks on one host).
+  MPICH 4.2.3 keeps nothing for the barrier. Create a persistent collective
+  once and reuse it.
 
 ## Building
 
@@ -168,9 +189,8 @@ Cargo reruns `build.rs`, and therefore recompiles the C shim, whenever
 `module load` that only changes `PATH`.
 
 Two Cargo features gate optional functionality: `rma` enables RMA and
-shared-memory window operations; `numa` implies `rma` and adds the SLURM
-helpers (the `slurm` module and `SlurmInfo`), needing no extra system
-library.
+shared-memory window operations; `slurm` adds the SLURM helpers (the
+`slurm` module and `SlurmInfo`), needing no extra system library.
 
 ## Running
 
@@ -186,15 +206,16 @@ implementation's.
 
 Run-time costs of ferrompi's own checks:
 
-- `Win::create` and `Win::allocate` each perform one allgather of 8 bytes
-  per rank, for the RMA bounds check; `SharedWindow::allocate` does not;
-- `Win::allocate` and `SharedWindow::allocate` also zero their segment,
+- `Win::create`, `Win::allocate` and `Win::allocate_shared` each perform one
+  allgather of 8 bytes per rank, for the RMA bounds check;
+- `Win::allocate` and `Win::allocate_shared` also zero their segment,
   which adds a lock-all epoch, two barriers, and a `memset` that commits
   every page at construction time. For example, a 64 MiB window at 4 ranks
   took about 60 ms per create-and-free, against about 18 ms for the raw MPI
   calls without ferrompi's zeroing, measured on MPICH 4.2.3 on one host;
-- every `Win` data-transfer call adds a local bounds check — no
-  communication — costing a few nanoseconds.
+- every transfer on an epoch handle (`ActiveEpoch`, `PassiveEpoch`) adds a
+  local bounds and access-set check: a few integer comparisons and checked
+  multiplications, with no communication and no MPI call.
 
 ### Reporting compatibility
 
@@ -207,7 +228,7 @@ include:
 - MPI implementation and version: (output of `mpiexec --version`)
 - OS and distribution:
 - Compiler: (output of `mpicc --version`, or the wrapper named by MPICC)
-- Cargo features tested: (e.g., default, rma, numa)
+- Cargo features tested: (e.g., default, rma, slurm)
 - Test command: (e.g., `MPI_NP_LIST=4 ./tests/run_mpi_tests.sh rma`)
 - Test results: the runner's summary line, plus any `FAIL <example> (np=N)`
   lines

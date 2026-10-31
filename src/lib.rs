@@ -9,18 +9,21 @@
 //! - **Generic API**: All operations work with any [`MpiDatatype`] (`f32`, `f64`, `i32`, `i64`, `u8`, `u32`, `u64`)
 //! - **Blocking collectives**: barrier, broadcast, reduce, allreduce, gather, scatter, allgather,
 //!   alltoall, scan, exscan, reduce\_scatter\_block, plus V-variants (gatherv, scatterv, allgatherv, alltoallv)
-//! - **Nonblocking collectives**: All 15 `i`-prefixed variants with [`Request`] handles
-//! - **Persistent collectives** (MPI 4.0, or Open MPI 5): `*_init` forms of every blocking collective except
-//!   `barrier`, plus five in-place forms, with [`PersistentRequest`] handles
+//! - **Nonblocking collectives**: all 15 `i`-prefixed variants, plus six in-place forms, created inside a [`scope`]
+//! - **Persistent collectives** (MPI 4.0, or Open MPI 5): `*_init` forms of every blocking collective,
+//!   plus six in-place forms, with [`PersistentRequest`] handles
 //! - **Large counts**: with an MPI 4.0 library, a count above `i32::MAX` uses MPI's `_c` call
 //!   (point-to-point, collectives including persistent ones, RMA); below
-//!   MPI 4.0 it returns [`Error::Mpi`] with class [`MpiErrorClass::Count`]. The V-collectives
+//!   MPI 4.0 it returns [`Error::Mpi`] with class [`MpiErrorClass::Count`]. On such a library, a
+//!   matched message above `i32::MAX` bytes cannot be discarded by dropping its [`Message`], and
+//!   [`Message::mrecv`] tells MPI of at most `i32::MAX` elements of room. The V-collectives
 //!   (`gatherv`, `scatterv`, `allgatherv`, `alltoallv`, and their persistent forms), which take
-//!   counts as `i32` arrays, and `allreduce_with_op`, whose user function takes an `int` length,
-//!   return that error on every MPI version.
+//!   counts as `i32` arrays, and every reduction with a user op, whose user function takes an
+//!   `int` length, return that error on every MPI version.
 //! - **Scalar and in-place variants**: `reduce_scalar`, `allreduce_scalar`, `reduce_inplace`,
 //!   `allreduce_inplace`, `scan_scalar`, `exscan_scalar`
-//! - **Point-to-point**: `send`, `recv`, `isend`, `irecv`, `sendrecv`, `probe`, `iprobe`
+//! - **Point-to-point**: `send`, `recv`, `isend`, `irecv`, `sendrecv`, `probe`, `iprobe`, and the
+//!   matched probes `mprobe` and `improbe`, whose [`Message`] only its own `mrecv` can receive
 //! - **Persistent point-to-point**: `send_init`, `bsend_init`, `rsend_init`, `ssend_init`,
 //!   `recv_init` methods on [`Communicator`], each returning a [`PersistentRequest`]
 //! - **Communicator management**: `split`, `split_type`, `split_shared`, `duplicate`
@@ -33,16 +36,11 @@
 //!   for struct-type builders.
 //! - **User-defined reduction operations**: [`UserOp`] wraps `MPI_Op_create`
 //!   with safe closure storage and trampoline.
-//! - **Distributed RMA windows** (feature `rma`): `Win<T>` with
-//!   `WinFenceAssert`, `WinPscwAssert`,
-//!   `WinLockGuard`, and `WinLockAllGuard`
-//!   RAII guards.
-//! - **Shared memory windows** (feature `rma`): `SharedWindow<T>`
-//!   with RAII lock guards for intra-node shared memory (distinct from the
-//!   distributed `Win<T>` windows above).
-//! - **Info objects**: [`Info`] creates and queries MPI info objects;
-//!   no ferrompi call takes one yet.
-//! - **SLURM helpers** (feature `numa`): Job topology queries via `slurm` module
+//! - **RMA and shared-memory windows** (feature `rma`): `Win<T>` with
+//!   `WinFenceAssert`, `WinPscwAssert`, and closure epochs over
+//!   `ActiveEpoch` and `PassiveEpoch`; `Win::allocate_shared` for intra-node
+//!   shared memory; `WinView` for access to a window's memory.
+//! - **SLURM helpers** (feature `slurm`): Job topology queries via `slurm` module
 //! - **Rich error handling**: [`MpiErrorClass`] categorization with messages from the MPI runtime
 //!
 //! ## Supported Types
@@ -82,17 +80,17 @@
 //!
 //! | Feature | Description | Dependencies |
 //! |---------|-------------|--------------|
-//! | `rma`   | RMA and shared-memory windows (`Win`, `SharedWindow`, lock guards, RMA operations, `ReduceOp::Replace`/`NoOp`) | — |
-//! | `numa`  | The `slurm` module and `SlurmInfo` | `rma` |
+//! | `rma`   | RMA and shared-memory windows (`Win`, epoch handles, views, RMA operations) | — |
+//! | `slurm` | The `slurm` module and `SlurmInfo` | — |
 //!
-//! `numa` needs no system library: it implies `rma` and adds only the SLURM
-//! job-topology helpers; it adds no NUMA code.
+//! `slurm` reads the job's SLURM environment variables and needs no system
+//! library.
 //!
 //! ## Thread Safety
 //!
-//! [`Communicator`], [`Group`], [`Request`], [`PersistentRequest`], [`Status`],
-//! [`CustomDatatype`], [`Info`], and [`UserOp`] are `Send + Sync`; [`Mpi`],
-//! `Win<T>`, `SharedWindow<T>` (feature `rma`), and their RAII lock guards are not.
+//! [`Communicator`], [`Group`], [`PersistentRequest`], [`Message`], [`Status`],
+//! [`CustomDatatype`] and [`UserOp`] are `Send + Sync`; [`Mpi`], [`Request`],
+//! `Win<T>`, its epoch handles and `WinView` (feature `rma`) are not.
 //!
 //! Which thread may call MPI is set by the provided [`ThreadLevel`]; see its
 //! documentation for the per-level rules.
@@ -128,11 +126,15 @@
 //! srun --cpu-bind=cores ./my_program
 //! ```
 //!
-//! Use the `slurm` module (with `numa` feature) to read these values at runtime.
+//! Use the `slurm` module (with the `slurm` feature) to read these values at runtime.
 //! See `examples/hybrid_openmp.rs` for the full pattern.
 //!
 //! ## Lifecycle
 //!
+//! [`Mpi::init`] or [`Mpi::init_thread`] comes first: until one has returned,
+//! any other call that would reach MPI returns [`Error::InvalidState`]
+//! instead, except the queries MPI allows at any time ([`Mpi::version`],
+//! [`Mpi::library_version`], [`Mpi::is_initialized`], [`Mpi::is_finalized`]).
 //! Dropping the [`Mpi`] handle finalizes MPI. See [`Mpi`] for what happens to
 //! other handles afterwards, and [`Error`] for which failures return `Err`
 //! and which abort the process.
@@ -158,12 +160,13 @@ pub mod doc;
 mod error;
 mod ffi;
 mod group;
-mod info;
+mod message;
 mod op;
 mod persistent;
 mod request;
 mod rt;
-#[cfg(feature = "numa")]
+mod scope;
+#[cfg(feature = "slurm")]
 pub mod slurm;
 mod status;
 mod topology;
@@ -174,8 +177,7 @@ pub use comm::{Communicator, SplitType};
 #[cfg(feature = "rma")]
 pub use datatype::AtomicMpiDatatype;
 pub use datatype::{
-    BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, MpiDatatype, MpiIndexedDatatype,
-    PlainData, ShortInt,
+    BytePermutable, DoubleInt, FloatInt, Int2, MpiDatatype, MpiIndexedDatatype, PlainData, ShortInt,
 };
 #[cfg(all(
     target_os = "linux",
@@ -189,18 +191,18 @@ pub use datatype::{LongDoubleInt, LongInt};
 pub use datatype_builder::{CustomDatatype, StructField};
 pub use error::{Error, MpiErrorClass, ResourceKind, Result};
 pub use group::{Group, GroupComparison, RankRange};
-pub use info::Info;
-pub use op::{ReduceOp, UserOp};
+pub use message::Message;
+pub use op::{AccumulateOp, CollectiveOp, FetchOp, ReduceOp, UserOp};
 pub use persistent::PersistentRequest;
 pub use request::Request;
-pub use status::Status;
-#[cfg(feature = "numa")]
+pub use scope::{scope, Scope};
+pub use status::{Source, Status, Tag};
+#[cfg(feature = "slurm")]
 pub use topology::SlurmInfo;
 pub use topology::{HostEntry, TopologyInfo};
 #[cfg(feature = "rma")]
 pub use window::{
-    LockAllGuard, LockGuard, LockType, PendingFetchResult, SharedWindow, Win, WinFenceAssert,
-    WinLockAllGuard, WinLockGuard, WinPscwAssert,
+    ActiveEpoch, LockType, PassiveEpoch, Win, WinFenceAssert, WinPscwAssert, WinView,
 };
 
 #[cfg(doctest)]
@@ -226,19 +228,30 @@ static ATTACHED_BUFFER: Mutex<Option<Box<[u8]>>> = Mutex::new(None);
 /// | [`Single`](ThreadLevel::Single) | Only the thread that called [`Mpi::init_thread`] | N/A |
 /// | [`Funneled`](ThreadLevel::Funneled) | Only the thread that called [`Mpi::init_thread`] | N/A |
 /// | [`Serialized`](ThreadLevel::Serialized) | Any thread | Caller serializes; debug builds detect an overlap |
-/// | [`Multiple`](ThreadLevel::Multiple) | Any thread | None needed |
+/// | [`Multiple`](ThreadLevel::Multiple) | Any thread | Collective calls on one communicator must be issued in the same order on every process |
 ///
 /// A call from any other thread at [`Single`](ThreadLevel::Single) or
 /// [`Funneled`](ThreadLevel::Funneled) returns
 /// `Err(`[`Error::ThreadLevelViolation`]`)` without calling MPI. At
 /// [`Serialized`](ThreadLevel::Serialized), the caller must serialize its own
 /// calls; a debug build that detects two calls overlapping also returns that
-/// error (a consuming [`Request::wait`](crate::Request::wait) aborts the
-/// process instead), but a release build does not check.
+/// error (a consuming [`Request::wait`](crate::Request::wait), the final wait
+/// of a [`scope`](crate::scope()) and the closing call of an RMA epoch abort
+/// the process instead), but a release build does not check.
 ///
 /// [`Mpi::thread_level()`] reports the level MPI actually granted, which may
 /// be lower than the level requested to [`Mpi::init_thread`]; it is the
 /// granted level, not the requested one, that these rules apply to.
+///
+/// At [`Serialized`](ThreadLevel::Serialized) and
+/// [`Multiple`](ThreadLevel::Multiple), MPI matches collective calls on a
+/// communicator in the order each process issues them (MPI-4.1 §11.6.2), so
+/// threads that share a communicator must issue its collective calls in the
+/// same order on every process. A mutex alone does not ensure that: the threads
+/// can take turns in a different order on each process. Give each thread its
+/// own communicator ([`Communicator::duplicate`](crate::Communicator::duplicate)),
+/// or make every collective call on one communicator from one thread.
+/// `Communicator` is `Sync`, so the compiler does not prevent the mismatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum ThreadLevel {
@@ -261,14 +274,20 @@ pub enum ThreadLevel {
 /// `Err(`[`Error::AlreadyInitialized`]`)`; once it is dropped, they return
 /// `Err(`[`Error::Finalized`]`)`. MPI cannot be re-initialized.
 ///
+/// Until one of the two has returned, the constructors that take no handle
+/// ([`UserOp::new`], [`UserOp::new_noncommutative`],
+/// [`CustomDatatype::contiguous`], [`CustomDatatype::vector`] and
+/// [`CustomDatatype::create_struct`]) return
+/// `Err(`[`Error::InvalidState`]`)` without calling MPI, on every thread.
+///
 /// Dropping this handle finalizes MPI. Afterward, every method that calls
-/// MPI through a communicator, group, request, window, datatype, info or
+/// MPI through a communicator, group, request, window, datatype or
 /// user op returns `Err(`[`Error::Finalized`]`)` without calling MPI. The
 /// queries the MPI standard allows at any time ([`Mpi::version`],
 /// [`Mpi::library_version`], [`Mpi::is_initialized`],
-/// [`Mpi::is_finalized`]) still answer. A communicator, request, window or
-/// window lock guard, datatype, group, info object or user op that outlives
-/// this handle makes no MPI call when it is dropped.
+/// [`Mpi::is_finalized`]) still answer. A communicator, request, window,
+/// datatype, group or user op that outlives this handle makes no
+/// MPI call when it is dropped.
 ///
 /// If any window (feature `rma`) is still alive when this handle is
 /// dropped — whatever constructed it — `MPI_Finalize` is skipped instead,
@@ -277,25 +296,66 @@ pub enum ThreadLevel {
 /// while tearing down internal state that still tracks a live window;
 /// window memory stays valid until the process exits. Launchers can report
 /// such an exit differently from a clean one; see
-/// [`doc::mpi_compatibility`]. Debug builds print a note to stderr when
-/// finalize still leaves MPI requests unfreed.
+/// [`doc::mpi_compatibility`].
+///
+/// `MPI_Finalize` is also skipped, with a stderr warning, if any
+/// [`PersistentRequest`] is active, whatever thread holds it: finalizing with a
+/// request pending is erroneous (MPI-4.1 §11.2.2), and the request can be moved
+/// to a thread this drop cannot wait for. The request can still be completed
+/// with `wait`/`test` afterwards; dropping it then makes no MPI call and leaks
+/// its handle and, if it is still active, its buffers.
+///
+/// The same holds while a [`Message`] from a matched probe is unreceived,
+/// whatever thread holds it: MPI requires every matched message to be received
+/// before `MPI_Finalize` (MPI-4.1 §11.2.2). It can still be received with
+/// `mrecv`, or dropped, afterwards.
+///
+/// The same holds while a nonblocking [`scope`](crate::scope()) is open on the
+/// thread that drops this handle: its requests complete when the scope ends.
+/// A scope open on another thread is waited for instead, with no timeout, at
+/// every thread level.
+///
+/// A `wait` or `test` of a persistent request, an `mrecv`, a [`Message`] drop
+/// or a probe that matches nothing, run on another thread while this handle is
+/// dropped, can make the drop skip `MPI_Finalize`, although nothing is left
+/// outstanding once that call returns.
+///
+/// When `MPI_Finalize` is skipped, MPI stays initialized: a `wait` or `test`
+/// on a request still pending completes it, a `cancel` on one still reaches
+/// MPI, a matched [`Message`] can still be received, an open RMA epoch still
+/// issues its closing call (fence, `MPI_Win_complete`, unlock; it can wait
+/// for a peer that no longer calls MPI), and an exposure epoch can still be
+/// waited for or tested; every other call returns
+/// `Err(`[`Error::Finalized`]`)`, and handles dropped afterwards are leaked
+/// without an MPI call, except a [`Message`], whose drop still receives it.
 ///
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
-/// whose `Drop` calls MPI — an uncompleted [`Request`], a
-/// [`PersistentRequest`], a communicator other than the world, a window or
-/// window lock guard, a datatype, group, info object or user op — on a
+/// whose `Drop` calls MPI — a [`PersistentRequest`], a communicator other than
+/// the world, a window, a datatype, group or user op — on a
 /// thread other than the one that called [`Mpi::init`]/[`Mpi::init_thread`]
-/// prints
-/// `ferrompi: <Type> dropped on thread <name or id>` to stderr and aborts
-/// the process.
+/// prints `ferrompi: <Type> dropped on thread <name or id>` to stderr and
+/// aborts the process. A [`Message`] is the exception: dropped there, it makes
+/// no MPI call and stays unreceived, so this handle's drop skips
+/// `MPI_Finalize`.
 ///
 /// At [`ThreadLevel::Serialized`]/[`ThreadLevel::Multiple`], dropping this
-/// handle while another thread is still inside an MPI call through this
-/// crate is a program error that `ferrompi` does not detect.
+/// handle waits for every MPI call that other threads have in progress
+/// through this crate to return; a call that starts after the drop began
+/// returns `Err(`[`Error::Finalized`]`)` without calling MPI, except a
+/// completion, test or cancel call on a request that a scope open on another
+/// thread still holds, which the drop waits for. A `wait` or `test` on an
+/// active [`PersistentRequest`] is admitted too, and the drop does not wait for
+/// the request. So is the `mrecv` or the drop of a matched [`Message`]. The
+/// closing call of a fence, PSCW access or passive-target epoch (the unlock),
+/// `Win::wait_exposure` and `Win::test_exposure` (feature `rma`) are admitted
+/// too: the drop does not wait for an epoch, because the epoch's window keeps
+/// it on the skip path. A thread blocked forever inside an MPI call, for
+/// example in a collective its peers never enter, blocks the drop; MPI requires
+/// every thread's MPI calls to complete before `MPI_Finalize`.
 ///
 /// A call that would fail one of the checks above (finalized, wrong
 /// thread) and is also given invalid arguments may return the argument
-/// error (for example [`Error::InvalidBuffer`]) instead of
+/// error (for example [`Error::BufferSize`]) instead of
 /// `Err(`[`Error::Finalized`]`)`/`Err(`[`Error::ThreadLevelViolation`]`)`;
 /// the order in which these checks run is not part of the API.
 ///
@@ -312,6 +372,10 @@ pub enum ThreadLevel {
 pub struct Mpi {
     /// The thread level that was provided
     thread_level: ThreadLevel,
+    /// This process's rank in `MPI_COMM_WORLD`, read once at init
+    world_rank: i32,
+    /// The size of `MPI_COMM_WORLD`, read once at init
+    world_size: i32,
     /// Marker to make Mpi !Send and !Sync
     _marker: PhantomData<*const ()>,
 }
@@ -326,7 +390,9 @@ impl Mpi {
     /// once MPI has been finalized, or `Err(`[`Error::Mpi`]`)` if
     /// `MPI_Init_thread` itself fails. An error inside `MPI_Init_thread`
     /// itself usually aborts the process before `Err(`[`Error::Mpi`]`)` can
-    /// be returned; see [`Error`].
+    /// be returned; see [`Error`]. If MPI then fails to report this process's
+    /// rank or the size of `MPI_COMM_WORLD`, that error is returned and MPI is
+    /// finalized, as it is when an `Mpi` handle is dropped.
     pub fn init() -> Result<Self> {
         Self::init_thread(ThreadLevel::Single)
     }
@@ -349,7 +415,11 @@ impl Mpi {
     /// once MPI has been finalized, or `Err(`[`Error::Mpi`]`)` if
     /// `MPI_Init_thread` itself fails. An error inside `MPI_Init_thread`
     /// itself usually aborts the process before `Err(`[`Error::Mpi`]`)` can
-    /// be returned; see [`Error`].
+    /// be returned; see [`Error`]. That error's class is
+    /// [`MpiErrorClass::Unknown`], because MPI cannot be asked for the class
+    /// of an error from its own initialization. If MPI then fails to report
+    /// this process's rank or the size of `MPI_COMM_WORLD`, that error is
+    /// returned and MPI is finalized, as it is when an `Mpi` handle is dropped.
     pub fn init_thread(required: ThreadLevel) -> Result<Self> {
         rt::begin_init()?;
 
@@ -374,7 +444,7 @@ impl Mpi {
         if ret != 0 {
             rt::abandon_init();
             return Err(Error::Mpi {
-                class: MpiErrorClass::Raw(ret),
+                class: MpiErrorClass::Unknown,
                 code: ret,
                 message: format!("MPI_Init_thread failed with code {ret}"),
                 operation: Some("init_thread"),
@@ -388,12 +458,23 @@ impl Mpi {
             _ => ThreadLevel::Multiple,
         };
 
+        // Read before `rt::activate`: until then the guard admits this thread
+        // and no other, so only MPI itself can fail these two.
+        let world = Communicator::from_handle(comm::WORLD_HANDLE);
+
         rt::activate(thread_level);
 
-        Ok(Mpi {
+        let mut mpi = Mpi {
             thread_level,
+            world_rank: 0,
+            world_size: 0,
             _marker: PhantomData,
-        })
+        };
+        // If the read failed, `?` drops `mpi`, which finalizes MPI.
+        let world = world?;
+        mpi.world_rank = world.rank;
+        mpi.world_size = world.size;
+        Ok(mpi)
     }
 
     /// Get the thread support level that was provided.
@@ -402,8 +483,15 @@ impl Mpi {
     }
 
     /// Get a handle to `MPI_COMM_WORLD`.
+    ///
+    /// Makes no MPI call: the rank and size were read when MPI was
+    /// initialized, and neither changes afterwards.
     pub fn world(&self) -> Communicator {
-        Communicator::world()
+        Communicator {
+            handle: comm::WORLD_HANDLE,
+            rank: self.world_rank,
+            size: self.world_size,
+        }
     }
 
     /// Get the current wall-clock time (`MPI_Wtime`), in seconds.
@@ -470,8 +558,9 @@ impl Mpi {
 
     /// Check if MPI has been finalized.
     ///
-    /// Returns `true` once the `Mpi` handle has been dropped, including when
-    /// `MPI_Finalize` itself was skipped because a window was still alive.
+    /// Returns `true` from the start of the `Mpi` handle's drop, including
+    /// when `MPI_Finalize` itself was skipped (see [`Mpi`]'s lifecycle section
+    /// for when it is).
     pub fn is_finalized() -> bool {
         if rt::is_finalized() {
             return true;
@@ -486,17 +575,40 @@ impl Mpi {
     /// Create a communicator from a group without requiring a parent
     /// communicator (MPI 4.0, or Open MPI 5).
     ///
-    /// `stringtag` must be identical across all ranks that participate
-    /// in the call; ranks with different tags or in different groups
-    /// produce separate communicators.
+    /// Every member of `group` must make the call, with a group of the same
+    /// members in the same order and with the same `stringtag`
+    /// (MPI-4.1 §7.4.2, p.339). These rules are not checked, here or by MPICH
+    /// and Open MPI: if the members pass different groups or string tags, the
+    /// call can block, or return communicators on which a later call blocks.
+    ///
+    /// MPI bounds the length of `stringtag`: with its terminating NUL it must
+    /// fit in `MPI_MAX_STRINGTAG_LEN` bytes, a limit of at least 63
+    /// (MPI-4.1 §7.4.2, p.339), so up to 62 bytes are portable. A tag that
+    /// does not fit in the linked library's limit is refused before any MPI
+    /// call: the limit is 256 in MPICH 4.2 and, unless the library was built
+    /// with another, 1024 in Open MPI 5.0.
+    ///
+    /// Returns `Ok(Some(comm))` to a member of `group`, and `Ok(None)` when
+    /// MPI creates no communicator for the caller:
+    /// - with the empty group, where the call is local
+    ///   (MPI-4.1 §7.4.2, p.339);
+    /// - on a rank that is not a member of a non-empty `group`. MPI-4.1 does
+    ///   not spell this case out for `MPI_Comm_create_from_group`: it calls the
+    ///   function similar to `MPI_Comm_create_group`, which returns no
+    ///   communicator to such a rank (MPI-4.1 §7.4.2, p.328). MPICH 4.2 and
+    ///   Open MPI 5.0 return none here.
     ///
     /// # Errors
     ///
-    /// - Returns `Err(Error::Internal(_))` if `stringtag` contains a null byte
-    ///   (the FFI call is never invoked in this case).
+    /// - Returns `Err(`[`Error::InvalidArgument`]`)` if `stringtag` contains a
+    ///   NUL byte, or does not fit in the library's `MPI_MAX_STRINGTAG_LEN`
+    ///   bytes with its terminating NUL (no MPI call is made in either case).
     /// - Returns `Err(Error::NotSupported(_))` when ferrompi was built
-    ///   against an MPI older than 4.0 other than Open MPI 5.
+    ///   against an MPI older than 4.0 other than Open MPI 5, whatever the
+    ///   length of the tag: such a library defines no limit.
     /// - Returns `Err(Error::Mpi { .. })` if the underlying MPI call fails.
+    /// - Returns `Err(`[`Error::ResourceExhausted`]`)` if the communicator
+    ///   table is full.
     ///
     /// # Example
     ///
@@ -507,12 +619,31 @@ impl Mpi {
     /// let world = mpi.world();
     /// let g = world.group().unwrap();
     /// // All ranks participate with the same tag.
-    /// let comm = mpi.create_from_group(&g, "my-tag").unwrap();
+    /// let comm = mpi
+    ///     .create_from_group(&g, "my-tag")
+    ///     .unwrap()
+    ///     .expect("every rank is in the group");
     /// assert_eq!(comm.size(), world.size());
     /// ```
-    pub fn create_from_group(&self, group: &group::Group, stringtag: &str) -> Result<Communicator> {
-        let c_tag = CString::new(stringtag)
-            .map_err(|_| Error::Internal("stringtag contains null byte".into()))?;
+    pub fn create_from_group(
+        &self,
+        group: &group::Group,
+        stringtag: &str,
+    ) -> Result<Option<Communicator>> {
+        let c_tag = CString::new(stringtag).map_err(|_| Error::InvalidArgument {
+            arg: "stringtag",
+            reason: "contains a NUL byte",
+        })?;
+        // SAFETY: the call takes no argument and makes no MPI call.
+        let limit = unsafe { ffi::ferrompi_max_stringtag_len() };
+        // The limit counts the terminating NUL (MPI-4.1 §19.3.9, p.847). An
+        // allocation is at most `isize::MAX` bytes, so the cast is exact.
+        if c_tag.as_bytes_with_nul().len() as i64 > limit {
+            return Err(Error::InvalidArgument {
+                arg: "stringtag",
+                reason: "longer than MPI_MAX_STRINGTAG_LEN allows",
+            });
+        }
         let mut new_handle: i32 = -1;
         // SAFETY: c_tag.as_ptr() is a valid, null-terminated C string that
         // lives for the duration of this call. group.handle is a valid group
@@ -522,7 +653,7 @@ impl Mpi {
             ffi::ferrompi_comm_create_from_group(group.handle, c_tag.as_ptr(), &mut new_handle)
         };
         Error::check_with_op(ret, "comm_create_from_group")?;
-        Communicator::from_handle(new_handle)
+        Communicator::from_optional_handle(new_handle)
     }
 
     /// Attach a user-provided buffer for use by buffered sends.
@@ -531,7 +662,7 @@ impl Mpi {
     /// MPI until [`buffer_detach`](Self::buffer_detach) is called. Only one
     /// buffer may be attached per process at a time; attempting to attach a
     /// second buffer without first detaching returns
-    /// `Err(`[`Error::InvalidOp`]`)`.
+    /// `Err(`[`Error::InvalidState`]`)`.
     ///
     /// The `buffer` is stored in a process-wide static so its allocation
     /// remains valid for the lifetime of the attachment. You must not access
@@ -551,14 +682,16 @@ impl Mpi {
     /// hundred extra bytes per buffered send. For safety, use a generous margin.
     ///
     /// Buffers larger than `i32::MAX` bytes are rejected with
-    /// `Err(`[`Error::InvalidBuffer`]`)` before the FFI call; the
+    /// `Err(`[`Error::InvalidArgument`]`)` before the FFI call; the
     /// underlying `MPI_Buffer_attach` takes an `int` count and cannot
-    /// address larger buffers.
+    /// address larger buffers. An empty buffer is rejected the same way:
+    /// every MPI refuses it, each with an error of its own.
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `buffer.len() > i32::MAX as usize`.
-    /// - [`Error::InvalidOp`] if a buffer is already attached.
+    /// - [`Error::InvalidArgument`] if `buffer` is empty or
+    ///   `buffer.len() > i32::MAX as usize`.
+    /// - [`Error::InvalidState`] if a buffer is already attached.
     /// - [`Error::Mpi`] if `MPI_Buffer_attach` fails.
     ///
     /// # Example
@@ -575,10 +708,21 @@ impl Mpi {
             .lock()
             .map_err(|_| Error::Internal("ATTACHED_BUFFER mutex poisoned".into()))?;
         if guard.is_some() {
-            return Err(Error::InvalidOp);
+            return Err(Error::InvalidState {
+                reason: "a buffer is already attached",
+            });
+        }
+        if buffer.is_empty() {
+            return Err(Error::InvalidArgument {
+                arg: "buffer",
+                reason: "empty",
+            });
         }
         if buffer.len() > i32::MAX as usize {
-            return Err(Error::InvalidBuffer);
+            return Err(Error::InvalidArgument {
+                arg: "buffer",
+                reason: "longer than i32::MAX bytes",
+            });
         }
         let ptr = buffer.as_ptr() as *mut std::ffi::c_void;
         let size = buffer.len() as i64;
@@ -610,7 +754,7 @@ impl Mpi {
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidOp`] if no buffer is currently attached.
+    /// - [`Error::InvalidState`] if no buffer is currently attached.
     /// - [`Error::Mpi`] if `MPI_Buffer_detach` fails.
     ///
     /// # Example
@@ -627,7 +771,9 @@ impl Mpi {
             .lock()
             .map_err(|_| Error::Internal("ATTACHED_BUFFER mutex poisoned".into()))?;
         if guard.is_none() {
-            return Err(Error::InvalidOp);
+            return Err(Error::InvalidState {
+                reason: "no buffer is attached",
+            });
         }
         let mut out_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut out_size: i64 = 0;
@@ -645,50 +791,70 @@ impl Mpi {
 
 impl Drop for Mpi {
     fn drop(&mut self) {
-        // rt::finalize() moves the lifecycle state from Active to Finalized
-        // before ferrompi_finalize runs, so a handle whose drop is nested
-        // inside the finalize sweep (a closure captured by a request/op that
-        // the sweep drops) observes Finalized and makes no MPI call. It also
+        // rt::begin_finalize() moves the lifecycle state from Active to
+        // Finalizing, which refuses new calls, frees and scope opens but
+        // still admits the completion calls of requests already pending, and
+        // at Serialized/Multiple waits for the calls other threads have in
+        // progress. If finalize_skip_reason() names a reason, the state stays
+        // Finalizing for the rest of the process and MPI stays initialized.
+        // Otherwise rt::end_finalize() stores Finalized, waits for the
+        // completion calls admitted meanwhile, and only then does
+        // ferrompi_finalize run, so a handle whose drop is nested inside the
+        // finalize sweep (a closure captured by a request/op that the sweep
+        // drops) observes Finalized and makes no MPI call. begin_finalize
         // returns false for a stub Mpi built without init (Uninit) and for a
-        // second call on an already-finalized state, so this branch runs
+        // second call on an already-finalized state, so this runs
         // ferrompi_finalize at most once.
-        if rt::finalize() {
-            #[cfg(feature = "rma")]
-            {
-                let live = window::live_windows();
-                if live > 0 {
-                    // A single write so concurrent ranks' output cannot interleave mid-line.
-                    let msg = format!(
-                        "ferrompi: MPI_Finalize skipped: {live} window(s) still alive; their memory stays valid until the process exits\n"
-                    );
-                    let _ = std::io::stderr().write_all(msg.as_bytes());
-                    return;
-                }
-            }
-            let mut active: i32 = 0;
-            // SAFETY: `active` is a valid local out-parameter that
-            // ferrompi_finalize writes the unfreed-active-request count
-            // into. rt::finalize() just returned true, so state was Active —
-            // MPI_Init(_thread) succeeded and MPI_Finalize has not yet been
-            // called for this process.
-            unsafe {
-                ffi::ferrompi_finalize(&mut active);
-            }
-            if cfg!(debug_assertions) && active > 0 {
-                // A single write so concurrent ranks' output cannot interleave mid-line.
-                let msg =
-                    format!("ferrompi: MPI_Finalize leaves {active} active request(s) unfreed\n");
-                let _ = std::io::stderr().write_all(msg.as_bytes());
-            }
+        if !rt::begin_finalize() {
+            return;
+        }
+        if let Some(reason) = finalize_skip_reason() {
+            // A single write so concurrent ranks' output cannot interleave mid-line.
+            let msg = format!("ferrompi: MPI_Finalize skipped: {reason}\n");
+            let _ = std::io::stderr().write_all(msg.as_bytes());
+            return;
+        }
+        rt::end_finalize();
+        // SAFETY: rt::begin_finalize() just returned true, so state was Active —
+        // MPI_Init(_thread) succeeded and MPI_Finalize has not yet been
+        // called for this process.
+        unsafe {
+            ffi::ferrompi_finalize();
         }
     }
 }
 
+/// Why `Mpi::drop` must not call `MPI_Finalize`, or `None` when it may: a
+/// nonblocking scope open on the dropping thread, an active persistent request
+/// or an unreceived matched message on any thread, or a live window (feature
+/// `rma`). This is the one place the skip is decided.
+fn finalize_skip_reason() -> Option<String> {
+    if rt::scopes_on_this_thread() > 0 {
+        return Some(
+            "a nonblocking scope is still open on this thread; its requests complete when the scope ends"
+                .into(),
+        );
+    }
+    let live = rt::live_handle_tokens();
+    if live > 0 {
+        return Some(format!(
+            "{live} persistent request(s) still active or matched message(s) not yet received; request buffers stay valid until the process exits"
+        ));
+    }
+    #[cfg(feature = "rma")]
+    {
+        let live = window::live_windows();
+        if live > 0 {
+            return Some(format!(
+                "{live} window(s) still alive; their memory stays valid until the process exits"
+            ));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    // Note: MPI tests must be run with mpiexec
-    // cargo build --examples && mpiexec -n 4 ./target/debug/examples/hello_world
-
     use super::{group, Error, Mpi, ThreadLevel, ATTACHED_BUFFER};
     use std::marker::PhantomData;
 
@@ -697,8 +863,18 @@ mod tests {
     fn stub_mpi() -> Mpi {
         Mpi {
             thread_level: ThreadLevel::Single,
+            world_rank: 3,
+            world_size: 8,
             _marker: PhantomData,
         }
+    }
+
+    /// `world()` on a stub handle: any MPI call here would run before
+    /// `MPI_Init_thread`.
+    #[test]
+    fn world_is_built_from_the_rank_and_size_read_at_init() {
+        let world = stub_mpi().world();
+        assert_eq!((world.rank(), world.size()), (3, 8));
     }
 
     // ── ThreadLevel tests ──────────────────────────────────────────────
@@ -713,29 +889,299 @@ mod tests {
 
     // ── Mpi::buffer_attach / buffer_detach unit tests ─────────────────────
 
-    /// Both guard paths of the attached-buffer static in one test, so no other
+    /// Three guard paths of the attached-buffer static in one test, so no other
     /// test can interleave with the shared state: detach with nothing attached
-    /// and attach while a buffer is attached both return `Err(InvalidOp)`
+    /// and attach while a buffer is attached return `Err(InvalidState)`, and
+    /// an empty buffer returns `Err(InvalidArgument)` and is not stored, all
     /// without reaching MPI (the static is seeded directly).
     #[test]
-    fn buffer_attach_detach_guards_return_invalid_op() {
+    fn buffer_attach_detach_guards_refuse_misuse() {
         let mpi = stub_mpi();
 
         *ATTACHED_BUFFER.lock().unwrap() = None;
         let result = mpi.buffer_detach();
         assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "expected Err(InvalidOp) on detach without attach, got: {result:?}"
+            matches!(
+                result,
+                Err(Error::InvalidState {
+                    reason: "no buffer is attached"
+                })
+            ),
+            "expected Err(InvalidState) on detach without attach, got: {result:?}"
         );
 
         *ATTACHED_BUFFER.lock().unwrap() = Some(vec![0u8; 4].into_boxed_slice());
         let result = mpi.buffer_attach(vec![0u8; 8].into_boxed_slice());
         assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "expected Err(InvalidOp) on double attach, got: {result:?}"
+            matches!(
+                result,
+                Err(Error::InvalidState {
+                    reason: "a buffer is already attached"
+                })
+            ),
+            "expected Err(InvalidState) on double attach, got: {result:?}"
         );
 
         ATTACHED_BUFFER.lock().unwrap().take();
+        let result = mpi.buffer_attach(Box::new([]));
+        assert!(
+            matches!(
+                result,
+                Err(Error::InvalidArgument {
+                    arg: "buffer",
+                    reason: "empty"
+                })
+            ),
+            "expected Err(InvalidArgument) for an empty buffer, got: {result:?}"
+        );
+        assert!(
+            ATTACHED_BUFFER.lock().unwrap().is_none(),
+            "a refused buffer must not be stored"
+        );
+    }
+
+    // ── finalize_skip_reason unit tests ───────────────────────────────────
+
+    #[test]
+    fn finalize_skip_reason_names_an_open_scope() {
+        let reason =
+            crate::scope(|_| Ok(super::finalize_skip_reason())).expect("an empty scope returns Ok");
+        assert_eq!(
+            reason.as_deref(),
+            Some("a nonblocking scope is still open on this thread; its requests complete when the scope ends")
+        );
+        assert_eq!(crate::rt::scopes_on_this_thread(), 0);
+    }
+
+    #[test]
+    fn finalize_skip_reason_names_an_active_persistent_request() {
+        let before = crate::rt::live_handle_tokens();
+        let token = crate::rt::open_handle_tokens(1)
+            .expect("an uninitialized process opens a token")
+            .take()
+            .expect("one token was opened");
+        let reason = super::finalize_skip_reason().expect("an active request skips the finalize");
+        assert!(
+            reason.contains("persistent request(s) still active"),
+            "unexpected reason: {reason}"
+        );
+        drop(token);
+        // Other tests hold tokens for a moment too, so wait for the sum to come
+        // back to its earlier value instead of asserting zero.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut live = crate::rt::live_handle_tokens();
+        while live > before && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+            live = crate::rt::live_handle_tokens();
+        }
+        assert!(live <= before);
+    }
+
+    // ── public enum shapes ────────────────────────────────────────────────
+
+    /// Each match has no wildcard arm and no `cfg`, so a variant that exists
+    /// under one feature set only stops this test compiling in the other.
+    #[test]
+    fn public_enums_have_one_shape_in_every_feature_set() {
+        use crate::{
+            GroupComparison, MpiErrorClass, ReduceOp, ResourceKind, Source, SplitType, Tag,
+        };
+
+        let _ = |e: &Error| match e {
+            Error::AlreadyInitialized
+            | Error::Finalized
+            | Error::ThreadLevelViolation
+            | Error::InvalidArgument { .. }
+            | Error::BufferSize { .. }
+            | Error::InvalidState { .. }
+            | Error::Mpi { .. }
+            | Error::NotSupported(_)
+            | Error::ResourceExhausted { .. }
+            | Error::Internal(_) => {}
+        };
+        let _ = |c: MpiErrorClass| match c {
+            MpiErrorClass::Success
+            | MpiErrorClass::Buffer
+            | MpiErrorClass::Count
+            | MpiErrorClass::Type
+            | MpiErrorClass::Tag
+            | MpiErrorClass::Comm
+            | MpiErrorClass::Rank
+            | MpiErrorClass::Request
+            | MpiErrorClass::Root
+            | MpiErrorClass::Group
+            | MpiErrorClass::Op
+            | MpiErrorClass::Topology
+            | MpiErrorClass::Dims
+            | MpiErrorClass::Arg
+            | MpiErrorClass::Unknown
+            | MpiErrorClass::Truncate
+            | MpiErrorClass::Other
+            | MpiErrorClass::Intern
+            | MpiErrorClass::InStatus
+            | MpiErrorClass::Pending
+            | MpiErrorClass::Win
+            | MpiErrorClass::Info
+            | MpiErrorClass::File
+            | MpiErrorClass::Raw(_) => {}
+        };
+        let _ = |r: ResourceKind| match r {
+            ResourceKind::Request
+            | ResourceKind::Communicator
+            | ResourceKind::Datatype
+            | ResourceKind::Operation
+            | ResourceKind::Window
+            | ResourceKind::Group => {}
+        };
+        let _ = |op: ReduceOp| match op {
+            ReduceOp::Sum
+            | ReduceOp::Max
+            | ReduceOp::Min
+            | ReduceOp::Prod
+            | ReduceOp::BitwiseOr
+            | ReduceOp::BitwiseAnd
+            | ReduceOp::BitwiseXor
+            | ReduceOp::LogicalOr
+            | ReduceOp::LogicalAnd
+            | ReduceOp::LogicalXor => {}
+        };
+        let _ = |t: SplitType| match t {
+            SplitType::Shared => {}
+        };
+        let _ = |l: ThreadLevel| match l {
+            ThreadLevel::Single
+            | ThreadLevel::Funneled
+            | ThreadLevel::Serialized
+            | ThreadLevel::Multiple => {}
+        };
+        let _ = |c: GroupComparison| match c {
+            GroupComparison::Identical | GroupComparison::Similar | GroupComparison::Unequal => {}
+        };
+        let _ = |s: Source| match s {
+            Source::Any | Source::ProcNull | Source::Rank(_) => {}
+        };
+        let _ = |t: Tag| match t {
+            Tag::Any | Tag::Value(_) => {}
+        };
+    }
+
+    // ── checks that need an initialized MPI ───────────────────────────────
+
+    /// The one test that initializes MPI. Other tests of this binary need a
+    /// process in which MPI was never initialized, so this one is ignored by
+    /// default and runs alone, as a singleton: `cargo test --lib -- --ignored`.
+    #[test]
+    #[ignore = "initializes MPI; run alone with `cargo test --lib -- --ignored`"]
+    fn checks_that_need_mpi() {
+        use crate::{CustomDatatype, MpiDatatype, MpiErrorClass, StructField};
+
+        let mpi = Mpi::init_thread(ThreadLevel::Multiple).expect("MPI init failed");
+        let world = mpi.world();
+        // The threads below duplicate the world communicator with no order
+        // between their calls, which is valid only in a world of one process.
+        assert_eq!(world.size(), 1, "this test needs a world of one process");
+
+        // An out-of-range group handle reaches MPI as MPI_GROUP_NULL.
+        let mut size: i32 = 0;
+        // SAFETY: `size` is a valid out-parameter; handle 999 is past the group table.
+        let ret = unsafe { crate::ffi::ferrompi_group_size(999, &mut size) };
+        assert!(
+            matches!(
+                Error::from_code(ret),
+                Error::Mpi {
+                    class: MpiErrorClass::Group,
+                    ..
+                }
+            ),
+            "group_size(999) returned {ret}"
+        );
+
+        // A count above INT_MAX is refused before either array is read.
+        let handle: i64 = -1;
+        let mut done: u8 = 0;
+        let mut failed: i64 = -1;
+        // SAFETY: the count guard returns before the two arrays are read or written.
+        let ret =
+            unsafe { crate::ffi::ferrompi_waitall(i64::MAX, &handle, &mut done, &mut failed) };
+        assert!(
+            matches!(
+                Error::from_code(ret),
+                Error::Mpi {
+                    class: MpiErrorClass::Count,
+                    ..
+                }
+            ),
+            "waitall(i64::MAX) returned {ret}"
+        );
+
+        // A refused create-from-group call writes no handle: the group handle
+        // is past the table, and where the library lacks
+        // MPI_Comm_create_from_group the shim refuses every call.
+        let mut out: i32 = -2;
+        // SAFETY: the tag is a C string and `out` is a valid out-parameter.
+        let ret = unsafe {
+            crate::ffi::ferrompi_comm_create_from_group(999, c"refused".as_ptr(), &mut out)
+        };
+        assert!(
+            ret != 0 && out == -2,
+            "create_from_group(999) returned {ret}, handle {out}"
+        );
+
+        crate::request::tests::stale_handle_is_rejected(&world);
+
+        // Four threads duplicate the world communicator at once: every handle
+        // names its own table slot.
+        if mpi.thread_level() == ThreadLevel::Multiple {
+            let comms = std::sync::Mutex::new(Vec::new());
+            std::thread::scope(|s| {
+                for _ in 0..4 {
+                    s.spawn(|| {
+                        let local: Vec<_> = (0..50)
+                            .map(|_| world.duplicate().expect("duplicate failed"))
+                            .collect();
+                        comms.lock().expect("mutex poisoned").extend(local);
+                    });
+                }
+            });
+            let comms = comms.into_inner().expect("mutex poisoned");
+            let unique: std::collections::HashSet<i32> = comms.iter().map(|c| c.handle).collect();
+            assert_eq!((comms.len(), unique.len()), (200, 200));
+        }
+
+        fn contiguous_handle<T: MpiDatatype>() -> i32 {
+            CustomDatatype::contiguous::<T>(4)
+                .expect("contiguous failed")
+                .handle
+        }
+        for handle in [
+            contiguous_handle::<f32>(),
+            contiguous_handle::<f64>(),
+            contiguous_handle::<i32>(),
+            contiguous_handle::<i64>(),
+            contiguous_handle::<u8>(),
+            contiguous_handle::<u32>(),
+            contiguous_handle::<u64>(),
+        ] {
+            assert!(handle >= 0);
+        }
+        let vector = CustomDatatype::vector::<f64>(3, 2, 5).expect("vector failed");
+        assert!(vector.handle >= 0);
+        let empty_blocks = CustomDatatype::vector::<f64>(3, 0, 5).expect("vector failed");
+        assert!(empty_blocks.handle >= 0);
+        let s = CustomDatatype::create_struct(&[
+            StructField::new::<f64>(1, 0),
+            StructField::new::<i32>(1, 8),
+        ])
+        .expect("create_struct failed");
+        assert!(s.handle >= 0);
+        let r = s.resized(0, 16).expect("resized failed");
+        assert!(r.handle >= 0 && r.handle != s.handle);
+
+        #[cfg(feature = "rma")]
+        {
+            crate::window::tests::window_handles_and_put_count(&world);
+            crate::request::tests::epoch_completes_pending_rput(&world);
+        }
     }
 
     // ── Mpi::create_from_group unit tests ─────────────────────────────────
@@ -752,15 +1198,60 @@ mod tests {
         // because the null-byte check fires first.
         let g = group::Group { handle: 0 };
         let result = mpi.create_from_group(&g, "bad\0tag");
-        match result {
-            Err(Error::Internal(msg)) => {
-                assert!(
-                    msg.contains("null byte"),
-                    "expected 'null byte' in error message, got: {msg}"
-                );
-            }
-            Ok(_) => panic!("expected Err(Error::Internal(_)), got Ok(_)"),
-            Err(e) => panic!("expected Err(Error::Internal(_)), got Err({e})"),
+        assert!(
+            matches!(
+                result,
+                Err(Error::InvalidArgument {
+                    arg: "stringtag",
+                    reason: "contains a NUL byte"
+                })
+            ),
+            "expected Err(InvalidArgument) for a NUL byte in the tag"
+        );
+    }
+
+    /// The longest `stringtag` the linked library allows passes the length
+    /// check, and one byte more is refused by it. MPI is never initialized
+    /// here: a tag that passes goes on to the lifecycle guard, which refuses
+    /// the call, so no MPI call is made either way.
+    #[test]
+    fn create_from_group_checks_the_length_of_the_tag() {
+        let mpi = stub_mpi();
+        let g = group::Group { handle: 0 };
+        // SAFETY: the call takes no argument and makes no MPI call.
+        let limit = unsafe { crate::ffi::ferrompi_max_stringtag_len() };
+        // Without `MPI_Comm_create_from_group` the library defines no limit,
+        // and no length is refused.
+        let longest = if limit == i64::MAX {
+            4096
+        } else {
+            assert!(limit >= 63, "MPI-4.1 requires at least 63, got {limit}");
+            usize::try_from(limit).expect("the limit is positive") - 1
+        };
+
+        let result = mpi.create_from_group(&g, &"t".repeat(longest));
+        assert!(
+            matches!(
+                result,
+                Err(Error::InvalidState {
+                    reason: "MPI is not initialized"
+                })
+            ),
+            "a tag of {longest} bytes passes the length check"
+        );
+        if limit != i64::MAX {
+            let result = mpi.create_from_group(&g, &"t".repeat(longest + 1));
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::InvalidArgument {
+                        arg: "stringtag",
+                        reason: "longer than MPI_MAX_STRINGTAG_LEN allows"
+                    })
+                ),
+                "a tag of {} bytes is refused",
+                longest + 1
+            );
         }
     }
 }

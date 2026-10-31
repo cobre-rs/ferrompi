@@ -18,6 +18,9 @@ pub mod architecture {}
 )]
 pub mod migrating_from_rsmpi {}
 
+#[doc = include_str!("../docs/migrating-0.6-to-0.7.md")]
+pub mod migrating_0_6_to_0_7 {}
+
 #[doc = include_str!("../docs/mpi-compatibility.md")]
 pub mod mpi_compatibility {}
 
@@ -38,3 +41,9 @@ pub mod adr_0005_mpi_op_create {}
 
 #[doc = include_str!("../docs/adr/0006-mpi5-abi-direction.md")]
 pub mod adr_0006_mpi5_abi_direction {}
+
+#[doc = include_str!("../docs/adr/0007-buffer-safety-and-handle-lifetimes.md")]
+pub mod adr_0007_buffer_safety_and_handle_lifetimes {}
+
+#[doc = include_str!("../docs/adr/0008-window-memory-access-model.md")]
+pub mod adr_0008_window_memory_access_model {}

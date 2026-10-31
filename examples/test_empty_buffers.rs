@@ -1,0 +1,242 @@
+//! Regression test for zero-length buffers in collectives.
+//!
+//! An empty `Vec<u8>` points at address 1, which some MPI libraries read as
+//! `MPI_IN_PLACE`. Every call of items 1 to 3 passes an empty byte buffer where
+//! a process has nothing to send or receive, and must return `Ok`:
+//!
+//! 1. `gather`, `gather_inplace`, `allgather`, `allreduce`, `allreduce_bytes`,
+//!    `reduce`, `scatter` and `alltoallv` with every buffer empty. `alltoallv`
+//!    gets one slice as its send and its receive counts, which is when MPICH
+//!    refuses a send and a receive buffer at the same address.
+//! 2. `gatherv` and `allgatherv` where rank 1 contributes nothing and every
+//!    other rank contributes four bytes; the gathered bytes are checked.
+//! 3. A persistent `allreduce_init` and a persistent `reduce_init` over empty
+//!    buffers, each started and waited once. Open MPI 5 refuses a
+//!    `reduce_init` whose two buffers share an address at the root. A library
+//!    without persistent collectives must refuse both with
+//!    `Error::NotSupported`.
+//! 4. `alltoallv`, `ialltoallv` and a persistent `reduce_init` over two empty
+//!    `f64` buffers. Two empty buffers of a type with alignment 2 or more share
+//!    one address; MPICH refuses that in the two all-to-all calls when one
+//!    slice gives the send and the receive counts, and Open MPI 5 in
+//!    `reduce_init` at the root. Each call must return `Ok`; on a library
+//!    without persistent collectives `reduce_init` must return
+//!    `Error::NotSupported`, as in item 3.
+//! 5. `alltoallv` and `ialltoallv` in which rank 0 only sends and every other
+//!    rank only receives, so that one `u64` buffer is empty on every rank.
+//!    Each call must return `Ok` and deliver the data.
+//! 6. `alltoallv` and `ialltoallv` over an empty `f64` slice that starts where
+//!    the other buffer begins, as the send and as the receive buffer. MPICH
+//!    refuses the shared address when one slice gives both counts. Each call
+//!    must return `Ok`.
+//!
+//! Run with: mpiexec -n 2 ./target/debug/examples/test_empty_buffers
+// mpi-test: np=2.. release
+
+use ferrompi::{Error, Mpi, PersistentRequest, ReduceOp, Result};
+
+mod common;
+
+/// True iff `request` was built, started and waited, or, on a library without
+/// persistent collectives, refused with `Error::NotSupported`.
+fn persistent_ok<T>(request: Result<PersistentRequest<T>>) -> bool {
+    if common::has_mpi4_collectives() {
+        match request {
+            Ok(mut request) => request.start().is_ok() && request.wait().is_ok(),
+            Err(_) => false,
+        }
+    } else {
+        matches!(request, Err(Error::NotSupported(_)))
+    }
+}
+
+fn main() {
+    let mpi = Mpi::init().expect("MPI init failed");
+    let world = mpi.world();
+    let rank = world.rank();
+    let size = world.size() as usize;
+    assert!(
+        size >= 2,
+        "test_empty_buffers requires at least 2 processes, got {size}"
+    );
+
+    let empty: Vec<u8> = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
+
+    let gather = world.gather(&empty, &mut out, 0);
+    common::check(&world, gather.is_ok(), "gather of empty buffers");
+
+    let gather_inplace = world.gather_inplace(&mut out, 0);
+    common::check(
+        &world,
+        gather_inplace.is_ok(),
+        "gather_inplace of an empty buffer",
+    );
+
+    let allgather = world.allgather(&empty, &mut out);
+    common::check(&world, allgather.is_ok(), "allgather of empty buffers");
+
+    let allreduce = world.allreduce(&empty, &mut out, ReduceOp::Max);
+    common::check(&world, allreduce.is_ok(), "allreduce of empty buffers");
+
+    let allreduce_bytes = world.allreduce_bytes(&empty, &mut out, ReduceOp::BitwiseOr);
+    common::check(
+        &world,
+        allreduce_bytes.is_ok(),
+        "allreduce_bytes of empty buffers",
+    );
+
+    let reduce = world.reduce(&empty, &mut out, ReduceOp::Max, 0);
+    common::check(&world, reduce.is_ok(), "reduce of empty buffers");
+
+    let scatter = world.scatter(&empty, &mut out, 0);
+    common::check(&world, scatter.is_ok(), "scatter of empty buffers");
+
+    let zeros = vec![0i32; size];
+    let alltoallv = world.alltoallv(&empty, &zeros, &zeros, &mut out, &zeros, &zeros);
+    common::check(&world, alltoallv.is_ok(), "alltoallv of empty buffers");
+
+    // Rank 1 contributes nothing; every other rank contributes four bytes
+    // holding its rank.
+    let counts: Vec<i32> = (0..size).map(|r| if r == 1 { 0 } else { 4 }).collect();
+    let displs = common::displs_from_counts(&counts);
+    let mine = vec![rank as u8; counts[rank as usize] as usize];
+    let expected: Vec<u8> = (0..size)
+        .flat_map(|r| vec![r as u8; counts[r] as usize])
+        .collect();
+
+    let mut gathered = vec![0u8; if rank == 0 { expected.len() } else { 0 }];
+    let gatherv = world.gatherv(&mine, &mut gathered, &counts, &displs, 0);
+    common::check(
+        &world,
+        gatherv.is_ok() && (rank != 0 || gathered == expected),
+        "gatherv with one empty contribution",
+    );
+
+    let mut all = vec![0u8; expected.len()];
+    let allgatherv = world.allgatherv(&mine, &mut all, &counts, &displs);
+    common::check(
+        &world,
+        allgatherv.is_ok() && all == expected,
+        "allgatherv with one empty contribution",
+    );
+
+    let allreduce_init = world.allreduce_init(Vec::<u8>::new(), Vec::<u8>::new(), ReduceOp::Max);
+    common::check(
+        &world,
+        persistent_ok(allreduce_init),
+        "persistent allreduce of empty buffers",
+    );
+
+    let reduce_init = world.reduce_init(Vec::<u8>::new(), Vec::<u8>::new(), ReduceOp::Max, 0);
+    common::check(
+        &world,
+        persistent_ok(reduce_init),
+        "persistent reduce of empty buffers",
+    );
+
+    // Two empty buffers of a type with alignment 2 or more share one address.
+    let none: Vec<f64> = Vec::new();
+    let mut none_out: Vec<f64> = Vec::new();
+
+    let alltoallv = world.alltoallv(&none, &zeros, &zeros, &mut none_out, &zeros, &zeros);
+    common::check(&world, alltoallv.is_ok(), "alltoallv of empty f64 buffers");
+
+    let ialltoallv = ferrompi::scope(|s| {
+        world
+            .ialltoallv(s, &none, &zeros, &zeros, &mut none_out, &zeros, &zeros)?
+            .wait()
+    });
+    common::check(
+        &world,
+        ialltoallv.is_ok(),
+        "ialltoallv of empty f64 buffers",
+    );
+
+    let reduce_init = world.reduce_init(Vec::<f64>::new(), Vec::<f64>::new(), ReduceOp::Max, 0);
+    common::check(
+        &world,
+        persistent_ok(reduce_init),
+        "persistent reduce of empty f64 buffers",
+    );
+
+    // Rank 0 only sends, one element to each other rank, and the other ranks
+    // only receive: one of the two buffers is empty on every rank. `places`
+    // gives both displacements, so those of the empty side are not all zero.
+    let root = rank == 0;
+    let places: Vec<i32> = (0..size as i32).collect();
+    let to_others: Vec<i32> = (0..size).map(|d| i32::from(d != 0)).collect();
+    let from_root: Vec<i32> = (0..size).map(|r| i32::from(r == 0)).collect();
+    let payload: Vec<u64> = (0..size as u64).map(|d| 100 + d).collect();
+    let (send, sendcounts): (&[u64], &[i32]) = if root {
+        (&payload, &to_others)
+    } else {
+        (&[], &zeros)
+    };
+    let recvcounts: &[i32] = if root { &zeros } else { &from_root };
+    let expected = 100 + rank as u64;
+
+    let mut recv = vec![0u64; usize::from(!root)];
+    let alltoallv = world.alltoallv(send, sendcounts, &places, &mut recv, recvcounts, &places);
+    common::check(
+        &world,
+        alltoallv.is_ok() && (root || recv[0] == expected),
+        "alltoallv with one empty buffer on every rank",
+    );
+
+    let mut recv = vec![0u64; usize::from(!root)];
+    let ialltoallv = ferrompi::scope(|s| {
+        world
+            .ialltoallv(s, send, sendcounts, &places, &mut recv, recvcounts, &places)?
+            .wait()
+    });
+    common::check(
+        &world,
+        ialltoallv.is_ok() && (root || recv[0] == expected),
+        "ialltoallv with one empty buffer on every rank",
+    );
+
+    // An empty slice that starts where the other buffer begins.
+    let mut data = [0.0f64; 4];
+    let (none, some) = data.split_at_mut(0);
+
+    let alltoallv = world.alltoallv(some, &zeros, &zeros, none, &zeros, &zeros);
+    common::check(
+        &world,
+        alltoallv.is_ok(),
+        "alltoallv with an empty receive buffer at the send buffer's address",
+    );
+
+    let alltoallv = world.alltoallv(none, &zeros, &zeros, some, &zeros, &zeros);
+    common::check(
+        &world,
+        alltoallv.is_ok(),
+        "alltoallv with an empty send buffer at the receive buffer's address",
+    );
+
+    let ialltoallv = ferrompi::scope(|s| {
+        world
+            .ialltoallv(s, &*some, &zeros, &zeros, &mut *none, &zeros, &zeros)?
+            .wait()
+    });
+    common::check(
+        &world,
+        ialltoallv.is_ok(),
+        "ialltoallv with an empty receive buffer at the send buffer's address",
+    );
+
+    let ialltoallv = ferrompi::scope(|s| {
+        world
+            .ialltoallv(s, &*none, &zeros, &zeros, &mut *some, &zeros, &zeros)?
+            .wait()
+    });
+    common::check(
+        &world,
+        ialltoallv.is_ok(),
+        "ialltoallv with an empty send buffer at the receive buffer's address",
+    );
+
+    if rank == 0 {
+        println!("PASS: test_empty_buffers");
+    }
+}

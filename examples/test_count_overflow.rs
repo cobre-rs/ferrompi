@@ -1,6 +1,7 @@
-//! Regression test for the `count > INT_MAX` guard across the 30 scalar-count
-//! shims (blocking/nonblocking p2p and collectives, plus the user-op
-//! reduction), the 6 v-collective shims, and the 7 RMA shims.
+//! Regression test for the `count > INT_MAX` guard across the scalar-count
+//! shims (blocking/nonblocking p2p and collectives, plus every blocking,
+//! nonblocking and persistent reduction with a user op) and the v-collective
+//! shims.
 //!
 //! On MPI < 4, a scalar count above `INT_MAX` must return
 //! `Err(Error::Mpi { class: MpiErrorClass::Count, .. })` before any MPI
@@ -10,20 +11,18 @@
 //! before allocating the two 4 GiB buffers a full run would otherwise need.
 //!
 //! V-collectives have no `_c` path on any MPI version, and a user op's classic
-//! function takes an `int` length, so both are checked before that skip. RMA
-//! is exercised through a raw `extern "C"` call to `ferrompi_put`, not the
-//! safe `Win::put` API: the window's bounds check rejects a mismatched
-//! `target_count` in Rust before the C guard is ever reached, so only a
-//! direct C call can observe it — and only on MPI < 4,
-//! since on MPI >= 4 the fixed shim would hand the oversized count to
-//! `MPI_Put_c` over a four-element window.
+//! function takes an `int` length, so both are checked before that skip. A
+//! persistent reduction without persistent collectives is refused with
+//! `Error::NotSupported` instead.
+//!
+//! A user op in `reduce_scatter_block` reduces `recv.len() * size` elements, so
+//! it is also refused when that span exceeds `INT_MAX`, though `recv.len()`
+//! does not.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_count_overflow
 // mpi-test: np=2.. skip-ok=mpich
 
-use ferrompi::{Communicator, Mpi, ReduceOp, UserOp};
-#[cfg(feature = "rma")]
-use ferrompi::{Error, MpiDatatype, MpiErrorClass, Win, WinFenceAssert};
+use ferrompi::{Communicator, Error, Mpi, ReduceOp, UserOp};
 
 mod common;
 
@@ -45,15 +44,18 @@ fn v_collectives(world: &Communicator) {
         "allgatherv with a 2^32+16-byte send returns Count",
     );
 
-    let igatherv_result = world.igatherv(&send, &mut recv, &counts, &displs, 0);
-    let igatherv_ok = if common::is_count(&igatherv_result) {
-        true
-    } else {
-        if let Ok(req) = igatherv_result {
-            let _ = req.wait();
-        }
-        false
-    };
+    let igatherv_ok = ferrompi::scope(|s| {
+        let igatherv_result = world.igatherv(s, &send, &mut recv, &counts, &displs, 0);
+        Ok(if common::is_count(&igatherv_result) {
+            true
+        } else {
+            if let Ok(req) = igatherv_result {
+                let _ = req.wait();
+            }
+            false
+        })
+    })
+    .expect("scope for igatherv");
     common::check(
         world,
         igatherv_ok,
@@ -61,76 +63,20 @@ fn v_collectives(world: &Communicator) {
     );
 }
 
-// Raw FFI declaration for the C-side RMA shim under test, in the same shape
-// as examples/test_waitall_count_overflow.rs. Declared here (rather than via
-// ferrompi::ffi, which is pub(crate)) so the example can call it directly
-// without an API extension on the Rust side.
-//
-// SAFETY invariant for the call in rma_put below: the C guard rejects
-// target_count before MPI_Put/MPI_Put_c is called, so `origin` is never
-// read by MPI and need only be valid for the duration of the call.
-#[cfg(feature = "rma")]
-extern "C" {
-    fn ferrompi_put(
-        origin: *const std::ffi::c_void,
-        origin_count: i64,
-        origin_dt_tag: i32,
-        target_rank: i32,
-        target_disp: i64,
-        target_count: i64,
-        target_dt_tag: i32,
-        win_handle: i32,
-    ) -> std::ffi::c_int;
-}
-
-/// Calls the C `ferrompi_put` shim directly with a `target_count` above
-/// `INT_MAX` over a real 4-element window, bypassing `Win::put`'s bounds
-/// check so the C-side guard is reachable. Only reachable on MPI < 4: the
-/// fixed shim on MPI >= 4 would pass the oversized count to `MPI_Put_c`.
-#[cfg(feature = "rma")]
-fn rma_put(world: &Communicator) {
-    let win = Win::<u64>::allocate(world, 4).expect("Win::allocate failed");
-    win.fence(WinFenceAssert::default())
-        .expect("opening fence failed");
-
-    let mut rma_put_ok = true;
-    if world.rank() == 0 {
-        let origin = [0u64; 4];
-        let dt_tag = <u64 as MpiDatatype>::TAG as i32;
-        let raw_ret = unsafe {
-            // SAFETY: see the invariant comment on the extern "C" block above.
-            ferrompi_put(
-                origin.as_ptr().cast(),
-                4,
-                dt_tag,
-                1,
-                0,
-                (1i64 << 32) + 4,
-                dt_tag,
-                win.raw_handle(),
-            )
-        };
-        rma_put_ok = matches!(
-            Error::from_code(raw_ret),
-            Error::Mpi {
-                class: MpiErrorClass::Count,
-                ..
-            }
-        );
+/// True iff `r` is what a persistent reduction with a user op above `INT_MAX`
+/// returns: `Count` on a library with persistent collectives, `NotSupported`
+/// without them.
+fn persistent_refused<T>(r: &ferrompi::Result<T>) -> bool {
+    if common::has_mpi4_collectives() {
+        common::is_count(r)
+    } else {
+        matches!(r, Err(Error::NotSupported(_)))
     }
-    win.fence(WinFenceAssert::default())
-        .expect("closing fence failed");
-    drop(win);
-
-    common::check(
-        world,
-        rma_put_ok,
-        "put with a 2^32+4 target count returns Count",
-    );
 }
 
-/// A user op's classic function takes an `int` length: `allreduce_with_op`
-/// must reject a count above `INT_MAX` on every MPI version.
+/// A user op's classic function takes an `int` length: every blocking,
+/// nonblocking and persistent reduction with a user op must reject a count
+/// above `INT_MAX`, and `reduce_scatter_block` a reduced span above it.
 fn user_op_reduction(world: &Communicator) {
     // Zeroed allocations whose pages the fixed shim never touches: the guard
     // must fire before any MPI call reads or writes them.
@@ -143,12 +89,150 @@ fn user_op_reduction(world: &Communicator) {
         }
     })
     .expect("UserOp::new failed");
-    let allreduce_with_op_ok =
-        common::is_count(&world.allreduce_with_op(&send, &mut recv, &max_op));
+
+    let allreduce_ok = common::is_count(&world.allreduce(&send, &mut recv, &max_op));
     common::check(
         world,
-        allreduce_with_op_ok,
-        "allreduce_with_op of 2^32+16 bytes returns Count",
+        allreduce_ok,
+        "allreduce of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let reduce_ok = common::is_count(&world.reduce(&send, &mut recv, &max_op, 0));
+    common::check(
+        world,
+        reduce_ok,
+        "reduce of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let scan_ok = common::is_count(&world.scan(&send, &mut recv, &max_op));
+    common::check(
+        world,
+        scan_ok,
+        "scan of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let exscan_ok = common::is_count(&world.exscan(&send, &mut recv, &max_op));
+    common::check(
+        world,
+        exscan_ok,
+        "exscan of 2^32+16 bytes with a user op returns Count",
+    );
+
+    // Each refusal returns before registering a request, so the scope has
+    // nothing to wait for.
+    let iallreduce_ok = ferrompi::scope(|s| {
+        Ok(common::is_count(
+            &world.iallreduce(s, &send, &mut recv, &max_op),
+        ))
+    })
+    .expect("scope failed");
+    common::check(
+        world,
+        iallreduce_ok,
+        "iallreduce of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let ireduce_ok = ferrompi::scope(|s| {
+        Ok(common::is_count(
+            &world.ireduce(s, &send, &mut recv, &max_op, 0),
+        ))
+    })
+    .expect("scope failed");
+    common::check(
+        world,
+        ireduce_ok,
+        "ireduce of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let iscan_ok =
+        ferrompi::scope(|s| Ok(common::is_count(&world.iscan(s, &send, &mut recv, &max_op))))
+            .expect("scope failed");
+    common::check(
+        world,
+        iscan_ok,
+        "iscan of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let iexscan_ok = ferrompi::scope(|s| {
+        Ok(common::is_count(
+            &world.iexscan(s, &send, &mut recv, &max_op),
+        ))
+    })
+    .expect("scope failed");
+    common::check(
+        world,
+        iexscan_ok,
+        "iexscan of 2^32+16 bytes with a user op returns Count",
+    );
+
+    // One block is within INT_MAX, but the reduction covers one block per
+    // rank, which is not.
+    let block = i32::MAX as usize / world.size() as usize + 1;
+    let span_send = vec![0u8; block * world.size() as usize];
+    let mut span_recv = vec![0u8; block];
+
+    let reduce_scatter_block_ok =
+        common::is_count(&world.reduce_scatter_block(&span_send, &mut span_recv, &max_op));
+    common::check(
+        world,
+        reduce_scatter_block_ok,
+        "reduce_scatter_block with a user op and a span above INT_MAX returns Count",
+    );
+
+    let ireduce_scatter_block_ok = ferrompi::scope(|s| {
+        Ok(common::is_count(&world.ireduce_scatter_block(
+            s,
+            &span_send,
+            &mut span_recv,
+            &max_op,
+        )))
+    })
+    .expect("scope failed");
+    common::check(
+        world,
+        ireduce_scatter_block_ok,
+        "ireduce_scatter_block with a user op and a span above INT_MAX returns Count",
+    );
+
+    // A persistent reduction owns its buffers, so each call below moves in
+    // fresh zeroed ones (a refusal never touches their pages and drops them).
+    let reduce_scatter_block_init_ok =
+        persistent_refused(&world.reduce_scatter_block_init(span_send, span_recv, &max_op));
+    common::check(
+        world,
+        reduce_scatter_block_init_ok,
+        "reduce_scatter_block_init with a user op and a span above INT_MAX returns Count",
+    );
+
+    let allreduce_init_ok =
+        persistent_refused(&world.allreduce_init(vec![0u8; N], vec![0u8; N], &max_op));
+    common::check(
+        world,
+        allreduce_init_ok,
+        "allreduce_init of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let reduce_init_ok =
+        persistent_refused(&world.reduce_init(vec![0u8; N], vec![0u8; N], &max_op, 0));
+    common::check(
+        world,
+        reduce_init_ok,
+        "reduce_init of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let scan_init_ok = persistent_refused(&world.scan_init(vec![0u8; N], vec![0u8; N], &max_op));
+    common::check(
+        world,
+        scan_init_ok,
+        "scan_init of 2^32+16 bytes with a user op returns Count",
+    );
+
+    let exscan_init_ok =
+        persistent_refused(&world.exscan_init(vec![0u8; N], vec![0u8; N], &max_op));
+    common::check(
+        world,
+        exscan_init_ok,
+        "exscan_init of 2^32+16 bytes with a user op returns Count",
     );
 }
 
@@ -199,23 +283,23 @@ fn main() {
     // A red run's ferrompi_ibcast truncates the count and actually issues a
     // real (16-byte) MPI_Ibcast, so `Ok` must still be drained via `wait()`
     // before counting the failure, rather than leaking the request.
-    let ibcast_result = world.ibroadcast(&mut recv, 0);
-    let ibroadcast_ok = if common::is_count(&ibcast_result) {
-        true
-    } else {
-        if let Ok(req) = ibcast_result {
-            let _ = req.wait();
-        }
-        false
-    };
+    let ibroadcast_ok = ferrompi::scope(|s| {
+        let ibcast_result = world.ibroadcast(s, &mut recv, 0);
+        Ok(if common::is_count(&ibcast_result) {
+            true
+        } else {
+            if let Ok(req) = ibcast_result {
+                let _ = req.wait();
+            }
+            false
+        })
+    })
+    .expect("scope for ibroadcast");
     common::check(
         &world,
         ibroadcast_ok,
         "ibroadcast of 2^32+16 bytes returns Count",
     );
-
-    #[cfg(feature = "rma")]
-    rma_put(&world);
 
     if rank == 0 {
         println!("PASS: test_count_overflow");

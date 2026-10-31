@@ -4,8 +4,9 @@
 #
 # Sources the runner (its main guard keeps this side-effect free) and checks
 # parse_directive, expand_np, impl_id, feature_closure, classify,
-# artifact_outcome and discover against fixed fixtures. Needs no MPI, no
-# cargo and no network.
+# lib_debug_assertions, lib_opt_level, artifact_outcome, discover and the
+# mode-flag refusal of main against fixed fixtures. Needs no MPI, no cargo and
+# no network.
 #
 # Prints "ok <case>" or "not ok <case>: <got> != <want>" per case and exits
 # 1 if any case failed.
@@ -62,7 +63,7 @@ check_discover_rejects() {
 
 check "parse_directive: full directive" \
   "$(parse_directive "np=2.. timeout=30 skip-ok=mpich-4.2,openmpi")" \
-  "2..|30|mpich-4.2,openmpi||"
+  "2..|30|mpich-4.2,openmpi|||"
 
 rc=0
 parse_directive "np=2 frobnicate=1" >/dev/null 2>&1 || rc=$?
@@ -74,7 +75,15 @@ check "parse_directive: invalid expect rejected" "$rc" "1"
 
 check "parse_directive: valgrind flag" \
   "$(parse_directive "np=1 valgrind")" \
-  "1||||1"
+  "1||||1|"
+
+check "parse_directive: release flag" \
+  "$(parse_directive "np=2 release")" \
+  "2|||||1"
+
+check "parse_directive: release with valgrind" \
+  "$(parse_directive "np=1 valgrind release")" \
+  "1||||1|1"
 
 # --- discover: directive-level rejections ---------------------------------
 
@@ -98,7 +107,22 @@ cat >"$d/example_unfin_np2.rs" <<'EOF'
 // mpi-test-stderr: done
 fn main() {}
 EOF
-check_discover_rejects "discover: expect=unfinalized requires np=1 rejected" "$d"
+rc=0
+out=$( (discover "$d"; echo "${DIRECTIVE_NP[example_unfin_np2]}|${DIRECTIVE_EXPECT[example_unfin_np2]}") 2>&1 ) || rc=$?
+check "discover: expect=unfinalized accepted at np=2" "$rc|$out" "0|2|unfinalized"
+
+d=$(mk_dir)
+cat >"$d/example_release.rs" <<'EOF'
+// mpi-test: np=2.. timeout=30 release
+fn main() {}
+EOF
+cat >"$d/example_plain.rs" <<'EOF'
+// mpi-test: np=2
+fn main() {}
+EOF
+rc=0
+out=$( (discover "$d"; echo "${DIRECTIVE_RELEASE[example_release]}|${DIRECTIVE_RELEASE[example_plain]}") 2>&1 ) || rc=$?
+check "discover: release flag stored per example" "$rc|$out" "0|1|"
 
 # --- discover: file-grammar rejections ------------------------------------
 
@@ -246,10 +270,87 @@ check "finalize-skipped marker matches the crate's warning" \
   "$(grep -qF -- "$FINALIZE_SKIPPED_MARKER" "$SCRIPT_DIR/../src/lib.rs" && echo yes || echo no)" \
   "yes"
 
+# --- classify: a FAIL line fails whatever the exit status ---------------------
+# mpiexec on some MPICH stacks returns 0 although every rank exited nonzero.
+
+fail_line_outcome="FAIL output contains a FAIL: line"
+
+f=$(mk_outfile $'FAIL: some check\n')
+check "classify: normal, anchored FAIL: line, exit 0" \
+  "$(classify 0 "$f" "" "" "" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'rank 1: FAIL: Win::put failed\n')
+check "classify: normal, rank N: FAIL: line, exit 0" \
+  "$(classify 0 "$f" "" "" "" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'rank 1: FAIL Test 2: expected 4, got 3\n')
+check "classify: normal, rank N: FAIL Test N line (no colon), exit 0" \
+  "$(classify 0 "$f" "" "" "" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'PASS: first\nFAIL: second\nPASS: third\n')
+check "classify: normal, PASS lines do not mask a FAIL: line" \
+  "$(classify 0 "$f" "" "" "" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'warn: noted\nFAIL: some check\n')
+check "classify: normal, stderr literal present does not mask a FAIL: line" \
+  "$(classify 0 "$f" "" "" "warn" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'SKIP: x\nFAIL: some check\n')
+check "classify: registered SKIP does not mask a FAIL: line" \
+  "$(classify 0 "$f" "openmpi" "" "" "openmpi-5.0.7")" "$fail_line_outcome"
+
+f=$(mk_outfile $'rank 0: FAIL: some check\nSKIP: x\n')
+check "classify: registered SKIP after a rank N: FAIL: line" \
+  "$(classify 0 "$f" "openmpi" "" "" "openmpi-5.0.7")" "$fail_line_outcome"
+
+f=$(mk_outfile $'shutdown complete\nFAIL: some check\n')
+check "classify: expect=unfinalized, FAIL: line, exit 0" \
+  "$(classify 0 "$f" "" "unfinalized" "shutdown" "unknown")" "$fail_line_outcome"
+check "classify: expect=unfinalized, FAIL: line, exit 1" \
+  "$(classify 1 "$f" "" "unfinalized" "shutdown" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'shutdown complete\nrank 0: FAIL: some check\n')
+check "classify: expect=unfinalized, rank N: FAIL: line, exit 0" \
+  "$(classify 0 "$f" "" "unfinalized" "shutdown" "unknown")" "$fail_line_outcome"
+
+# Two ranks that skip MPI_Finalize each print the marker. Open MPI exits 1 for
+# that, and Open MPI and MPICH can turn a failing rank's exit 2 into 0 or 1, so
+# the FAIL line is what fails a failing rank; a status of 2 or more fails on its
+# own.
+f=$(mk_outfile $'skipped\nskipped\n')
+check "classify: expect=unfinalized, two ranks, exit 0, literal present" \
+  "$(classify 0 "$f" "" "unfinalized" "skipped" "unknown")" "PASS"
+check "classify: expect=unfinalized, two ranks, exit 1, literal present" \
+  "$(classify 1 "$f" "" "unfinalized" "skipped" "unknown")" "PASS"
+check "classify: expect=unfinalized, two ranks, a rank's exit 2" \
+  "$(classify 2 "$f" "" "unfinalized" "skipped" "unknown")" "FAIL exit 2"
+
+f=$(mk_outfile $'skipped\nskipped\nFAIL: rank 1 check\n')
+check "classify: expect=unfinalized, two ranks, FAIL: line, exit 1" \
+  "$(classify 1 "$f" "" "unfinalized" "skipped" "unknown")" "$fail_line_outcome"
+check "classify: expect=unfinalized, two ranks, FAIL: line, exit 0" \
+  "$(classify 0 "$f" "" "unfinalized" "skipped" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'boom\nrank 1: FAIL: returned instead of aborting\n')
+check "classify: expect=abort, exit 134, literal present, rank N: FAIL: line" \
+  "$(classify 134 "$f" "" "abort" "boom" "unknown")" "$fail_line_outcome"
+
+f=$(mk_outfile $'SKIP: x\nFAIL: some check\n')
+check "classify: expect=abort, exit 0, registered SKIP and a FAIL: line" \
+  "$(classify 0 "$f" "openmpi-4" "abort" "boom" "openmpi-4.1.6")" "$fail_line_outcome"
+
+f=$(mk_outfile $'FAIL: some check\n')
+check "classify: exit 124 with a FAIL: line stays FAIL timeout" \
+  "$(classify 124 "$f" "" "" "" "unknown")" "FAIL timeout"
+
+f=$(mk_outfile $'ferrompi: MPI_ERR_PROC_FAILED_PENDING is not supported\nPASS: FAILURES=0 FAILED=0\n')
+check "classify: FAIL inside a longer word is not a FAIL line" \
+  "$(classify 0 "$f" "" "" "" "unknown")" "PASS"
+
 # --- feature_closure -------------------------------------------------------
 
-check "feature_closure: numa pulls in rma" \
-  "$(feature_closure "numa" '{"numa":["rma"],"rma":[]}')" "numa,rma"
+check "feature_closure: an alias pulls in the features it names" \
+  "$(feature_closure "alias" '{"alias":["slurm","rma"],"rma":[],"slurm":[]}')" "alias,rma,slurm"
 
 # --- lib_debug_assertions ---------------------------------------------------
 
@@ -265,11 +366,35 @@ f=$(mk_outfile '{"reason":"compiler-artifact","target":{"name":"hello_world","ki
 check "lib_debug_assertions: no library artifact" \
   "$(lib_debug_assertions "$f")" ""
 
+# --- lib_opt_level ---------------------------------------------------------
+
+f=$(mk_outfile '{"reason":"compiler-artifact","target":{"name":"ferrompi","kind":["lib"]},"profile":{"opt_level":"3"}}')
+check "lib_opt_level: optimised" \
+  "$(lib_opt_level "$f")" "3"
+
+f=$(mk_outfile '{"reason":"compiler-artifact","target":{"name":"ferrompi","kind":["lib"]},"profile":{"opt_level":"0"}}')
+check "lib_opt_level: unoptimised" \
+  "$(lib_opt_level "$f")" "0"
+
+f=$(mk_outfile '{"reason":"compiler-artifact","target":{"name":"hello_world","kind":["example"]},"profile":{"opt_level":"3"}}')
+check "lib_opt_level: no library artifact" \
+  "$(lib_opt_level "$f")" ""
+
+# --- main: the mode flags are exclusive ------------------------------------
+
+rc=0
+out=$( (main --release --valgrind rma) 2>&1 >/dev/null ) || rc=$?
+check "main: --release --valgrind exits 2" "$rc|$out" "2|ERROR: --release and --valgrind cannot be combined"
+
+rc=0
+out=$( (main --valgrind --release rma) 2>&1 >/dev/null ) || rc=$?
+check "main: --valgrind --release exits 2" "$rc|$out" "2|ERROR: --release and --valgrind cannot be combined"
+
 # --- artifact_outcome (the missing-artifact replay) -----------------------
 
 check "artifact_outcome: required feature enabled -> missing binary" \
-  "$(artifact_outcome "rma" "rma,numa")" "FAIL missing binary"
+  "$(artifact_outcome "rma" "rma,slurm")" "FAIL missing binary"
 check "artifact_outcome: required feature outside closure -> skip" \
-  "$(artifact_outcome "numa" "rma")" "SKIP(feature)"
+  "$(artifact_outcome "slurm" "rma")" "SKIP(feature)"
 
 exit "$FAILED"

@@ -21,11 +21,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Calculate neighbors in the ring
     let next = (rank + 1) % size;
     let prev = (rank + size - 1) % size;
 
-    // Data to send
     let send_data = vec![rank as f64 * 100.0 + 1.0, rank as f64 * 100.0 + 2.0];
     let mut recv_data = vec![0.0; 2];
 
@@ -36,21 +34,20 @@ fn main() -> Result<()> {
     // This avoids deadlock
     if rank % 2 == 0 {
         world.send(&send_data, next, 0)?;
-        let (source, tag, count) = world.recv(&mut recv_data, prev, 0)?;
+        let status = world.recv(&mut recv_data, prev, 0)?;
         println!(
-            "Rank {}: received {:?} from rank {} (tag={}, count={})",
-            rank, recv_data, source, tag, count
+            "Rank {}: received {:?} from {:?} (tag={:?}, count={:?})",
+            rank, recv_data, status.source, status.tag, status.count
         );
     } else {
-        let (source, tag, count) = world.recv(&mut recv_data, prev, 0)?;
+        let status = world.recv(&mut recv_data, prev, 0)?;
         println!(
-            "Rank {}: received {:?} from rank {} (tag={}, count={})",
-            rank, recv_data, source, tag, count
+            "Rank {}: received {:?} from {:?} (tag={:?}, count={:?})",
+            rank, recv_data, status.source, status.tag, status.count
         );
         world.send(&send_data, next, 0)?;
     }
 
-    // Verify we got the right data
     let expected = vec![prev as f64 * 100.0 + 1.0, prev as f64 * 100.0 + 2.0];
     assert_eq!(recv_data, expected, "Data mismatch!");
 

@@ -85,35 +85,48 @@ fn main() {
                     let send_buf: [u8; 4] = [rank as u8; 4];
                     let mut recv_buf: [u8; 4] = [0u8; 4];
 
-                    // Post irecv before isend to avoid potential deadlock.
-                    let recv_req = match world_ref.irecv(&mut recv_buf, partner, tag) {
-                        Ok(r) => r,
+                    // Post irecv before isend to avoid potential deadlock. Each
+                    // iteration's requests live in the worker's own scope.
+                    let completed = ferrompi::scope(|ms| {
+                        let recv_req = match world_ref.irecv(ms, &mut recv_buf, partner, tag) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                eprintln!("rank {rank} thread {thread_id}: irecv failed: {e}");
+                                any_error_ref.store(true, Ordering::Relaxed);
+                                return Ok(false);
+                            }
+                        };
+
+                        let send_req = match world_ref.isend(ms, &send_buf, partner, tag) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                eprintln!("rank {rank} thread {thread_id}: isend failed: {e}");
+                                any_error_ref.store(true, Ordering::Relaxed);
+                                return Ok(false);
+                            }
+                        };
+
+                        if let Err(e) = send_req.wait() {
+                            eprintln!("rank {rank} thread {thread_id}: isend wait failed: {e}");
+                            any_error_ref.store(true, Ordering::Relaxed);
+                            return Ok(false);
+                        }
+
+                        if let Err(e) = recv_req.wait() {
+                            eprintln!("rank {rank} thread {thread_id}: irecv wait failed: {e}");
+                            any_error_ref.store(true, Ordering::Relaxed);
+                            return Ok(false);
+                        }
+                        Ok(true)
+                    });
+                    match completed {
+                        Ok(true) => {}
+                        Ok(false) => return,
                         Err(e) => {
-                            eprintln!("rank {rank} thread {thread_id}: irecv failed: {e}");
+                            eprintln!("rank {rank} thread {thread_id}: scope failed: {e}");
                             any_error_ref.store(true, Ordering::Relaxed);
                             return;
                         }
-                    };
-
-                    let send_req = match world_ref.isend(&send_buf, partner, tag) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            eprintln!("rank {rank} thread {thread_id}: isend failed: {e}");
-                            any_error_ref.store(true, Ordering::Relaxed);
-                            return;
-                        }
-                    };
-
-                    if let Err(e) = send_req.wait() {
-                        eprintln!("rank {rank} thread {thread_id}: isend wait failed: {e}");
-                        any_error_ref.store(true, Ordering::Relaxed);
-                        return;
-                    }
-
-                    if let Err(e) = recv_req.wait() {
-                        eprintln!("rank {rank} thread {thread_id}: irecv wait failed: {e}");
-                        any_error_ref.store(true, Ordering::Relaxed);
-                        return;
                     }
                 }
             });

@@ -6,7 +6,7 @@
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_nonblocking
 // mpi-test: np=2..
 
-use ferrompi::Mpi;
+use ferrompi::{Mpi, Source, Tag};
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -31,15 +31,40 @@ fn main() {
         let send_data = vec![rank as f64 * 10.0 + 1.0, rank as f64 * 10.0 + 2.0];
         let mut recv_data = vec![0.0f64; 2];
 
-        // Post nonblocking receive first, then nonblocking send
-        let recv_req = world
-            .irecv(&mut recv_data, prev, tag)
-            .expect("irecv failed");
-        let send_req = world.isend(&send_data, next, tag).expect("isend failed");
+        let (send_status, recv_status) = ferrompi::scope(|s| {
+            // Post nonblocking receive first, then nonblocking send
+            let recv_req = world
+                .irecv(s, &mut recv_data, prev, tag)
+                .expect("irecv failed");
+            let send_req = world.isend(s, &send_data, next, tag).expect("isend failed");
 
-        // Wait for both to complete
-        send_req.wait().expect("isend wait failed");
-        recv_req.wait().expect("irecv wait failed");
+            // Wait for both to complete
+            let send_status = send_req.wait().expect("isend wait failed");
+            let recv_status = recv_req.wait().expect("irecv wait failed");
+            Ok((send_status, recv_status))
+        })
+        .expect("scope failed");
+
+        assert_eq!(
+            (
+                recv_status.source,
+                recv_status.tag,
+                recv_status.count,
+                recv_status.error
+            ),
+            (Source::Rank(prev), Tag::Value(tag), Some(2), None),
+            "rank {rank}: irecv wait status mismatch"
+        );
+        assert_eq!(
+            (
+                send_status.source,
+                send_status.tag,
+                send_status.count,
+                send_status.error
+            ),
+            (Source::Any, Tag::Any, Some(0), None),
+            "rank {rank}: isend wait status is not the empty status"
+        );
 
         // Verify received data is from the previous rank
         let expected = vec![prev as f64 * 10.0 + 1.0, prev as f64 * 10.0 + 2.0];
@@ -65,31 +90,35 @@ fn main() {
         let send_bufs: Vec<Vec<f64>> = (0..3).map(|i| vec![(rank * 100 + i) as f64; 4]).collect();
         let mut recv_bufs: Vec<Vec<f64>> = (0..3).map(|_| vec![0.0f64; 4]).collect();
 
-        // Post all receives first
-        let mut recv_reqs: Vec<_> = recv_bufs
-            .iter_mut()
-            .enumerate()
-            .map(|(i, buf)| {
-                world
-                    .irecv(buf, prev, 200 + i as i32)
-                    .expect("irecv failed")
-            })
-            .collect();
+        ferrompi::scope(|s| {
+            // Post all receives first
+            let mut recv_reqs: Vec<_> = recv_bufs
+                .iter_mut()
+                .enumerate()
+                .map(|(i, buf)| {
+                    world
+                        .irecv(s, buf, prev, 200 + i as i32)
+                        .expect("irecv failed")
+                })
+                .collect();
 
-        // Post all sends
-        let mut send_reqs: Vec<_> = send_bufs
-            .iter()
-            .enumerate()
-            .map(|(i, buf)| {
-                world
-                    .isend(buf, next, 200 + i as i32)
-                    .expect("isend failed")
-            })
-            .collect();
+            // Post all sends
+            let mut send_reqs: Vec<_> = send_bufs
+                .iter()
+                .enumerate()
+                .map(|(i, buf)| {
+                    world
+                        .isend(s, buf, next, 200 + i as i32)
+                        .expect("isend failed")
+                })
+                .collect();
 
-        // Wait for all using wait_all
-        ferrompi::Request::wait_all(&mut send_reqs).expect("send wait_all failed");
-        ferrompi::Request::wait_all(&mut recv_reqs).expect("recv wait_all failed");
+            // Wait for all using wait_all
+            ferrompi::Request::wait_all(&mut send_reqs).expect("send wait_all failed");
+            ferrompi::Request::wait_all(&mut recv_reqs).expect("recv wait_all failed");
+            Ok(())
+        })
+        .expect("scope failed");
 
         // Verify each received buffer
         for (i, buf) in recv_bufs.iter().enumerate() {
@@ -119,21 +148,27 @@ fn main() {
         let send_buf = vec![rank as f64 * 7.0; 5];
         let mut recv_buf = vec![0.0f64; 5];
 
-        let (source, actual_tag, count) = world
+        let status = world
             .sendrecv(&send_buf, next, tag, &mut recv_buf, prev, tag)
             .expect("sendrecv failed");
 
         assert_eq!(
-            source, prev,
-            "rank {rank}: sendrecv source = {source}, expected {prev}"
+            status.source,
+            Source::Rank(prev),
+            "rank {rank}: sendrecv source = {:?}, expected {prev}",
+            status.source
         );
         assert_eq!(
-            actual_tag, tag,
-            "rank {rank}: sendrecv tag = {actual_tag}, expected {tag}"
+            status.tag,
+            Tag::Value(tag),
+            "rank {rank}: sendrecv tag = {:?}, expected {tag}",
+            status.tag
         );
         assert_eq!(
-            count, 5,
-            "rank {rank}: sendrecv count = {count}, expected 5"
+            status.count,
+            Some(5),
+            "rank {rank}: sendrecv count = {:?}, expected 5",
+            status.count
         );
 
         let expected_val = prev as f64 * 7.0;
@@ -155,48 +190,50 @@ fn main() {
     // ========================================================================
     {
         let tag = 400;
-        if size >= 2 {
-            let partner = if rank % 2 == 0 { rank + 1 } else { rank - 1 };
-            if partner < size {
-                if rank % 2 == 0 {
-                    let send_data = vec![(rank * 11) as f64; 3];
-                    world.send(&send_data, partner, tag).expect("send failed");
+        let partner = if rank % 2 == 0 { rank + 1 } else { rank - 1 };
+        if partner < size {
+            if rank % 2 == 0 {
+                let send_data = vec![(rank * 11) as f64; 3];
+                world.send(&send_data, partner, tag).expect("send failed");
 
-                    let mut recv_data = vec![0.0f64; 3];
-                    let (src, _, _) = world
-                        .recv(&mut recv_data, partner, tag)
-                        .expect("recv failed");
-                    assert_eq!(
-                        src, partner,
-                        "rank {rank}: recv source = {src}, expected {partner}"
+                let mut recv_data = vec![0.0f64; 3];
+                let status = world
+                    .recv(&mut recv_data, partner, tag)
+                    .expect("recv failed");
+                assert_eq!(
+                    status.source,
+                    Source::Rank(partner),
+                    "rank {rank}: recv source = {:?}, expected {partner}",
+                    status.source
+                );
+                let expected = (partner * 11) as f64;
+                for &v in &recv_data {
+                    assert!(
+                        (v - expected).abs() < f64::EPSILON,
+                        "rank {rank}: send/recv got {v}, expected {expected}"
                     );
-                    let expected = (partner * 11) as f64;
-                    for &v in &recv_data {
-                        assert!(
-                            (v - expected).abs() < f64::EPSILON,
-                            "rank {rank}: send/recv got {v}, expected {expected}"
-                        );
-                    }
-                } else {
-                    let mut recv_data = vec![0.0f64; 3];
-                    let (src, _, _) = world
-                        .recv(&mut recv_data, partner, tag)
-                        .expect("recv failed");
-                    assert_eq!(
-                        src, partner,
-                        "rank {rank}: recv source = {src}, expected {partner}"
-                    );
-                    let expected = (partner * 11) as f64;
-                    for &v in &recv_data {
-                        assert!(
-                            (v - expected).abs() < f64::EPSILON,
-                            "rank {rank}: send/recv got {v}, expected {expected}"
-                        );
-                    }
-
-                    let send_data = vec![(rank * 11) as f64; 3];
-                    world.send(&send_data, partner, tag).expect("send failed");
                 }
+            } else {
+                let mut recv_data = vec![0.0f64; 3];
+                let status = world
+                    .recv(&mut recv_data, partner, tag)
+                    .expect("recv failed");
+                assert_eq!(
+                    status.source,
+                    Source::Rank(partner),
+                    "rank {rank}: recv source = {:?}, expected {partner}",
+                    status.source
+                );
+                let expected = (partner * 11) as f64;
+                for &v in &recv_data {
+                    assert!(
+                        (v - expected).abs() < f64::EPSILON,
+                        "rank {rank}: send/recv got {v}, expected {expected}"
+                    );
+                }
+
+                let send_data = vec![(rank * 11) as f64; 3];
+                world.send(&send_data, partner, tag).expect("send failed");
             }
         }
         if rank == 0 {
@@ -212,17 +249,17 @@ fn main() {
     // Rank 0 sends to rank 1, rank 1 probes before receiving
     {
         let tag = 500;
-        if rank == 0 && size >= 2 {
+        if rank == 0 {
             let data = vec![42.0f64; 7];
             world.send(&data, 1, tag).expect("probe test: send failed");
         } else if rank == 1 {
             let status = world.probe::<f64>(0, tag).expect("probe failed");
-            assert_eq!(status.source, 0, "probe source mismatch");
-            assert_eq!(status.tag, tag, "probe tag mismatch");
-            assert_eq!(status.count, 7, "probe count mismatch");
+            assert_eq!(status.source, Source::Rank(0), "probe source mismatch");
+            assert_eq!(status.tag, Tag::Value(tag), "probe tag mismatch");
+            assert_eq!(status.count, Some(7), "probe count mismatch");
 
             // Now receive the probed message
-            let mut buf = vec![0.0f64; status.count as usize];
+            let mut buf = vec![0.0f64; status.count.unwrap()];
             world
                 .recv(&mut buf, 0, tag)
                 .expect("recv after probe failed");
@@ -243,7 +280,7 @@ fn main() {
     // Rank 0 sends to rank 1, rank 1 polls with iprobe
     {
         let tag = 600;
-        if rank == 0 && size >= 2 {
+        if rank == 0 {
             let data = vec![99.0f64; 3];
             world.send(&data, 1, tag).expect("iprobe test: send failed");
         } else if rank == 1 {
@@ -257,11 +294,11 @@ fn main() {
                 std::hint::spin_loop();
             }
             let status = status.expect("iprobe: message never arrived");
-            assert_eq!(status.source, 0, "iprobe source mismatch");
-            assert_eq!(status.tag, tag, "iprobe tag mismatch");
-            assert_eq!(status.count, 3, "iprobe count mismatch");
+            assert_eq!(status.source, Source::Rank(0), "iprobe source mismatch");
+            assert_eq!(status.tag, Tag::Value(tag), "iprobe tag mismatch");
+            assert_eq!(status.count, Some(3), "iprobe count mismatch");
 
-            let mut buf = vec![0.0f64; status.count as usize];
+            let mut buf = vec![0.0f64; status.count.unwrap()];
             world
                 .recv(&mut buf, 0, tag)
                 .expect("recv after iprobe failed");
@@ -287,20 +324,24 @@ fn main() {
         let send_data = vec![(rank + 1) as f64; 10];
         let mut recv_data = vec![0.0f64; 10];
 
-        let mut recv_req = world
-            .irecv(&mut recv_data, prev, tag)
-            .expect("irecv failed");
-        let send_req = world.isend(&send_data, next, tag).expect("isend failed");
-
-        // Poll recv with test()
         let mut polls = 0u64;
-        while !recv_req.test().expect("test failed") {
-            polls += 1;
-            std::hint::spin_loop();
-        }
+        ferrompi::scope(|s| {
+            let mut recv_req = world
+                .irecv(s, &mut recv_data, prev, tag)
+                .expect("irecv failed");
+            let send_req = world.isend(s, &send_data, next, tag).expect("isend failed");
 
-        // send_req must also complete (wait to be safe)
-        send_req.wait().expect("isend wait failed");
+            // Poll recv with test()
+            while recv_req.test().expect("test failed").is_none() {
+                polls += 1;
+                std::hint::spin_loop();
+            }
+
+            // send_req must also complete (wait to be safe)
+            send_req.wait().expect("isend wait failed");
+            Ok(())
+        })
+        .expect("scope failed");
 
         let expected_val = (prev + 1) as f64;
         for (i, &v) in recv_data.iter().enumerate() {
@@ -332,12 +373,20 @@ fn main() {
         ];
         let mut recv_buf = vec![0.0f64; 3];
 
-        let (source, _tag, count) = world
+        let status = world
             .sendrecv(&send_buf, next, 800, &mut recv_buf, prev, 800)
             .expect("sendrecv different tags failed");
 
-        assert_eq!(source, prev, "rank {rank}: sendrecv source mismatch");
-        assert_eq!(count, 3, "rank {rank}: sendrecv count mismatch");
+        assert_eq!(
+            status.source,
+            Source::Rank(prev),
+            "rank {rank}: sendrecv source mismatch"
+        );
+        assert_eq!(
+            status.count,
+            Some(3),
+            "rank {rank}: sendrecv count mismatch"
+        );
 
         let expected = vec![
             (prev * 3) as f64,
@@ -354,13 +403,14 @@ fn main() {
     world.barrier().expect("barrier 8 failed");
 
     // ========================================================================
-    // Test 9: Request::drop() without wait + is_completed() coverage
+    // Test 9: dropping a request without wait + is_completed() coverage
     // ========================================================================
     // Ring pattern: each rank posts irecv then isend.
     // We wait on the recv request (to get the data) but DROP the send request
-    // without calling wait(). This exercises the Drop impl's FFI wait path.
+    // without calling wait(). The scope that owns the send waits for it when
+    // the scope ends.
     // Safety: the matching irecv.wait() on the receiving rank ensures the
-    // send operation completes, so the Drop-side wait will return promptly.
+    // send operation completes, so the scope's wait will return promptly.
     //
     // We also verify is_completed() returns false on a freshly created request
     // (before any wait/test) and true after test() succeeds.
@@ -372,20 +422,31 @@ fn main() {
         let send_data = vec![(rank + 1) as f64 * 7.77; 6];
         let mut recv_data = vec![0.0f64; 6];
 
-        // Post nonblocking receive, then nonblocking send
-        let recv_req = world
-            .irecv(&mut recv_data, prev, tag)
-            .expect("irecv failed");
-        let send_req = world.isend(&send_data, next, tag).expect("isend failed");
+        ferrompi::scope(|s| {
+            // Post nonblocking receive, then nonblocking send
+            let recv_req = world
+                .irecv(s, &mut recv_data, prev, tag)
+                .expect("irecv failed");
+            let send_req = world.isend(s, &send_data, next, tag).expect("isend failed");
 
-        // Verify is_completed() returns false on a fresh request
-        assert!(
-            !send_req.is_completed(),
-            "rank {rank}: is_completed() should be false before wait/test"
-        );
+            // Verify is_completed() returns false on a fresh request
+            assert!(
+                !send_req.is_completed(),
+                "rank {rank}: is_completed() should be false before wait/test"
+            );
 
-        // Wait on recv to complete the data transfer
-        recv_req.wait().expect("irecv wait failed");
+            // Wait on recv to complete the data transfer
+            recv_req.wait().expect("irecv wait failed");
+
+            // DROP send_req without calling wait() — the scope completes it
+            #[expect(
+                clippy::drop_non_drop,
+                reason = "Request has no Drop impl; the drop marks the early release"
+            )]
+            drop(send_req);
+            Ok(())
+        })
+        .expect("scope failed");
 
         // Verify received data from previous rank
         let expected_val = (prev + 1) as f64 * 7.77;
@@ -395,9 +456,6 @@ fn main() {
                 "rank {rank}: drop test recv_data[{i}] = {v}, expected {expected_val}"
             );
         }
-
-        // DROP send_req without calling wait() — exercises Drop impl's FFI path
-        drop(send_req);
     }
 
     world.barrier().expect("barrier 9 failed");

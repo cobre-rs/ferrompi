@@ -25,13 +25,13 @@ They are meant to become regression tests during the 0.5.x plan. Once a finding 
 Every crate is a standalone Cargo package with its own empty `[workspace]`. Each depends on the ferrompi working tree through a relative path (`../../../..`), so it always builds against the current code.
 
 ```bash
-cd audits/2026-09-24/repros/<crate>      # soundness | c-shim | perf
+cd audits/2026-09-24/repros/<crate>      # c-shim | perf
 cargo build --release
 mpiexec -n <N> target/release/<program>
 ```
 
-- `soundness`, `c-shim` and `perf` enable `ferrompi/rma`.
-- Some fixes will make a repro stop compiling on purpose. The SND-01, SND-02, SND-05 and SND-08 (case B) repros rely on APIs that the fix removes. A compile error is then the expected "after fix" result, and the repro should be replaced by a `compile_fail` doctest.
+- `c-shim` and `perf` enable `ferrompi/rma`.
+- Some fixes will make a repro stop compiling on purpose. The SND-08 (case B) repro relies on an API that the fix removes. A compile error is then the expected "after fix" result, and the repro should be replaced by a `compile_fail` doctest.
 
 Building the C programs:
 
@@ -55,24 +55,12 @@ rustc --edition 2021 api-checks/main_ne.rs --extern lib_ne=/tmp/ne/liblib_ne.rli
 
 Finding IDs refer to `../findings/`. In the "How to run" column, `np` is the `mpiexec -n` value, and "valgrind" means the finding was confirmed by running `mpiexec -n <np> valgrind ./prog`.
 
-### soundness/: safe code that causes undefined behaviour
-
-| Program | Finding | What it does | How to run | Observed on v0.5.0 | Expected after fix |
-|---|---|---|---|---|---|
-| `soundness/src/bin/r1_irecv_uaf.rs` | SND-01 | `irecv` into a `Vec` that is dropped while the receive is pending, then allocates a same-size victim `Vec` that reuses the freed memory | np=2 | `victim bytes overwritten by MPI = 256 / 256 (first=0x55)`: MPI writes into the reused allocation | Does not compile: the request or scope keeps the buffer borrowed |
-| `soundness/src/bin/r6_fetch_drop.rs` | SND-04 | Drops a `PendingFetchResult` before the closing fence on a `Win::allocate` window, plus a `get` into a buffer dropped mid-epoch | np=2 | **Did not manifest**: MPICH completes allocate-window RMA eagerly. Kept as the negative control for r6b | Same (no corruption) |
-| `soundness/src/bin/r6b_fetch_drop_create.rs` | SND-04 | Same as r6, over a `Win::create` window (MPICH defers the operation to the fence) | np=2 | `unrelated Vec after get() completes = 0x1111111111111112 (expected 0x3333333333333333)`: the fetched value lands in freed and reused memory | Does not compile, or the result is kept alive until the epoch closes |
-| `soundness/src/bin/r8_forget_win.rs` | SND-05 | `mem::forget(Win::create(&mut buf))`, `drop(buf)`, victim `Vec` reuses the memory, then rank 1 does a locked `put` | np=2 | `victim[0..4] = 0x5555555555555555…`: the remote `put` writes into the freed and reused allocation | Does not compile, or `Win::create` owns the buffer so forgetting it leaks the buffer instead of freeing it |
-| `soundness/src/bin/r11_shm_race.rs` | SND-13 | Rank 1 spins on `remote_slice(0)[0]` (a `&[u64]`) while rank 0 sets the flag through its own slice | np=2 (same node) | `evidence/r11.out`: rank 0 printed `flag set`/`exiting` 3 s apart; rank 1 never printed `observed flag`. The release build hoisted the load out of the loop: the disassembly is a single `cmpq $0x0,(%rcx)` followed by a jump to itself, so the loop never ends. The miscompilation is observed, not just theoretical | No plain `&[T]` over memory another process writes; the access API forces an atomic or volatile read, and the loop sees the flag |
-| `soundness/src/bin/r13_persistent_realloc.rs` | SND-02 | `recv_init(&mut data)`, then `data.reserve(4096)` reallocates the buffer, then `start`/`send`/`wait` | np=2 | Heap corruption: SIGSEGV inside `MPI_Finalize` (gdb: `unlink_chunk`/`_int_malloc` under `Mpi::drop`) | Does not compile: the persistent request owns its buffer |
-
 ### c-shim/: C-layer correctness (`src/bin/t*.rs`) and C baselines (`c/`)
 
 | Program | Finding | What it does | How to run | Observed on v0.5.0 | Expected after fix |
 |---|---|---|---|---|---|
 | `c-shim/src/bin/t10_group_empty.rs` | VER (GROUP_EMPTY slot) | Creates and drops empty groups (`include(&[])`, `difference(self)`) 3 times | np=1 | Works and prints `SURVIVED`; slot 0 (`MPI_GROUP_EMPTY`) is never handed out or freed | Unchanged |
 | `c-shim/src/bin/t12_reduce_inplace.rs` | VER (in-place semantics) | `reduce_inplace` Sum to root 0 | np=2 | Correct result on MPICH; the in-place alias check passes | Unchanged |
-| `c-shim/src/bin/t14_send_neg1.rs` | COR-09 | `send(dest = -1)` | np=1 | Returns `Ok` and does nothing: `-1 == MPI_PROC_NULL` on MPICH. On Open MPI the same call is an invalid-rank error | Portable, explicit semantics (typed ProcNull/Any, normalised in C) |
 | `c-shim/src/bin/t15_err_after_finalize.rs` | VER (late request drop, error string after finalize) | An `irecv` request outlives `Mpi`; `wait()` is called after finalize | np=1 | Returns `Err` with a readable message and prints `SURVIVED`. The table sweep makes late request use harmless, and `MPI_Error_class`/`Error_string` work after finalize on MPICH | Unchanged, or a clearer "finalized" error once COR-07 lands |
 | `c-shim/c/pair_type_extents.c` | VER (pair layouts), COR-11 baseline | Prints lb, extent and size of the MPI value+index pair types (`MPI_FLOAT_INT` … `MPI_LONG_DOUBLE_INT`) | `mpicc`; np=1 | x86_64 Linux MPICH: FLOAT_INT 8, DOUBLE_INT 16, LONG_INT 16, 2INT 8, SHORT_INT 8, LONG_DOUBLE_INT 32. All match the Rust `#[repr(C)]` sizes in `src/datatype.rs` | Unchanged on Linux |
 | `c-shim/c/gfree.c` | VER | `MPI_Group_free(MPI_GROUP_EMPTY)` in plain C | `mpicc`; np=1 | MPICH accepts it (rc=0) | Reference only |
@@ -111,7 +99,7 @@ All binaries run interleaved A/B rounds, timing raw MPI (called directly through
 
 | File | What it shows |
 |---|---|
-| `r11.out` | Output of `soundness` r11: rank 1 never observes the flag |
+| `r11.out` | Historical: output of the `soundness` r11 program, deleted when SND-13 was marked fixed. Rank 1 never observes the flag |
 | `bt.out` | VER: last iteration of a 300× stress run (`--test-threads=2`) of the `buffer_attach`/`buffer_detach` unit tests in `src/lib.rs`. 4 passed, 0 failures across all 300 iterations; the shared `ATTACHED_BUFFER` static does not race in practice |
 
 Not archived:

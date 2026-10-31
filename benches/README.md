@@ -115,13 +115,47 @@ and reports each arm's median ns/call plus their delta. The first case,
 `A/A direct iallreduce+wait`, runs the direct call on both arms to give the noise floor
 the other cases' deltas are judged against.
 
-**Six cases:** `A/A direct iallreduce+wait` (noise floor), `isend+irecv+wait`,
-`8x(isend+irecv)+waitall`, `iallreduce+wait`, `persistent start+wait`, and
-`8x persistent start_all+wait_all`.
+**Nineteen cases** (14 at `funneled`, see Thread level), in run order:
+`A/A direct iallreduce+wait` (noise floor), then the blocking collectives
+`allreduce f64 sum`, `allreduce u64 bor`, `allgatherv u8 x64`, `broadcast f64` and
+`barrier`, then `isend+irecv+wait`, `8x(isend+irecv)+waitall`, `iallreduce+wait`,
+`persistent start+wait`, and `8x persistent start_all+wait_all`, then the six group-query
+cases `group size T=1`, `group rank T=1`, `group size T=4`, `group size T=8`,
+`group rank T=4` and `group rank T=8`, and last `scope empty T=1` and `scope empty T=8`.
 
-**Output.** A header line, `# <library line>; 21 interleaved rounds per arm; median ns
-per call`, then one line per case:
-`<case> direct X ns   ferrompi Y ns   delta ±Z ns`.
+The group-query cases compare `MPI_Group_size` / `MPI_Group_rank` with `Group::size` /
+`Group::rank` on one shared group, 20 000 calls per thread. `T=n` is the thread count:
+each round runs one arm on `n` scoped threads released together by a barrier, and the
+round's value is the median of the threads' ns/call. The `T=4` and `T=8` cases run only at
+`multiple`: at `funneled` a thread other than the initializing one cannot call MPI through
+ferrompi. The `T=8` cases are meant to run pinned, for example under `taskset -c 0-7`.
+
+The `scope empty` cases time `ferrompi::scope` around an empty closure, 200 000 scopes per
+thread, with the same `T=n` rounds. They have no direct arm: there is no `MPI_*` call to
+compare with, and the scope holds no request, so the time is the scope's own open and close.
+
+Y and Z, the thread-level overhead budgets, are read from the group cases; the 0.7 section below gives their limits and the reference build each is measured against:
+
+- Y is the T=1 delta at multiple minus the same case's multiple delta recorded for the reference build (`0.6.0`, or `pre-counter` for `group rank`), with the sum of both sessions' A/A deltas as tolerance; it is never a same-session multiple-minus-funneled difference.
+- Z is the same difference at T=8: the T=8 delta at multiple minus the same case's T=8 delta recorded for the reference build, with the same tolerance.
+
+**Thread level.** The environment variable `FERROMPI_BENCH_LEVEL` selects the level MPI
+is initialized with: `funneled` (the default when unset) or `multiple`. Any other value
+panics with `FERROMPI_BENCH_LEVEL must be funneled or multiple, got <value>`. If the
+library grants a different level than requested, the bench prints
+`ffi_overhead: <level> not provided; skipped` and exits 0. The eleven original cases, the
+two `T=1` group cases and `scope empty T=1` run at either level, 14 case lines at
+`funneled`; `multiple` adds the four `T=4` and `T=8` group cases and `scope empty T=8`,
+19 case lines.
+
+```
+FERROMPI_BENCH_LEVEL=multiple mpiexec -n 1 target/release/deps/ffi_overhead-<hash>
+```
+
+**Output.** A header line, `# <library line>; level <Level>; 21 interleaved rounds per
+arm; median ns per call`, then one line per case:
+`<case> direct <a> ns   ferrompi <b> ns   delta <±d> ns`. The `scope empty` lines have no
+direct arm and read `<case> ferrompi <b> ns`.
 
 **MPICH-only direct arm.** The direct arm declares MPICH's integer handle values and
 calls only MPI-1/MPI-3 symbols, so the binary links on every MPI implementation. At run
@@ -143,6 +177,195 @@ direct, in ns per call:
 The noise floor ranged from 3.5 ns locally to 0.9 ns under UCX, and every other case's
 minimum delta cleared its floor on both. On Open MPI 4.1.6 and 5.0.7 the bench prints the
 skip line.
+
+**Blocking and thread-level results.** The 0.6.0 library on local MPICH 4.2.3 (`ch4:ofi`),
+run as a singleton pinned with `taskset -c 0-7`: three runs per level, taken alternately at
+`funneled` and `multiple`. Values are the median of the three runs' deltas, ferrompi minus
+direct, in ns per call, for the 13 cases at `funneled` and the 17 at `multiple`; `n/a` marks
+a case the level does not run.
+
+| Case | funneled | multiple |
+|---|---|---|
+| A/A direct iallreduce+wait | +0.3 | −0.8 |
+| allreduce f64 sum | +1.7 | +1.4 |
+| allreduce u64 bor | +1.5 | +1.4 |
+| allgatherv u8 x64 | +3.6 | +3.4 |
+| broadcast f64 | +0.8 | +1.0 |
+| barrier | +1.2 | +1.2 |
+| isend+irecv+wait | +36.9 | +38.8 |
+| 8x(isend+irecv)+waitall | +359.0 | +374.4 |
+| iallreduce+wait | +12.2 | +12.3 |
+| persistent start+wait | +8.6 | +5.6 |
+| 8x persistent start_all+wait_all | +135.7 | +124.9 |
+| group size T=1 | +2.0 | +1.8 |
+| group rank T=1 | +2.0 | +2.0 |
+| group size T=4 | n/a | +1.8 |
+| group size T=8 | n/a | +3.3 |
+| group rank T=4 | n/a | +2.0 |
+| group rank T=8 | n/a | +3.0 |
+
+The `A/A direct iallreduce+wait` delta of the three runs was +0.4, +0.2 and +0.3 ns at
+`funneled` and −0.1, −0.8 and −1.3 ns at `multiple`. A run whose A/A delta exceeded 2 ns in
+absolute value would have been re-run; none was. On the measuring machine (an i7-12700KF)
+CPUs 0-7 are four physical cores with two hardware threads each, so the `T=8` cases run two
+threads per core.
+
+### 0.7 in-flight accounting and scopes
+
+The in-flight counter and the nonblocking scope, measured on 2026-10-03 against three
+builds in one session: local MPICH 4.2.3 (`ch4:ofi`), a singleton, on an i7-12700KF.
+
+- `0.6.0` is the 0.6.0 behaviour (`2802bf9`).
+- `pre-counter` is the build before the counter and the scope landed (`030b3a5`).
+- `head` is the build measured (`6e834be`).
+
+The letters B, X, Y and Z name budgets only.
+
+Each set runs the binaries as `0.6.0` `head` `head` `0.6.0` four times, then `pre-counter`
+`head` `head` `pre-counter` twice, so it holds 8 slots of `0.6.0`, 12 of `head` and 4 of
+`pre-counter`, and the medians below are over those slots. Values are the
+median of each binary's deltas, ferrompi minus direct, in ns per call. A slot whose
+`A/A direct iallreduce+wait` delta exceeded 2 ns in absolute value would have been
+re-run; none was.
+
+The budgets:
+
+- B: a blocking collective at `funneled` costs at most 1 ns more than at 0.6.0. Those arms
+  hold no scope, so B also shows the in-flight count stays off the blocking path.
+- X: a nonblocking scope costs at most 5 ns per request at `funneled`, with no heap
+  allocation per iteration while 64 or fewer requests are in flight
+  (`examples/test_scope_alloc.rs`).
+- Y: one enter/exit pair of the in-flight counter at `multiple`, uncontended, costs at
+  most 15 ns. It is the `multiple` delta at `head` minus the `multiple` delta of the
+  `0.6.0` reference, never a `multiple` minus `funneled` difference in one session.
+- Z: the same call at 8 threads costs at most 30 ns per call, twice Y.
+
+A budget is met when the increase is at most the budget plus the A/A allowance. For B and
+X the allowance is the largest |A/A| of the set, since both sides are measured together.
+For Y and Z it is the sum of the largest |A/A| of each side's slots in the set. The
+`group rank` reference is `pre-counter`, not `0.6.0`: `Group::rank` returns an
+`Option<i32>` and costs 1.4-1.7 ns more than at 0.6.0.
+
+| Budget | Case | Level, pinning | Reference | Reference Δ | Head Δ | Increase | Limit | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| B | allreduce f64 sum | funneled, `taskset -c 0-7` | `0.6.0` | +1.3 | +1.9 | +0.6 | ≤ 1 + 1.8 = 2.8 | met |
+| B | allreduce u64 bor | funneled, `taskset -c 0-7` | `0.6.0` | +1.3 | +2.1 | +0.8 | ≤ 1 + 1.8 = 2.8 | met |
+| B | allgatherv u8 x64 | funneled, `taskset -c 0-7` | `0.6.0` | +3.7 | +4.7 | +1.0 | ≤ 1 + 1.8 = 2.8 | met |
+| B | broadcast f64 | funneled, `taskset -c 0-7` | `0.6.0` | +1.0 | +1.2 | +0.2 | ≤ 1 + 1.8 = 2.8 | met |
+| B | barrier | funneled, `taskset -c 0-7` | `0.6.0` | +1.2 | +1.05 | −0.15 | ≤ 1 + 1.8 = 2.8 | met |
+| X | 8x(isend+irecv)+waitall | funneled, `taskset -c 0-7` | `pre-counter` | +362.95 | +384.95 | +22.0 (1.38 per request over 16) | ≤ 16 × 5 + 1.8 = 81.8 | met |
+| X | iallreduce+wait | funneled, `taskset -c 0-7` | `pre-counter` | +12.35 | +16.55 | +4.2 | ≤ 5 + 1.8 = 6.8 | met |
+| Y | group size T=1 | multiple, `taskset -c 0-7` | `0.6.0` | +1.9 | +10.7 | +8.8 | ≤ 15 + 0.9 + 0.5 = 16.4 | met |
+| Y | group rank T=1 | multiple, `taskset -c 0-7` | `pre-counter` | +3.9 | +13.6 | +9.7 | ≤ 15 + 0.1 + 0.5 = 15.6 | met |
+| Z | group size T=8 | multiple, `taskset -c 0,2,4,6,8,10,12,14` | `0.6.0` | +1.9 | +9.0 | +7.1 | ≤ 30 + 1.6 + 1.1 = 32.7 | met |
+| Z | group rank T=8 | multiple, `taskset -c 0,2,4,6,8,10,12,14` | `pre-counter` | +4.1 | +12.3 | +8.2 | ≤ 30 + 0.9 + 1.1 = 32.0 | met |
+| context | isend+irecv+wait | funneled, `taskset -c 0-7` | `pre-counter` | +36.15 | +40.4 | +4.25 (2.13 per request over 2) | none | n/a |
+| context | persistent start+wait | funneled, `taskset -c 0-7` | `pre-counter` | +9.6 | +10.5 | +0.9 | none | n/a |
+| context | 8x persistent start_all+wait_all | funneled, `taskset -c 0-7` | `pre-counter` | +127.65 | +116.6 | −11.05 | none | n/a |
+| context | persistent start+wait | multiple, `taskset -c 0-7` | `pre-counter` | +5.4 | +50.8 | +45.4 | none | n/a |
+| context | 8x persistent start_all+wait_all | multiple, `taskset -c 0-7` | `pre-counter` | +137.1 | +129.9 | −7.2 | none | n/a |
+
+The context rows have no limit: no budget covers the persistent requests or the
+two-request arm. Persistent `start+wait` at `multiple` reads about +45 ns over
+`pre-counter`. The arm makes four counted calls (two `start`, two `wait`), about 11 ns
+each, in line with budget Y's per-call figure.
+
+The largest |A/A| per binary, for `0.6.0`, `pre-counter` and `head`, was 0.4, 1.2 and
+1.8 ns in the `funneled` set, 0.9, 0.1 and 0.5 ns in the `multiple` set, and 1.6, 0.9
+and 1.1 ns in the set pinned to one thread per physical core.
+
+The Z rows run pinned to `taskset -c 0,2,4,6,8,10,12,14`, one thread per physical core of
+the measuring machine. There the direct call's T=8/T=1 ratio is 1.08 for `group size` and
+1.18 for `group rank` (medians over the 24 slots; `head` alone gives 1.08 and 1.15), so
+the call qualifies for the 8-thread budget. Under `taskset -c 0-7`, which puts two
+threads on each of four cores, the same ratios are 1.64 and 1.77. The T=8/T=1 ratio of
+ferrompi at `head` is 0.90 for `group size` and 0.96 for `group rank`.
+
+**Scope count across threads.** `scope empty T=1` and `scope empty T=8` time a scope that holds
+no request, so they show the scope's own open and close. No budget covers them, and neither
+`0.6.0` nor `pre-counter` has `ferrompi::scope`. The table compares the build before the open
+scopes were counted per thread (`before`, `c9c5649`) with the build that counts them per thread
+(`after`). One session on 2026-10-03, local MPICH 4.2.3 (`ch4:ofi`), a singleton, the binaries
+run as `before` `after` `after` `before`. Values are the median ns per scope over the slots.
+
+| Case | Level, pinning | Slots each | before | after |
+|---|---|---|---|---|
+| scope empty T=1 | funneled, `taskset -c 0-7` | 60 | 2.9 | 2.9 |
+| scope empty T=1 | multiple, `taskset -c 0,2,4,6,8,10,12,14` | 48 | 10.8 | 10.8 |
+| scope empty T=8 | multiple, `taskset -c 0,2,4,6,8,10,12,14` | 48 | 165.5 | 10.8 |
+
+The largest |A/A| of a slot was 1.6 ns (`before`) and 1.4 ns (`after`) at `funneled`, and 1.4 and
+2.0 ns at `multiple`. Budget X is a `Single`/`Funneled` budget: at `Multiple` a scope costs two
+SeqCst read-modify-writes, about 10 ns, and counting per thread removes the cross-thread
+contention between them. At `funneled` the init thread's scope is uncounted, so that row does
+not move.
+
+`examples/test_scope_alloc.rs` counts the heap allocations Rust code makes, not MPI's own,
+with a counting global allocator. After 10 warm-up iterations, 1000 scopes of 64 requests
+each (32 self receives and 32 self sends, completed by `Request::wait_all`) allocate
+nothing; one scope of 65 requests does allocate, which marks the 64-slot boundary.
+
+**Persistent requests.** Budget P: each persistent arm costs at most 15 ns per request at
+`funneled` over `E`, the build before persistent requests owned their buffers (`250c7b1`),
+plus the largest |A/A| of the slots. `H` is the build with owned buffers, the extent token
+and the returned `Status`. One session on 2026-10-03, local MPICH 4.2.3 (`ch4:ofi`), a
+singleton, `taskset -c 0-7`: the binaries run as `E` `H` `H` `E` twice, then 30 interleaved
+rounds of both, so 34 slots each at `funneled` and, with 20 rounds, 24 at `multiple`. Values
+are the median ns per call, ferrompi minus direct; the increase is `H` minus `E` divided by
+the arm's requests (2 in `persistent start+wait`, a send and a receive; 16 in the 8x arm).
+
+| Case | Level, pinning | Slots each | E | H | Increase per request |
+|---|---|---|---|---|---|
+| persistent start+wait | funneled, `taskset -c 0-7` | 34 | +9.2 | +30.6 | +10.70 (limit 15 + 1.4 = 16.4, met) |
+| 8x persistent start_all+wait_all | funneled, `taskset -c 0-7` | 34 | +139.7 | +215.6 | +4.74 (limit 15 + 1.4 = 16.4, met) |
+| persistent start+wait | multiple, `taskset -c 0-7` | 24 | +50.75 | +66.75 | +8.00 (no limit) |
+| 8x persistent start_all+wait_all | multiple, `taskset -c 0-7` | 24 | +98.6 | +182.1 | +5.22 (no limit) |
+
+The increase is the extent token, two atomic read-modify-writes per request (one when it is
+taken, one when it is released), plus, for a receive, the status fill. `multiple` has no
+limit: each call is counted (budget Y), and the 8x arm there depends on code placement.
+
+### 0.7.0 release check
+
+The budgets B, X, Y, Z and P were measured again on the release candidate on 2026-10-31, on local
+MPICH 4.2.3 (`ch4:ofi`), a singleton, on an i7-12700KF. Four bench binaries ran: `0.6.0`
+(`2802bf9`), `pre-counter` (`030b3a5`), `E` (`250c7b1`, the build before persistent requests
+owned their buffers) and `H` (`78fb28e`), the release candidate.
+
+A session runs set F (`funneled`, `taskset -c 0-7`), set M (`multiple`, `taskset -c 0-7`) and
+set Z (`multiple`, `taskset -c 0,2,4,6,8,10,12,14`), in that order. Set F runs the binaries as
+`0.6.0` `H` `H` `0.6.0` four times, then `pre-counter` `H` `H` `pre-counter` twice, then `E` `H`
+`H` `E` twice: 8 slots of `0.6.0`, 4 of `pre-counter`, 4 of `E` and 16 of `H`. Sets M and Z drop
+the `E` rounds and hold 8, 4 and 12 slots. A slot whose `A/A direct iallreduce+wait` delta
+exceeded 2 ns in absolute value was re-run, at most four attempts. Three such sessions ran at
+least 15 minutes apart. In each session the increase is the median delta of `H` minus that of
+the reference, in ns per call; the table gives the three increases and their median, and a
+budget is met when the median is at most the budget plus the A/A allowance, by the rule above.
+P is gated on these default builds. The increases of the two 8x arms (16 requests) and of
+`persistent start+wait` (2 requests) are per request; the X limit over 16 requests is 5 plus the
+allowance divided by 16, and the P limits are 15 plus the largest |A/A| of the `E` and `H`
+slots, as in the persistent table above.
+
+| Budget | Case | Level, pinning | Reference | Session increases | Median increase | Limit | Verdict |
+|---|---|---|---|---|---|---|---|
+| B | allreduce f64 sum | funneled, `taskset -c 0-7` | `0.6.0` | +0.70, +0.75, +0.65 | +0.70 | ≤ 1 + 1.60 = 2.60 | met |
+| B | allreduce u64 bor | funneled, `taskset -c 0-7` | `0.6.0` | +0.50, +0.50, +0.50 | +0.50 | ≤ 1 + 1.60 = 2.60 | met |
+| B | allgatherv u8 x64 | funneled, `taskset -c 0-7` | `0.6.0` | +0.20, +0.50, +0.80 | +0.50 | ≤ 1 + 1.60 = 2.60 | met |
+| B | broadcast f64 | funneled, `taskset -c 0-7` | `0.6.0` | +0.40, +0.50, +0.45 | +0.45 | ≤ 1 + 1.60 = 2.60 | met |
+| B | barrier | funneled, `taskset -c 0-7` | `0.6.0` | −0.45, −0.50, −0.40 | −0.45 | ≤ 1 + 1.60 = 2.60 | met |
+| X | 8x(isend+irecv)+waitall (per request, over 16) | funneled, `taskset -c 0-7` | `pre-counter` | +3.00, +2.78, +2.58 | +2.78 | ≤ 5 + 1.60 / 16 = 5.10 | met |
+| X | iallreduce+wait | funneled, `taskset -c 0-7` | `pre-counter` | +1.65, +1.85, +1.50 | +1.65 | ≤ 5 + 1.60 = 6.60 | met |
+| Y | group size T=1 | multiple, `taskset -c 0-7` | `0.6.0` | +8.80, +9.30, +8.85 | +8.85 | ≤ 15 + 1.70 + 1.50 = 18.20 | met |
+| Y | group rank T=1 | multiple, `taskset -c 0-7` | `pre-counter` | +9.50, +10.10, +9.70 | +9.70 | ≤ 15 + 0.60 + 1.50 = 17.10 | met |
+| Z | group size T=8 | multiple, `taskset -c 0,2,4,6,8,10,12,14` | `0.6.0` | +7.10, +7.10, +7.10 | +7.10 | ≤ 30 + 1.50 + 1.50 = 33.00 | met |
+| Z | group rank T=8 | multiple, `taskset -c 0,2,4,6,8,10,12,14` | `pre-counter` | +8.45, +8.40, +8.50 | +8.45 | ≤ 30 + 1.90 + 1.50 = 33.40 | met |
+| P | persistent start+wait (per request, over 2) | funneled, `taskset -c 0-7` | `E` | +10.68, +10.78, +10.60 | +10.68 | ≤ 15 + 1.20 = 16.20 | met |
+| P | 8x persistent start_all+wait_all (per request, over 16) | funneled, `taskset -c 0-7` | `E` | +4.94, +5.26, +4.87 | +4.94 | ≤ 15 + 1.20 = 16.20 | met |
+
+The largest |A/A| of a kept slot over the three sessions, for `0.6.0`, `pre-counter`, `E` and
+`H`, was 1.6, 0.9, 0.5 and 1.2 ns in set F; for `0.6.0`, `pre-counter` and `H`, it was 1.7,
+0.6 and 1.5 ns in set M and 1.5, 1.9 and 1.5 ns in set Z. Two slots of the second session exceeded 2 ns (−2.3 ns in set F,
+−2.1 ns in set M) and were re-run once each; the re-runs read −0.1 and −0.3 ns.
 
 ## Design notes
 

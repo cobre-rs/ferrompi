@@ -29,7 +29,7 @@ fn main() -> Result<()> {
     // using the world rank preserves the original relative ordering.
     let color = rank % 2;
     let sub = world
-        .split(color, rank)?
+        .split(Some(color), rank)?
         .expect("split with valid color should return a communicator");
 
     let sub_rank = sub.rank();
@@ -47,7 +47,6 @@ fn main() -> Result<()> {
     let local_sum = world.allreduce_scalar(rank as f64, ReduceOp::Sum)?;
     let sub_sum = sub.allreduce_scalar(rank as f64, ReduceOp::Sum)?;
 
-    // Compute expected sub-communicator sum based on parity
     let expected_sub_sum: f64 = (0..size).filter(|r| r % 2 == color).map(|r| r as f64).sum();
 
     assert!(

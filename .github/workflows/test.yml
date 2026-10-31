@@ -43,16 +43,9 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/cargo-registry-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-${{ matrix.mpi }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.mpi }}-
-            ${{ runner.os }}-cargo-
+          key: ${{ matrix.mpi }}
 
       - name: Cache cargo build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -112,12 +105,16 @@ jobs:
         if: matrix.features != ''
         run: cargo clippy --all-targets --features ${{ matrix.features }} -- -D warnings
 
-      - name: Clippy (numa feature)
+      - name: Clippy (slurm feature)
         if: matrix.mpi == 'mpich' && matrix.features == 'rma'
-        run: cargo clippy --all-targets --features numa -- -D warnings
+        run: cargo clippy --all-targets --features slurm -- -D warnings
 
       - name: Unit tests
-        run: cargo test --lib --features numa --verbose
+        run: cargo test --lib --features slurm,rma --verbose
+
+      - name: Unit test that initializes MPI
+        timeout-minutes: 5
+        run: cargo test --lib --features "${{ matrix.features }}" -- --ignored
 
       - name: Build examples
         run: cargo build --examples --features "${{ matrix.features }}"
@@ -133,6 +130,12 @@ jobs:
         run: |
           chmod +x tests/run_mpi_tests.sh
           MPI_NP_LIST="${{ matrix.np_list }}" ./tests/run_mpi_tests.sh "${{ matrix.features }}"
+
+      - name: MPI integration tests (release, fat LTO)
+        if: matrix.mpi == 'mpich' && matrix.features == 'rma'
+        env:
+          CARGO_PROFILE_RELEASE_LTO: fat
+        run: MPI_NP_LIST="${{ matrix.np_list }}" ./tests/run_mpi_tests.sh --release rma
 
   test-openmpi5:
     name: Test (openmpi5, rma)
@@ -162,21 +165,19 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/cargo-registry-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-openmpi5-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-openmpi5-
+          key: openmpi5
 
       - name: Check MPI version
         run: mpiexec --version
 
       - name: MPI integration tests (rma)
         run: MPI_NP_LIST=4 ./tests/run_mpi_tests.sh rma
+
+      - name: Unit test that initializes MPI
+        timeout-minutes: 5
+        run: cargo test --lib --features rma -- --ignored
 
       - name: Receive pending after a process failure aborts (ULFM)
         shell: bash
@@ -207,15 +208,9 @@ jobs:
           toolchain: 1.85
 
       - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/cargo-registry-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-msrv-
+          key: msrv
 
       - name: Setup MPICH
         uses: ./.github/actions/setup-mpich
@@ -245,15 +240,9 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/cargo-registry-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-abi-stubs-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-abi-stubs-
+          key: abi-stubs
 
       - name: Build and install the ABI stubs
         run: make -C mpi-abi-stubs install PREFIX="$RUNNER_TEMP/mpi-abi"
@@ -278,15 +267,9 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/cargo-registry-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-large-count-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-large-count-
+          key: large-count
 
       - name: Setup MPICH
         uses: ./.github/actions/setup-mpich
@@ -313,15 +296,9 @@ jobs:
           components: llvm-tools-preview
 
       - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/cargo-registry-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-coverage-
+          key: coverage
 
       - name: Setup MPICH
         uses: ./.github/actions/setup-mpich
@@ -336,8 +313,9 @@ jobs:
           # shellcheck source=/dev/null
           source <(cargo llvm-cov show-env --export-prefix)
           cargo llvm-cov clean --workspace
-          cargo test --lib --features numa
-          MPI_NP_LIST=4 ./tests/run_mpi_tests.sh numa
+          cargo test --lib --features slurm,rma
+          cargo test --lib --features slurm,rma -- --ignored
+          MPI_NP_LIST=4 ./tests/run_mpi_tests.sh slurm,rma
           cargo llvm-cov report --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
@@ -362,15 +340,9 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/cargo-registry-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-doc-
+          key: doc
 
       - name: Setup MPICH
         uses: ./.github/actions/setup-mpich
@@ -386,13 +358,23 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      - name: Package allow-list
+      - name: Package allow-list (all features)
         run: |
-          cargo package --locked
+          cargo package --locked --all-features
           cargo package --locked --list > "$RUNNER_TEMP/package-files"
-          if grep -E '^(examples|benches|audits|tests|\.github)/|^test\.sh$' "$RUNNER_TEMP/package-files"; then
+          grep -vxE 'examples/(shared_memory|rma_put|rma_get|rma_accumulate|rma_get_accumulate)\.rs' \
+            "$RUNNER_TEMP/package-files" > "$RUNNER_TEMP/package-rest"
+          if grep -E '^(examples|benches|audits|tests|\.github)/|^test\.sh$' "$RUNNER_TEMP/package-rest"; then
             exit 1
           fi
+
+      - name: Install pinned nightly toolchain (doctest error codes)
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: nightly-2026-09-30
+
+      - name: Doctest error codes (pinned nightly, all features)
+        run: cargo +nightly-2026-09-30 test --doc --all-features
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
@@ -419,15 +401,9 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: ./.github/actions/cargo-registry-cache
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-valgrind-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-valgrind-
+          key: valgrind
 
       - name: Setup MPICH
         uses: ./.github/actions/setup-mpich

@@ -1,6 +1,6 @@
 # ADR-0006: MPI 5.0 Standard ABI Direction
 
-**Status:** Accepted — 2026-09-24
+**Status:** Accepted — 2026-09-24; amended 2026-10-29
 
 ## Context
 
@@ -57,6 +57,9 @@ alone cannot tell the draft header from the ratified one.
   returns an index into ferrompi's own tables. Interoperability with other
   MPI-using libraries waits for the by-value handle representation in
   Decision 3.
+
+  > **Amended 2026-10-29 — No handle accessor.** See [Amendments](#amendments).
+
 - `docs/mpi-compatibility.md` is the reference for selecting an ABI build.
 
 ## Alternatives
@@ -69,3 +72,9 @@ alone cannot tell the draft header from the ratified one.
   and constant declarations for no stated requirement.
 - Rejected: an ABI-only release — not while every ABI implementation is an
   opt-in build.
+
+## Amendments
+
+### 2026-10-29 — No handle accessor
+
+0.7.0 removed `raw_handle()`; the public API exposes no handle value, not even an index into ferrompi's tables.

@@ -1,22 +1,31 @@
-//! Integration test for Win passive-target lock/unlock epoch helpers.
+//! Integration test for Win passive-target lock/unlock epoch closures.
 //!
-//! Verifies that `Win::lock`, `Win::lock_all`, `WinLockGuard::flush`, and
-//! `WinLockAllGuard::flush` / `flush_all` work correctly without issuing any
-//! RMA data operations.
+//! Verifies that `Win::lock` and `Win::lock_all` run their closure in an
+//! epoch, that `PassiveEpoch::flush` / `flush_all` work inside it without
+//! issuing any RMA data operations, and that the epoch is unlocked whether the
+//! closure returns, returns an error or panics.
 //!
 //! Test matrix (all on a 2-rank world):
 //!
-//! 1. **Shared lock on rank 0** — every rank acquires `LockType::Shared` on
-//!    rank 0, calls `guard.flush()`, then drops the guard (→ unlock).
-//! 2. **Exclusive self-lock** — rank 0 acquires `LockType::Exclusive` on
-//!    itself, then drops the guard.
-//! 3. **lock_all** — all ranks call `lock_all()`, invoke `guard.flush(0)`
-//!    and `guard.flush_all()`, then drop the guard (→ unlock_all).
+//! 1. **Shared lock on rank 0** — every rank locks rank 0 with
+//!    `LockType::Shared`, calls `e.flush(0)`, then the closure ends
+//!    (→ unlock).
+//! 2. **Exclusive self-lock** — rank 0 locks itself with `LockType::Exclusive`.
+//! 3. **lock_all** — all ranks call `lock_all`, invoke `e.flush(0)` and
+//!    `e.flush_all()`, then the closure ends (→ unlock_all).
+//! 4. **Unlock after an error** — rank 0's closure returns an error; the lock
+//!    is released, so locking rank 0 exclusively again succeeds.
+//! 5. **Unlock on unwind** — rank 0's closure panics; the panic reaches the
+//!    caller and the lock is released, so locking rank 0 exclusively again
+//!    succeeds. A second exclusive lock on a window still locked would fail or
+//!    hang.
 //!
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_rma_win_lock
 // mpi-test: np=2
 
-use ferrompi::{LockType, Mpi, ReduceOp, Win, WinFenceAssert};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+use ferrompi::{Error, LockType, Mpi, ReduceOp, Win, WinFenceAssert};
 
 mod common;
 
@@ -36,7 +45,7 @@ fn main() {
     // ========================================================================
     // Allocate an 8-element f64 window on every rank.
     // ========================================================================
-    let win = match Win::<f64>::allocate(&world, 8) {
+    let mut win = match Win::<f64>::allocate(&world, 8) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("rank {rank}: FAIL: Win::allocate failed: {e}");
@@ -47,7 +56,9 @@ fn main() {
 
     // `no_succeed` says no fence epoch follows; the barrier puts every rank's
     // fence before any rank's lock.
-    if let Err(e) = win.fence(WinFenceAssert::no_succeed()) {
+    if let Err(e) = win.fence(WinFenceAssert::none(), WinFenceAssert::no_succeed(), |_| {
+        Ok(())
+    }) {
         eprintln!("rank {rank}: FAIL: initial fence failed: {e}");
         local_ok = false;
     }
@@ -57,31 +68,29 @@ fn main() {
     }
 
     // ========================================================================
-    // Test 1: Shared lock on rank 0, flush, then unlock (via Drop).
+    // Test 1: Shared lock on rank 0, flush, then unlock when the closure ends.
     //
     // Every rank acquires a shared lock on rank 0's window. Because shared
     // locks allow multiple concurrent holders, this is valid even when all
     // ranks execute the block simultaneously.
     // ========================================================================
     {
-        let guard = match win.lock(LockType::Shared, 0) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL: Win::lock(Shared, 0) failed: {e}");
-                world.abort(1);
+        let locked = win.lock(LockType::Shared, 0, |e| {
+            if let Err(err) = e.flush(0) {
+                eprintln!("rank {rank}: FAIL: PassiveEpoch::flush failed: {err}");
+                local_ok = false;
             }
-        };
-
-        if let Err(e) = guard.flush() {
-            eprintln!("rank {rank}: FAIL: WinLockGuard::flush failed: {e}");
-            local_ok = false;
+            Ok(())
+        });
+        if let Err(e) = locked {
+            eprintln!("rank {rank}: FAIL: Win::lock(Shared, 0) failed: {e}");
+            world.abort(1);
         }
-        // guard drops here → MPI_Win_unlock(0, win)
     }
 
     world.barrier().expect("barrier after test 1 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::lock with LockGuard");
+        println!("PASS: Win::lock with PassiveEpoch");
     }
 
     // ========================================================================
@@ -91,19 +100,17 @@ fn main() {
     // barrier so the test progresses collectively.
     // ========================================================================
     if rank == 0 {
-        let guard = match win.lock(LockType::Exclusive, 0) {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL: Win::lock(Exclusive, 0) failed: {e}");
-                world.abort(1);
+        let locked = win.lock(LockType::Exclusive, 0, |e| {
+            if let Err(err) = e.flush(0) {
+                eprintln!("rank {rank}: FAIL: PassiveEpoch::flush (exclusive) failed: {err}");
+                local_ok = false;
             }
-        };
-
-        if let Err(e) = guard.flush() {
-            eprintln!("rank {rank}: FAIL: WinLockGuard::flush (exclusive) failed: {e}");
-            local_ok = false;
+            Ok(())
+        });
+        if let Err(e) = locked {
+            eprintln!("rank {rank}: FAIL: Win::lock(Exclusive, 0) failed: {e}");
+            world.abort(1);
         }
-        // guard drops here → MPI_Win_unlock(0, win)
     }
 
     world.barrier().expect("barrier after test 2 failed");
@@ -114,33 +121,93 @@ fn main() {
     // ========================================================================
     // Test 3: lock_all — shared locks on all ranks simultaneously.
     //
-    // All ranks call lock_all(), issue flush(0) and flush_all(), then drop
-    // the guard (→ unlock_all).
+    // All ranks call lock_all, issue flush(0) and flush_all(), then the
+    // closure ends (→ unlock_all).
     // ========================================================================
     {
-        let guard = match win.lock_all() {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL: Win::lock_all failed: {e}");
-                world.abort(1);
+        let locked = win.lock_all(|e| {
+            if let Err(err) = e.flush(0) {
+                eprintln!("rank {rank}: FAIL: PassiveEpoch::flush(0) failed: {err}");
+                local_ok = false;
             }
-        };
 
-        if let Err(e) = guard.flush(0) {
-            eprintln!("rank {rank}: FAIL: WinLockAllGuard::flush(0) failed: {e}");
-            local_ok = false;
+            if let Err(err) = e.flush_all() {
+                eprintln!("rank {rank}: FAIL: PassiveEpoch::flush_all failed: {err}");
+                local_ok = false;
+            }
+            Ok(())
+        });
+        if let Err(e) = locked {
+            eprintln!("rank {rank}: FAIL: Win::lock_all failed: {e}");
+            world.abort(1);
         }
-
-        if let Err(e) = guard.flush_all() {
-            eprintln!("rank {rank}: FAIL: WinLockAllGuard::flush_all failed: {e}");
-            local_ok = false;
-        }
-        // guard drops here → MPI_Win_unlock_all(win)
     }
 
     world.barrier().expect("barrier after test 3 failed");
     if rank == 0 && local_ok {
-        println!("PASS: Win::lock_all with WinLockAllGuard");
+        println!("PASS: Win::lock_all with PassiveEpoch");
+    }
+
+    // ========================================================================
+    // Test 4: the lock is released when the closure returns an error.
+    //
+    // The put names a rank outside the window's communicator, so it is rejected
+    // before any MPI call and the closure returns that error. Locking rank 0
+    // exclusively again succeeds only if the first lock was released.
+    // ========================================================================
+    if rank == 0 {
+        let buf = [1.0f64];
+        let epoch = win.lock(LockType::Exclusive, 0, |e| e.put(&buf, size, 0));
+        if !matches!(
+            epoch,
+            Err(Error::InvalidArgument {
+                arg: "target_rank",
+                ..
+            })
+        ) {
+            eprintln!("rank {rank}: FAIL: Win::lock [test 4] returned {epoch:?}");
+            local_ok = false;
+        }
+        if let Err(e) = win.lock(LockType::Exclusive, 0, |e| e.flush(0)) {
+            eprintln!("rank {rank}: FAIL: the lock was not released after an error: {e}");
+            local_ok = false;
+        }
+    }
+
+    world.barrier().expect("barrier after test 4 failed");
+    if rank == 0 && local_ok {
+        println!("PASS: Win::lock unlocks after the closure returns an error");
+    }
+
+    // ========================================================================
+    // Test 5: the lock is released when the closure panics.
+    //
+    // The panic is caught around the `lock` call, so it must reach that far.
+    // Locking rank 0 exclusively again succeeds only if the unwind released
+    // the first lock.
+    // ========================================================================
+    if rank == 0 {
+        // The panic is the test's input; keep its message out of the output.
+        std::panic::set_hook(Box::new(|_| {}));
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            win.lock(LockType::Exclusive, 0, |_| -> ferrompi::Result<()> {
+                panic!("unwind test")
+            })
+        }));
+        drop(std::panic::take_hook());
+        if unwound.is_ok() {
+            eprintln!("rank {rank}: FAIL: the panic did not reach the caller of Win::lock");
+            local_ok = false;
+        }
+        if let Err(e) = win.lock(LockType::Exclusive, 0, |e| e.flush(0)) {
+            eprintln!("rank {rank}: FAIL: the lock was not released on unwind: {e}");
+            local_ok = false;
+        }
+    }
+
+    world.barrier().expect("barrier after test 5 failed");
+    if rank == 0 && local_ok {
+        println!("PASS: Win::lock unlocks and keeps unwinding when the closure panics");
     }
 
     common::check(&world, local_ok, "test_rma_win_lock");

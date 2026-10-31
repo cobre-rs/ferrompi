@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Info, Mpi, ReduceOp, ThreadLevel, UserOp};
+use ferrompi::{CustomDatatype, Error, Mpi, ReduceOp, ThreadLevel, UserOp};
 
 fn main() {
     let mpi = Mpi::init().expect("MPI init failed");
@@ -47,11 +47,14 @@ fn main() {
     );
     let mut buf = [0i32; 1];
     assert!(
-        matches!(world.irecv(&mut buf, 0, 0), Err(Error::Finalized)),
+        matches!(
+            ferrompi::scope(|s| world.irecv(s, &mut buf, 0, 0).map(|_| ())),
+            Err(Error::Finalized)
+        ),
         "irecv after finalize must return Err(Finalized)"
     );
     assert!(
-        matches!(world.send_init(&buf, 0, 0), Err(Error::Finalized)),
+        matches!(world.send_init(buf.to_vec(), 0, 0), Err(Error::Finalized)),
         "send_init after finalize must return Err(Finalized)"
     );
     assert!(
@@ -71,22 +74,14 @@ fn main() {
         "barrier on a pre-finalize communicator must return Err(Finalized)"
     );
     assert!(
-        matches!(Info::new(), Err(Error::Finalized)),
-        "Info::new after finalize must return Err(Finalized)"
-    );
-    assert!(
-        matches!(
-            CustomDatatype::contiguous(2, DatatypeTag::F64),
-            Err(Error::Finalized)
-        ),
+        matches!(CustomDatatype::contiguous::<f64>(2), Err(Error::Finalized)),
         "CustomDatatype::contiguous after finalize must return Err(Finalized)"
     );
 
-    // More than the 16 op-table slots: each call's create fails at the
-    // guarded ferrompi_op_create_user, and the rollback must release the
-    // slot it allocated. If the rollback leaked slots, the table would be
-    // exhausted well before the 17th call and this would observe
-    // Err(ResourceExhausted) instead of Err(Finalized).
+    // More than the 16 op-table slots: each call is refused before it takes
+    // a slot. Calls that took slots and kept them would exhaust the table
+    // before the 17th, which would then return Err(ResourceExhausted)
+    // instead of Err(Finalized).
     for i in 0..17 {
         let r = UserOp::<f64>::new(|a: &[f64], b: &mut [f64]| {
             b[0] += a[0];

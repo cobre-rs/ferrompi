@@ -41,7 +41,7 @@ fn main() -> Result<()> {
         "topo.library_version() disagrees with Mpi::library_version()"
     );
 
-    #[cfg(feature = "numa")]
+    #[cfg(feature = "slurm")]
     {
         assert_eq!(
             topo.slurm().is_some(),

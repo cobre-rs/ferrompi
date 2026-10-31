@@ -5,6 +5,10 @@
 //! `A/A direct iallreduce+wait`, runs the direct arm on both sides; its delta is
 //! the noise floor the other cases' deltas are judged against.
 //!
+//! `FERROMPI_BENCH_LEVEL` selects the thread level MPI is initialized with:
+//! `funneled` (the default) or `multiple`. The binary prints one line and exits 0
+//! when the library does not provide the requested level.
+//!
 //! The direct arm links MPICH's integer handle values and calls only MPI-1/MPI-3
 //! symbols, so it links on every MPI implementation. At run time it runs only when
 //! `Mpi::library_version()` reports MPICH; on any other library it prints one line
@@ -16,9 +20,10 @@
 
 #![allow(non_snake_case)]
 
-use ferrompi::{Mpi, PersistentRequest, ReduceOp, Request};
+use ferrompi::{Mpi, PersistentRequest, ReduceOp, Request, ThreadLevel};
 use std::ffi::{c_int, c_void};
 use std::hint::black_box;
+use std::sync::Barrier;
 use std::time::Instant;
 
 /// MPICH's `MPI_Request` is a plain `int`.
@@ -28,6 +33,9 @@ type MpiRequest = c_int;
 const MPI_COMM_WORLD: c_int = 0x4400_0000;
 const MPI_DOUBLE: c_int = 0x4c00_080b;
 const MPI_SUM: c_int = 0x5800_0003;
+const MPI_UINT8_T: c_int = 0x4c00_013b;
+const MPI_UINT64_T: c_int = 0x4c00_083e;
+const MPI_BOR: c_int = 0x5800_0008;
 
 /// Interleaved rounds per case.
 const ROUNDS: usize = 21;
@@ -80,6 +88,36 @@ extern "C" {
         comm: c_int,
         request: *mut MpiRequest,
     ) -> c_int;
+    fn MPI_Allreduce(
+        sendbuf: *const c_void,
+        recvbuf: *mut c_void,
+        count: c_int,
+        datatype: c_int,
+        op: c_int,
+        comm: c_int,
+    ) -> c_int;
+    fn MPI_Allgatherv(
+        sendbuf: *const c_void,
+        sendcount: c_int,
+        sendtype: c_int,
+        recvbuf: *mut c_void,
+        recvcounts: *const c_int,
+        displs: *const c_int,
+        recvtype: c_int,
+        comm: c_int,
+    ) -> c_int;
+    fn MPI_Bcast(
+        buffer: *mut c_void,
+        count: c_int,
+        datatype: c_int,
+        root: c_int,
+        comm: c_int,
+    ) -> c_int;
+    fn MPI_Barrier(comm: c_int) -> c_int;
+    fn MPI_Comm_group(comm: c_int, group: *mut c_int) -> c_int;
+    fn MPI_Group_size(group: c_int, size: *mut c_int) -> c_int;
+    fn MPI_Group_rank(group: c_int, rank: *mut c_int) -> c_int;
+    fn MPI_Group_free(group: *mut c_int) -> c_int;
     fn MPI_Start(request: *mut MpiRequest) -> c_int;
     fn MPI_Startall(count: c_int, requests: *mut MpiRequest) -> c_int;
     fn MPI_Wait(request: *mut MpiRequest, status: *mut c_void) -> c_int;
@@ -155,8 +193,83 @@ fn compare(name: &str, iters: usize, mut direct: impl FnMut(), mut ferrompi: imp
     );
 }
 
+/// Run `f` on `threads` scoped threads released together by a barrier; each worker
+/// times its own `iters` calls and the result is the median of their ns/call. A
+/// single thread runs on the caller, the one thread that may call MPI at `Funneled`.
+fn ns_per_call_threads(threads: usize, iters: usize, f: &(impl Fn() + Sync)) -> f64 {
+    if threads == 1 {
+        return ns_per_call(iters, f);
+    }
+    let barrier = Barrier::new(threads);
+    let mut per_thread: Vec<f64> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    barrier.wait();
+                    ns_per_call(iters, f)
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().unwrap()).collect()
+    });
+    median(&mut per_thread)
+}
+
+/// `compare` with each round run on `threads` threads (see `ns_per_call_threads`).
+fn compare_threads(
+    name: &str,
+    threads: usize,
+    iters: usize,
+    direct: impl Fn() + Sync,
+    ferrompi: impl Fn() + Sync,
+) {
+    ns_per_call_threads(threads, iters / 4 + 1, &direct);
+    ns_per_call_threads(threads, iters / 4 + 1, &ferrompi);
+
+    let mut direct_ns = Vec::with_capacity(ROUNDS);
+    let mut ferrompi_ns = Vec::with_capacity(ROUNDS);
+    for round in 0..ROUNDS {
+        if round % 2 == 0 {
+            direct_ns.push(ns_per_call_threads(threads, iters, &direct));
+            ferrompi_ns.push(ns_per_call_threads(threads, iters, &ferrompi));
+        } else {
+            ferrompi_ns.push(ns_per_call_threads(threads, iters, &ferrompi));
+            direct_ns.push(ns_per_call_threads(threads, iters, &direct));
+        }
+    }
+
+    let a = median(&mut direct_ns);
+    let b = median(&mut ferrompi_ns);
+    println!(
+        "{name:<34} direct {a:>8.1} ns   ferrompi {b:>8.1} ns   delta {:>+7.1} ns",
+        b - a
+    );
+}
+
+/// A case with no direct arm: the median over `ROUNDS` rounds of
+/// `ns_per_call_threads`, after one warm-up round.
+fn ferrompi_threads(name: &str, threads: usize, iters: usize, ferrompi: impl Fn() + Sync) {
+    ns_per_call_threads(threads, iters / 4 + 1, &ferrompi);
+    let mut ns: Vec<f64> = (0..ROUNDS)
+        .map(|_| ns_per_call_threads(threads, iters, &ferrompi))
+        .collect();
+    println!("{name:<34} ferrompi {:>8.1} ns", median(&mut ns));
+}
+
 fn main() {
-    let mpi = Mpi::init().unwrap();
+    let requested =
+        std::env::var_os("FERROMPI_BENCH_LEVEL").map(|v| v.to_string_lossy().into_owned());
+    let level = match requested.as_deref() {
+        None | Some("funneled") => ThreadLevel::Funneled,
+        Some("multiple") => ThreadLevel::Multiple,
+        Some(other) => panic!("FERROMPI_BENCH_LEVEL must be funneled or multiple, got {other}"),
+    };
+
+    let mpi = Mpi::init_thread(level).unwrap();
+    if mpi.thread_level() != level {
+        println!("ffi_overhead: {level:?} not provided; skipped");
+        return;
+    }
     let world = mpi.world();
 
     assert_eq!(world.size(), 1, "ffi_overhead runs at one rank");
@@ -167,7 +280,7 @@ fn main() {
         println!("ffi_overhead: the direct arm needs MPICH's handle values; skipped on {line}");
         return;
     }
-    println!("# {line}; {ROUNDS} interleaved rounds per arm; median ns per call");
+    println!("# {line}; level {level:?}; {ROUNDS} interleaved rounds per arm; median ns per call");
 
     // A/A direct iallreduce+wait: both arms run the direct code, on separate
     // buffers, to establish the noise floor the other cases are judged against.
@@ -181,6 +294,146 @@ fn main() {
             || direct_iallreduce(&send_b, &mut recv_b),
         );
     }
+
+    // allreduce f64 sum: blocking MPI_Allreduce against world.allreduce.
+    {
+        let (send_d, mut recv_d) = ([1.0f64], [0.0f64]);
+        let (send_f, mut recv_f) = ([1.0f64], [0.0f64]);
+        compare(
+            "allreduce f64 sum",
+            20_000,
+            || {
+                // SAFETY: send_d/recv_d are live, distinct one-element f64 buffers;
+                // the blocking MPI_Allreduce is done with them when it returns.
+                unsafe {
+                    MPI_Allreduce(
+                        black_box(send_d.as_ptr()).cast(),
+                        black_box(recv_d.as_mut_ptr()).cast(),
+                        1,
+                        MPI_DOUBLE,
+                        MPI_SUM,
+                        MPI_COMM_WORLD,
+                    );
+                }
+            },
+            || {
+                world
+                    .allreduce(black_box(&send_f), black_box(&mut recv_f), ReduceOp::Sum)
+                    .unwrap();
+            },
+        );
+    }
+
+    // allreduce u64 bor: blocking MPI_Allreduce with MPI_BOR on u64.
+    {
+        let (send_d, mut recv_d) = ([1u64], [0u64]);
+        let (send_f, mut recv_f) = ([1u64], [0u64]);
+        compare(
+            "allreduce u64 bor",
+            20_000,
+            || {
+                // SAFETY: send_d/recv_d are live, distinct one-element u64 buffers;
+                // the blocking MPI_Allreduce is done with them when it returns.
+                unsafe {
+                    MPI_Allreduce(
+                        black_box(send_d.as_ptr()).cast(),
+                        black_box(recv_d.as_mut_ptr()).cast(),
+                        1,
+                        MPI_UINT64_T,
+                        MPI_BOR,
+                        MPI_COMM_WORLD,
+                    );
+                }
+            },
+            || {
+                world
+                    .allreduce(
+                        black_box(&send_f),
+                        black_box(&mut recv_f),
+                        ReduceOp::BitwiseOr,
+                    )
+                    .unwrap();
+            },
+        );
+    }
+
+    // allgatherv u8 x64: one rank contributes 64 bytes; counts/displs are
+    // read-only and shared by both arms.
+    {
+        let send_d = [7u8; 64];
+        let mut recv_d = [0u8; 64];
+        let send_f = [7u8; 64];
+        let mut recv_f = [0u8; 64];
+        let (counts, displs) = ([64 as c_int], [0 as c_int]);
+        compare(
+            "allgatherv u8 x64",
+            20_000,
+            || {
+                // SAFETY: send_d/recv_d are live, distinct 64-byte buffers; counts and
+                // displs hold one entry for the one rank and outlive the call; the
+                // blocking MPI_Allgatherv is done with all four when it returns.
+                unsafe {
+                    MPI_Allgatherv(
+                        black_box(send_d.as_ptr()).cast(),
+                        64,
+                        MPI_UINT8_T,
+                        black_box(recv_d.as_mut_ptr()).cast(),
+                        counts.as_ptr(),
+                        displs.as_ptr(),
+                        MPI_UINT8_T,
+                        MPI_COMM_WORLD,
+                    );
+                }
+            },
+            || {
+                world
+                    .allgatherv(black_box(&send_f), black_box(&mut recv_f), &counts, &displs)
+                    .unwrap();
+            },
+        );
+    }
+
+    // broadcast f64: root 0 is the only rank.
+    {
+        let mut data_d = [1.0f64];
+        let mut data_f = [1.0f64];
+        compare(
+            "broadcast f64",
+            20_000,
+            || {
+                // SAFETY: data_d is a live one-element f64 buffer; the blocking
+                // MPI_Bcast is done with it when it returns.
+                unsafe {
+                    MPI_Bcast(
+                        black_box(data_d.as_mut_ptr()).cast(),
+                        1,
+                        MPI_DOUBLE,
+                        0,
+                        MPI_COMM_WORLD,
+                    );
+                }
+            },
+            || {
+                world.broadcast(black_box(&mut data_f), 0).unwrap();
+            },
+        );
+    }
+
+    // barrier: no buffers.
+    compare(
+        "barrier",
+        20_000,
+        || {
+            // SAFETY: MPI_Barrier borrows no buffers; MPI_COMM_WORLD is valid while
+            // `mpi` is alive.
+            unsafe {
+                MPI_Barrier(MPI_COMM_WORLD);
+            }
+        },
+        || {
+            world.barrier().unwrap();
+        },
+    );
 
     // isend+irecv+wait: one self message each way.
     {
@@ -218,10 +471,14 @@ fn main() {
         let send_f = [1.0f64];
         let mut recv_f = [0.0f64];
         let ferrompi = || {
-            let rreq = world.irecv(black_box(&mut recv_f), 0, 0).unwrap();
-            let sreq = world.isend(black_box(&send_f), 0, 0).unwrap();
-            rreq.wait().unwrap();
-            sreq.wait().unwrap();
+            ferrompi::scope(|s| {
+                let rreq = world.irecv(s, black_box(&mut recv_f), 0, 0).unwrap();
+                let sreq = world.isend(s, black_box(&send_f), 0, 0).unwrap();
+                rreq.wait().unwrap();
+                sreq.wait().unwrap();
+                Ok(())
+            })
+            .unwrap();
         };
 
         compare("isend+irecv+wait", 20_000, direct, ferrompi);
@@ -265,16 +522,23 @@ fn main() {
 
         let send_f = [1.0f64; BATCH];
         let mut recv_f = [0.0f64; BATCH];
-        let mut reqs_f: Vec<Request> = Vec::with_capacity(2 * BATCH);
         let ferrompi = || {
-            for (i, x) in recv_f.chunks_mut(1).enumerate() {
-                reqs_f.push(world.irecv(x, 0, i as i32).unwrap());
-            }
-            for (i, x) in send_f.chunks(1).enumerate() {
-                reqs_f.push(world.isend(x, 0, i as i32).unwrap());
-            }
-            Request::wait_all(&mut reqs_f).unwrap();
-            reqs_f.clear();
+            ferrompi::scope(|s| {
+                let mut recv_chunks = recv_f.chunks_mut(1);
+                let mut send_chunks = send_f.chunks(1);
+                let mut reqs: [Request<'_>; 2 * BATCH] = std::array::from_fn(|i| {
+                    if i < BATCH {
+                        let x = recv_chunks.next().unwrap();
+                        world.irecv(s, x, 0, i as i32).unwrap()
+                    } else {
+                        let x = send_chunks.next().unwrap();
+                        world.isend(s, x, 0, (i - BATCH) as i32).unwrap()
+                    }
+                });
+                Request::wait_all(&mut reqs).unwrap();
+                Ok(())
+            })
+            .unwrap();
         };
 
         compare("8x(isend+irecv)+waitall", 5_000, direct, ferrompi);
@@ -289,11 +553,13 @@ fn main() {
             20_000,
             || direct_iallreduce(&send_d, &mut recv_d),
             || {
-                world
-                    .iallreduce(black_box(&send_f), black_box(&mut recv_f), ReduceOp::Sum)
-                    .unwrap()
-                    .wait()
-                    .unwrap();
+                ferrompi::scope(|s| {
+                    world
+                        .iallreduce(s, black_box(&send_f), black_box(&mut recv_f), ReduceOp::Sum)?
+                        .wait()?;
+                    Ok(())
+                })
+                .unwrap();
             },
         );
     }
@@ -327,10 +593,8 @@ fn main() {
             );
         }
 
-        let mut recv_f = [0.0f64];
-        let send_f = [1.0f64];
-        let mut recv_preq = world.recv_init(&mut recv_f, 0, 0).unwrap();
-        let mut send_preq = world.send_init(&send_f, 0, 0).unwrap();
+        let mut recv_preq = world.recv_init(vec![0.0f64], 0, 0).unwrap();
+        let mut send_preq = world.send_init(vec![1.0f64], 0, 0).unwrap();
 
         compare(
             "persistent start+wait",
@@ -399,14 +663,12 @@ fn main() {
             }
         }
 
-        let mut recv_f = [0.0f64; BATCH];
-        let send_f = [1.0f64; BATCH];
-        let mut preqs_f: Vec<PersistentRequest> = Vec::with_capacity(2 * BATCH);
-        for (i, x) in recv_f.chunks_mut(1).enumerate() {
-            preqs_f.push(world.recv_init(x, 0, i as i32).unwrap());
+        let mut preqs_f: Vec<PersistentRequest<f64>> = Vec::with_capacity(2 * BATCH);
+        for i in 0..BATCH {
+            preqs_f.push(world.recv_init(vec![0.0f64], 0, i as i32).unwrap());
         }
-        for (i, x) in send_f.chunks(1).enumerate() {
-            preqs_f.push(world.send_init(x, 0, i as i32).unwrap());
+        for i in 0..BATCH {
+            preqs_f.push(world.send_init(vec![1.0f64], 0, i as i32).unwrap());
         }
 
         compare(
@@ -435,6 +697,71 @@ fn main() {
             for req in &mut reqs_d {
                 MPI_Request_free(req);
             }
+        }
+    }
+
+    // group size / group rank: local group queries with no peer. One shared
+    // ferrompi Group; the direct arm's handle is copied into each closure. T>1 runs
+    // only at Multiple: at Funneled a non-init thread gets ThreadLevelViolation.
+    {
+        let mut g: c_int = 0;
+        // SAFETY: MPI_COMM_WORLD is valid while `mpi` is alive; g is an exclusive
+        // output.
+        unsafe {
+            MPI_Comm_group(MPI_COMM_WORLD, &mut g);
+        }
+        let group = world.group().unwrap();
+
+        let size_direct = move || {
+            let mut n: c_int = 0;
+            // SAFETY: g names the group created above, freed only after the last
+            // case; n is an exclusive output.
+            unsafe {
+                MPI_Group_size(g, &mut n);
+            }
+            black_box(n);
+        };
+        let size_ferrompi = || {
+            black_box(group.size().unwrap());
+        };
+        let rank_direct = move || {
+            let mut r: c_int = 0;
+            // SAFETY: g names the group created above, freed only after the last
+            // case; r is an exclusive output.
+            unsafe {
+                MPI_Group_rank(g, &mut r);
+            }
+            black_box(r);
+        };
+        let rank_ferrompi = || {
+            black_box(group.rank().unwrap());
+        };
+
+        compare_threads("group size T=1", 1, 20_000, size_direct, size_ferrompi);
+        compare_threads("group rank T=1", 1, 20_000, rank_direct, rank_ferrompi);
+        if level == ThreadLevel::Multiple {
+            compare_threads("group size T=4", 4, 20_000, size_direct, size_ferrompi);
+            compare_threads("group size T=8", 8, 20_000, size_direct, size_ferrompi);
+            compare_threads("group rank T=4", 4, 20_000, rank_direct, rank_ferrompi);
+            compare_threads("group rank T=8", 8, 20_000, rank_direct, rank_ferrompi);
+        }
+
+        // SAFETY: g is a live group handle and every thread that used it has been
+        // joined.
+        unsafe {
+            MPI_Group_free(&mut g);
+        }
+    }
+
+    // scope empty: a scope that holds no request, so the cost is the scope's own
+    // open and close; there is no direct arm. T=8 runs only at Multiple.
+    {
+        let empty = || {
+            ferrompi::scope(|_| Ok(())).unwrap();
+        };
+        ferrompi_threads("scope empty T=1", 1, 200_000, empty);
+        if level == ThreadLevel::Multiple {
+            ferrompi_threads("scope empty T=8", 8, 200_000, empty);
         }
     }
 }

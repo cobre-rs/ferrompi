@@ -1,22 +1,29 @@
 //! Point-to-point communication: send, recv, isend, irecv, the persistent send/recv
-//! constructors, sendrecv, probe, iprobe.
+//! constructors, sendrecv, probe, iprobe, mprobe, improbe.
 
 use crate::comm::Communicator;
-use crate::datatype::{buf, buf_mut, MpiDatatype, PlainData};
+use crate::datatype::{buf, buf_mut, tag_of, MpiDatatype, PlainData};
 use crate::datatype_builder::CustomDatatype;
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::persistent::PersistentRequest;
+use crate::message::Message;
+use crate::persistent::{vec_buf, vec_buf_mut, PersistentRequest};
 use crate::request::{Request, RequestKind};
-use crate::status::Status;
+use crate::rt;
+use crate::scope::Scope;
+use crate::status::{Source, Status, Tag};
 
 impl Communicator {
     /// Send a slice of values to another process.
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
     /// * `data` - Buffer to send
-    /// * `dest` - Destination rank
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag` - Message tag
     ///
     /// # Example
@@ -28,7 +35,13 @@ impl Communicator {
     /// let data = vec![1.0f64, 2.0, 3.0];
     /// world.send(&data, 1, 0).unwrap();
     /// ```
-    pub fn send<T: MpiDatatype>(&self, data: &[T], dest: i32, tag: i32) -> Result<()> {
+    pub fn send<T: MpiDatatype>(
+        &self,
+        data: &[T],
+        dest: impl Into<Source>,
+        tag: i32,
+    ) -> Result<()> {
+        let dest = dest.into().dest_code()?;
         let (p, n, dt) = buf(data);
         // SAFETY: this blocking call returns only after MPI is done with the buffer.
         let ret = unsafe { ffi::ferrompi_send(p, n, dt, dest, tag, self.handle) };
@@ -37,59 +50,61 @@ impl Communicator {
 
     /// Receive a slice of values from another process.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
-    /// Returns `(actual_source, actual_tag, actual_count)`; `actual_count` is
-    /// `-1` when the message is not a whole number of `T`.
+    /// Returns the receive's [`Status`]: `status.source` is the matched source,
+    /// `status.tag` the matched tag and `status.count` the number of `T` elements
+    /// received, `None` when the message is not a whole number of `T`. A receive
+    /// from `Source::ProcNull` returns `Source::ProcNull`, `Tag::Any` and
+    /// `Some(0)` on every MPI.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::Mpi;
+    /// # use ferrompi::{Mpi, Source, Tag};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// let mut buf = vec![0.0f64; 10];
-    /// let (source, tag, count) = world.recv(&mut buf, 0, 0).unwrap();
+    /// let status = world.recv(&mut buf, 0, 0).unwrap();
+    /// assert_eq!(status.source, Source::Rank(0));
+    /// assert_eq!(status.tag, Tag::Value(0));
+    /// assert_eq!(status.count, Some(10));
     /// ```
     pub fn recv<T: MpiDatatype>(
         &self,
         data: &mut [T],
-        source: i32,
-        tag: i32,
-    ) -> Result<(i32, i32, i64)> {
-        let mut actual_source: i32 = 0;
-        let mut actual_tag: i32 = 0;
-        let mut actual_count: i64 = 0;
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<Status> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
+        let mut status = ffi::FerrompiStatus::default();
 
         let (p, n, dt) = buf_mut(data);
         // SAFETY: this blocking call returns only after MPI is done with the buffer.
-        let ret = unsafe {
-            ffi::ferrompi_recv(
-                p,
-                n,
-                dt,
-                source,
-                tag,
-                self.handle,
-                &mut actual_source,
-                &mut actual_tag,
-                &mut actual_count,
-            )
-        };
+        let ret = unsafe { ffi::ferrompi_recv(p, n, dt, source, tag, self.handle, &mut status) };
         Error::check_with_op(ret, "recv")?;
-        Ok((actual_source, actual_tag, actual_count))
+        Ok(Status::from_ffi(status))
     }
 
     /// Nonblocking send.
     ///
     /// Initiates a send operation and returns immediately with a [`Request`]
-    /// handle. The send buffer **must not be modified** until the request is
-    /// completed via [`Request::wait()`] or [`Request::test()`].
+    /// that belongs to the scope `s`. `data` is borrowed for the scope, so it
+    /// cannot be modified until [`scope`](crate::scope) returns, and the scope
+    /// completes the send at the latest then; [`Request::wait()`] and
+    /// [`Request::test()`] are for the caller who needs it earlier.
+    ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
     ///
     /// # Arguments
     ///
-    /// * `data` - Buffer to send (must remain valid until the request completes)
-    /// * `dest` - Destination rank
+    /// * `s` - The scope that owns the request
+    /// * `data` - Buffer to send, borrowed for the scope
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag` - Message tag
     ///
     /// # Example
@@ -99,34 +114,50 @@ impl Communicator {
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// let data = vec![1.0f64, 2.0, 3.0];
-    /// let req = world.isend(&data, 1, 0).unwrap();
-    /// // ... do other work ...
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.isend(s, &data, 1, 0)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn isend<T: MpiDatatype>(&self, data: &[T], dest: i32, tag: i32) -> Result<Request> {
+    #[inline]
+    pub fn isend<'s, T: MpiDatatype>(
+        &self,
+        s: &'s Scope<'s, '_>,
+        data: &'s [T],
+        dest: impl Into<Source>,
+        tag: i32,
+    ) -> Result<Request<'s>> {
+        let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf(data);
-        // SAFETY: the returned Request does not borrow data; keeping it alive and unmodified
-        // until completion is the caller's obligation, which this signature does not enforce.
+        // SAFETY: data is borrowed for 's, and the scope completes every request it holds
+        // before 's ends, so the buffer outlives the span in which MPI may read it.
         let ret =
             unsafe { ffi::ferrompi_isend(p, n, dt, dest, tag, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "isend")?;
-        Ok(Request::new(request_handle, RequestKind::PointToPoint))
+        Ok(s.request(request_handle, RequestKind::PointToPoint))
     }
 
     /// Nonblocking receive.
     ///
     /// Initiates a receive operation and returns immediately with a [`Request`]
-    /// handle. The receive buffer **must not be read** until the request is
-    /// completed via [`Request::wait()`] or [`Request::test()`].
+    /// that belongs to the scope `s`. `data` is borrowed mutably for the scope:
+    /// it cannot be read until [`scope`](crate::scope) returns, even after the
+    /// request was waited, and the scope completes the receive at the latest
+    /// then.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// # Arguments
     ///
-    /// * `data` - Receive buffer (must remain valid until the request completes)
-    /// * `source` - Source rank (or -1 for any source)
-    /// * `tag` - Message tag (or -1 for any tag)
+    /// * `s` - The scope that owns the request
+    /// * `data` - Receive buffer, borrowed for the scope
+    /// * `source` - Source rank, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag` - Message tag or [`Tag::Any`]
     ///
     /// # Example
     ///
@@ -135,19 +166,34 @@ impl Communicator {
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// let mut buf = vec![0.0f64; 10];
-    /// let req = world.irecv(&mut buf, 0, 0).unwrap();
-    /// // ... do other work ...
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.irecv(s, &mut buf, 0, 0)?;
+    ///     // ... do other work ...
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
+    /// // buf is readable again here.
     /// ```
-    pub fn irecv<T: MpiDatatype>(&self, data: &mut [T], source: i32, tag: i32) -> Result<Request> {
+    #[inline]
+    pub fn irecv<'s, T: MpiDatatype>(
+        &self,
+        s: &'s Scope<'s, '_>,
+        data: &'s mut [T],
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<Request<'s>> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         let mut request_handle: i64 = 0;
         let (p, n, dt) = buf_mut(data);
-        // SAFETY: the returned Request does not borrow data; keeping it alive and unread
-        // until completion is the caller's obligation, which this signature does not enforce.
+        // SAFETY: data is borrowed mutably for 's, and the scope completes every request it
+        // holds before 's ends, so the buffer outlives the span in which MPI may write it and
+        // nothing reads it meanwhile.
         let ret =
             unsafe { ffi::ferrompi_irecv(p, n, dt, source, tag, self.handle, &mut request_handle) };
         Error::check_with_op(ret, "irecv")?;
-        Ok(Request::new(request_handle, RequestKind::PointToPoint))
+        Ok(s.request(request_handle, RequestKind::PointToPoint))
     }
 
     /// Blocking send-receive.
@@ -156,44 +202,57 @@ impl Communicator {
     /// single operation. This is useful for avoiding deadlocks in ring-style
     /// communication patterns where each process both sends and receives.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `recvtag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
-    /// Returns `(actual_source, actual_tag, actual_count)`; `actual_count` is
-    /// `-1` when the message is not a whole number of `T`.
+    /// Returns the [`Status`] of the receive half only; the send leaves no trace
+    /// in it. `status.source` is the matched source, `status.tag` the matched tag
+    /// and `status.count` the number of `T` elements received, `None` when the
+    /// message is not a whole number of `T`. With `Source::ProcNull` as the
+    /// source the receive half returns `Source::ProcNull`, `Tag::Any` and
+    /// `Some(0)` on every MPI, and the send still happens.
+    ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
     ///
     /// # Arguments
     ///
     /// * `send` - Buffer to send
-    /// * `dest` - Destination rank
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `sendtag` - Send message tag
     /// * `recv` - Receive buffer
-    /// * `source` - Source rank (or -1 for any source)
-    /// * `recvtag` - Receive message tag (or -1 for any tag)
+    /// * `source` - Source rank, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `recvtag` - Receive message tag or [`Tag::Any`]
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::Mpi;
+    /// # use ferrompi::{Mpi, Source, Tag};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// let send = vec![world.rank() as f64; 5];
     /// let mut recv = vec![0.0f64; 5];
     /// let next = (world.rank() + 1) % world.size();
     /// let prev = (world.rank() - 1 + world.size()) % world.size();
-    /// let (src, tag, count) = world.sendrecv(&send, next, 0, &mut recv, prev, 0).unwrap();
+    /// let status = world.sendrecv(&send, next, 0, &mut recv, prev, 0).unwrap();
+    /// assert_eq!(status.source, Source::Rank(prev));
+    /// assert_eq!(status.tag, Tag::Value(0));
+    /// assert_eq!(status.count, Some(5));
     /// ```
     pub fn sendrecv<T: MpiDatatype>(
         &self,
         send: &[T],
-        dest: i32,
+        dest: impl Into<Source>,
         sendtag: i32,
         recv: &mut [T],
-        source: i32,
-        recvtag: i32,
-    ) -> Result<(i32, i32, i64)> {
-        let mut actual_source: i32 = 0;
-        let mut actual_tag: i32 = 0;
-        let mut actual_count: i64 = 0;
+        source: impl Into<Source>,
+        recvtag: impl Into<Tag>,
+    ) -> Result<Status> {
+        let dest = dest.into().dest_code()?;
+        let source = source.into().source_code("source")?;
+        let recvtag = recvtag.into().tag_code("recvtag")?;
+        let mut status = ffi::FerrompiStatus::default();
 
         let (sp, sn, sdt) = buf(send);
         let (rp, rn, rdt) = buf_mut(recv);
@@ -212,23 +271,22 @@ impl Communicator {
                 source,
                 recvtag,
                 self.handle,
-                &mut actual_source,
-                &mut actual_tag,
-                &mut actual_count,
+                &mut status,
             )
         };
         Error::check_with_op(ret, "sendrecv")?;
-        Ok((actual_source, actual_tag, actual_count))
+        Ok(Status::from_ffi(status))
     }
 
     /// Blocking probe for an incoming message.
     ///
     /// Waits until a matching message is available and returns status
-    /// information (source rank, tag, element count) without actually
+    /// information (source, tag, element count) without actually
     /// receiving the message. This is useful for determining the size of an
     /// incoming message before allocating a receive buffer.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// The type parameter `T` determines the MPI datatype used by
     /// `MPI_Get_count` to compute the element count in the returned
@@ -236,45 +294,36 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `source` - Source rank to match (or -1 for any source)
-    /// * `tag` - Message tag to match (or -1 for any tag)
+    /// * `source` - Source rank to match, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag` - Message tag to match or [`Tag::Any`]
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::Mpi;
+    /// # use ferrompi::{Mpi, Source, Tag};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// // Probe for any incoming f64 message
-    /// let status = world.probe::<f64>(-1, -1).unwrap();
+    /// let status = world.probe::<f64>(Source::Any, Tag::Any).unwrap();
     /// // Allocate a buffer of exactly the right size
-    /// assert!(status.count >= 0, "message is not a whole number of f64");
-    /// let mut buf = vec![0.0f64; status.count as usize];
+    /// let mut buf = vec![0.0f64; status.count.expect("whole number of f64")];
     /// world.recv(&mut buf, status.source, status.tag).unwrap();
     /// ```
-    pub fn probe<T: MpiDatatype>(&self, source: i32, tag: i32) -> Result<Status> {
-        let mut actual_source: i32 = 0;
-        let mut actual_tag: i32 = 0;
-        let mut count: i64 = 0;
+    pub fn probe<T: MpiDatatype>(
+        &self,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<Status> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
+        let mut status = ffi::FerrompiStatus::default();
 
         // SAFETY: all arguments are scalar integers or exclusive output pointers; self.handle is owned.
         let ret = unsafe {
-            ffi::ferrompi_probe(
-                source,
-                tag,
-                self.handle,
-                &mut actual_source,
-                &mut actual_tag,
-                &mut count,
-                T::TAG as i32,
-            )
+            ffi::ferrompi_probe(source, tag, self.handle, &mut status, tag_of::<T>() as i32)
         };
         Error::check_with_op(ret, "probe")?;
-        Ok(Status {
-            source: actual_source,
-            tag: actual_tag,
-            count,
-        })
+        Ok(Status::from_ffi(status))
     }
 
     /// Nonblocking probe for an incoming message.
@@ -282,7 +331,8 @@ impl Communicator {
     /// Checks whether a matching message is available without blocking.
     /// Returns `Some(Status)` if a message is available, `None` otherwise.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// The type parameter `T` determines the MPI datatype used by
     /// `MPI_Get_count` to compute the element count in the returned
@@ -290,27 +340,30 @@ impl Communicator {
     ///
     /// # Arguments
     ///
-    /// * `source` - Source rank to match (or -1 for any source)
-    /// * `tag` - Message tag to match (or -1 for any tag)
+    /// * `source` - Source rank to match, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag` - Message tag to match or [`Tag::Any`]
     ///
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::Mpi;
+    /// # use ferrompi::{Mpi, Source, Tag};
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
     /// // Poll for an incoming f64 message without blocking
-    /// if let Some(status) = world.iprobe::<f64>(-1, -1).unwrap() {
-    ///     assert!(status.count >= 0, "message is not a whole number of f64");
-    ///     let mut buf = vec![0.0f64; status.count as usize];
+    /// if let Some(status) = world.iprobe::<f64>(Source::Any, Tag::Any).unwrap() {
+    ///     let mut buf = vec![0.0f64; status.count.expect("whole number of f64")];
     ///     world.recv(&mut buf, status.source, status.tag).unwrap();
     /// }
     /// ```
-    pub fn iprobe<T: MpiDatatype>(&self, source: i32, tag: i32) -> Result<Option<Status>> {
+    pub fn iprobe<T: MpiDatatype>(
+        &self,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<Option<Status>> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         let mut flag: i32 = 0;
-        let mut actual_source: i32 = 0;
-        let mut actual_tag: i32 = 0;
-        let mut count: i64 = 0;
+        let mut status = ffi::FerrompiStatus::default();
 
         // SAFETY: all arguments are scalar integers or exclusive output pointers; self.handle is owned.
         let ret = unsafe {
@@ -319,22 +372,166 @@ impl Communicator {
                 tag,
                 self.handle,
                 &mut flag,
-                &mut actual_source,
-                &mut actual_tag,
-                &mut count,
-                T::TAG as i32,
+                &mut status,
+                tag_of::<T>() as i32,
             )
         };
         Error::check_with_op(ret, "iprobe")?;
         if flag != 0 {
-            Ok(Some(Status {
-                source: actual_source,
-                tag: actual_tag,
-                count,
-            }))
+            Ok(Some(Status::from_ffi(status)))
         } else {
             Ok(None)
         }
+    }
+
+    /// Blocking matched probe.
+    ///
+    /// Waits until a matching message is available, takes it out of the receive
+    /// queue and returns it as a [`Message`] with its [`Status`]. Only
+    /// [`Message::mrecv`] on that handle receives it, so no other receive or
+    /// probe, on any thread, can take the message in between. Use it instead of
+    /// [`probe`](Self::probe) when several threads receive on one communicator.
+    ///
+    /// `Source::Any`/`Tag::Any` match any source/tag. `Source::ProcNull`
+    /// returns at once with a message that holds no data, whose status is
+    /// `Source::ProcNull`, `Tag::Any` and `Some(0)`.
+    ///
+    /// The type parameter `T` determines the MPI datatype used by
+    /// `MPI_Get_count` to compute the element count in the returned
+    /// [`Status`].
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Source rank to match, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag` - Message tag to match or [`Tag::Any`]
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidArgument`] for a negative rank or tag;
+    /// [`Error::Finalized`] once [`Mpi`](crate::Mpi) is being dropped;
+    /// [`Error::ThreadLevelViolation`] on a thread that may not call MPI at the
+    /// provided thread level; otherwise MPI's own error, for example class
+    /// [`MpiErrorClass::Rank`](crate::MpiErrorClass::Rank) for a rank outside
+    /// the communicator. No message is matched when an error is returned.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrompi::{Mpi, Source, Tag};
+    /// # let mpi = Mpi::init().unwrap();
+    /// # let world = mpi.world();
+    /// let (message, status) = world.mprobe::<f64>(Source::Any, Tag::Any).unwrap();
+    /// // Allocate a buffer of exactly the right size
+    /// let mut buf = vec![0.0f64; status.count.expect("whole number of f64")];
+    /// message.mrecv(&mut buf).unwrap();
+    /// ```
+    pub fn mprobe<T: MpiDatatype>(
+        &self,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<(Message, Status)> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
+        // Counted before the probe, so the probe's own in-flight count cannot be
+        // released before the message it matched is counted. Dropped, and so
+        // given back, on every return that built no `Message`.
+        let tokens =
+            rt::open_handle_tokens(1).map_err(|code| Error::from_code_with_op(code, "mprobe"))?;
+        let mut message: i64 = 0;
+        let mut bytes: i64 = -1;
+        let mut status = ffi::FerrompiStatus::default();
+
+        // SAFETY: all arguments are scalar integers or exclusive output pointers; self.handle is owned.
+        let ret = unsafe {
+            ffi::ferrompi_mprobe(
+                source,
+                tag,
+                self.handle,
+                &mut message,
+                &mut bytes,
+                &mut status,
+                tag_of::<T>() as i32,
+            )
+        };
+        Error::check_with_op(ret, "mprobe")?;
+        Ok((
+            Message::new(message, bytes, tokens.take()),
+            Status::from_ffi(status),
+        ))
+    }
+
+    /// Nonblocking matched probe.
+    ///
+    /// Checks whether a matching message is available without blocking. If one
+    /// is, takes it out of the receive queue and returns `Some` of the
+    /// [`Message`] and its [`Status`], as [`mprobe`](Self::mprobe) does;
+    /// otherwise returns `None`.
+    ///
+    /// `Source::Any`/`Tag::Any` match any source/tag. `Source::ProcNull` always
+    /// matches, with a message that holds no data.
+    ///
+    /// The type parameter `T` determines the MPI datatype used by
+    /// `MPI_Get_count` to compute the element count in the returned
+    /// [`Status`].
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Source rank to match, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag` - Message tag to match or [`Tag::Any`]
+    ///
+    /// # Errors
+    ///
+    /// As [`mprobe`](Self::mprobe).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use ferrompi::{Mpi, Source, Tag};
+    /// # let mpi = Mpi::init().unwrap();
+    /// # let world = mpi.world();
+    /// // Poll for an incoming f64 message without blocking
+    /// if let Some((message, status)) = world.improbe::<f64>(Source::Any, Tag::Any).unwrap() {
+    ///     let mut buf = vec![0.0f64; status.count.expect("whole number of f64")];
+    ///     message.mrecv(&mut buf).unwrap();
+    /// }
+    /// ```
+    pub fn improbe<T: MpiDatatype>(
+        &self,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<Option<(Message, Status)>> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
+        // Counted before the probe, as in `mprobe`, and given back when nothing
+        // matched.
+        let tokens =
+            rt::open_handle_tokens(1).map_err(|code| Error::from_code_with_op(code, "improbe"))?;
+        let mut flag: i32 = 0;
+        let mut message: i64 = 0;
+        let mut bytes: i64 = -1;
+        let mut status = ffi::FerrompiStatus::default();
+
+        // SAFETY: all arguments are scalar integers or exclusive output pointers; self.handle is owned.
+        let ret = unsafe {
+            ffi::ferrompi_improbe(
+                source,
+                tag,
+                self.handle,
+                &mut flag,
+                &mut message,
+                &mut bytes,
+                &mut status,
+                tag_of::<T>() as i32,
+            )
+        };
+        Error::check_with_op(ret, "improbe")?;
+        if flag == 0 {
+            return Ok(None);
+        }
+        Ok(Some((
+            Message::new(message, bytes, tokens.take()),
+            Status::from_ffi(status),
+        )))
     }
 
     // ========================================================================
@@ -344,15 +541,21 @@ impl Communicator {
     /// Initialize a persistent send operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// The caller must not modify `data` while the request is active
-    /// (between `start()` and `wait()`).
+    /// The request owns `data`; write the next iteration's values through
+    /// `buffer_mut()`, which refuses while the request is active (between
+    /// `start()` and `wait()`).
     ///
     /// Available in all MPI versions (MPI 1.1+).
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
-    /// * `data` - Send buffer (must remain valid for lifetime of handle)
-    /// * `dest` - Destination rank
+    /// * `data` - Send buffer, owned by the request; reach it with `buffer`/`buffer_mut`
+    ///   while the request is inactive, or take it back with `into_buffer`
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
     /// # Example
@@ -361,8 +564,7 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1.0f64; 100];
-    /// let mut req = world.send_init(&send, 1, 7).unwrap();
+    /// let mut req = world.send_init(vec![1.0f64; 100], 1, 7).unwrap();
     /// for _ in 0..10 {
     ///     req.start().unwrap();
     ///     req.wait().unwrap();
@@ -370,21 +572,21 @@ impl Communicator {
     /// ```
     pub fn send_init<T: MpiDatatype>(
         &self,
-        data: &[T],
-        dest: i32,
+        data: Vec<T>,
+        dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
+        let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
-        let (p, n, dt) = buf(data);
-        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
-        // is freed and does not borrow it; keeping `data` alive and untouched between
-        // start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (p, n, dt) = vec_buf(&data);
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, taken from the `Vec` by
+        // `vec_buf`. The request built below owns `data` under the ownership invariant
+        // documented on `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_send_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "send_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, data))
     }
 
     /// Initialize a persistent buffered-mode send operation.
@@ -406,10 +608,15 @@ impl Communicator {
     /// `MPI_BSEND_OVERHEAD` is implementation-specific (typically a few hundred
     /// bytes); use a generous margin in practice.
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
-    /// * `data` - Send buffer (must remain valid for lifetime of handle)
-    /// * `dest` - Destination rank
+    /// * `data` - Send buffer, owned by the request; reach it with `buffer`/`buffer_mut`
+    ///   while the request is inactive, or take it back with `into_buffer`
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
     /// # Example
@@ -421,8 +628,7 @@ impl Communicator {
     /// // Attach a 64 KiB buffer before creating buffered send requests.
     /// mpi.buffer_attach(vec![0u8; 64 * 1024].into_boxed_slice()).unwrap();
     ///
-    /// let send = vec![1.0f64; 100];
-    /// let mut req = world.bsend_init(&send, 1, 7).unwrap();
+    /// let mut req = world.bsend_init(vec![1.0f64; 100], 1, 7).unwrap();
     /// for _ in 0..10 {
     ///     req.start().unwrap();
     ///     req.wait().unwrap();
@@ -432,21 +638,21 @@ impl Communicator {
     /// ```
     pub fn bsend_init<T: MpiDatatype>(
         &self,
-        data: &[T],
-        dest: i32,
+        data: Vec<T>,
+        dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
+        let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
-        let (p, n, dt) = buf(data);
-        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
-        // is freed and does not borrow it; keeping `data` alive and untouched between
-        // start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (p, n, dt) = vec_buf(&data);
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, taken from the `Vec` by
+        // `vec_buf`. The request built below owns `data` under the ownership invariant
+        // documented on `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_bsend_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "bsend_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, data))
     }
 
     /// Initialize a persistent ready-mode send operation.
@@ -473,13 +679,18 @@ impl Communicator {
     /// `barrier()` after the receiver posts its receive and before the sender
     /// calls `start()` to ensure the ordering is respected.
     ///
-    /// The caller must not modify `data` while the request is active
-    /// (between `start()` and `wait()`).
+    /// The request owns `data`; `buffer_mut()` refuses while the request is
+    /// active (between `start()` and `wait()`).
+    ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
     ///
     /// # Arguments
     ///
-    /// * `data` - Send buffer (must remain valid for lifetime of handle)
-    /// * `dest` - Destination rank
+    /// * `data` - Send buffer, owned by the request; reach it with `buffer`/`buffer_mut`
+    ///   while the request is inactive, or take it back with `into_buffer`
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
     /// # Example
@@ -490,29 +701,28 @@ impl Communicator {
     /// # let world = mpi.world();
     /// // Safety contract: receiver must post recv before we call start().
     /// // Use a barrier to guarantee the ordering.
-    /// let send = vec![42.0f64; 10];
-    /// let mut req = world.rsend_init(&send, 1, 7).unwrap();
+    /// let mut req = world.rsend_init(vec![42.0f64; 10], 1, 7).unwrap();
     /// world.barrier().unwrap(); // recv on rank 1 is posted by now
     /// req.start().unwrap();
     /// req.wait().unwrap();
     /// ```
     pub fn rsend_init<T: MpiDatatype>(
         &self,
-        data: &[T],
-        dest: i32,
+        data: Vec<T>,
+        dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
+        let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
-        let (p, n, dt) = buf(data);
-        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
-        // is freed and does not borrow it; keeping `data` alive and untouched between
-        // start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (p, n, dt) = vec_buf(&data);
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, taken from the `Vec` by
+        // `vec_buf`. The request built below owns `data` under the ownership invariant
+        // documented on `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_rsend_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "rsend_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, data))
     }
 
     /// Initialize a persistent synchronous-mode send operation.
@@ -528,15 +738,20 @@ impl Communicator {
     /// to standard or buffered sends.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// The caller must not modify `data` while the request is active
-    /// (between `start()` and `wait()`).
+    /// The request owns `data`; `buffer_mut()` refuses while the request is
+    /// active (between `start()` and `wait()`).
     ///
     /// Available in all MPI versions (MPI 1.1+).
     ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
+    ///
     /// # Arguments
     ///
-    /// * `data` - Send buffer (must remain valid for lifetime of handle)
-    /// * `dest` - Destination rank
+    /// * `data` - Send buffer, owned by the request; reach it with `buffer`/`buffer_mut`
+    ///   while the request is inactive, or take it back with `into_buffer`
+    /// * `dest` - Destination rank or [`Source::ProcNull`]
     /// * `tag`  - Message tag
     ///
     /// # Example
@@ -545,8 +760,7 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let send = vec![1i32; 5];
-    /// let mut req = world.ssend_init(&send, 1, 3).unwrap();
+    /// let mut req = world.ssend_init(vec![1i32; 5], 1, 3).unwrap();
     /// for _ in 0..5 {
     ///     req.start().unwrap();
     ///     req.wait().unwrap(); // returns only after receiver has started
@@ -554,35 +768,37 @@ impl Communicator {
     /// ```
     pub fn ssend_init<T: MpiDatatype>(
         &self,
-        data: &[T],
-        dest: i32,
+        data: Vec<T>,
+        dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<PersistentRequest> {
+    ) -> Result<PersistentRequest<T>> {
+        let dest = dest.into().dest_code()?;
         let mut request_handle: i64 = 0;
-        let (p, n, dt) = buf(data);
-        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
-        // is freed and does not borrow it; keeping `data` alive and untouched between
-        // start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (p, n, dt) = vec_buf(&data);
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, taken from the `Vec` by
+        // `vec_buf`. The request built below owns `data` under the ownership invariant
+        // documented on `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_ssend_init(p, n, dt, dest, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "ssend_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, data))
     }
 
     /// Initialize a persistent receive operation.
     ///
     /// The returned handle can be started multiple times with `start()`.
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// Available in all MPI versions (MPI 1.1+).
     ///
     /// # Arguments
     ///
-    /// * `data`   - Receive buffer (must remain valid for lifetime of handle)
-    /// * `source` - Source rank, or `-1` for `MPI_ANY_SOURCE`
-    /// * `tag`    - Message tag, or `-1` for `MPI_ANY_TAG`
+    /// * `data`   - Receive buffer, owned by the request; reach it with `buffer`/`buffer_mut`
+    ///   while the request is inactive, or take it back with `into_buffer`
+    /// * `source` - Source rank, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag`    - Message tag or [`Tag::Any`]
     ///
     /// # Example
     ///
@@ -590,8 +806,7 @@ impl Communicator {
     /// # use ferrompi::Mpi;
     /// # let mpi = Mpi::init().unwrap();
     /// # let world = mpi.world();
-    /// let mut recv = vec![0.0f64; 100];
-    /// let mut req = world.recv_init(&mut recv, 0, 7).unwrap();
+    /// let mut req = world.recv_init(vec![0.0f64; 100], 0, 7).unwrap();
     /// for _ in 0..10 {
     ///     req.start().unwrap();
     ///     req.wait().unwrap();
@@ -599,21 +814,22 @@ impl Communicator {
     /// ```
     pub fn recv_init<T: MpiDatatype>(
         &self,
-        data: &mut [T],
-        source: i32,
-        tag: i32,
-    ) -> Result<PersistentRequest> {
+        mut data: Vec<T>,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<PersistentRequest<T>> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         let mut request_handle: i64 = 0;
-        let (p, n, dt) = buf_mut(data);
-        // SAFETY: the returned PersistentRequest records `data`'s pointer until the request
-        // is freed and does not borrow it; keeping `data` alive and untouched between
-        // start() and completion is the caller's documented obligation, which this
-        // signature does not enforce.
+        let (p, n, dt) = vec_buf_mut(&mut data);
+        // SAFETY: `p` and `n` describe `data`'s heap allocation, taken from the `Vec` by
+        // `vec_buf_mut`. The request built below owns `data` under the ownership invariant
+        // documented on `PersistentRequest::new_pair`.
         let ret = unsafe {
             ffi::ferrompi_recv_init(p, n, dt, source, tag, self.handle, &mut request_handle)
         };
         Error::check_with_op(ret, "recv_init")?;
-        Ok(PersistentRequest::new(request_handle))
+        Ok(PersistentRequest::new(request_handle, data))
     }
 
     /// Send a slice of values to another process using a committed custom datatype.
@@ -621,18 +837,22 @@ impl Communicator {
     /// This is the custom-datatype counterpart of [`send`](Self::send). The element
     /// type `T` must satisfy the [`PlainData`](crate::PlainData) bound. `datatype`'s
     /// extent must equal `size_of::<T>()` and its data must lie within one `T`,
-    /// otherwise the call returns [`Error::InvalidBuffer`] without calling MPI.
+    /// otherwise the call returns [`Error::InvalidArgument`] without calling MPI.
+    ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
     ///
     /// # Arguments
     ///
     /// * `buf`      - Buffer to send; MPI count is `buf.len()`
     /// * `datatype` - Committed custom datatype describing each element
-    /// * `dest`     - Destination rank
+    /// * `dest`     - Destination rank or [`Source::ProcNull`]
     /// * `tag`      - Message tag
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    /// - [`Error::InvalidArgument`] if `datatype`'s extent does not equal
     ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
     ///   locally before any MPI call. If a peer already posted the matching
     ///   receive, that peer operation is not cancelled.
@@ -640,7 +860,7 @@ impl Communicator {
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, StructField};
+    /// # use ferrompi::{CustomDatatype, Mpi, StructField};
     /// # let _mpi = Mpi::init().unwrap();
     /// # let world = _mpi.world();
     /// #[repr(C)]
@@ -649,8 +869,8 @@ impl Communicator {
     /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
     /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
-    ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
-    ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
+    ///     StructField::new::<f64>(1, 0),
+    ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
     /// let buf = [Pair { v: 1.23456789, i: 42 }];
     /// world.send_custom(&buf, &dt, 1, 0).unwrap();
@@ -659,9 +879,10 @@ impl Communicator {
         &self,
         buf: &[T],
         datatype: &CustomDatatype,
-        dest: i32,
+        dest: impl Into<Source>,
         tag: i32,
     ) -> Result<()> {
+        let dest = dest.into().dest_code()?;
         datatype.check_layout::<T>()?;
         // SAFETY: buf.as_ptr() is valid for buf.len() elements; datatype.handle is an owned,
         // committed CustomDatatype; the buffer outlives this blocking call; check_layout above
@@ -684,23 +905,24 @@ impl Communicator {
     /// This is the custom-datatype counterpart of [`recv`](Self::recv). The element
     /// type `T` must satisfy the [`PlainData`](crate::PlainData) bound. `datatype`'s
     /// extent must equal `size_of::<T>()` and its data must lie within one `T`,
-    /// otherwise the call returns [`Error::InvalidBuffer`] without calling MPI.
+    /// otherwise the call returns [`Error::InvalidArgument`] without calling MPI.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// Returns a [`Status`] whose `count` is the number of `T` elements
-    /// received; `count` is `-1` when the message is not a whole number of `T`.
+    /// received; `count` is `None` when the message is not a whole number of `T`.
     ///
     /// # Arguments
     ///
     /// * `buf`      - Receive buffer; MPI count is `buf.len()`
     /// * `datatype` - Committed custom datatype describing each element
-    /// * `source`   - Source rank (or -1 for any source)
-    /// * `tag`      - Message tag (or -1 for any tag)
+    /// * `source`   - Source rank, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag`      - Message tag or [`Tag::Any`]
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    /// - [`Error::InvalidArgument`] if `datatype`'s extent does not equal
     ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
     ///   locally before any MPI call. If a peer already posted the matching
     ///   send, that peer operation is not cancelled.
@@ -708,7 +930,7 @@ impl Communicator {
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, StructField};
+    /// # use ferrompi::{CustomDatatype, Mpi, StructField};
     /// # let _mpi = Mpi::init().unwrap();
     /// # let world = _mpi.world();
     /// #[repr(C)]
@@ -717,24 +939,24 @@ impl Communicator {
     /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
     /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
-    ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
-    ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
+    ///     StructField::new::<f64>(1, 0),
+    ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
     /// let mut buf = [Pair { v: 0.0, i: 0 }];
     /// let status = world.recv_custom(&mut buf, &dt, 0, 0).unwrap();
-    /// assert_eq!(status.count, 1);
+    /// assert_eq!(status.count, Some(1));
     /// ```
     pub fn recv_custom<T: PlainData>(
         &self,
         buf: &mut [T],
         datatype: &CustomDatatype,
-        source: i32,
-        tag: i32,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
     ) -> Result<Status> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         datatype.check_layout::<T>()?;
-        let mut actual_source: i32 = 0;
-        let mut actual_tag: i32 = 0;
-        let mut actual_count: i64 = 0;
+        let mut status = ffi::FerrompiStatus::default();
 
         // SAFETY: buf.as_mut_ptr() is exclusively writable for buf.len() elements; datatype.handle
         // is an owned, committed CustomDatatype; the buffer outlives this blocking call; the
@@ -748,40 +970,41 @@ impl Communicator {
                 source,
                 tag,
                 self.handle,
-                &mut actual_source,
-                &mut actual_tag,
-                &mut actual_count,
+                &mut status,
             )
         };
         Error::check_with_op(ret, "recv_custom")?;
-        Ok(Status {
-            source: actual_source,
-            tag: actual_tag,
-            count: actual_count,
-        })
+        Ok(Status::from_ffi(status))
     }
 
     /// Nonblocking send using a committed custom datatype.
     ///
     /// This is the custom-datatype counterpart of [`isend`](Self::isend). The
-    /// send buffer **must not be modified** until the request is completed via
-    /// [`Request::wait()`] or [`Request::test()`].
+    /// request belongs to the scope `s`, and `buf` and `datatype` are borrowed
+    /// for it: the buffer cannot be modified, and the datatype cannot be freed,
+    /// until [`scope`](crate::scope) returns. The scope completes the send at
+    /// the latest then.
     ///
     /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound.
     /// `datatype`'s extent must equal `size_of::<T>()` and its data must lie
-    /// within one `T`, otherwise the call returns [`Error::InvalidBuffer`]
+    /// within one `T`, otherwise the call returns [`Error::InvalidArgument`]
     /// without calling MPI.
+    ///
+    /// A `dest` of `Source::ProcNull` sends nothing and completes at once;
+    /// `Source::Any` or a negative rank returns [`Error::InvalidArgument`] before
+    /// any MPI call.
     ///
     /// # Arguments
     ///
-    /// * `buf`      - Buffer to send (must remain valid until the request completes)
-    /// * `datatype` - Committed custom datatype describing each element
-    /// * `dest`     - Destination rank
+    /// * `s`        - The scope that owns the request
+    /// * `buf`      - Buffer to send, borrowed for the scope
+    /// * `datatype` - Committed custom datatype describing each element, borrowed for the scope
+    /// * `dest`     - Destination rank or [`Source::ProcNull`]
     /// * `tag`      - Message tag
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    /// - [`Error::InvalidArgument`] if `datatype`'s extent does not equal
     ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
     ///   locally before any MPI call. If a peer already posted the matching
     ///   receive, that peer operation is not cancelled.
@@ -789,7 +1012,7 @@ impl Communicator {
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, StructField};
+    /// # use ferrompi::{CustomDatatype, Mpi, StructField};
     /// # let _mpi = Mpi::init().unwrap();
     /// # let world = _mpi.world();
     /// #[repr(C)]
@@ -798,25 +1021,34 @@ impl Communicator {
     /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
     /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
-    ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
-    ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
+    ///     StructField::new::<f64>(1, 0),
+    ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
     /// let buf = [Pair { v: 1.23456789, i: 42 }];
-    /// let req = world.isend_custom(&buf, &dt, 1, 0).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.isend_custom(s, &buf, &dt, 1, 0)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn isend_custom<T: PlainData>(
+    #[inline]
+    pub fn isend_custom<'s, T: PlainData>(
         &self,
-        buf: &[T],
-        datatype: &CustomDatatype,
-        dest: i32,
+        s: &'s Scope<'s, '_>,
+        buf: &'s [T],
+        datatype: &'s CustomDatatype,
+        dest: impl Into<Source>,
         tag: i32,
-    ) -> Result<Request> {
+    ) -> Result<Request<'s>> {
+        let dest = dest.into().dest_code()?;
         datatype.check_layout::<T>()?;
         let mut request_handle: i64 = 0;
         // SAFETY: buf.as_ptr() is valid for buf.len() elements; datatype.handle is an owned,
-        // committed CustomDatatype; the caller must keep the buffer alive until Request completion;
-        // check_layout above guarantees each element's data lies within its T, so MPI touches only buf.
+        // committed CustomDatatype; buf and datatype are borrowed for 's, and the scope completes
+        // every request it holds before 's ends, so both outlive the span in which MPI may use
+        // them; check_layout above guarantees each element's data lies within its T, so MPI
+        // touches only buf.
         let ret = unsafe {
             ffi::ferrompi_isend_custom(
                 buf.as_ptr().cast::<std::ffi::c_void>(),
@@ -829,32 +1061,36 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "isend_custom")?;
-        Ok(Request::new(request_handle, RequestKind::PointToPoint))
+        Ok(s.request(request_handle, RequestKind::PointToPoint))
     }
 
     /// Nonblocking receive using a committed custom datatype.
     ///
     /// This is the custom-datatype counterpart of [`irecv`](Self::irecv). The
-    /// receive buffer **must not be read** until the request is completed via
-    /// [`Request::wait()`] or [`Request::test()`].
+    /// request belongs to the scope `s`, and `buf` and `datatype` are borrowed
+    /// for it: the buffer cannot be read, even after the request was waited, and
+    /// the datatype cannot be freed, until [`scope`](crate::scope) returns. The
+    /// scope completes the receive at the latest then.
     ///
-    /// Use `source = -1` for `MPI_ANY_SOURCE` and `tag = -1` for `MPI_ANY_TAG`.
+    /// `Source::Any`/`Tag::Any` match any source/tag; `Source::ProcNull` completes
+    /// at once with no data.
     ///
     /// The element type `T` must satisfy the [`PlainData`](crate::PlainData) bound.
     /// `datatype`'s extent must equal `size_of::<T>()` and its data must lie
-    /// within one `T`, otherwise the call returns [`Error::InvalidBuffer`]
+    /// within one `T`, otherwise the call returns [`Error::InvalidArgument`]
     /// without calling MPI.
     ///
     /// # Arguments
     ///
-    /// * `buf`      - Receive buffer (must remain valid until the request completes)
-    /// * `datatype` - Committed custom datatype describing each element
-    /// * `source`   - Source rank (or -1 for any source)
-    /// * `tag`      - Message tag (or -1 for any tag)
+    /// * `s`        - The scope that owns the request
+    /// * `buf`      - Receive buffer, borrowed for the scope
+    /// * `datatype` - Committed custom datatype describing each element, borrowed for the scope
+    /// * `source`   - Source rank, [`Source::Any`] or [`Source::ProcNull`]
+    /// * `tag`      - Message tag or [`Tag::Any`]
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidBuffer`] if `datatype`'s extent does not equal
+    /// - [`Error::InvalidArgument`] if `datatype`'s extent does not equal
     ///   `size_of::<T>()`, or its data does not lie within one `T` — checked
     ///   locally before any MPI call. If a peer already posted the matching
     ///   send, that peer operation is not cancelled.
@@ -862,7 +1098,7 @@ impl Communicator {
     /// # Example
     ///
     /// ```no_run
-    /// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, StructField};
+    /// # use ferrompi::{CustomDatatype, Mpi, StructField};
     /// # let _mpi = Mpi::init().unwrap();
     /// # let world = _mpi.world();
     /// #[repr(C)]
@@ -871,26 +1107,36 @@ impl Communicator {
     /// // SAFETY: Pair is #[repr(C)] of an f64 and an i32, so any bit pattern is valid.
     /// unsafe impl ferrompi::PlainData for Pair {}
     /// let dt = CustomDatatype::create_struct(&[
-    ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
-    ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
+    ///     StructField::new::<f64>(1, 0),
+    ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
     /// let mut buf = [Pair { v: 0.0, i: 0 }];
-    /// let req = world.irecv_custom(&mut buf, &dt, 0, 0).unwrap();
-    /// req.wait().unwrap();
+    /// ferrompi::scope(|s| {
+    ///     let req = world.irecv_custom(s, &mut buf, &dt, 0, 0)?;
+    ///     req.wait()?;
+    ///     Ok(())
+    /// })
+    /// .unwrap();
     /// ```
-    pub fn irecv_custom<T: PlainData>(
+    #[inline]
+    pub fn irecv_custom<'s, T: PlainData>(
         &self,
-        buf: &mut [T],
-        datatype: &CustomDatatype,
-        source: i32,
-        tag: i32,
-    ) -> Result<Request> {
+        s: &'s Scope<'s, '_>,
+        buf: &'s mut [T],
+        datatype: &'s CustomDatatype,
+        source: impl Into<Source>,
+        tag: impl Into<Tag>,
+    ) -> Result<Request<'s>> {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
         datatype.check_layout::<T>()?;
         let mut request_handle: i64 = 0;
         // SAFETY: buf.as_mut_ptr() is exclusively writable for buf.len() elements; datatype.handle
-        // is an owned, committed CustomDatatype; the caller must not read the buffer until
-        // Request completion; the PlainData bound on T makes any bytes MPI writes a valid T, and
-        // check_layout above guarantees each element's data lies within its T, so MPI touches only buf.
+        // is an owned, committed CustomDatatype; buf and datatype are borrowed for 's, and the scope
+        // completes every request it holds before 's ends, so both outlive the span in which MPI
+        // may use them and nothing reads buf meanwhile; the PlainData bound on T makes any bytes
+        // MPI writes a valid T, and check_layout above guarantees each element's data lies within
+        // its T, so MPI touches only buf.
         let ret = unsafe {
             ffi::ferrompi_irecv_custom(
                 buf.as_mut_ptr().cast::<std::ffi::c_void>(),
@@ -903,6 +1149,6 @@ impl Communicator {
             )
         };
         Error::check_with_op(ret, "irecv_custom")?;
-        Ok(Request::new(request_handle, RequestKind::PointToPoint))
+        Ok(s.request(request_handle, RequestKind::PointToPoint))
     }
 }

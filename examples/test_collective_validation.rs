@@ -20,44 +20,79 @@ use ferrompi::{Error, Mpi, PersistentRequest, Request, Result};
 
 mod common;
 
-fn check_unit(result: Result<()>, rank: i32, method: &str, local_ok: &mut bool) {
-    if !matches!(result, Err(Error::InvalidBuffer)) {
-        eprintln!("rank {rank}: {method}: expected Err(InvalidBuffer), got {result:?}");
+struct Expect {
+    variant: &'static str,
+    matches: fn(&Error) -> bool,
+}
+
+const BUFFER_SIZE: Expect = Expect {
+    variant: "BufferSize",
+    matches: |e| matches!(e, Error::BufferSize { .. }),
+};
+
+const INVALID_ARGUMENT: Expect = Expect {
+    variant: "InvalidArgument",
+    matches: |e| matches!(e, Error::InvalidArgument { .. }),
+};
+
+fn check_unit(result: Result<()>, rank: i32, method: &str, expected: &Expect, local_ok: &mut bool) {
+    if !matches!(&result, Err(e) if (expected.matches)(e)) {
+        eprintln!(
+            "rank {rank}: {method}: expected Err({}), got {result:?}",
+            expected.variant
+        );
         *local_ok = false;
     }
 }
 
-fn check_request(result: Result<Request>, rank: i32, method: &str, local_ok: &mut bool) {
+fn check_request(
+    result: Result<Request<'_>>,
+    rank: i32,
+    method: &str,
+    expected: &Expect,
+    local_ok: &mut bool,
+) {
     match result {
-        Err(Error::InvalidBuffer) => {}
+        Err(e) if (expected.matches)(&e) => {}
         Err(e) => {
-            eprintln!("rank {rank}: {method}: expected Err(InvalidBuffer), got Err({e:?})");
+            eprintln!(
+                "rank {rank}: {method}: expected Err({}), got Err({e:?})",
+                expected.variant
+            );
             *local_ok = false;
         }
         Ok(req) => {
             req.wait().expect("wait on unexpectedly-accepted request");
-            eprintln!("rank {rank}: {method}: expected Err(InvalidBuffer), got Ok(Request)");
+            eprintln!(
+                "rank {rank}: {method}: expected Err({}), got Ok(Request)",
+                expected.variant
+            );
             *local_ok = false;
         }
     }
 }
 
 fn check_persistent(
-    result: Result<PersistentRequest>,
+    result: Result<PersistentRequest<i32>>,
     rank: i32,
     method: &str,
+    expected: &Expect,
     local_ok: &mut bool,
 ) {
     match result {
-        Err(Error::InvalidBuffer) => {}
+        Err(e) if (expected.matches)(&e) => {}
         Err(e) => {
-            eprintln!("rank {rank}: {method}: expected Err(InvalidBuffer), got Err({e:?})");
+            eprintln!(
+                "rank {rank}: {method}: expected Err({}), got Err({e:?})",
+                expected.variant
+            );
             *local_ok = false;
         }
         Ok(req) => {
             drop(req);
             eprintln!(
-                "rank {rank}: {method}: expected Err(InvalidBuffer), got Ok(PersistentRequest)"
+                "rank {rank}: {method}: expected Err({}), got Ok(PersistentRequest)",
+                expected.variant
             );
             *local_ok = false;
         }
@@ -78,15 +113,18 @@ fn main() {
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.gather(&send, &mut backing[..2 * size - 1], 0);
-        check_unit(result, rank, "gather", &mut local_ok);
+        check_unit(result, rank, "gather", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
-        let result = world.igather(&send, &mut backing[..2 * size - 1], 0);
-        check_request(result, rank, "igather", &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.igather(s, &send, &mut backing[..2 * size - 1], 0);
+            check_request(result, rank, "igather", &BUFFER_SIZE, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for igather");
 
-        let mut backing = vec![0i32; 2 * size];
-        let result = world.gather_init(&send, &mut backing[..2 * size - 1], 0);
-        check_persistent(result, rank, "gather_init", &mut local_ok);
+        let result = world.gather_init(send, vec![0i32; 2 * size - 1], 0);
+        check_persistent(result, rank, "gather_init", &BUFFER_SIZE, &mut local_ok);
     }
 
     // allgather / iallgather / allgather_init: every rank, recv one element short.
@@ -95,15 +133,18 @@ fn main() {
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.allgather(&send, &mut backing[..2 * size - 1]);
-        check_unit(result, rank, "allgather", &mut local_ok);
+        check_unit(result, rank, "allgather", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
-        let result = world.iallgather(&send, &mut backing[..2 * size - 1]);
-        check_request(result, rank, "iallgather", &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.iallgather(s, &send, &mut backing[..2 * size - 1]);
+            check_request(result, rank, "iallgather", &BUFFER_SIZE, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for iallgather");
 
-        let mut backing = vec![0i32; 2 * size];
-        let result = world.allgather_init(&send, &mut backing[..2 * size - 1]);
-        check_persistent(result, rank, "allgather_init", &mut local_ok);
+        let result = world.allgather_init(send, vec![0i32; 2 * size - 1]);
+        check_persistent(result, rank, "allgather_init", &BUFFER_SIZE, &mut local_ok);
     }
 
     // scatter / iscatter / scatter_init: root only, send one element short.
@@ -112,15 +153,18 @@ fn main() {
 
         let send_backing = vec![1i32; 2 * size];
         let result = world.scatter(&send_backing[..2 * size - 1], &mut recv, 0);
-        check_unit(result, rank, "scatter", &mut local_ok);
+        check_unit(result, rank, "scatter", &BUFFER_SIZE, &mut local_ok);
 
         let send_backing = vec![1i32; 2 * size];
-        let result = world.iscatter(&send_backing[..2 * size - 1], &mut recv, 0);
-        check_request(result, rank, "iscatter", &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.iscatter(s, &send_backing[..2 * size - 1], &mut recv, 0);
+            check_request(result, rank, "iscatter", &BUFFER_SIZE, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for iscatter");
 
-        let send_backing = vec![1i32; 2 * size];
-        let result = world.scatter_init(&send_backing[..2 * size - 1], &mut recv, 0);
-        check_persistent(result, rank, "scatter_init", &mut local_ok);
+        let result = world.scatter_init(vec![1i32; 2 * size - 1], recv, 0);
+        check_persistent(result, rank, "scatter_init", &BUFFER_SIZE, &mut local_ok);
     }
 
     // gatherv / igatherv / gatherv_init: root only, recv one element short of what
@@ -132,16 +176,25 @@ fn main() {
 
         let mut backing = vec![0i32; 2 * size];
         let result = world.gatherv(&send, &mut backing[..2 * size - 1], &recvcounts, &displs, 0);
-        check_unit(result, rank, "gatherv", &mut local_ok);
+        check_unit(result, rank, "gatherv", &BUFFER_SIZE, &mut local_ok);
 
         let mut backing = vec![0i32; 2 * size];
-        let result = world.igatherv(&send, &mut backing[..2 * size - 1], &recvcounts, &displs, 0);
-        check_request(result, rank, "igatherv", &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.igatherv(
+                s,
+                &send,
+                &mut backing[..2 * size - 1],
+                &recvcounts,
+                &displs,
+                0,
+            );
+            check_request(result, rank, "igatherv", &BUFFER_SIZE, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for igatherv");
 
-        let mut backing = vec![0i32; 2 * size];
-        let result =
-            world.gatherv_init(&send, &mut backing[..2 * size - 1], &recvcounts, &displs, 0);
-        check_persistent(result, rank, "gatherv_init", &mut local_ok);
+        let result = world.gatherv_init(send, vec![0i32; 2 * size - 1], &recvcounts, &displs, 0);
+        check_persistent(result, rank, "gatherv_init", &BUFFER_SIZE, &mut local_ok);
     }
 
     // scatterv / iscatterv / scatterv_init: root only, sendcounts/displs one entry
@@ -159,25 +212,30 @@ fn main() {
             &mut recv,
             0,
         );
-        check_unit(result, rank, "scatterv", &mut local_ok);
+        check_unit(result, rank, "scatterv", &BUFFER_SIZE, &mut local_ok);
 
-        let result = world.iscatterv(
-            &send,
-            &mut recv,
-            &sendcounts_full[..size - 1],
-            &displs_full[..size - 1],
-            0,
-        );
-        check_request(result, rank, "iscatterv", &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.iscatterv(
+                s,
+                &send,
+                &sendcounts_full[..size - 1],
+                &displs_full[..size - 1],
+                &mut recv,
+                0,
+            );
+            check_request(result, rank, "iscatterv", &BUFFER_SIZE, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for iscatterv");
 
         let result = world.scatterv_init(
-            &send,
+            send,
             &sendcounts_full[..size - 1],
             &displs_full[..size - 1],
-            &mut recv,
+            recv,
             0,
         );
-        check_persistent(result, rank, "scatterv_init", &mut local_ok);
+        check_persistent(result, rank, "scatterv_init", &BUFFER_SIZE, &mut local_ok);
     }
 
     // allgatherv / iallgatherv / allgatherv_init: every rank, displs[0] negative
@@ -190,15 +248,30 @@ fn main() {
 
         let mut backing = vec![0i32; size + 1];
         let result = world.allgatherv(&send, &mut backing[1..], &recvcounts, &displs);
-        check_unit(result, rank, "allgatherv", &mut local_ok);
+        check_unit(result, rank, "allgatherv", &INVALID_ARGUMENT, &mut local_ok);
 
         let mut backing = vec![0i32; size + 1];
-        let result = world.iallgatherv(&send, &mut backing[1..], &recvcounts, &displs);
-        check_request(result, rank, "iallgatherv", &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.iallgatherv(s, &send, &mut backing[1..], &recvcounts, &displs);
+            check_request(
+                result,
+                rank,
+                "iallgatherv",
+                &INVALID_ARGUMENT,
+                &mut local_ok,
+            );
+            Ok(())
+        })
+        .expect("scope for iallgatherv");
 
-        let mut backing = vec![0i32; size + 1];
-        let result = world.allgatherv_init(&send, &mut backing[1..], &recvcounts, &displs);
-        check_persistent(result, rank, "allgatherv_init", &mut local_ok);
+        let result = world.allgatherv_init(send, vec![0i32; size], &recvcounts, &displs);
+        check_persistent(
+            result,
+            rank,
+            "allgatherv_init",
+            &INVALID_ARGUMENT,
+            &mut local_ok,
+        );
     }
 
     // alltoallv / ialltoallv / alltoallv_init: every rank, recvcounts[0] negative.
@@ -219,27 +292,31 @@ fn main() {
             &recvcounts,
             &rdispls,
         );
-        check_unit(result, rank, "alltoallv", &mut local_ok);
+        check_unit(result, rank, "alltoallv", &INVALID_ARGUMENT, &mut local_ok);
 
-        let result = world.ialltoallv(
-            &send,
-            &mut recv,
-            &sendcounts,
-            &sdispls,
-            &recvcounts,
-            &rdispls,
-        );
-        check_request(result, rank, "ialltoallv", &mut local_ok);
+        ferrompi::scope(|s| {
+            let result = world.ialltoallv(
+                s,
+                &send,
+                &sendcounts,
+                &sdispls,
+                &mut recv,
+                &recvcounts,
+                &rdispls,
+            );
+            check_request(result, rank, "ialltoallv", &INVALID_ARGUMENT, &mut local_ok);
+            Ok(())
+        })
+        .expect("scope for ialltoallv");
 
-        let result = world.alltoallv_init(
-            &send,
-            &sendcounts,
-            &sdispls,
-            &mut recv,
-            &recvcounts,
-            &rdispls,
+        let result = world.alltoallv_init(send, &sendcounts, &sdispls, recv, &recvcounts, &rdispls);
+        check_persistent(
+            result,
+            rank,
+            "alltoallv_init",
+            &INVALID_ARGUMENT,
+            &mut local_ok,
         );
-        check_persistent(result, rank, "alltoallv_init", &mut local_ok);
     }
 
     common::check(&world, local_ok, "test_collective_validation");

@@ -1,6 +1,6 @@
 # ADR-0004: PersistentRequest Lifecycle and Buffer-Lifetime Invariants
 
-**Status:** Accepted — 2026-05-17; amended 2026-09-24
+**Status:** Accepted — 2026-05-17; amended 2026-09-24; buffer-safety model superseded by ADR-0007 (`docs/adr/0007-buffer-safety-and-handle-lifetimes.md`, 2026-10-29)
 **Date:** 2026-05-17
 **Deciders:** Rogerio Alves
 
@@ -526,7 +526,7 @@ ADR is superseded in 0.7.0 by a new ADR on buffer ownership.
 ### 2026-09-24 — Constructor set and MPI version gates
 
 - There are ten persistent collective constructors; the persistent barrier constructor
-  listed in the scope was never added.
+  listed in the scope was never added. See the 2026-10-29 amendment "Persistent barrier".
 - On an MPI older than 4.0 the collective constructors return `Err(Error::NotSupported(_))`
   naming the operation. The paragraph that named a nonexistent error class was corrected
   in place.
@@ -545,11 +545,22 @@ library is Open MPI 5 or later, which implements them while reporting MPI 3.1. T
 large-count forms stay gated on `MPI_VERSION >= 4`. Elsewhere the constructors return
 `Err(Error::NotSupported(_))` as before.
 
+### 2026-10-29 — Superseded by ADR-0007
+
+The buffer-lifetime invariants and the `Drop` behaviour described in this ADR are those of
+0.6. In 0.7.0 a `PersistentRequest` owns its buffers, as
+ADR-0007 records. The `*_init` / `start` /
+`wait` design of this ADR stands.
+
+### 2026-10-29 — Persistent barrier
+
+`Communicator::barrier_init` was added in 0.7.0.
+
 ---
 
 ## Status
 
-Accepted — 2026-05-17; amended 2026-09-24, 2026-09-29, 2026-09-30. The implementation lives in `src/persistent.rs` (the `PersistentRequest`
+Accepted — 2026-05-17; amended 2026-09-24, 2026-09-29, 2026-09-30, 2026-10-29. The implementation lives in `src/persistent.rs` (the `PersistentRequest`
 type and its `Drop` impl) and `src/comm/persistent.rs` (the persistent collective `*_init` methods on `Communicator`;
 the persistent point-to-point constructors are in `src/comm/p2p.rs` and the persistent v-collective ones in
 `src/comm/v_collective.rs`).

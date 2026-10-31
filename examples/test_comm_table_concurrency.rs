@@ -2,16 +2,17 @@
 //!
 //! Spawns 4 std::thread workers on a single MPI rank; each thread calls
 //! `world.duplicate()` 50 times and collects all 50 live Communicator objects
-//! before appending their handles to a shared list.  All 200 communicators are
-//! kept alive until every thread has finished allocating, so the handles are
-//! all simultaneously resident in the table when we check for duplicates.
-//! Any duplicate handle means two threads claimed the same `comm_table` slot
-//! via a data race in `alloc_comm`.
+//! before appending them to a shared list.  All 200 communicators are kept
+//! alive until every thread has finished allocating, so they are all
+//! simultaneously resident in the table when we count them.
+//! That their handles are distinct (a duplicate handle would mean two threads
+//! claimed the same `comm_table` slot via a data race in `alloc_comm`) is
+//! checked by the `checks_that_need_mpi` unit test in `src/lib.rs`, which can
+//! read the handles.
 //!
-//! With 4 threads × 50 duplications = 200 concurrent alloc_comm calls, the
-//! test races reliably without the C11 CAS fix and confirms no slot is
-//! double-claimed with it.  After the assertion, the communicators are dropped,
-//! which exercises concurrent ferrompi_comm_free as well.
+//! With 4 threads × 50 duplications = 200 concurrent alloc_comm calls, this
+//! example races them for the table slots.  The communicators are freed one
+//! after another, on the main thread, when `comms` drops at the end of `main`.
 //!
 //! Run with: mpiexec -n 1 ./target/debug/examples/test_comm_table_concurrency
 //!
@@ -26,7 +27,6 @@
 // mpi-test: np=1
 
 use ferrompi::{Communicator, Mpi, ThreadLevel};
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 mod common;
@@ -53,7 +53,7 @@ fn main() {
     }
 
     // Shared collection: each thread appends its Communicators (still live) so
-    // all 200 slots are simultaneously occupied when we check for duplicates.
+    // all 200 slots are simultaneously occupied when we count them.
     let comms: Arc<Mutex<Vec<Communicator>>> =
         Arc::new(Mutex::new(Vec::with_capacity(TOTAL_HANDLES)));
 
@@ -83,7 +83,7 @@ fn main() {
         // alive inside `comms`.
     });
 
-    // Check that all 200 simultaneously-live handles are distinct.
+    // Check that all 200 communicators are simultaneously live.
     let collected = comms.lock().expect("mutex poisoned");
     assert_eq!(
         collected.len(),
@@ -92,17 +92,9 @@ fn main() {
         collected.len()
     );
 
-    let unique: HashSet<i32> = collected.iter().map(|c| c.raw_handle()).collect();
-    assert_eq!(
-        unique.len(),
-        TOTAL_HANDLES,
-        "duplicate comm handles detected: {} unique out of {} total — slot collision in alloc_comm",
-        unique.len(),
-        TOTAL_HANDLES
-    );
-
-    // Drop collected here (end of scope) — exercises concurrent ferrompi_comm_free.
+    // Release the lock. The communicators are freed when `comms` drops at the
+    // end of `main`.
     drop(collected);
 
-    println!("OK: comm table concurrency test passed ({TOTAL_HANDLES} distinct handles)");
+    println!("OK: comm table concurrency test passed ({TOTAL_HANDLES} communicators)");
 }

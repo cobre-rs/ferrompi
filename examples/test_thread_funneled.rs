@@ -5,10 +5,19 @@
 //! every guarded call from a non-init thread must instead return
 //! `Err(Error::ThreadLevelViolation)` without calling MPI.
 //!
+//! It ends with `Mpi::drop` while a worker thread is inside a nonblocking scope
+//! that holds no request: the drop must wait for that scope, then really
+//! finalize MPI, which the runner checks by the absence of the
+//! `MPI_Finalize skipped` warning.
+//!
 //! Run with: mpiexec -n 1 ./target/debug/examples/test_thread_funneled
 // mpi-test: np=1
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Info, Mpi, ReduceOp, ThreadLevel, UserOp};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use ferrompi::{CustomDatatype, Error, Mpi, ReduceOp, ThreadLevel, UserOp};
 
 mod common;
 
@@ -22,14 +31,31 @@ fn main() {
         "init_thread provided Funneled",
     );
 
+    // The init thread takes all 16 slots of the op table, so a create on the
+    // worker below that took a slot before the thread check would report a
+    // full table instead.
+    let held_ops: Vec<UserOp<f64>> = (0..16)
+        .map(|_| {
+            UserOp::new(|a: &[f64], b: &mut [f64]| b[0] += a[0])
+                .expect("UserOp::new on the init thread failed")
+        })
+        .collect();
+    common::check(
+        &world,
+        matches!(
+            UserOp::<f64>::new(|a: &[f64], b: &mut [f64]| b[0] += a[0]),
+            Err(Error::ResourceExhausted { .. })
+        ),
+        "op table full on the init thread",
+    );
+
     // Every guarded call below must be rejected before touching MPI: no MPI
     // object is created or dropped on this worker thread.
-    let worker_ok = std::thread::scope(|s| {
+    let (worker_ok, worker_op_refused) = std::thread::scope(|s| {
         let world_ref = &world;
         s.spawn(move || {
             let mut ok = true;
             let mut rbuf = [0i32; 1];
-            let sbuf = [1i32; 1];
 
             ok &= matches!(world_ref.barrier(), Err(Error::ThreadLevelViolation));
             ok &= matches!(
@@ -41,7 +67,7 @@ fn main() {
                 Err(Error::ThreadLevelViolation)
             );
             ok &= matches!(
-                world_ref.irecv(&mut rbuf, 0, 1),
+                ferrompi::scope(|ms| world_ref.irecv(ms, &mut rbuf, 0, 1).map(|_| ())),
                 Err(Error::ThreadLevelViolation)
             );
             ok &= matches!(
@@ -49,40 +75,38 @@ fn main() {
                 Err(Error::ThreadLevelViolation)
             );
             ok &= matches!(
-                world_ref.send_init(&sbuf, 0, 1),
+                world_ref.send_init(vec![1i32], 0, 1),
                 Err(Error::ThreadLevelViolation)
             );
             ok &= matches!(world_ref.duplicate(), Err(Error::ThreadLevelViolation));
             ok &= matches!(world_ref.group(), Err(Error::ThreadLevelViolation));
             ok &= matches!(world_ref.processor_name(), Err(Error::ThreadLevelViolation));
-            ok &= matches!(Info::new(), Err(Error::ThreadLevelViolation));
             ok &= matches!(
-                CustomDatatype::contiguous(2, DatatypeTag::F64),
+                CustomDatatype::contiguous::<f64>(2),
                 Err(Error::ThreadLevelViolation)
             );
-            // One more than the op table's 16 slots: a rejected create must
-            // not leak a slot, or the last attempt would fail differently.
-            const OP_SLOTS_PLUS_ONE: usize = 17;
-            for _ in 0..OP_SLOTS_PLUS_ONE {
-                let r = UserOp::<f64>::new(|a: &[f64], b: &mut [f64]| {
-                    b[0] += a[0];
-                });
-                ok &= matches!(r, Err(Error::ThreadLevelViolation));
-            }
+            let op_refused = matches!(
+                UserOp::<f64>::new(|a: &[f64], b: &mut [f64]| b[0] += a[0]),
+                Err(Error::ThreadLevelViolation)
+            );
 
-            ok
+            (ok, op_refused)
         })
         .join()
         .expect("worker thread panicked")
     });
     common::check(&world, worker_ok, "worker calls below Serialized rejected");
+    common::check(
+        &world,
+        worker_op_refused,
+        "worker's UserOp::new refused for the thread level, not for a full table",
+    );
+    drop(held_ops);
 
     // A wait() rejected by the thread check must leave `active` unchanged,
     // so a later wait() on the init thread still owns a live request.
-    let mut rbuf7 = [0i32; 1];
-    let sbuf7 = [7i32; 1];
-    let mut recv_req = world.recv_init(&mut rbuf7, 0, 7).expect("recv_init failed");
-    let mut send_req = world.send_init(&sbuf7, 0, 7).expect("send_init failed");
+    let mut recv_req = world.recv_init(vec![0i32], 0, 7).expect("recv_init failed");
+    let mut send_req = world.send_init(vec![7i32], 0, 7).expect("send_init failed");
     recv_req.start().expect("recv start failed");
     send_req.start().expect("send start failed");
 
@@ -101,12 +125,40 @@ fn main() {
 
     recv_req.wait().expect("recv wait failed");
     send_req.wait().expect("send wait failed");
-    common::check(&world, rbuf7 == sbuf7, "recv/send data matches after wait");
+    common::check(
+        &world,
+        matches!((recv_req.buffer(), send_req.buffer()), (Ok(r), Ok(s)) if r == s),
+        "recv/send data matches after wait",
+    );
     common::check(
         &world,
         !recv_req.is_active() && !send_req.is_active(),
         "requests inactive after init-thread wait",
     );
+
+    // No check after the drop can use `common::check`: its allreduce is refused
+    // once `Mpi` began to drop.
+    let (opened, opened_rx) = mpsc::channel();
+    let worker_scope_ended = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            ferrompi::scope(|_| {
+                opened.send(()).expect("init thread hung up");
+                std::thread::sleep(Duration::from_millis(50));
+                worker_scope_ended.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .expect("the worker's scope must return Ok");
+        });
+        opened_rx
+            .recv()
+            .expect("worker hung up before opening its scope");
+        drop(mpi);
+        assert!(
+            worker_scope_ended.load(Ordering::SeqCst),
+            "Mpi::drop returned before the worker's scope ended"
+        );
+    });
 
     println!("test_thread_funneled: PASS");
 }

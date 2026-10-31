@@ -19,7 +19,6 @@ const FERROMPI_ERR_DATATYPES_FULL: i32 = -7003;
 const FERROMPI_ERR_OPS_FULL: i32 = -7004;
 const FERROMPI_ERR_WINDOWS_FULL: i32 = -7005;
 const FERROMPI_ERR_GROUPS_FULL: i32 = -7006;
-const FERROMPI_ERR_INFOS_FULL: i32 = -7007;
 
 // Returned by the persistent-collective and comm_create_from_group stubs
 // compiled without FERROMPI_HAVE_MPI4_COLLECTIVES (the library lacks the
@@ -28,11 +27,22 @@ const FERROMPI_ERR_INFOS_FULL: i32 = -7007;
 // MUST match `FERROMPI_ERR_NOT_SUPPORTED` in `csrc/ferrompi.h`.
 const FERROMPI_ERR_NOT_SUPPORTED: i32 = -7008;
 
+// Returned by the `ferrompi_comm_create` and `ferrompi_comm_create_group`
+// shims, before their MPI call, for a group with a member that is not in the
+// communicator. Intercepted in [`Error::from_code`] and mapped to
+// [`Error::InvalidArgument`]. This MUST match
+// `FERROMPI_ERR_GROUP_NOT_IN_COMM` in `csrc/ferrompi.h`.
+const FERROMPI_ERR_GROUP_NOT_IN_COMM: i32 = -7009;
+
 // Rust-only lifecycle-guard sentinels. Produced only by the Rust lifecycle
 // guard (never returned by the C layer), and outside the -7001..-7099 range
-// the C sentinels above use.
+// the C sentinels above use. A handle reaches a caller only after
+// `rt::activate`, and the state never goes back from `Active`, so a call on
+// one never returns the third: the call sites that tell a refused call from
+// one MPI ran test for the first two only.
 pub(crate) const FERROMPI_ERR_FINALIZED: i32 = -7101;
 pub(crate) const FERROMPI_ERR_THREAD_LEVEL: i32 = -7102;
+pub(crate) const FERROMPI_ERR_NOT_INITIALIZED: i32 = -7103;
 
 /// Identifies which internal ferrompi handle table was exhausted in an
 /// [`Error::ResourceExhausted`].
@@ -41,6 +51,7 @@ pub(crate) const FERROMPI_ERR_THREAD_LEVEL: i32 = -7102;
 /// `MAX_COMMS`, `MAX_DATATYPES`, `MAX_OPS`, `MAX_REQUESTS`). The `Display`
 /// form is the lowercase resource noun used in the error message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
 pub enum ResourceKind {
     /// Nonblocking / persistent request table (`MAX_REQUESTS`).
     #[error("request")]
@@ -60,9 +71,6 @@ pub enum ResourceKind {
     /// Group table.
     #[error("group")]
     Group,
-    /// Info-object table.
-    #[error("info")]
-    Info,
 }
 
 impl ResourceKind {
@@ -76,7 +84,6 @@ impl ResourceKind {
             FERROMPI_ERR_OPS_FULL => Some(ResourceKind::Operation),
             FERROMPI_ERR_WINDOWS_FULL => Some(ResourceKind::Window),
             FERROMPI_ERR_GROUPS_FULL => Some(ResourceKind::Group),
-            FERROMPI_ERR_INFOS_FULL => Some(ResourceKind::Info),
             _ => None,
         }
     }
@@ -85,9 +92,10 @@ impl ResourceKind {
 /// MPI error class, categorizing the type of MPI error.
 ///
 /// The named variants correspond to the MPI error classes, compared against
-/// the linked MPI library's own `MPI_ERR_*` constants (see [`Self::from_raw`]).
+/// the linked MPI library's own `MPI_ERR_*` constants.
 /// [`Self::Raw`] carries a class value this enum does not name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
 pub enum MpiErrorClass {
     /// `MPI_SUCCESS` — no error
     #[error("SUCCESS")]
@@ -173,7 +181,7 @@ impl MpiErrorClass {
     /// delegates to the C layer, which compares `class` against the linked
     /// library's own `MPI_ERR_*` constants, so the mapping is correct on
     /// MPICH-derived libraries, Open MPI and the MPI 5 standard ABI.
-    pub fn from_raw(class: i32) -> Self {
+    pub(crate) fn from_raw(class: i32) -> Self {
         // SAFETY: ferrompi_error_class_index only compares its argument
         // against compile-time MPI_ERR_* constants; there is no pointer,
         // buffer, or initialization precondition to uphold.
@@ -232,7 +240,7 @@ fn fmt_mpi(
 /// failures on those objects return `Err` instead of aborting through MPI's
 /// default handler.
 ///
-/// Nine paths end the process instead of returning `Err`:
+/// These paths end the process instead of returning `Err`:
 /// - an error inside `MPI_Init_thread` itself, before any error handler is
 ///   installed: MPI's default handler is `MPI_ERRORS_ARE_FATAL`, so
 ///   [`Mpi::init`](crate::Mpi::init)/[`Mpi::init_thread`](crate::Mpi::init_thread)
@@ -249,6 +257,8 @@ fn fmt_mpi(
 ///   returning `Err`;
 /// - a panic inside a [`UserOp`](crate::UserOp) reduction closure aborts
 ///   the process;
+/// - a fence or PSCW epoch still open while its closure unwinds aborts the
+///   process, since closing it is collective or synchronizing;
 /// - dropping a handle on the wrong thread aborts the process; see the
 ///   [`Mpi`](crate::Mpi) lifecycle section;
 /// - under a fault-tolerant MPI, a receive from any source that a process
@@ -257,13 +267,15 @@ fn fmt_mpi(
 ///   process, since no `ferrompi` call can complete it; so does the
 ///   nonblocking receive call itself when the request table was full,
 ///   since it then waits for the receive before returning;
-/// - `Win::create` on a rank whose window table is full aborts the process
-///   (`MPI_Abort`, falling back to `SIGABRT` if `MPI_Abort` itself returns),
-///   since the new window already exposes the caller's buffer to its peers;
 /// - in a debug build at
 ///   [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized), a
-///   [`Request::wait`](crate::Request::wait) that overlaps another thread's MPI
-///   call aborts the process, since it can neither run nor hand the request back;
+///   [`Request::wait`](crate::Request::wait), the final wait of a nonblocking
+///   [`scope`](crate::scope) or of a passive-target epoch, or an RMA epoch's
+///   closing call, that overlaps another thread's MPI call aborts the process,
+///   since it can neither run nor hand the request or epoch back;
+/// - the final wait of a nonblocking [`scope`](crate::scope) or of a
+///   passive-target epoch that completes none of its pending requests aborts
+///   the process, since the borrowed buffers cannot be released;
 /// - [`Communicator::abort`](crate::Communicator::abort) aborts the process
 ///   by design.
 ///
@@ -281,7 +293,14 @@ pub enum Error {
     ///
     /// Returned by any MPI-calling method invoked after the [`Mpi`](crate::Mpi)
     /// handle was dropped, and by `Mpi::init`/`Mpi::init_thread` once MPI has
-    /// been finalized. No MPI call is made.
+    /// been finalized. The refused call makes no MPI call. A method that makes
+    /// several MPI calls can be refused after an earlier one ran: a window
+    /// constructor after its length exchange, which leaves no window on this
+    /// rank while the other ranks can block creating theirs, and a
+    /// communicator constructor after its creating call, which loses the new
+    /// communicator (it is never freed, and keeps its handle-table slot).
+    /// After a skipped `MPI_Finalize`, `wait` and `test` on a request still
+    /// pending complete it, and `cancel` reaches it, instead.
     #[error("MPI has been finalized")]
     Finalized,
 
@@ -292,12 +311,59 @@ pub enum Error {
     /// below [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized),
     /// and, in debug builds only, by a call that overlaps another thread's
     /// call at [`ThreadLevel::Serialized`](crate::ThreadLevel::Serialized).
-    /// No MPI call is made.
+    /// The refused call makes no MPI call. A method that makes several MPI
+    /// calls can be refused after an earlier one ran: a window constructor
+    /// after its length exchange, which leaves no window on this rank while the
+    /// other ranks can block creating theirs, and a communicator constructor
+    /// after its creating call, which loses the new communicator (it is never
+    /// freed, and keeps its handle-table slot).
     #[error("MPI call not permitted on this thread at the provided thread level")]
     ThreadLevelViolation,
 
+    /// An argument outside what the call accepts, detected before any MPI call
+    /// other than the local calls the check itself makes. The constructors of
+    /// a window are the exception: they first exchange each rank's length and
+    /// displacement unit with one allgather, and report such an argument after
+    /// it.
+    #[error("invalid argument `{arg}`: {reason}")]
+    #[non_exhaustive]
+    InvalidArgument {
+        /// The name of the offending argument.
+        arg: &'static str,
+        /// Why the call rejects the argument.
+        reason: &'static str,
+    },
+
+    /// A buffer whose length does not match what the call needs, detected
+    /// before any MPI call.
+    #[error("buffer `{arg}` has {actual} elements, {required} required")]
+    #[non_exhaustive]
+    BufferSize {
+        /// The name of the offending buffer argument.
+        arg: &'static str,
+        /// The exact length the call needs, or the minimum when the method
+        /// documents that a longer buffer is accepted.
+        required: usize,
+        /// The length the caller passed.
+        actual: usize,
+    },
+
+    /// The object, or MPI itself, is not in a state that allows the call.
+    ///
+    /// Also returned, with the reason `MPI is not initialized`, by a
+    /// constructor that takes no handle and would call MPI, when it is invoked
+    /// before `Mpi::init`/`Mpi::init_thread` has returned; the
+    /// [`Mpi`](crate::Mpi) lifecycle section lists them. No MPI call is made.
+    #[error("invalid state: {reason}")]
+    #[non_exhaustive]
+    InvalidState {
+        /// Why the current state rejects the call.
+        reason: &'static str,
+    },
+
     /// MPI error with class, code, descriptive message, and optional operation name.
     #[error("{}", fmt_mpi(.class, .code, .message, .operation))]
+    #[non_exhaustive]
     Mpi {
         /// The error class (category of error).
         class: MpiErrorClass,
@@ -309,24 +375,18 @@ pub enum Error {
         operation: Option<&'static str>,
     },
 
-    /// Invalid buffer provided (e.g., send/recv buffer size mismatch).
-    #[error("Invalid buffer")]
-    InvalidBuffer,
-
-    /// Invalid reduction operation for the method being called
-    /// (e.g., passing a non-MAXLOC/MINLOC op to `allreduce_indexed`).
-    #[error("Invalid reduction operation for this method")]
-    InvalidOp,
-
-    /// Operation not supported. Two sources:
+    /// Operation not supported. Three sources:
     /// - an MPI 4.0 operation (a persistent collective or
     ///   [`Mpi::create_from_group`](crate::Mpi::create_from_group)) when
     ///   ferrompi was built against an MPI older than 4.0 other than Open
     ///   MPI 5, which implements both;
     /// - [`Request::cancel`](crate::Request::cancel) on a nonblocking-collective
-    ///   or RMA request.
+    ///   or RMA request;
+    /// - `remote` on a window (feature `rma`) that is not from
+    ///   `Win::allocate_shared`, or whose memory model MPI does not report as
+    ///   `MPI_WIN_UNIFIED`.
     ///
-    /// The string names the operation.
+    /// The string names the operation or what it needs.
     #[error("Operation not supported: {0}")]
     NotSupported(String),
 
@@ -344,6 +404,7 @@ pub enum Error {
     /// whose call succeeded hold theirs, so collective calls on it cannot
     /// complete; retrying is a new collective call on every rank.
     #[error("ferrompi {resource} table is full")]
+    #[non_exhaustive]
     ResourceExhausted {
         /// Which internal handle table overflowed.
         resource: ResourceKind,
@@ -358,23 +419,26 @@ impl Error {
     /// Create a structured error from an MPI error code.
     ///
     /// Calls `ferrompi_error_info` to obtain the error class and human-readable
-    /// message from the MPI runtime.
+    /// message from the MPI runtime. That lookup is refused before MPI is
+    /// initialized, once `MPI_Finalize` is running or has returned, and on a
+    /// thread the thread level does not allow to call MPI; the error then has
+    /// class [`MpiErrorClass::Raw`] and the message `MPI error code {code}`.
     ///
     /// # Returns
     ///
     /// If called with `MPI_SUCCESS` (code 0), returns
     /// `Error::Internal("from_code called with success code 0")`.
-    /// Callers should use [`Error::check`] or [`Error::check_with_op`]
-    /// for the standard "Ok on success, Err on failure" idiom.
+    /// Callers should use [`Error::check_with_op`] for the standard "Ok on
+    /// success, Err on failure" idiom.
     ///
     /// Marked `#[cold]` + `#[inline(never)]`: this is only reached on the error
-    /// path of [`Error::check`]/[`Error::check_with_op`], and its body (a 512-byte
+    /// path of [`Error::check_with_op`], and its body (a 512-byte
     /// stack buffer, an FFI call to `ferrompi_error_info`, and a `format!`
     /// fallback) must stay out of line so the inlined success-path check folds
     /// to a single return-code branch in the caller.
     #[cold]
     #[inline(never)]
-    pub fn from_code(code: i32) -> Self {
+    pub(crate) fn from_code(code: i32) -> Self {
         if code == 0 {
             return Error::Internal("from_code called with success code 0".into());
         }
@@ -391,8 +455,19 @@ impl Error {
         if code == FERROMPI_ERR_THREAD_LEVEL {
             return Error::ThreadLevelViolation;
         }
+        if code == FERROMPI_ERR_NOT_INITIALIZED {
+            return Error::InvalidState {
+                reason: "MPI is not initialized",
+            };
+        }
         if code == FERROMPI_ERR_NOT_SUPPORTED {
             return Error::NotSupported("MPI 4.0 operation".into());
+        }
+        if code == FERROMPI_ERR_GROUP_NOT_IN_COMM {
+            return Error::InvalidArgument {
+                arg: "group",
+                reason: "member outside the communicator",
+            };
         }
 
         let mut class: i32 = 0;
@@ -425,7 +500,7 @@ impl Error {
                 operation: None,
             }
         } else {
-            // ferrompi_error_info itself failed — provide a fallback
+            // ferrompi_error_info failed or was refused — provide a fallback
             Error::Mpi {
                 class: MpiErrorClass::Raw(code),
                 code,
@@ -463,7 +538,7 @@ impl Error {
     /// it out of line lets [`Error::check_with_op`] inline to a bare branch.
     #[cold]
     #[inline(never)]
-    pub fn from_code_with_op(code: i32, operation: &'static str) -> Self {
+    pub(crate) fn from_code_with_op(code: i32, operation: &'static str) -> Self {
         if code == FERROMPI_ERR_NOT_SUPPORTED {
             return Error::NotSupported(operation.into());
         }
@@ -485,24 +560,6 @@ impl Error {
         }
     }
 
-    /// Check an MPI return code, returning `Ok(())` for success.
-    ///
-    /// Returns `Err(Error::from_code(code))` for a non-zero code: `Error::Mpi`
-    /// for an MPI error code, or the variant [`Error::from_code`] maps a
-    /// ferrompi sentinel to.
-    ///
-    /// `#[inline]` so the success-path check (`code == 0`) folds into the
-    /// caller across codegen-unit/crate boundaries; the cold error
-    /// construction is delegated to the `#[cold]` [`Error::from_code`].
-    #[inline]
-    pub fn check(code: i32) -> Result<()> {
-        if code == 0 {
-            Ok(())
-        } else {
-            Err(Error::from_code(code))
-        }
-    }
-
     /// Check an MPI return code with an operation name, returning `Ok(())` for
     /// success.
     ///
@@ -514,7 +571,7 @@ impl Error {
     /// cold error construction stays out of line in the `#[cold]`
     /// [`Error::from_code_with_op`].
     #[inline]
-    pub fn check_with_op(code: i32, operation: &'static str) -> Result<()> {
+    pub(crate) fn check_with_op(code: i32, operation: &'static str) -> Result<()> {
         if code == 0 {
             Ok(())
         } else {
@@ -526,13 +583,13 @@ impl Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        Error, MpiErrorClass, ResourceKind, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_NOT_SUPPORTED,
-        FERROMPI_ERR_THREAD_LEVEL,
+        Error, MpiErrorClass, ResourceKind, FERROMPI_ERR_FINALIZED, FERROMPI_ERR_GROUP_NOT_IN_COMM,
+        FERROMPI_ERR_NOT_INITIALIZED, FERROMPI_ERR_NOT_SUPPORTED, FERROMPI_ERR_THREAD_LEVEL,
     };
 
     #[test]
     fn check_success_returns_ok() {
-        assert!(Error::check(0).is_ok());
+        assert!(Error::check_with_op(0, "barrier").is_ok());
     }
 
     #[test]
@@ -548,9 +605,6 @@ mod tests {
 
     #[test]
     fn error_display_formats_correctly() {
-        let err = Error::InvalidBuffer;
-        assert_eq!(format!("{err}"), "Invalid buffer");
-
         let err = Error::AlreadyInitialized;
         assert_eq!(format!("{err}"), "MPI has already been initialized");
 
@@ -649,7 +703,6 @@ mod tests {
             (-7004, ResourceKind::Operation),
             (-7005, ResourceKind::Window),
             (-7006, ResourceKind::Group),
-            (-7007, ResourceKind::Info),
         ];
         for (code, expected) in cases {
             match Error::from_code(code) {
@@ -671,6 +724,30 @@ mod tests {
             Error::ThreadLevelViolation => {}
             other => panic!("expected Error::ThreadLevelViolation, got {other:?}"),
         }
+        match Error::from_code_with_op(FERROMPI_ERR_NOT_INITIALIZED, "op_create") {
+            Error::InvalidState {
+                reason: "MPI is not initialized",
+            } => {}
+            other => panic!("expected Error::InvalidState, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_code_maps_group_not_in_comm_sentinel() {
+        // The sentinel is intercepted before any MPI FFI call, so this is
+        // safe to run without an initialized MPI runtime.
+        for err in [
+            Error::from_code(FERROMPI_ERR_GROUP_NOT_IN_COMM),
+            Error::from_code_with_op(FERROMPI_ERR_GROUP_NOT_IN_COMM, "comm_create_group"),
+        ] {
+            match err {
+                Error::InvalidArgument {
+                    arg: "group",
+                    reason: "member outside the communicator",
+                } => {}
+                other => panic!("expected Error::InvalidArgument, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -681,8 +758,8 @@ mod tests {
             Error::NotSupported(_) => {}
             other => panic!("expected Error::NotSupported, got {other:?}"),
         }
-        match Error::from_code_with_op(FERROMPI_ERR_NOT_SUPPORTED, "bcast_init") {
-            Error::NotSupported(op) => assert_eq!(op, "bcast_init"),
+        match Error::from_code_with_op(FERROMPI_ERR_NOT_SUPPORTED, "broadcast_init") {
+            Error::NotSupported(op) => assert_eq!(op, "broadcast_init"),
             other => panic!("expected Error::NotSupported, got {other:?}"),
         }
     }
@@ -709,5 +786,32 @@ mod tests {
             resource: ResourceKind::Window,
         };
         assert_eq!(format!("{err}"), "ferrompi window table is full");
+    }
+
+    #[test]
+    fn invalid_argument_display() {
+        let err = Error::InvalidArgument {
+            arg: "root",
+            reason: "negative rank",
+        };
+        assert_eq!(format!("{err}"), "invalid argument `root`: negative rank");
+    }
+
+    #[test]
+    fn buffer_size_display() {
+        let err = Error::BufferSize {
+            arg: "recv",
+            required: 4,
+            actual: 3,
+        };
+        assert_eq!(format!("{err}"), "buffer `recv` has 3 elements, 4 required");
+    }
+
+    #[test]
+    fn invalid_state_display() {
+        let err = Error::InvalidState {
+            reason: "request is already active",
+        };
+        assert_eq!(format!("{err}"), "invalid state: request is already active");
     }
 }

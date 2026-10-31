@@ -1,9 +1,11 @@
-//! Integration test for `UserOp<T>` and `Communicator::allreduce_with_op`.
+//! Integration test for `UserOp<T>` and `Communicator::allreduce`.
 //!
 //! Tests:
 //!   1. Element-wise max of f64 via a user-defined commutative op.
 //!   2. Bitwise-OR reimplementation on i32 (each rank contributes 1 << rank).
 //!   3. Drop-after-use: verifies no MPI corruption after the UserOp is dropped.
+//!   4. Non-commutative min on i32.
+//!   5. One commutative op through `reduce` and `scan`.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_user_op
 // mpi-test: np=4 valgrind
@@ -49,8 +51,8 @@ fn main() {
         let send = vec![rank as f64 + 1.5_f64];
         let mut recv = vec![0.0_f64];
 
-        if let Err(e) = world.allreduce_with_op(&send, &mut recv, &op) {
-            eprintln!("rank {rank}: FAIL Test 1: allreduce_with_op failed: {e}");
+        if let Err(e) = world.allreduce(&send, &mut recv, &op) {
+            eprintln!("rank {rank}: FAIL Test 1: allreduce failed: {e}");
             local_ok = false;
         }
 
@@ -90,8 +92,8 @@ fn main() {
         let send = vec![contrib];
         let mut recv = vec![0i32];
 
-        if let Err(e) = world.allreduce_with_op(&send, &mut recv, &op) {
-            eprintln!("rank {rank}: FAIL Test 2: allreduce_with_op failed: {e}");
+        if let Err(e) = world.allreduce(&send, &mut recv, &op) {
+            eprintln!("rank {rank}: FAIL Test 2: allreduce failed: {e}");
             local_ok = false;
         }
 
@@ -132,8 +134,8 @@ fn main() {
 
         let send = vec![1i32];
         let mut recv = vec![0i32];
-        if let Err(e) = world.allreduce_with_op(&send, &mut recv, &op) {
-            eprintln!("rank {rank}: FAIL Test 3: allreduce_with_op failed: {e}");
+        if let Err(e) = world.allreduce(&send, &mut recv, &op) {
+            eprintln!("rank {rank}: FAIL Test 3: allreduce failed: {e}");
             local_ok = false;
         }
 
@@ -188,8 +190,8 @@ fn main() {
         let send = vec![rank + 1];
         let mut recv = vec![0i32];
 
-        if let Err(e) = world.allreduce_with_op(&send, &mut recv, &op) {
-            eprintln!("rank {rank}: FAIL Test 4: allreduce_with_op failed: {e}");
+        if let Err(e) = world.allreduce(&send, &mut recv, &op) {
+            eprintln!("rank {rank}: FAIL Test 4: allreduce failed: {e}");
             local_ok = false;
         }
 
@@ -198,6 +200,68 @@ fn main() {
             local_ok = false;
         } else if rank == 0 {
             println!("PASS: UserOp non-commutative min (result = {})", recv[0]);
+        }
+    }
+
+    // ========================================================================
+    // Test 5: one commutative op through reduce and scan
+    //   Each rank contributes [rank + 1.5].
+    //   reduce to root 0: [(size - 1) as f64 + 1.5] at the root only.
+    //   scan: [rank as f64 + 1.5] on every rank, since the contributions rise
+    //   with the rank.
+    // ========================================================================
+    {
+        let op: UserOp<f64> = match UserOp::new(|invec, inoutvec| {
+            for (x, y) in invec.iter().zip(inoutvec.iter_mut()) {
+                if *x > *y {
+                    *y = *x;
+                }
+            }
+        }) {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("rank {rank}: FAIL Test 5: UserOp::new failed: {e}");
+                let _ = world.allreduce_scalar(0i32, ReduceOp::Min);
+                std::process::exit(1);
+            }
+        };
+
+        let send = vec![rank as f64 + 1.5_f64];
+        let mut recv = vec![0.0_f64];
+        if let Err(e) = world.reduce(&send, &mut recv, &op, 0) {
+            eprintln!("rank {rank}: FAIL Test 5: reduce failed: {e}");
+            local_ok = false;
+        } else if rank == 0 {
+            let expected = (size - 1) as f64 + 1.5_f64;
+            if (recv[0] - expected).abs() > 1e-12 {
+                eprintln!(
+                    "rank {rank}: FAIL Test 5: reduce expected {expected}, got {}",
+                    recv[0]
+                );
+                local_ok = false;
+            } else {
+                println!("PASS: UserOp max through reduce (result = {})", recv[0]);
+            }
+        }
+
+        let mut prefix = vec![0.0_f64];
+        if let Err(e) = world.scan(&send, &mut prefix, &op) {
+            eprintln!("rank {rank}: FAIL Test 5: scan failed: {e}");
+            local_ok = false;
+        } else {
+            let expected = rank as f64 + 1.5_f64;
+            if (prefix[0] - expected).abs() > 1e-12 {
+                eprintln!(
+                    "rank {rank}: FAIL Test 5: scan expected {expected}, got {}",
+                    prefix[0]
+                );
+                local_ok = false;
+            } else if rank == 0 {
+                println!(
+                    "PASS: UserOp max through scan (rank 0 result = {})",
+                    prefix[0]
+                );
+            }
         }
     }
 

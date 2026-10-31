@@ -10,6 +10,22 @@ use std::os::raw::{c_char, c_double, c_int, c_void};
 pub type int32_t = i32;
 pub type int64_t = i64;
 
+/// Mirror of the C `ferrompi_status`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FerrompiStatus {
+    pub source: int32_t,
+    pub tag: int32_t,
+    pub count: int64_t,
+    pub error: int32_t,
+}
+
+const _: () = assert!(std::mem::size_of::<FerrompiStatus>() == 24);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, source) == 0);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, tag) == 4);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, count) == 8);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, error) == 16);
+
 // Lock type constants matching the C header defines
 #[cfg(feature = "rma")]
 pub const FERROMPI_LOCK_EXCLUSIVE: int32_t = 0;
@@ -17,24 +33,21 @@ pub const FERROMPI_LOCK_EXCLUSIVE: int32_t = 0;
 pub const FERROMPI_LOCK_SHARED: int32_t = 1;
 
 // Never routed through the `crate::rt` lifecycle guard: calls legal before
-// init or after finalize (init, lifecycle and version queries, error
-// lookup), calls that make no MPI call (op-table bookkeeping, error-class
-// mapping), `wtime`, which only a live `Mpi` reaches, and calls made only
-// from a `Drop` impl.
+// init or after finalize (init, lifecycle and version queries), calls that
+// make no MPI call (op-table bookkeeping, error-class mapping, the limit on a
+// string tag's length), `wtime`, which only a live `Mpi` reaches, calls made
+// only from a `Drop` impl, and the op-table calls of `UserOp`'s constructors,
+// which hold an in-flight token from before they take a slot until they have
+// created its op or given the slot back. The error lookup is guarded by hand
+// after this block: MPI 3.1 libraries need not allow it before MPI is
+// initialized, nor during or after `MPI_Finalize`.
 extern "C" {
     pub fn ferrompi_init_thread(required: c_int, provided: *mut c_int) -> c_int;
-    pub fn ferrompi_finalize(active_requests: *mut int32_t) -> c_int;
+    pub fn ferrompi_finalize() -> c_int;
     pub fn ferrompi_initialized(flag: *mut c_int) -> c_int;
     pub fn ferrompi_finalized(flag: *mut c_int) -> c_int;
     pub fn ferrompi_comm_free(comm: int32_t) -> c_int;
     pub fn ferrompi_group_free(group_handle: int32_t) -> c_int;
-    pub fn ferrompi_info_free(info_handle: int32_t) -> c_int;
-    pub fn ferrompi_error_info(
-        code: c_int,
-        error_class: *mut int32_t,
-        message: *mut c_char,
-        msg_len: *mut int32_t,
-    ) -> c_int;
     pub fn ferrompi_request_free(request: int64_t) -> c_int;
     pub fn ferrompi_get_library_version(buf: *mut c_char, len: *mut int32_t) -> c_int;
     pub fn ferrompi_get_version(version: *mut c_char, len: *mut int32_t) -> c_int;
@@ -43,7 +56,17 @@ extern "C" {
     /// Allocate a free slot in the op-slot table.
     /// Writes the slot index to `*out_slot`.
     /// Returns MPI_SUCCESS on success, FERROMPI_ERR_OPS_FULL if the table is full.
+    /// Call it only under an in-flight token, which orders the claim after
+    /// `Mpi::init`'s reset of the table.
     pub fn ferrompi_op_alloc_slot(out_slot: *mut int32_t) -> c_int;
+    /// Create an MPI_Op for the given slot.
+    /// `commute = 1` → commutative; `commute = 0` → non-commutative.
+    /// Writes the handle (same value as `slot`) to `*out_handle`.
+    pub fn ferrompi_op_create_user(
+        slot: int32_t,
+        commute: int32_t,
+        out_handle: *mut int32_t,
+    ) -> c_int;
     /// Free the MPI_Op and release the slot.
     /// Drop ordering: MPI_Op_free → ferrompi_op_drop_closure → free_op_slot.
     pub fn ferrompi_op_free(handle: int32_t) -> c_int;
@@ -58,27 +81,168 @@ extern "C" {
     /// `MPI_ERR_*` constants and return a ferrompi-stable index in
     /// `MpiErrorClass`'s declaration order, or -1 if unrecognized.
     pub fn ferrompi_error_class_index(error_class: c_int) -> int32_t;
+    /// The most bytes the string tag of `ferrompi_comm_create_from_group` may
+    /// take, its terminating NUL included (the library's
+    /// `MPI_MAX_STRINGTAG_LEN`), or `i64::MAX` where the library lacks
+    /// `MPI_Comm_create_from_group` and so defines no limit. Makes no MPI call.
+    pub fn ferrompi_max_stringtag_len() -> int64_t;
 }
 
 // RMA counterpart of the block above: a non-status return with no MPI call
-// (mode-value constants), or called only from a `Drop` impl.
+// (mode-value constants), or called from a `Drop` impl or under an in-flight
+// token its caller holds (`ferrompi_win_free`, the window constructors, and
+// `ferrompi_win_shared_query`, which `Win::allocate_shared` calls inside its
+// creating call's span). `Win::into_buffer` and the constructors also take the
+// debug `Serialized` overlap check; `Drop for Win` cannot report a refusal, so
+// its free is not checked.
 #[cfg(feature = "rma")]
 extern "C" {
+    pub fn ferrompi_win_allocate_shared(
+        size: int64_t,
+        disp_unit: int32_t,
+        comm: int32_t,
+        baseptr: *mut *mut c_void,
+        win: *mut int32_t,
+        unified: *mut int32_t,
+    ) -> c_int;
+    pub fn ferrompi_win_create(
+        base: *mut c_void,
+        size: int64_t,
+        disp_unit: int32_t,
+        comm: int32_t,
+        win: *mut int32_t,
+    ) -> c_int;
+    pub fn ferrompi_win_allocate(
+        size: int64_t,
+        disp_unit: int32_t,
+        comm: int32_t,
+        baseptr: *mut *mut c_void,
+        win: *mut int32_t,
+    ) -> c_int;
+    pub fn ferrompi_win_shared_query(
+        win: int32_t,
+        rank: int32_t,
+        size: *mut int64_t,
+        disp_unit: *mut int32_t,
+        baseptr: *mut *mut c_void,
+    ) -> c_int;
     pub fn ferrompi_win_free(win: int32_t) -> c_int;
     pub fn ferrompi_win_fence_mode_values(out: *mut int32_t);
-    pub fn ferrompi_win_unlock(rank: int32_t, win: int32_t) -> c_int;
-    pub fn ferrompi_win_unlock_all(win: int32_t) -> c_int;
     pub fn ferrompi_win_pscw_mode_values(out: *mut int32_t);
 }
 
+extern "C" {
+    #[link_name = "ferrompi_error_info"]
+    fn error_info(
+        code: c_int,
+        error_class: *mut int32_t,
+        message: *mut c_char,
+        msg_len: *mut int32_t,
+    ) -> c_int;
+}
+
+/// Looks up the class and text of an MPI error code, under an in-flight token
+/// so that it cannot overlap `MPI_Finalize`. Takes the completion entry: it is
+/// admitted while finalizing, and refused before MPI is initialized (except on
+/// the init thread), once finalized, or on a thread the thread level does not
+/// allow, with the refusal code as the result. Unlike the other wrappers it
+/// skips the debug overlap check: MPI-4.1 §11.6 and Table 11.1 make
+/// `MPI_Error_class` and `MPI_Error_string` always thread-safe, so
+/// `Error::from_code` needs no serialization from its callers, and a refusal
+/// would only lose the message.
+///
+/// # Safety
+///
+/// The pointers must be valid for the writes of `ferrompi_error_info` in
+/// `csrc/ferrompi.c`: `message` for `MPI_MAX_ERROR_STRING` bytes, the other two
+/// for one `int32_t`.
+pub unsafe fn ferrompi_error_info(
+    code: c_int,
+    error_class: *mut int32_t,
+    message: *mut c_char,
+    msg_len: *mut int32_t,
+) -> c_int {
+    let _call = match crate::rt::enter_completion() {
+        Ok(token) => token,
+        Err(refused) => return refused,
+    };
+    // SAFETY: the caller upholds the C function's contract, and the token keeps
+    // `MPI_Finalize` from starting until this call returns.
+    unsafe { error_info(code, error_class, message, msg_len) }
+}
+
+/// The same C call as [`ferrompi_win_fence`], for the fence that closes an
+/// epoch. `MPI_Win_fence` both closes and opens, so the ordinary wrapper refuses
+/// it while finalizing; this one takes the completion entry, which admits it,
+/// because an epoch left open would leave its origin buffers in MPI's hands.
+/// Like the other wrappers it makes the debug overlap check.
+///
+/// # Safety
+///
+/// `win` must be a live window handle, and `assert_val` a mode value of the
+/// linked MPI implementation, as for `ferrompi_win_fence`.
+#[cfg(feature = "rma")]
+pub(crate) unsafe fn ferrompi_win_fence_close(assert_val: int32_t, win: int32_t) -> c_int {
+    let _call = match crate::rt::enter_completion() {
+        Ok(token) => token,
+        Err(code) => return code,
+    };
+    #[cfg(debug_assertions)]
+    let _flag = match crate::rt::begin_call() {
+        Ok(flag) => flag,
+        Err(code) => return code,
+    };
+    // SAFETY: the caller upholds the C function's contract, and the token keeps
+    // `MPI_Finalize` from starting until this call returns.
+    unsafe { raw::ferrompi_win_fence(assert_val, win) }
+}
+
 /// Wraps every other extern declaration in [`crate::rt::enter`]'s lifecycle
-/// check, forwarding to the same-named function in [`raw`] on success. The
-/// raw declarations live in `raw` so call sites (`ffi::ferrompi_x`) keep
+/// check, forwarding to the same-named function in [`raw`] on success and
+/// holding the returned in-flight token until the call returns. The raw
+/// declarations live in `raw` so call sites (`ffi::ferrompi_x`) keep
 /// resolving to the guarded wrapper without any change.
+///
+/// The externs after the trailing marker complete, test or cancel a request that
+/// is already pending, receive a message that is already matched, or close an
+/// epoch that is already open. Their wrappers take the completion entry
+/// instead, which admits them while finalizing; both lists share one `raw`
+/// module and one wrapper body.
 macro_rules! guarded_extern {
+    (@wrappers $enter:path; $(
+        $(#[$meta:meta])*
+        pub fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> c_int;
+    )*) => {
+        $(
+            $(#[$meta])*
+            // Every MPI call goes through a wrapper; forcing it inline keeps the
+            // guard's measured cost under a nanosecond per call.
+            #[inline(always)]
+            #[allow(clippy::too_many_arguments)] // signature mirrors the C function
+            pub unsafe fn $name($($arg: $ty),*) -> c_int {
+                let _call = match $enter() {
+                    Ok(token) => token,
+                    Err(code) => return code,
+                };
+                #[cfg(debug_assertions)]
+                let _flag = match crate::rt::begin_call() {
+                    Ok(flag) => flag,
+                    Err(code) => return code,
+                };
+                // SAFETY: the wrapper forwards the caller's arguments unchanged;
+                // the caller upholds the C function's contract.
+                unsafe { raw::$name($($arg),*) }
+            }
+        )*
+    };
     ($(
         $(#[$meta:meta])*
         pub fn $name:ident($($arg:ident: $ty:ty),* $(,)?) -> c_int;
+    )*
+    @completion
+    $(
+        $(#[$cmeta:meta])*
+        pub fn $cname:ident($($carg:ident: $cty:ty),* $(,)?) -> c_int;
     )*) => {
         pub(crate) mod raw {
             use super::*;
@@ -87,33 +251,27 @@ macro_rules! guarded_extern {
                     $(#[$meta])*
                     pub fn $name($($arg: $ty),*) -> c_int;
                 )*
+                $(
+                    $(#[$cmeta])*
+                    pub fn $cname($($carg: $cty),*) -> c_int;
+                )*
             }
         }
 
-        $(
-            $(#[$meta])*
-            // Every MPI call goes through a wrapper; forcing it inline keeps the
-            // guard's measured cost under a nanosecond per call.
-            #[inline(always)]
-            #[allow(clippy::too_many_arguments)] // signature mirrors the C function
-            pub unsafe fn $name($($arg: $ty),*) -> c_int {
-                let guard = crate::rt::enter();
-                if guard != 0 {
-                    return guard;
-                }
-                #[cfg(debug_assertions)]
-                let held = match crate::rt::begin_call() {
-                    Ok(held) => held,
-                    Err(code) => return code,
-                };
-                // SAFETY: the wrapper forwards the caller's arguments unchanged;
-                // the caller upholds the C function's contract.
-                let result = unsafe { raw::$name($($arg),*) };
-                #[cfg(debug_assertions)]
-                crate::rt::end_call(held);
-                result
-            }
-        )*
+        guarded_extern! {
+            @wrappers crate::rt::enter;
+            $(
+                $(#[$meta])*
+                pub fn $name($($arg: $ty),*) -> c_int;
+            )*
+        }
+        guarded_extern! {
+            @wrappers crate::rt::enter_completion;
+            $(
+                $(#[$cmeta])*
+                pub fn $cname($($carg: $cty),*) -> c_int;
+            )*
+        }
     };
 }
 
@@ -141,9 +299,12 @@ guarded_extern! {
         newcomm: *mut int32_t,
     ) -> c_int;
 
-    pub fn ferrompi_comm_create_from_group_parent(
+    pub fn ferrompi_comm_create(comm: int32_t, group: int32_t, newcomm: *mut int32_t) -> c_int;
+
+    pub fn ferrompi_comm_create_group(
         comm: int32_t,
         group: int32_t,
+        tag: int32_t,
         newcomm: *mut int32_t,
     ) -> c_int;
 
@@ -246,9 +407,7 @@ guarded_extern! {
         source: int32_t,
         tag: int32_t,
         comm: int32_t,
-        actual_source: *mut int32_t,
-        actual_tag: *mut int32_t,
-        actual_count: *mut int64_t,
+        status: *mut FerrompiStatus,
     ) -> c_int;
 
     pub fn ferrompi_isend(
@@ -283,9 +442,7 @@ guarded_extern! {
         source: int32_t,
         recvtag: int32_t,
         comm: int32_t,
-        actual_source: *mut int32_t,
-        actual_tag: *mut int32_t,
-        actual_count: *mut int64_t,
+        status: *mut FerrompiStatus,
     ) -> c_int;
 
     // ============================================================
@@ -295,9 +452,7 @@ guarded_extern! {
         source: int32_t,
         tag: int32_t,
         comm: int32_t,
-        actual_source: *mut int32_t,
-        actual_tag: *mut int32_t,
-        count: *mut int64_t,
+        status: *mut FerrompiStatus,
         datatype_tag: int32_t,
     ) -> c_int;
 
@@ -306,9 +461,28 @@ guarded_extern! {
         tag: int32_t,
         comm: int32_t,
         flag: *mut int32_t,
-        actual_source: *mut int32_t,
-        actual_tag: *mut int32_t,
-        count: *mut int64_t,
+        status: *mut FerrompiStatus,
+        datatype_tag: int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_mprobe(
+        source: int32_t,
+        tag: int32_t,
+        comm: int32_t,
+        message: *mut int64_t,
+        bytes: *mut int64_t,
+        status: *mut FerrompiStatus,
+        datatype_tag: int32_t,
+    ) -> c_int;
+
+    pub fn ferrompi_improbe(
+        source: int32_t,
+        tag: int32_t,
+        comm: int32_t,
+        flag: *mut int32_t,
+        message: *mut int64_t,
+        bytes: *mut int64_t,
+        status: *mut FerrompiStatus,
         datatype_tag: int32_t,
     ) -> c_int;
 
@@ -667,6 +841,8 @@ guarded_extern! {
     // ============================================================
     // Generic Persistent Collectives (MPI 4.0, or Open MPI 5)
     // ============================================================
+    pub fn ferrompi_barrier_init(comm: int32_t, request: *mut int64_t) -> c_int;
+
     pub fn ferrompi_bcast_init(
         buf: *mut c_void,
         count: int64_t,
@@ -817,76 +993,6 @@ guarded_extern! {
     ) -> c_int;
 
     // ============================================================
-    // Info Object Operations
-    // ============================================================
-    pub fn ferrompi_info_create(info_handle: *mut int32_t) -> c_int;
-
-    pub fn ferrompi_info_set(
-        info_handle: int32_t,
-        key: *const c_char,
-        value: *const c_char,
-    ) -> c_int;
-
-    pub fn ferrompi_info_get(
-        info_handle: int32_t,
-        key: *const c_char,
-        value: *mut c_char,
-        valuelen: *mut int32_t,
-        flag: *mut int32_t,
-    ) -> c_int;
-
-    // ============================================================
-    // Request Management
-    // ============================================================
-    pub fn ferrompi_wait(request: int64_t) -> c_int;
-
-    pub fn ferrompi_test(request: int64_t, flag: *mut int32_t) -> c_int;
-
-    pub fn ferrompi_waitall(
-        count: int64_t,
-        requests: *const int64_t,
-        done: *mut u8,
-        failed_index: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_request_get_status(request: int64_t, flag: *mut int32_t) -> c_int;
-
-    pub fn ferrompi_cancel(request: int64_t) -> c_int;
-
-    pub fn ferrompi_waitany(
-        count: int64_t,
-        requests: *const int64_t,
-        index: *mut int32_t,
-        done: *mut u8,
-    ) -> c_int;
-
-    pub fn ferrompi_waitsome(
-        count: int64_t,
-        requests: *const int64_t,
-        outcount: *mut int64_t,
-        indices: *mut int32_t,
-        done: *mut u8,
-        failed_index: *mut int64_t,
-    ) -> c_int;
-
-    pub fn ferrompi_testany(
-        count: int64_t,
-        requests: *const int64_t,
-        index: *mut int32_t,
-        flag: *mut int32_t,
-        done: *mut u8,
-    ) -> c_int;
-
-    pub fn ferrompi_testsome(
-        count: int64_t,
-        requests: *const int64_t,
-        outcount: *mut int64_t,
-        indices: *mut int32_t,
-        done: *mut u8,
-        failed_index: *mut int64_t,
-    ) -> c_int;
-
-    // ============================================================
     // Persistent Request Management
     // ============================================================
     pub fn ferrompi_start(request: int64_t) -> c_int;
@@ -958,9 +1064,7 @@ guarded_extern! {
         source: int32_t,
         tag: int32_t,
         comm: int32_t,
-        actual_source: *mut int32_t,
-        actual_tag: *mut int32_t,
-        actual_count: *mut int64_t,
+        status: *mut FerrompiStatus,
     ) -> c_int;
 
     pub fn ferrompi_isend_custom(
@@ -981,70 +1085,6 @@ guarded_extern! {
         tag: int32_t,
         comm: int32_t,
         request: *mut int64_t,
-    ) -> c_int;
-
-    // ============================================================
-    // User-Defined Reduction Op (MPI_Op_create)
-    // ============================================================
-    /// Create an MPI_Op for the given slot.
-    /// `commute = 1` → commutative; `commute = 0` → non-commutative.
-    /// Writes the handle (same value as `slot`) to `*out_handle`.
-    pub fn ferrompi_op_create_user(
-        slot: int32_t,
-        commute: int32_t,
-        out_handle: *mut int32_t,
-    ) -> c_int;
-
-    /// MPI_Allreduce using a user-defined reduction op.
-    pub fn ferrompi_allreduce_user_op(
-        sendbuf: *const c_void,
-        recvbuf: *mut c_void,
-        count: int64_t,
-        datatype_tag: int32_t,
-        op_handle: int32_t,
-        comm: int32_t,
-    ) -> c_int;
-
-    // ============================================================
-    // RMA / Window
-    // ============================================================
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_allocate_shared(
-        size: int64_t,
-        disp_unit: int32_t,
-        info: int32_t,
-        comm: int32_t,
-        baseptr: *mut *mut c_void,
-        win: *mut int32_t,
-    ) -> c_int;
-
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_create(
-        base: *mut c_void,
-        size: int64_t,
-        disp_unit: int32_t,
-        info: int32_t,
-        comm: int32_t,
-        win: *mut int32_t,
-    ) -> c_int;
-
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_allocate(
-        size: int64_t,
-        disp_unit: int32_t,
-        info: int32_t,
-        comm: int32_t,
-        baseptr: *mut *mut c_void,
-        win: *mut int32_t,
-    ) -> c_int;
-
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_shared_query(
-        win: int32_t,
-        rank: int32_t,
-        size: *mut int64_t,
-        disp_unit: *mut int32_t,
-        baseptr: *mut *mut c_void,
     ) -> c_int;
 
     // ============================================================
@@ -1085,36 +1125,29 @@ guarded_extern! {
     #[cfg(feature = "rma")]
     pub fn ferrompi_win_start(group: int32_t, assert_val: int32_t, win: int32_t) -> c_int;
 
+    /// Allocate a group-table slot for a duplicate of the group of the
+    /// communicator that created `win`, and write its handle to `*group_handle`.
+    /// The caller owns the slot and frees it with `ferrompi_group_free`.
     #[cfg(feature = "rma")]
-    pub fn ferrompi_win_complete(win: int32_t) -> c_int;
-
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_wait(win: int32_t) -> c_int;
-
-    #[cfg(feature = "rma")]
-    pub fn ferrompi_win_test(win: int32_t, flag: *mut int32_t) -> c_int;
+    pub fn ferrompi_win_get_group(win: int32_t, group_handle: *mut int32_t) -> c_int;
 
     #[cfg(feature = "rma")]
     pub fn ferrompi_put(
         origin: *const c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         win_handle: int32_t,
     ) -> c_int;
 
     #[cfg(feature = "rma")]
     pub fn ferrompi_rput(
         origin: *const c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         win_handle: int32_t,
         request_handle: *mut int64_t,
     ) -> c_int;
@@ -1122,24 +1155,20 @@ guarded_extern! {
     #[cfg(feature = "rma")]
     pub fn ferrompi_get(
         origin: *mut c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         win_handle: int32_t,
     ) -> c_int;
 
     #[cfg(feature = "rma")]
     pub fn ferrompi_rget(
         origin: *mut c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         win_handle: int32_t,
         request_handle: *mut int64_t,
     ) -> c_int;
@@ -1147,12 +1176,10 @@ guarded_extern! {
     #[cfg(feature = "rma")]
     pub fn ferrompi_accumulate(
         origin: *const c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         op_tag: int32_t,
         win_handle: int32_t,
     ) -> c_int;
@@ -1160,12 +1187,10 @@ guarded_extern! {
     #[cfg(feature = "rma")]
     pub fn ferrompi_raccumulate(
         origin: *const c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         op_tag: int32_t,
         win_handle: int32_t,
         request_handle: *mut int64_t,
@@ -1174,15 +1199,11 @@ guarded_extern! {
     #[cfg(feature = "rma")]
     pub fn ferrompi_get_accumulate(
         origin: *const c_void,
-        origin_count: int64_t,
-        origin_dt_tag: int32_t,
         result: *mut c_void,
-        result_count: int64_t,
-        result_dt_tag: int32_t,
+        count: int64_t,
+        dt_tag: int32_t,
         target_rank: int32_t,
         target_disp: int64_t,
-        target_count: int64_t,
-        target_dt_tag: int32_t,
         op_tag: int32_t,
         win_handle: int32_t,
     ) -> c_int;
@@ -1208,4 +1229,93 @@ guarded_extern! {
         target_disp: int64_t,
         win_handle: int32_t,
     ) -> c_int;
+
+    // ============================================================
+    // Request Completion and Cancellation
+    // Complete, test or cancel a request that is already pending, or receive
+    // a message that is already matched: admitted while finalizing, unlike
+    // every call above.
+    // ============================================================
+    @completion
+    pub fn ferrompi_wait(request: int64_t, status: *mut FerrompiStatus) -> c_int;
+
+    pub fn ferrompi_test(
+        request: int64_t,
+        flag: *mut int32_t,
+        status: *mut FerrompiStatus,
+    ) -> c_int;
+
+    pub fn ferrompi_waitall(
+        count: int64_t,
+        requests: *const int64_t,
+        done: *mut u8,
+        failed_index: *mut int64_t,
+    ) -> c_int;
+
+    pub fn ferrompi_request_get_status(request: int64_t, flag: *mut int32_t) -> c_int;
+
+    pub fn ferrompi_waitany(
+        count: int64_t,
+        requests: *const int64_t,
+        index: *mut int32_t,
+        done: *mut u8,
+        status: *mut FerrompiStatus,
+    ) -> c_int;
+
+    pub fn ferrompi_waitsome(
+        count: int64_t,
+        requests: *const int64_t,
+        outcount: *mut int64_t,
+        indices: *mut int32_t,
+        done: *mut u8,
+        statuses: *mut FerrompiStatus,
+    ) -> c_int;
+
+    pub fn ferrompi_testany(
+        count: int64_t,
+        requests: *const int64_t,
+        index: *mut int32_t,
+        flag: *mut int32_t,
+        done: *mut u8,
+        status: *mut FerrompiStatus,
+    ) -> c_int;
+
+    pub fn ferrompi_testsome(
+        count: int64_t,
+        requests: *const int64_t,
+        outcount: *mut int64_t,
+        indices: *mut int32_t,
+        done: *mut u8,
+        statuses: *mut FerrompiStatus,
+    ) -> c_int;
+
+    pub fn ferrompi_cancel(request: int64_t) -> c_int;
+
+    pub fn ferrompi_mrecv(
+        buf: *mut c_void,
+        count: int64_t,
+        datatype_tag: int32_t,
+        message: int64_t,
+        status: *mut FerrompiStatus,
+    ) -> c_int;
+
+    // ============================================================
+    // RMA / Epoch Closing
+    // Close an access, exposure or passive-target epoch that is already open:
+    // admitted while finalizing, unlike the calls that open one.
+    // ============================================================
+    #[cfg(feature = "rma")]
+    pub fn ferrompi_win_complete(win: int32_t) -> c_int;
+
+    #[cfg(feature = "rma")]
+    pub fn ferrompi_win_wait(win: int32_t) -> c_int;
+
+    #[cfg(feature = "rma")]
+    pub fn ferrompi_win_test(win: int32_t, flag: *mut int32_t) -> c_int;
+
+    #[cfg(feature = "rma")]
+    pub fn ferrompi_win_unlock(rank: int32_t, win: int32_t) -> c_int;
+
+    #[cfg(feature = "rma")]
+    pub fn ferrompi_win_unlock_all(win: int32_t) -> c_int;
 }

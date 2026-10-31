@@ -1,13 +1,14 @@
 //! Integration test for ALL nonblocking collective operations.
 //!
-//! Exercises all 15 nonblocking collective methods in `Comm`:
+//! Exercises all 15 nonblocking collective methods in `Communicator`:
 //! ibroadcast, iallreduce, ireduce, igather, iallgather, iscatter,
 //! ibarrier, iscan, iexscan, ialltoall, igatherv, iscatterv,
 //! iallgatherv, ialltoallv, and ireduce_scatter_block.
 //!
 //! Each operation returns a `Request` that is `.wait()`ed before
 //! verifying results with assertions matching the blocking test
-//! math in `test_collectives.rs`.
+//! math in `test_collectives.rs`; `ialltoallv` alone uses send and
+//! receive layouts that differ.
 //!
 //! Run with: mpiexec -n 4 ./target/debug/examples/test_nonblocking_collectives
 // mpi-test: np=2..
@@ -39,8 +40,14 @@ fn main() {
                 *x = (i + 1) as f64;
             }
         }
-        let req = world.ibroadcast(&mut data, 0).expect("ibroadcast failed");
-        req.wait().expect("ibroadcast wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .ibroadcast(s, &mut data, 0)
+                .expect("ibroadcast failed");
+            req.wait().expect("ibroadcast wait failed");
+            Ok(())
+        })
+        .expect("ibroadcast scope failed");
 
         for (i, &x) in data.iter().enumerate() {
             assert!(
@@ -63,10 +70,14 @@ fn main() {
     {
         let send = vec![rank as f64; 5];
         let mut recv = vec![0.0f64; 5];
-        let req = world
-            .iallreduce(&send, &mut recv, ReduceOp::Sum)
-            .expect("iallreduce failed");
-        req.wait().expect("iallreduce wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .iallreduce(s, &send, &mut recv, ReduceOp::Sum)
+                .expect("iallreduce failed");
+            req.wait().expect("iallreduce wait failed");
+            Ok(())
+        })
+        .expect("iallreduce scope failed");
 
         // Sum of ranks: 0 + 1 + ... + (size-1) = size*(size-1)/2
         let expected = (size * (size - 1) / 2) as f64;
@@ -90,10 +101,14 @@ fn main() {
     {
         let send = vec![(rank + 1) as f64; 4];
         let mut recv = vec![0.0f64; 4];
-        let req = world
-            .ireduce(&send, &mut recv, ReduceOp::Sum, 0)
-            .expect("ireduce failed");
-        req.wait().expect("ireduce wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .ireduce(s, &send, &mut recv, ReduceOp::Sum, 0)
+                .expect("ireduce failed");
+            req.wait().expect("ireduce wait failed");
+            Ok(())
+        })
+        .expect("ireduce scope failed");
 
         if rank == 0 {
             // Sum of 1 + 2 + ... + size = size*(size+1)/2
@@ -104,6 +119,28 @@ fn main() {
                     "ireduce recv[{i}] = {v}, expected {expected}"
                 );
             }
+        }
+
+        // MPI ignores recv at a non-root rank, so it may be empty there. An
+        // empty u8 slice's pointer is 0x1, which is MPI_IN_PLACE on some MPI
+        // libraries.
+        let send_u8 = vec![(rank + 1) as u8; 4];
+        let mut recv_u8 = if rank == 0 { vec![0u8; 4] } else { Vec::new() };
+        ferrompi::scope(|s| {
+            let req = world
+                .ireduce(s, &send_u8, &mut recv_u8, ReduceOp::Sum, 0)
+                .expect("ireduce with an empty non-root recv failed");
+            req.wait()
+                .expect("ireduce with an empty non-root recv wait failed");
+            Ok(())
+        })
+        .expect("ireduce with an empty non-root recv scope failed");
+        if rank == 0 {
+            let expected = (size * (size + 1) / 2) as u8;
+            assert!(
+                recv_u8.iter().all(|&v| v == expected),
+                "ireduce u8 recv = {recv_u8:?}, expected {expected} in every element"
+            );
         }
         test_count += 1;
         if rank == 0 {
@@ -119,8 +156,14 @@ fn main() {
     {
         let send = vec![rank as f64 * 10.0, rank as f64 * 10.0 + 1.0];
         let mut recv = vec![0.0f64; 2 * size as usize];
-        let req = world.igather(&send, &mut recv, 0).expect("igather failed");
-        req.wait().expect("igather wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .igather(s, &send, &mut recv, 0)
+                .expect("igather failed");
+            req.wait().expect("igather wait failed");
+            Ok(())
+        })
+        .expect("igather scope failed");
 
         if rank == 0 {
             for r in 0..size {
@@ -154,10 +197,14 @@ fn main() {
     {
         let send = vec![rank as f64; 2];
         let mut recv = vec![0.0f64; 2 * size as usize];
-        let req = world
-            .iallgather(&send, &mut recv)
-            .expect("iallgather failed");
-        req.wait().expect("iallgather wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .iallgather(s, &send, &mut recv)
+                .expect("iallgather failed");
+            req.wait().expect("iallgather wait failed");
+            Ok(())
+        })
+        .expect("iallgather scope failed");
 
         for r in 0..size {
             let idx = r as usize * 2;
@@ -193,10 +240,14 @@ fn main() {
             vec![0.0f64; (size * 3) as usize]
         };
         let mut recv = vec![0.0f64; 3];
-        let req = world
-            .iscatter(&send_data, &mut recv, 0)
-            .expect("iscatter failed");
-        req.wait().expect("iscatter wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .iscatter(s, &send_data, &mut recv, 0)
+                .expect("iscatter failed");
+            req.wait().expect("iscatter wait failed");
+            Ok(())
+        })
+        .expect("iscatter scope failed");
 
         let base = rank * 3;
         for (i, &v) in recv.iter().enumerate() {
@@ -218,8 +269,12 @@ fn main() {
     // Test 7: ibarrier
     // ========================================================================
     {
-        let req = world.ibarrier().expect("ibarrier failed");
-        req.wait().expect("ibarrier wait failed");
+        ferrompi::scope(|s| {
+            let req = world.ibarrier(s).expect("ibarrier failed");
+            req.wait().expect("ibarrier wait failed");
+            Ok(())
+        })
+        .expect("ibarrier scope failed");
 
         test_count += 1;
         if rank == 0 {
@@ -235,10 +290,14 @@ fn main() {
     {
         let send = vec![1.0f64; 3];
         let mut recv = vec![0.0f64; 3];
-        let req = world
-            .iscan(&send, &mut recv, ReduceOp::Sum)
-            .expect("iscan failed");
-        req.wait().expect("iscan wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .iscan(s, &send, &mut recv, ReduceOp::Sum)
+                .expect("iscan failed");
+            req.wait().expect("iscan wait failed");
+            Ok(())
+        })
+        .expect("iscan scope failed");
 
         // On rank i, inclusive scan of 1.0 from all ranks 0..=i => (i+1)
         let expected = (rank + 1) as f64;
@@ -262,10 +321,14 @@ fn main() {
     {
         let send = vec![1.0f64; 3];
         let mut recv = vec![0.0f64; 3];
-        let req = world
-            .iexscan(&send, &mut recv, ReduceOp::Sum)
-            .expect("iexscan failed");
-        req.wait().expect("iexscan wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .iexscan(s, &send, &mut recv, ReduceOp::Sum)
+                .expect("iexscan failed");
+            req.wait().expect("iexscan wait failed");
+            Ok(())
+        })
+        .expect("iexscan scope failed");
 
         // On rank i > 0, exclusive scan of 1.0 from ranks 0..i => i
         // On rank 0, result is undefined per MPI standard — skip assertion
@@ -294,8 +357,14 @@ fn main() {
         // send = [rank, rank, ..., rank] (one per destination rank)
         let send = vec![rank as f64; size as usize];
         let mut recv = vec![0.0f64; size as usize];
-        let req = world.ialltoall(&send, &mut recv).expect("ialltoall failed");
-        req.wait().expect("ialltoall wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .ialltoall(s, &send, &mut recv)
+                .expect("ialltoall failed");
+            req.wait().expect("ialltoall wait failed");
+            Ok(())
+        })
+        .expect("ialltoall scope failed");
 
         // recv[i] should be i (the value that rank i sent)
         for (i, &v) in recv.iter().enumerate() {
@@ -326,10 +395,14 @@ fn main() {
 
         let mut recv = vec![0.0f64; total];
 
-        let req = world
-            .igatherv(&send, &mut recv, &recvcounts, &displs, 0)
-            .expect("igatherv failed");
-        req.wait().expect("igatherv wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .igatherv(s, &send, &mut recv, &recvcounts, &displs, 0)
+                .expect("igatherv failed");
+            req.wait().expect("igatherv wait failed");
+            Ok(())
+        })
+        .expect("igatherv scope failed");
 
         if rank == 0 {
             for r in 0..size {
@@ -379,10 +452,14 @@ fn main() {
         };
 
         let mut recv = vec![0.0f64; recv_count];
-        let req = world
-            .iscatterv(&send, &mut recv, &sendcounts, &displs, 0)
-            .expect("iscatterv failed");
-        req.wait().expect("iscatterv wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .iscatterv(s, &send, &sendcounts, &displs, &mut recv, 0)
+                .expect("iscatterv failed");
+            req.wait().expect("iscatterv wait failed");
+            Ok(())
+        })
+        .expect("iscatterv scope failed");
 
         let expected = rank as f64 * 100.0;
         for (i, &v) in recv.iter().enumerate() {
@@ -411,10 +488,14 @@ fn main() {
         let total: usize = recvcounts.iter().map(|&c| c as usize).sum();
         let mut recv = vec![0.0f64; total];
 
-        let req = world
-            .iallgatherv(&send, &mut recv, &recvcounts, &displs)
-            .expect("iallgatherv failed");
-        req.wait().expect("iallgatherv wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .iallgatherv(s, &send, &mut recv, &recvcounts, &displs)
+                .expect("iallgatherv failed");
+            req.wait().expect("iallgatherv wait failed");
+            Ok(())
+        })
+        .expect("iallgatherv scope failed");
 
         for r in 0..size {
             let offset = displs[r as usize] as usize;
@@ -441,35 +522,55 @@ fn main() {
     // Test 14: ialltoallv (variable-count all-to-all)
     // ========================================================================
     {
-        // Each rank sends 1 element to every other rank.
-        // The element sent from rank r to rank d is (r * 1000 + d) as f64.
+        // Rank r sends 1 + (r + 2 * d) % 3 elements to rank d, so the counts a
+        // rank sends differ from the counts it receives. Send blocks start one
+        // element into strides of four, in rank order; receive blocks start at
+        // strides of four, in reverse rank order. Element k of the block from r
+        // to d is (r * size + d) * 4 + k. Every other element of `send` is -2.0
+        // and of `recv` -1.0, and `recv` must keep those.
         let sz = size as usize;
-        let sendcounts = vec![1i32; sz];
-        let sdispls: Vec<i32> = (0..sz as i32).collect();
-        let recvcounts = vec![1i32; sz];
-        let rdispls: Vec<i32> = (0..sz as i32).collect();
+        let count = |from: i32, to: i32| 1 + (from + 2 * to) % 3;
+        let value = |from: i32, to: i32, k: i32| ((from * size + to) * 4 + k) as f64;
 
-        let send: Vec<f64> = (0..size).map(|d| (rank * 1000 + d) as f64).collect();
-        let mut recv = vec![0.0f64; sz];
+        let sendcounts: Vec<i32> = (0..size).map(|d| count(rank, d)).collect();
+        let sdispls: Vec<i32> = (0..size).map(|d| 4 * d + 1).collect();
+        let recvcounts: Vec<i32> = (0..size).map(|r| count(r, rank)).collect();
+        let rdispls: Vec<i32> = (0..size).map(|r| 4 * (size - 1 - r)).collect();
 
-        let req = world
-            .ialltoallv(
-                &send,
-                &mut recv,
-                &sendcounts,
-                &sdispls,
-                &recvcounts,
-                &rdispls,
-            )
-            .expect("ialltoallv failed");
-        req.wait().expect("ialltoallv wait failed");
+        let mut send = vec![-2.0f64; 4 * sz];
+        let mut expected = vec![-1.0f64; 4 * sz];
+        for peer in 0..size {
+            let p = peer as usize;
+            for k in 0..sendcounts[p] {
+                send[(sdispls[p] + k) as usize] = value(rank, peer, k);
+            }
+            for k in 0..recvcounts[p] {
+                expected[(rdispls[p] + k) as usize] = value(peer, rank, k);
+            }
+        }
+        let mut recv = vec![-1.0f64; 4 * sz];
 
-        // recv[i] should be the value that rank i sent to us = i * 1000 + rank
-        for (i, &v) in recv.iter().enumerate() {
-            let expected = (i as i32 * 1000 + rank) as f64;
+        ferrompi::scope(|s| {
+            let req = world
+                .ialltoallv(
+                    s,
+                    &send,
+                    &sendcounts,
+                    &sdispls,
+                    &mut recv,
+                    &recvcounts,
+                    &rdispls,
+                )
+                .expect("ialltoallv failed");
+            req.wait().expect("ialltoallv wait failed");
+            Ok(())
+        })
+        .expect("ialltoallv scope failed");
+
+        for (i, (&v, &e)) in recv.iter().zip(&expected).enumerate() {
             assert!(
-                (v - expected).abs() < f64::EPSILON,
-                "rank {rank}: ialltoallv recv[{i}] = {v}, expected {expected}"
+                (v - e).abs() < f64::EPSILON,
+                "rank {rank}: ialltoallv recv[{i}] = {v}, expected {e}"
             );
         }
         test_count += 1;
@@ -490,10 +591,14 @@ fn main() {
         let send = vec![1.0f64; block_size * sz];
         let mut recv = vec![0.0f64; block_size];
 
-        let req = world
-            .ireduce_scatter_block(&send, &mut recv, ReduceOp::Sum)
-            .expect("ireduce_scatter_block failed");
-        req.wait().expect("ireduce_scatter_block wait failed");
+        ferrompi::scope(|s| {
+            let req = world
+                .ireduce_scatter_block(s, &send, &mut recv, ReduceOp::Sum)
+                .expect("ireduce_scatter_block failed");
+            req.wait().expect("ireduce_scatter_block wait failed");
+            Ok(())
+        })
+        .expect("ireduce_scatter_block scope failed");
 
         // Each element is the sum across all ranks of 1.0 => size
         let expected = size as f64;

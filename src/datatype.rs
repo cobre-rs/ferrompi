@@ -5,7 +5,7 @@
 //! - [`MpiDatatype`]: maps primitive Rust types to MPI datatype tags for all
 //!   communication operations (broadcast, send, recv, allreduce with scalar ops).
 //! - [`MpiIndexedDatatype`]: marks the six MPI paired value+index structs that are
-//!   only valid with [`MPI_MAXLOC`/`MPI_MINLOC`](crate::ReduceOp::MaxLoc) reductions.
+//!   only valid with [`MPI_MAXLOC`/`MPI_MINLOC`](crate::CollectiveOp::MAX_LOC) reductions.
 //! - [`BytePermutable`]: marks types safe for byte-level bitwise reductions via
 //!   `MPI_BYTE` (`BitwiseOr`, `BitwiseAnd`, `BitwiseXor`).
 //!
@@ -42,7 +42,15 @@ use std::ffi::c_void;
 
 /// Internal module to seal [`MpiDatatype`] — prevents external implementations.
 mod sealed {
-    pub trait Sealed {}
+    use super::DatatypeTag;
+
+    /// Argument of [`Sealed::tag`]: it cannot be named outside this crate, so
+    /// the tag cannot be read through a public bound.
+    pub struct Token;
+
+    pub trait Sealed {
+        fn tag(_: Token) -> DatatypeTag;
+    }
 }
 
 /// Internal module to seal [`MpiIndexedDatatype`] — a separate seal so that
@@ -50,7 +58,11 @@ mod sealed {
 /// `MpiIndexedDatatype` must NOT automatically satisfy `MpiDatatype`, and
 /// vice-versa.
 mod sealed_indexed {
-    pub trait Sealed {}
+    use super::{sealed::Token, DatatypeTag};
+
+    pub trait Sealed {
+        fn tag(_: Token) -> DatatypeTag;
+    }
 }
 
 /// Internal module to seal [`BytePermutable`] — a separate seal for types
@@ -136,9 +148,44 @@ pub enum DatatypeTag {
 /// let mut data_i32 = vec![42i32; 10];
 /// world.broadcast(&mut data_i32, 0).unwrap();
 /// ```
-pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {
-    /// The datatype tag used for FFI dispatch to the C layer.
-    const TAG: DatatypeTag;
+///
+/// # The datatype code is private
+///
+/// The code the C layer dispatches on has no public name:
+///
+/// ```compile_fail,E0432
+/// use ferrompi::DatatypeTag;
+/// ```
+///
+/// ```no_run
+/// use ferrompi::MpiDatatype;
+/// ```
+///
+/// and it cannot be read through a bound on this trait:
+///
+/// ```compile_fail,E0599
+/// fn f<T: ferrompi::MpiDatatype>() {
+///     let _ = T::TAG;
+/// }
+/// ```
+///
+/// ```no_run
+/// fn f<T: ferrompi::MpiDatatype>() {
+///     let _ = ferrompi::CustomDatatype::contiguous::<T>(1);
+/// }
+/// ```
+pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {}
+
+/// The tag the C layer dispatches on for `T`.
+#[inline]
+pub(crate) fn tag_of<T: MpiDatatype>() -> DatatypeTag {
+    T::tag(sealed::Token)
+}
+
+/// The tag the C layer dispatches on for the pair type `T`.
+#[inline]
+pub(crate) fn pair_tag_of<T: MpiIndexedDatatype>() -> DatatypeTag {
+    T::tag(sealed::Token)
 }
 
 /// Bound for the element type of the custom-datatype point-to-point methods
@@ -160,17 +207,17 @@ pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {
 ///
 /// # Example
 ///
-/// ```compile_fail
-/// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi};
+/// ```compile_fail,E0277
+/// # use ferrompi::{CustomDatatype, Mpi};
 /// # let _mpi = Mpi::init().unwrap();
 /// # let world = _mpi.world();
-/// let dt8 = CustomDatatype::contiguous(8, DatatypeTag::U8).unwrap();
+/// let dt8 = CustomDatatype::contiguous::<u8>(8).unwrap();
 /// let mut boxes: [Box<u64>; 1] = [Box::new(5)];
 /// world.recv_custom(&mut boxes, &dt8, 0, 2).unwrap();
 /// ```
 ///
 /// ```no_run
-/// # use ferrompi::{CustomDatatype, DatatypeTag, Mpi, PlainData};
+/// # use ferrompi::{CustomDatatype, Mpi, PlainData};
 /// #[repr(C)]
 /// #[derive(Clone, Copy)]
 /// struct Pair { v: f64, i: i32 }
@@ -178,7 +225,7 @@ pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {
 /// unsafe impl PlainData for Pair {}
 /// # let _mpi = Mpi::init().unwrap();
 /// # let world = _mpi.world();
-/// let dt8 = CustomDatatype::contiguous(8, DatatypeTag::U8).unwrap();
+/// let dt8 = CustomDatatype::contiguous::<u8>(8).unwrap();
 /// let mut boxes: [Pair; 1] = [Pair { v: 0.0, i: 0 }];
 /// world.recv_custom(&mut boxes, &dt8, 0, 2).unwrap();
 /// ```
@@ -195,23 +242,105 @@ unsafe impl<T: PlainData, const N: usize> PlainData for [T; N] {}
 /// unaliased). The count is exact: a slice length never exceeds
 /// `isize::MAX <= i64::MAX`. The tag is the MPI datatype that the sealed
 /// `MpiDatatype` impl assigns to `T`, so MPI's element size and layout equal
-/// `T`'s. The pointer is never null, even for an empty slice, so a NULL
-/// passed elsewhere as an in-place marker stays unambiguous.
+/// `T`'s. The pointer is never null, so a NULL passed elsewhere as an in-place
+/// marker stays unambiguous; see [`buf_ptr`] for an empty slice.
+// PERF: with no inline attribute on `buf` and `buf_mut` (and `#[inline]` on
+// `buf_ptr`), `isend` and `irecv` are no longer inlined into a caller's scope
+// body.
+#[inline(always)]
 pub(crate) fn buf<T: MpiDatatype>(s: &[T]) -> (*const c_void, i64, i32) {
-    (s.as_ptr().cast(), s.len() as i64, T::TAG as i32)
+    (
+        buf_ptr(s.as_ptr(), s.len(), false),
+        s.len() as i64,
+        tag_of::<T>() as i32,
+    )
 }
 
 /// See [`buf`].
+#[inline(always)]
 pub(crate) fn buf_mut<T: MpiDatatype>(s: &mut [T]) -> (*mut c_void, i64, i32) {
-    (s.as_mut_ptr().cast(), s.len() as i64, T::TAG as i32)
+    (
+        buf_ptr(s.as_mut_ptr(), s.len(), true).cast_mut(),
+        s.len() as i64,
+        tag_of::<T>() as i32,
+    )
+}
+
+/// The addresses MPI gets in place of an empty buffer's own: the first for a
+/// buffer MPI reads, the second for one it writes, so that two substituted
+/// buffers of one call never share an address. [`buf_ptr`] and
+/// [`empty_buf_ptr`] substitute them.
+static EMPTY: [u64; 2] = [0; 2];
+
+/// `ptr`, or the address of a private static when the buffer holds no bytes
+/// (`len` is zero or `T` is zero-sized) and `T` has alignment 1. Such a buffer
+/// usually points at address 1, which is `MPI_IN_PLACE` in Open MPI and in the
+/// MPI-5 ABI; a type with a larger alignment has an even address, and
+/// `MPI_IN_PLACE` is an odd address there and in MPICH. `written` selects the
+/// second address, so that two substituted buffers of one call never share
+/// one; [`empty_buf_ptr`] names the calls that need that. MPI reads and writes
+/// nothing through a buffer of count zero.
+#[inline(always)]
+pub(crate) fn buf_ptr<T>(ptr: *const T, len: usize, written: bool) -> *const c_void {
+    if align_of::<T>() == 1 && (len == 0 || size_of::<T>() == 0) {
+        std::ptr::from_ref(&EMPTY[usize::from(written)]).cast()
+    } else {
+        ptr.cast()
+    }
+}
+
+/// `ptr`, or, when `empty`, an address of [`EMPTY`] that is not `other`, the
+/// pointer of the call's other buffer: the first for a buffer MPI reads and the
+/// second (`written`) for one it writes, or the remaining one of the two when
+/// `other` is that address. It is [`buf_ptr`]'s substitution for an element
+/// type of any alignment.
+///
+/// [`buf_ptr`] leaves an empty buffer of a type with alignment 2 or more at its
+/// own address: a test on the length would cost the blocking collectives a
+/// branch. That address can be the other buffer's: two empty `Vec`s usually
+/// share one dangling address, and an empty slice can start where the other
+/// buffer begins. MPICH's `MPI_Alltoallv` and `MPI_Ialltoallv` can refuse equal
+/// send and receive buffers whatever the counts, and so can Open MPI 5's
+/// `MPI_Reduce_init` at the root. So `alltoallv` and `ialltoallv` pass each of
+/// their two pointers through here, `empty` when that buffer is, and
+/// `reduce_init`, whose two `Vec`s share an address only when both are empty,
+/// its receive pointer, `empty` when both are. MPI reads and writes nothing
+/// through a buffer of count zero.
+///
+/// MPICH's `MPI_Alltoallv_init` makes the same test. `alltoallv_init` needs no
+/// call here: it hands MPI its own end-to-end copy of the four arrays, in which
+/// the send and the receive counts never share an address.
+///
+/// `other` is needed because the two addresses are not this crate's alone: a
+/// build with link-time optimization can place a caller's read-only constant
+/// of sixteen zero bytes where [`EMPTY`] is, and a send buffer can then start
+/// at the second address.
+#[inline]
+pub(crate) fn empty_buf_ptr(
+    ptr: *const c_void,
+    empty: bool,
+    written: bool,
+    other: *const c_void,
+) -> *const c_void {
+    let fixed = |second: bool| std::ptr::from_ref(&EMPTY[usize::from(second)]).cast::<c_void>();
+    if !empty {
+        ptr
+    } else if fixed(written) == other {
+        fixed(!written)
+    } else {
+        fixed(written)
+    }
 }
 
 macro_rules! impl_mpi_datatype {
     ($ty:ty, $tag:expr) => {
-        impl sealed::Sealed for $ty {}
-        impl MpiDatatype for $ty {
-            const TAG: DatatypeTag = $tag;
+        impl sealed::Sealed for $ty {
+            #[inline]
+            fn tag(_: sealed::Token) -> DatatypeTag {
+                $tag
+            }
         }
+        impl MpiDatatype for $ty {}
     };
 }
 
@@ -233,14 +362,14 @@ impl_mpi_datatype!(u64, DatatypeTag::U64);
 /// Only the six MPI predefined paired value+index types implement it.
 ///
 /// Use these types exclusively with [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed) and
-/// [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) / [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc). They are **not** valid for
+/// [`CollectiveOp::MAX_LOC`](crate::CollectiveOp::MAX_LOC) / [`CollectiveOp::MIN_LOC`](crate::CollectiveOp::MIN_LOC). They are **not** valid for
 /// `broadcast`, `send`, `recv`, or other collectives: they implement
 /// [`MpiIndexedDatatype`], not [`MpiDatatype`], which those APIs require.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use ferrompi::{Mpi, ReduceOp, DoubleInt, MpiIndexedDatatype};
+/// use ferrompi::{CollectiveOp, Mpi, DoubleInt, MpiIndexedDatatype};
 ///
 /// let mpi = Mpi::init().unwrap();
 /// let world = mpi.world();
@@ -248,30 +377,26 @@ impl_mpi_datatype!(u64, DatatypeTag::U64);
 ///
 /// let send = [DoubleInt { value: rank as f64, index: rank }];
 /// let mut recv = [DoubleInt { value: 0.0, index: 0 }];
-/// world.allreduce_indexed(&send, &mut recv, ReduceOp::MaxLoc).unwrap();
+/// world.allreduce_indexed(&send, &mut recv, CollectiveOp::MAX_LOC).unwrap();
 /// // Every rank now holds { value: (size-1) as f64, index: size-1 }
 /// ```
 ///
 /// # Sealed: cannot implement for external types
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use ferrompi::MpiIndexedDatatype;
-/// use ferrompi::DatatypeTag;
 ///
+/// #[derive(Clone, Copy)]
+/// struct Mine;
 /// // This must not compile — MpiIndexedDatatype is sealed.
-/// impl MpiIndexedDatatype for i32 {
-///     const TAG: DatatypeTag = DatatypeTag::Int2;
-/// }
+/// impl MpiIndexedDatatype for Mine {}
 /// ```
-pub trait MpiIndexedDatatype: sealed_indexed::Sealed + Copy + Send + 'static {
-    /// The datatype tag used for FFI dispatch to the C layer.
-    const TAG: DatatypeTag;
-}
+pub trait MpiIndexedDatatype: sealed_indexed::Sealed + Copy + Send + 'static {}
 
 /// Paired `{ f32 value; i32 index }` — maps to `MPI_FLOAT_INT`.
 ///
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// Use with [`CollectiveOp::MAX_LOC`](crate::CollectiveOp::MAX_LOC) or [`CollectiveOp::MIN_LOC`](crate::CollectiveOp::MIN_LOC) via
 /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
@@ -285,7 +410,7 @@ pub struct FloatInt {
 /// Paired `{ f64 value; i32 index }` — maps to `MPI_DOUBLE_INT`.
 ///
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// Use with [`CollectiveOp::MAX_LOC`](crate::CollectiveOp::MAX_LOC) or [`CollectiveOp::MIN_LOC`](crate::CollectiveOp::MIN_LOC) via
 /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
 ///
 /// Layout on 64-bit Linux: `sizeof == 16`, `alignof == 8` (4 bytes of trailing
@@ -304,7 +429,7 @@ pub struct DoubleInt {
 ///
 /// On 64-bit Linux, C `long` is 8 bytes, so `value` is `i64`.
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// Use with [`CollectiveOp::MAX_LOC`](crate::CollectiveOp::MAX_LOC) or [`CollectiveOp::MIN_LOC`](crate::CollectiveOp::MIN_LOC) via
 /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
 ///
 /// This type is available only on Linux x86_64, aarch64 and little-endian
@@ -330,7 +455,7 @@ pub struct LongInt {
 /// Paired `{ i32 value; i32 index }` — maps to `MPI_2INT`.
 ///
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// Use with [`CollectiveOp::MAX_LOC`](crate::CollectiveOp::MAX_LOC) or [`CollectiveOp::MIN_LOC`](crate::CollectiveOp::MIN_LOC) via
 /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
 ///
 /// Layout: `sizeof == 8`, `alignof == 4`.
@@ -346,7 +471,7 @@ pub struct Int2 {
 /// Paired `{ i16 value; i32 index }` — maps to `MPI_SHORT_INT`.
 ///
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// Use with [`CollectiveOp::MAX_LOC`](crate::CollectiveOp::MAX_LOC) or [`CollectiveOp::MIN_LOC`](crate::CollectiveOp::MIN_LOC) via
 /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
 ///
 /// Layout on 64-bit Linux: `sizeof == 8`, `alignof == 4` (2 bytes of padding
@@ -369,7 +494,7 @@ pub struct ShortInt {
 /// `long double` representation via FFI if needed.
 ///
 /// The `index` field conventionally holds the rank of the contributing process.
-/// Use with [`ReduceOp::MaxLoc`](crate::ReduceOp::MaxLoc) or [`ReduceOp::MinLoc`](crate::ReduceOp::MinLoc) via
+/// Use with [`CollectiveOp::MAX_LOC`](crate::CollectiveOp::MAX_LOC) or [`CollectiveOp::MIN_LOC`](crate::CollectiveOp::MIN_LOC) via
 /// [`Communicator::allreduce_indexed`](crate::Communicator::allreduce_indexed).
 ///
 /// This type is available only on Linux x86_64, aarch64 and little-endian
@@ -394,10 +519,13 @@ pub struct LongDoubleInt {
 
 macro_rules! impl_mpi_indexed_datatype {
     ($ty:ty, $tag:expr) => {
-        impl sealed_indexed::Sealed for $ty {}
-        impl MpiIndexedDatatype for $ty {
-            const TAG: DatatypeTag = $tag;
+        impl sealed_indexed::Sealed for $ty {
+            #[inline]
+            fn tag(_: sealed::Token) -> DatatypeTag {
+                $tag
+            }
         }
+        impl MpiIndexedDatatype for $ty {}
     };
 }
 
@@ -465,11 +593,13 @@ const _: () = assert!(
 ///
 /// # Sealed: cannot implement for external types
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// use ferrompi::BytePermutable;
 ///
+/// #[derive(Clone, Copy)]
+/// struct Mine;
 /// // This must not compile — BytePermutable is sealed.
-/// impl BytePermutable for f64 {}
+/// impl BytePermutable for Mine {}
 /// ```
 pub trait BytePermutable: sealed_byte::Sealed + Copy + Send + 'static {}
 
@@ -499,24 +629,36 @@ impl<T: BytePermutable, const N: usize> BytePermutable for [T; N] {}
 /// Trait for types eligible for use with `MPI_Compare_and_swap`.
 ///
 /// This is a **sealed trait** — it cannot be implemented outside this crate.
-/// Per MPI 4.1 section 12.5.4, the predefined types guaranteed to support
-/// `MPI_Compare_and_swap` are the integer and byte types: `i32`, `i64`,
-/// `u32`, `u64`, and `u8`.
+/// MPI-4.1 §12.3.4 allows only integer, logical and byte datatypes in
+/// `MPI_Compare_and_swap`; of ferrompi's element types these are `i32`, `i64`,
+/// `u32`, `u64` and `u8`.
 ///
 /// **Floating-point types (`f32`, `f64`) are intentionally excluded.** The
-/// MPI standard does not require implementations to support floating-point
-/// CAS. Accepting them would introduce silent portability bugs across MPI
-/// implementations.
+/// MPI standard does not allow them in compare-and-swap. Accepting them would
+/// introduce silent portability bugs across MPI implementations.
 ///
-/// This trait is used as a bound on [`Win::compare_and_swap`](crate::Win::compare_and_swap)
+/// This trait is used as a bound on
+/// [`ActiveEpoch::compare_and_swap`](crate::ActiveEpoch::compare_and_swap) and
+/// [`PassiveEpoch::compare_and_swap`](crate::PassiveEpoch::compare_and_swap)
 /// to ensure the method only exists for windows whose element type is
 /// CAS-eligible.
 ///
-/// # Sealed: cannot implement for external types
+/// # Eligible types only
 ///
-/// ```compile_fail
-/// fn _check(w: &ferrompi::Win<f64>) -> ferrompi::Result<f64> {
-///     w.compare_and_swap(0.0, 0.0, 0, 0)
+/// `compare_and_swap` exists only for integer and byte elements: on an `f64`
+/// window the method is not found.
+///
+/// ```compile_fail,E0599
+/// fn _check(e: &ferrompi::ActiveEpoch<'_, '_, f64>, v: &'static f64, r: &'static mut f64) -> ferrompi::Result<()> {
+///     e.compare_and_swap(v, v, r, 0, 0)
+/// }
+/// ```
+///
+/// The same call on an `i64` window compiles:
+///
+/// ```no_run
+/// fn _check(e: &ferrompi::ActiveEpoch<'_, '_, i64>, v: &'static i64, r: &'static mut i64) -> ferrompi::Result<()> {
+///     e.compare_and_swap(v, v, r, 0, 0)
 /// }
 /// ```
 #[cfg(feature = "rma")]
@@ -546,8 +688,8 @@ mod tests {
     #[cfg(feature = "rma")]
     use super::AtomicMpiDatatype;
     use super::{
-        BytePermutable, DatatypeTag, DoubleInt, FloatInt, Int2, MpiDatatype, MpiIndexedDatatype,
-        PlainData, ShortInt,
+        buf, buf_mut, buf_ptr, empty_buf_ptr, pair_tag_of, tag_of, BytePermutable, DatatypeTag,
+        DoubleInt, FloatInt, Int2, PlainData, ShortInt,
     };
     #[cfg(all(
         target_os = "linux",
@@ -576,15 +718,15 @@ mod tests {
         assert_eq!(DatatypeTag::LongDoubleInt as i32, 12);
         assert_eq!(DatatypeTag::Byte as i32, 13);
 
-        assert_eq!(f32::TAG as i32, 0);
-        assert_eq!(f64::TAG as i32, 1);
-        assert_eq!(i32::TAG as i32, 2);
-        assert_eq!(i64::TAG as i32, 3);
-        assert_eq!(u8::TAG as i32, 4);
-        assert_eq!(u32::TAG as i32, 5);
-        assert_eq!(u64::TAG as i32, 6);
-        assert_eq!(FloatInt::TAG as i32, 7);
-        assert_eq!(DoubleInt::TAG as i32, 8);
+        assert_eq!(tag_of::<f32>() as i32, 0);
+        assert_eq!(tag_of::<f64>() as i32, 1);
+        assert_eq!(tag_of::<i32>() as i32, 2);
+        assert_eq!(tag_of::<i64>() as i32, 3);
+        assert_eq!(tag_of::<u8>() as i32, 4);
+        assert_eq!(tag_of::<u32>() as i32, 5);
+        assert_eq!(tag_of::<u64>() as i32, 6);
+        assert_eq!(pair_tag_of::<FloatInt>() as i32, 7);
+        assert_eq!(pair_tag_of::<DoubleInt>() as i32, 8);
         #[cfg(all(
             target_os = "linux",
             any(
@@ -593,9 +735,9 @@ mod tests {
                 all(target_arch = "powerpc64", target_endian = "little")
             )
         ))]
-        assert_eq!(LongInt::TAG as i32, 9);
-        assert_eq!(Int2::TAG as i32, 10);
-        assert_eq!(ShortInt::TAG as i32, 11);
+        assert_eq!(pair_tag_of::<LongInt>() as i32, 9);
+        assert_eq!(pair_tag_of::<Int2>() as i32, 10);
+        assert_eq!(pair_tag_of::<ShortInt>() as i32, 11);
         #[cfg(all(
             target_os = "linux",
             any(
@@ -604,7 +746,53 @@ mod tests {
                 all(target_arch = "powerpc64", target_endian = "little")
             )
         ))]
-        assert_eq!(LongDoubleInt::TAG as i32, 12);
+        assert_eq!(pair_tag_of::<LongDoubleInt>() as i32, 12);
+    }
+
+    #[test]
+    fn empty_byte_buffer_is_passed_at_a_fixed_even_address() {
+        let empty: Vec<u8> = Vec::new();
+        assert_eq!(empty.as_ptr() as usize, 1);
+        let (ptr, len, _) = buf(&empty);
+        assert_eq!(len, 0);
+        assert!(!ptr.is_null() && (ptr as usize) % 2 == 0);
+        let mut empty_out: Vec<u8> = Vec::new();
+        let out = buf_mut(&mut empty_out).0.cast_const();
+        assert!(!out.is_null() && (out as usize) % 2 == 0 && out != ptr);
+        let no_bytes = [[0u8; 0]; 3];
+        assert_eq!(buf_ptr(no_bytes.as_ptr(), no_bytes.len(), false), ptr);
+    }
+
+    #[test]
+    fn other_buffers_are_passed_at_their_own_address() {
+        let bytes = [7u8; 3];
+        assert_eq!(buf(&bytes).0, bytes.as_ptr().cast());
+        let no_words: Vec<u64> = Vec::new();
+        assert_eq!(buf(&no_words).0, no_words.as_ptr().cast());
+    }
+
+    #[test]
+    fn empty_buffer_of_any_type_gets_a_fixed_address() {
+        let mut data = [0.0f64; 4];
+        let (none, some) = data.split_at_mut(0);
+        let full = buf(some).0;
+        let empty = buf_mut(none).0.cast_const();
+        // The defect: an empty slice of an alignment-8 type can start where the
+        // other buffer begins.
+        assert_eq!(full, empty);
+        let read = empty_buf_ptr(empty, true, false, full);
+        let written = empty_buf_ptr(empty, true, true, full);
+        assert!(read != full && written != full && read != written);
+        // They are the addresses `buf` and `buf_mut` give empty byte buffers.
+        let mut no_bytes: Vec<u8> = Vec::new();
+        assert_eq!(read, buf(&no_bytes).0);
+        assert_eq!(written, buf_mut(&mut no_bytes).0.cast_const());
+        // An empty buffer never gets the address the other buffer is at.
+        assert_eq!(empty_buf_ptr(empty, true, false, read), written);
+        assert_eq!(empty_buf_ptr(empty, true, true, written), read);
+        // A buffer that is not empty keeps its pointer.
+        assert_eq!(empty_buf_ptr(full, false, false, empty), full);
+        assert_eq!(empty_buf_ptr(full, false, true, full), full);
     }
 
     #[test]

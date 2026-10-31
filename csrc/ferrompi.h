@@ -64,13 +64,31 @@ extern "C" {
 #define FERROMPI_ERR_OPS_FULL        (-7004)
 #define FERROMPI_ERR_WINDOWS_FULL    (-7005)
 #define FERROMPI_ERR_GROUPS_FULL     (-7006)
-#define FERROMPI_ERR_INFOS_FULL      (-7007)
 
 /* Returned by the persistent-collective and comm_create_from_group stubs
  * compiled without FERROMPI_HAVE_MPI4_COLLECTIVES (the library lacks the
  * MPI 4.0 operation). src/error.rs maps it to Error::NotSupported. This
  * MUST stay in sync with the mirrored const in src/error.rs. */
 #define FERROMPI_ERR_NOT_SUPPORTED   (-7008)
+
+/* Returned by ferrompi_comm_create and ferrompi_comm_create_group, before the
+ * MPI call, for a group with a member that is not in the communicator.
+ * src/error.rs maps it to Error::InvalidArgument. This MUST stay in sync with
+ * the mirrored const in src/error.rs. */
+#define FERROMPI_ERR_GROUP_NOT_IN_COMM (-7009)
+
+/* Private codes for the wildcard receive sources and tags. The C layer
+ * translates them to the linked MPI's MPI_ANY_SOURCE, MPI_PROC_NULL and
+ * MPI_ANY_TAG, whose values differ per implementation. These MUST stay in
+ * sync with the mirrored consts in src/status.rs. */
+#define FERROMPI_ANY_SOURCE (-1)
+#define FERROMPI_PROC_NULL  (-2)
+#define FERROMPI_ANY_TAG    (-1)
+
+/* Op codes at or above FERROMPI_OP_USER_BASE name the user op in slot
+ * (code - FERROMPI_OP_USER_BASE); smaller codes are the predefined ops get_op
+ * switches on. MUST stay in sync with the mirrored const in src/op.rs. */
+#define FERROMPI_OP_USER_BASE 64
 
 /* Written to a window-allocating shim's handle out-parameter when MPI
  * created the window but zeroing or registering it failed: the window is
@@ -83,7 +101,7 @@ extern "C" {
 
 int ferrompi_init_thread(int required, int* provided);
 
-int ferrompi_finalize(int32_t* active_requests);
+int ferrompi_finalize(void);
 
 int ferrompi_initialized(int* flag);
 
@@ -111,21 +129,47 @@ int ferrompi_comm_split_type(int32_t comm, int32_t split_type, int32_t key, int3
  * Create a sub-communicator from a parent communicator and a group (MPI_Comm_create).
  * Collective over comm_handle: every rank in comm_handle must call, even ranks
  * not in group_handle. Ranks not in group_handle receive newcomm_handle = -1.
+ * Returns FERROMPI_ERR_GROUP_NOT_IN_COMM, before the MPI call, when group_handle
+ * has a member that is not in comm_handle.
  */
-int ferrompi_comm_create_from_group_parent(int32_t comm_handle,
-                                           int32_t group_handle,
-                                           int32_t* newcomm_handle);
+int ferrompi_comm_create(int32_t comm_handle,
+                         int32_t group_handle,
+                         int32_t* newcomm_handle);
+
+/**
+ * Create a sub-communicator from a parent communicator and a group
+ * (MPI_Comm_create_group). Collective over group_handle only: its members
+ * call with the same group and tag. For a rank not in group_handle the call
+ * is local and newcomm_handle is set to -1.
+ * Returns FERROMPI_ERR_GROUP_NOT_IN_COMM, before the MPI call, when group_handle
+ * has a member that is not in comm_handle.
+ */
+int ferrompi_comm_create_group(int32_t comm_handle,
+                               int32_t group_handle,
+                               int32_t tag,
+                               int32_t* newcomm_handle);
 
 /**
  * Create a communicator from a group without a parent communicator
  * (MPI_Comm_create_from_group, MPI 4.0, or Open MPI 5). Collective only over the processes
  * sharing the same group and stringtag, not over an existing communicator.
+ * When MPI returns MPI_COMM_NULL (the empty group, or a caller that is not in
+ * group_handle), newcomm_handle is set to -1.
  * Returns FERROMPI_ERR_NOT_SUPPORTED when built against a library without
  * MPI_Comm_create_from_group.
  */
 int ferrompi_comm_create_from_group(int32_t group_handle,
                                     const char* stringtag,
                                     int32_t* newcomm_handle);
+
+/**
+ * The most bytes the stringtag of ferrompi_comm_create_from_group may take,
+ * its terminating NUL included: the library's MPI_MAX_STRINGTAG_LEN
+ * (MPI-4.1 7.4.2). INT64_MAX when built against a library without
+ * MPI_Comm_create_from_group, which defines no such limit. Makes no MPI call.
+ * The caller checks the length against it; the shim above does not.
+ */
+int64_t ferrompi_max_stringtag_len(void);
 
 /* ============================================================
  * Synchronization
@@ -136,6 +180,24 @@ int ferrompi_barrier(int32_t comm);
 /* ============================================================
  * Generic Point-to-Point Communication
  * ============================================================ */
+
+/* A receive, probe or completion status. source and tag are what MPI
+ * reported, except that MPI_PROC_NULL, MPI_ANY_SOURCE and MPI_ANY_TAG are
+ * replaced by FERROMPI_PROC_NULL, FERROMPI_ANY_SOURCE and FERROMPI_ANY_TAG;
+ * count is in elements of the call's datatype, -1 when the
+ * message is not a whole number of them; error is an MPI error class
+ * (MPI_Error_class of MPI_Status.MPI_ERROR), never an error code:
+ * MPI_SUCCESS unless ferrompi_waitsome/ferrompi_testsome report this
+ * request's own error. A send, collective or RMA request, a cancelled
+ * receive and an already-completed request have no source, tag or count of
+ * their own: they report source FERROMPI_ANY_SOURCE, tag FERROMPI_ANY_TAG and
+ * count 0. */
+typedef struct {
+    int32_t source;
+    int32_t tag;
+    int64_t count;
+    int32_t error;
+} ferrompi_status;
 
 int ferrompi_send(
     const void* buf,
@@ -153,9 +215,7 @@ int ferrompi_recv(
     int32_t source,
     int32_t tag,
     int32_t comm,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* actual_count
+    ferrompi_status* status
 );
 
 int ferrompi_isend(
@@ -190,9 +250,7 @@ int ferrompi_sendrecv(
     int32_t source,
     int32_t recvtag,
     int32_t comm,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* actual_count
+    ferrompi_status* status
 );
 
 /* ============================================================
@@ -203,9 +261,7 @@ int ferrompi_probe(
     int32_t source,
     int32_t tag,
     int32_t comm,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* count,
+    ferrompi_status* status,
     int32_t datatype_tag
 );
 
@@ -214,10 +270,56 @@ int ferrompi_iprobe(
     int32_t tag,
     int32_t comm,
     int32_t* flag,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* count,
+    ferrompi_status* status,
     int32_t datatype_tag
+);
+
+/* ============================================================
+ * Matched Probe and Receive
+ * ============================================================ */
+
+/**
+ * Matched probe (MPI_Mprobe). On success *message holds the MPI_Message by
+ * value, *bytes its length in bytes (-1 if MPI cannot report it) and *status
+ * its status counted in datatype_tag elements. The message stays matched until
+ * ferrompi_mrecv receives it.
+ */
+int ferrompi_mprobe(
+    int32_t source,
+    int32_t tag,
+    int32_t comm,
+    int64_t* message,
+    int64_t* bytes,
+    ferrompi_status* status,
+    int32_t datatype_tag
+);
+
+/**
+ * Nonblocking matched probe (MPI_Improbe). *flag is 0 when nothing matched;
+ * message, bytes and status are then left untouched.
+ */
+int ferrompi_improbe(
+    int32_t source,
+    int32_t tag,
+    int32_t comm,
+    int32_t* flag,
+    int64_t* message,
+    int64_t* bytes,
+    ferrompi_status* status,
+    int32_t datatype_tag
+);
+
+/**
+ * Matched receive (MPI_Mrecv) of a message from ferrompi_mprobe or
+ * ferrompi_improbe. status may be NULL. A call that reached MPI consumed the
+ * message whatever it returned, so a message is never passed twice.
+ */
+int ferrompi_mrecv(
+    void* buf,
+    int64_t count,
+    int32_t datatype_tag,
+    int64_t message,
+    ferrompi_status* status
 );
 
 /* ============================================================
@@ -228,16 +330,15 @@ int ferrompi_bcast(void* buf, int64_t count, int32_t datatype_tag, int32_t root,
 
 /**
  * In-place collectives (generic): reduce, allreduce, gather, allgather,
- * alltoall, igather, iallgather, ialltoall, allreduce_init, gather_init,
- * allgather_init and alltoall_init substitute MPI_IN_PLACE for sendbuf when
- * sendbuf == NULL; scatter, iscatter and scatter_init substitute MPI_IN_PLACE
- * for recvbuf when recvbuf == NULL. ireduce, iallreduce and reduce_init pass
- * sendbuf through unchanged.
+ * alltoall, ireduce, iallreduce, igather, iallgather, ialltoall, reduce_init,
+ * allreduce_init, gather_init, allgather_init and alltoall_init substitute
+ * MPI_IN_PLACE for sendbuf when sendbuf == NULL; scatter, iscatter and
+ * scatter_init substitute MPI_IN_PLACE for recvbuf when recvbuf == NULL.
  * Rust slices never produce a NULL pointer, so NULL is an unambiguous in-place
  * marker here.
  */
 
-/** Reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
+/** Reduce (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_reduce(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t root, int32_t comm);
 
 /** All-reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
@@ -295,8 +396,10 @@ int ferrompi_alltoallv(
 
 int ferrompi_ibcast(void* buf, int64_t count, int32_t datatype_tag, int32_t root, int32_t comm, int64_t* request);
 
+/** Nonblocking all-reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
 int ferrompi_iallreduce(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t comm, int64_t* request);
 
+/** Nonblocking reduce (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_ireduce(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t root, int32_t comm, int64_t* request);
 
 /** Nonblocking gather (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */
@@ -398,6 +501,8 @@ int ferrompi_bsend_init(
  * Generic Persistent Collectives (MPI 4.0, or Open MPI 5)
  * ============================================================ */
 
+int ferrompi_barrier_init(int32_t comm, int64_t* request);
+
 int ferrompi_bcast_init(void* buf, int64_t count, int32_t datatype_tag, int32_t root, int32_t comm, int64_t* request);
 
 /** Initialize persistent all-reduce (generic). NULL sendbuf maps to MPI_IN_PLACE. */
@@ -406,6 +511,7 @@ int ferrompi_allreduce_init(const void* sendbuf, void* recvbuf, int64_t count, i
 /** Initialize persistent gather (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_gather_init(const void* sendbuf, int64_t sendcount, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t root, int32_t comm, int64_t* request);
 
+/** Initialize persistent reduce (generic). NULL sendbuf maps to MPI_IN_PLACE (valid only at root). */
 int ferrompi_reduce_init(const void* sendbuf, void* recvbuf, int64_t count, int32_t datatype_tag, int32_t op, int32_t root, int32_t comm, int64_t* request);
 
 /** Initialize persistent scatter (generic). NULL recvbuf maps to MPI_IN_PLACE (valid only at root). */
@@ -430,19 +536,6 @@ int ferrompi_allgatherv_init(const void* sendbuf, int64_t sendcount, void* recvb
 int ferrompi_alltoallv_init(const void* sendbuf, const int32_t* sendcounts, const int32_t* sdispls, void* recvbuf, const int32_t* recvcounts, const int32_t* rdispls, int32_t datatype_tag, int32_t comm, int64_t* request);
 
 int ferrompi_reduce_scatter_block_init(const void* sendbuf, void* recvbuf, int64_t recvcount, int32_t datatype_tag, int32_t op, int32_t comm, int64_t* request);
-
-/* ============================================================
- * Info Object Operations
- * ============================================================ */
-
-int ferrompi_info_create(int32_t* info_handle);
-
-/** Free an MPI_Info object (MPI_Info_free). No-op on an invalid or already-freed handle. */
-int ferrompi_info_free(int32_t info_handle);
-
-int ferrompi_info_set(int32_t info_handle, const char* key, const char* value);
-
-int ferrompi_info_get(int32_t info_handle, const char* key, char* value, int32_t* valuelen, int32_t* flag);
 
 /* ============================================================
  * Group Operations
@@ -504,9 +597,13 @@ int32_t ferrompi_error_class_index(int error_class);
  * Request Management
  * ============================================================ */
 
-int ferrompi_wait(int64_t request);
+/* status may be NULL (MPI_STATUS_IGNORE) in the four single-completion calls
+ * below (wait, test, waitany, testany). It is filled only when the call
+ * returns MPI_SUCCESS and completes a request: for waitany and testany, with
+ * the status of the returned index. */
+int ferrompi_wait(int64_t request, ferrompi_status* status);
 
-int ferrompi_test(int64_t request, int32_t* flag);
+int ferrompi_test(int64_t request, int32_t* flag, ferrompi_status* status);
 
 int ferrompi_waitall(int64_t count, const int64_t* requests, uint8_t* done,
                       int64_t* failed_index);
@@ -519,16 +616,23 @@ int ferrompi_request_get_status(int64_t request, int32_t* flag);
 /** Request cancellation of a pending operation (MPI_Cancel). Does not free the request handle. */
 int ferrompi_cancel(int64_t request);
 
-int ferrompi_waitany(int64_t count, const int64_t* requests, int32_t* index, uint8_t* done);
+int ferrompi_waitany(int64_t count, const int64_t* requests, int32_t* index, uint8_t* done,
+                      ferrompi_status* status);
 
+/* statuses has count entries; entry k belongs to indices[k] and is filled for
+ * k < *outcount when the call returns MPI_SUCCESS. A request that MPI reported
+ * through MPI_ERR_IN_STATUS has its class in statuses[k].error, and the call
+ * returns MPI_SUCCESS. Every other return, MPI_ERR_IN_STATUS with no reported
+ * request failed included, passes through unchanged. */
 int ferrompi_waitsome(int64_t count, const int64_t* requests, int64_t* outcount,
-                       int32_t* indices, uint8_t* done, int64_t* failed_index);
+                       int32_t* indices, uint8_t* done, ferrompi_status* statuses);
 
 int ferrompi_testany(int64_t count, const int64_t* requests, int32_t* index,
-                      int32_t* flag, uint8_t* done);
+                      int32_t* flag, uint8_t* done, ferrompi_status* status);
 
+/* statuses as for ferrompi_waitsome. */
 int ferrompi_testsome(int64_t count, const int64_t* requests, int64_t* outcount,
-                       int32_t* indices, uint8_t* done, int64_t* failed_index);
+                       int32_t* indices, uint8_t* done, ferrompi_status* statuses);
 
 int ferrompi_start(int64_t request);
 
@@ -543,15 +647,15 @@ int ferrompi_startall(int64_t count, const int64_t* requests, uint8_t* started);
 #define FERROMPI_LOCK_EXCLUSIVE 0
 #define FERROMPI_LOCK_SHARED    1
 
-/* Both allocating shims leave *win unchanged when MPI created no window, and set it to FERROMPI_WIN_LEAKED when MPI created the window but zeroing it failed or the handle table was full (that window is never freed). *win holds the real non-negative handle only on success. */
-int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t info,
-                                  int32_t comm, void** baseptr, int32_t* win);
+/* The three creating shims leave *win unchanged when MPI created no window, and set it to FERROMPI_WIN_LEAKED when MPI created the window but zeroing it failed or the handle table was full (that window is never freed). *win holds the real non-negative handle only on success. ferrompi_win_allocate_shared also writes *unified: 0 on entry, then 1 only when MPI created the window and its MPI_WIN_MODEL attribute is MPI_WIN_UNIFIED, so it is 0 when no window was created or the query failed or found no attribute. */
+int ferrompi_win_allocate_shared(int64_t size, int32_t disp_unit, int32_t comm,
+                                  void** baseptr, int32_t* win, int32_t* unified);
 
-int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t info,
-                         int32_t comm, int32_t* win);
+int ferrompi_win_create(void* base, int64_t size, int32_t disp_unit, int32_t comm,
+                         int32_t* win);
 
-int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t info,
-                           int32_t comm, void** baseptr, int32_t* win);
+int ferrompi_win_allocate(int64_t size, int32_t disp_unit, int32_t comm,
+                           void** baseptr, int32_t* win);
 
 int ferrompi_win_shared_query(int32_t win, int32_t rank,
                                int64_t* size, int32_t* disp_unit, void** baseptr);
@@ -585,6 +689,9 @@ int ferrompi_win_post(int32_t group, int32_t assert_val, int32_t win);
 
 int ferrompi_win_start(int32_t group, int32_t assert_val, int32_t win);
 
+/* Allocates a group-table slot for a duplicate of the group of the communicator that created the window and writes its handle to *group_handle; the caller frees it with ferrompi_group_free. Returns FERROMPI_ERR_GROUPS_FULL when the table is full. */
+int ferrompi_win_get_group(int32_t win, int32_t* group_handle);
+
 int ferrompi_win_complete(int32_t win);
 
 int ferrompi_win_wait(int32_t win);
@@ -593,35 +700,32 @@ int ferrompi_win_test(int32_t win, int32_t* flag);
 
 void ferrompi_win_pscw_mode_values(int32_t* out);
 
-int ferrompi_put(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                 int32_t target_rank, int64_t target_disp, int64_t target_count,
-                 int32_t target_dt_tag, int32_t win_handle);
+/* Each transfer shim below takes one count and one datatype tag and uses them as the origin, target (and result) count and type. A count above INT_MAX calls the _c variant on MPI >= 4 and returns MPI_ERR_COUNT below. */
+int ferrompi_put(const void* origin, int64_t count, int32_t dt_tag,
+                 int32_t target_rank, int64_t target_disp, int32_t win_handle);
 
-int ferrompi_rput(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                  int32_t target_rank, int64_t target_disp, int64_t target_count,
-                  int32_t target_dt_tag, int32_t win_handle, int64_t* request_handle);
+int ferrompi_rput(const void* origin, int64_t count, int32_t dt_tag,
+                  int32_t target_rank, int64_t target_disp, int32_t win_handle,
+                  int64_t* request_handle);
 
-int ferrompi_get(void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                 int32_t target_rank, int64_t target_disp, int64_t target_count,
-                 int32_t target_dt_tag, int32_t win_handle);
+int ferrompi_get(void* origin, int64_t count, int32_t dt_tag,
+                 int32_t target_rank, int64_t target_disp, int32_t win_handle);
 
-int ferrompi_rget(void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                  int32_t target_rank, int64_t target_disp, int64_t target_count,
-                  int32_t target_dt_tag, int32_t win_handle, int64_t* request_handle);
+int ferrompi_rget(void* origin, int64_t count, int32_t dt_tag,
+                  int32_t target_rank, int64_t target_disp, int32_t win_handle,
+                  int64_t* request_handle);
 
-int ferrompi_accumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                        int32_t target_rank, int64_t target_disp, int64_t target_count,
-                        int32_t target_dt_tag, int32_t op_tag, int32_t win_handle);
+int ferrompi_accumulate(const void* origin, int64_t count, int32_t dt_tag,
+                        int32_t target_rank, int64_t target_disp, int32_t op_tag,
+                        int32_t win_handle);
 
-int ferrompi_raccumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                         int32_t target_rank, int64_t target_disp, int64_t target_count,
-                         int32_t target_dt_tag, int32_t op_tag, int32_t win_handle,
-                         int64_t* request_handle);
+int ferrompi_raccumulate(const void* origin, int64_t count, int32_t dt_tag,
+                         int32_t target_rank, int64_t target_disp, int32_t op_tag,
+                         int32_t win_handle, int64_t* request_handle);
 
-int ferrompi_get_accumulate(const void* origin, int64_t origin_count, int32_t origin_dt_tag,
-                            void* result, int64_t result_count, int32_t result_dt_tag,
-                            int32_t target_rank, int64_t target_disp, int64_t target_count,
-                            int32_t target_dt_tag, int32_t op_tag, int32_t win_handle);
+int ferrompi_get_accumulate(const void* origin, void* result, int64_t count,
+                            int32_t dt_tag, int32_t target_rank, int64_t target_disp,
+                            int32_t op_tag, int32_t win_handle);
 
 int ferrompi_fetch_and_op(const void* origin, void* result, int32_t dt_tag,
                           int32_t target_rank, int64_t target_disp,
@@ -700,9 +804,7 @@ int ferrompi_recv_custom(
     int32_t source,
     int32_t tag,
     int32_t comm,
-    int32_t* actual_source,
-    int32_t* actual_tag,
-    int64_t* actual_count
+    ferrompi_status* status
 );
 
 int ferrompi_isend_custom(
@@ -738,15 +840,6 @@ int ferrompi_op_free(int32_t handle);
 
 /** Release the op slot without calling MPI_Op_free. The caller must already have dropped the Rust closure. */
 int ferrompi_op_free_slot_only(int32_t handle);
-
-int ferrompi_allreduce_user_op(
-    const void* sendbuf,
-    void* recvbuf,
-    int64_t count,
-    int32_t datatype_tag,
-    int32_t op_handle,
-    int32_t comm
-);
 
 #ifdef __cplusplus
 }

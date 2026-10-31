@@ -25,7 +25,6 @@
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::rt;
-use crate::Communicator;
 
 /// Outcome of [`Group::compare`].
 ///
@@ -98,18 +97,18 @@ pub struct RankRange {
 ///
 /// This type wraps an `MPI_Group` handle with RAII semantics: the underlying
 /// MPI group object is freed automatically when the `Group` is dropped,
-/// unless it is slot 0 (reserved for `MPI_GROUP_EMPTY`).
+/// unless it is the empty group: that is MPI's predefined `MPI_GROUP_EMPTY`,
+/// which is never freed.
 ///
 /// Obtain a `Group` from a communicator via
 /// [`Communicator::group`](crate::Communicator::group), then use
 /// [`include`](Self::include) or [`exclude`](Self::exclude) to derive
 /// sub-groups.
 ///
-/// # MPI_UNDEFINED
+/// # Non-members
 ///
-/// [`rank`](Self::rank) returns `-1` when the calling process is not a
-/// member of the group (`MPI_UNDEFINED` in the MPI standard). Consumers
-/// must handle this sentinel explicitly.
+/// [`rank`](Self::rank) returns `None` when the calling process is not a
+/// member of the group.
 pub struct Group {
     pub(crate) handle: i32,
 }
@@ -121,7 +120,10 @@ pub struct Group {
 unsafe impl Send for Group {}
 // SAFETY: &Group exposes only reads of the immutable handle field and FFI
 // calls gated by the same lifecycle guard, so its thread safety follows
-// the requested ThreadLevel as Communicator's does.
+// the requested ThreadLevel as Communicator's does. MPI libraries write a
+// group object inside some group calls without locking it (MPICH 4.2 builds
+// its ordered member list on first use), so the C layer serialises those calls
+// when two threads can be inside MPI at once.
 unsafe impl Sync for Group {}
 
 impl Group {
@@ -151,8 +153,7 @@ impl Group {
 
     /// Get the rank of the calling process in this group.
     ///
-    /// Returns `MPI_UNDEFINED` (`-1`) when the calling process is not a member
-    /// of the group. Consumers must handle this sentinel explicitly.
+    /// Returns `None` when the calling process is not a member of the group.
     ///
     /// # Errors
     ///
@@ -166,43 +167,14 @@ impl Group {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let g = world.group().unwrap();
-    /// assert_eq!(g.rank().unwrap(), world.rank());
+    /// assert_eq!(g.rank().unwrap(), Some(world.rank()));
     /// ```
-    pub fn rank(&self) -> Result<i32> {
+    pub fn rank(&self) -> Result<Option<i32>> {
         let mut rank: i32 = 0;
         // SAFETY: self.handle is owned by this Group and was allocated by the C-side group table.
         let ret = unsafe { ffi::ferrompi_group_rank(self.handle, &mut rank) };
         Error::check_with_op(ret, "group_rank")?;
-        Ok(rank)
-    }
-
-    /// Get the raw group handle for internal use.
-    pub fn raw_handle(&self) -> i32 {
-        self.handle
-    }
-
-    /// Return the normalised `MPI_UNDEFINED` sentinel value (`-1`).
-    ///
-    /// [`rank`](Self::rank) returns `-1` when the calling process is not a
-    /// member of the group.
-    ///
-    /// This function does not require an active MPI session.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use ferrompi::{Group, Mpi};
-    ///
-    /// let mpi = Mpi::init().unwrap();
-    /// let world = mpi.world();
-    /// let sub = world.group().unwrap().include(&[0, 2]).unwrap();
-    /// let r = sub.rank().unwrap();
-    /// if r == Group::undefined() {
-    ///     println!("not a member of this sub-group");
-    /// }
-    /// ```
-    pub const fn undefined() -> i32 {
-        Communicator::UNDEFINED
+        Ok(if rank == -1 { None } else { Some(rank) })
     }
 
     /// Create a new group containing only the specified ranks from this group.
@@ -564,13 +536,13 @@ impl Group {
 
 impl Drop for Group {
     fn drop(&mut self) {
-        // Slot 0 is reserved for MPI_GROUP_EMPTY and must not be freed.
+        // Handle 0 is MPI_GROUP_EMPTY, which must not be freed.
         if self.handle <= 0 {
             return;
         }
-        if !rt::drop_guard("Group") {
+        let Some(_call) = rt::drop_guard("Group") else {
             return;
-        }
+        };
         // SAFETY: self.handle is owned and valid; Drop runs exactly once, so no double-free.
         unsafe { ffi::ferrompi_group_free(self.handle) };
     }
@@ -582,7 +554,7 @@ mod tests {
 
     #[test]
     fn group_drop_with_zero_handle_is_no_op() {
-        // Handle 0 corresponds to MPI_GROUP_EMPTY (reserved slot).
+        // Handle 0 is MPI_GROUP_EMPTY, which takes no table slot and is never freed.
         // The Drop impl guards against handle == 0, so this must not
         // call ferrompi_group_free and must not panic or segfault.
         let g = Group { handle: 0 };

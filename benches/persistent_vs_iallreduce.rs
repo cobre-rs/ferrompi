@@ -43,10 +43,8 @@ fn bench_iterative_allreduce(c: &mut Criterion, world: &Communicator) {
         // persistent request in the same order before any bench_function runs.
         common::lead(world, [SETUP, n as u64]);
 
-        let send = vec![world.rank() as f64; n];
-        let mut recv = vec![0.0f64; n];
         let mut persistent = world
-            .allreduce_init(&send, &mut recv, ReduceOp::Sum)
+            .allreduce_init(vec![world.rank() as f64; n], vec![0.0f64; n], ReduceOp::Sum)
             .expect("allreduce_init needs persistent collectives");
 
         group.bench_with_input(BenchmarkId::new("persistent", bytes), &n, |b, _| {
@@ -56,22 +54,32 @@ fn bench_iterative_allreduce(c: &mut Criterion, world: &Communicator) {
                     persistent.start().unwrap();
                     persistent.wait().unwrap();
                 }
-                black_box(&recv);
+                black_box(persistent.buffer().unwrap());
             });
         });
 
-        // Drop rank 0's request before the next size's SETUP so each rank holds at
-        // most one persistent request at a time.
-        drop(persistent);
+        // Take the buffers back and free rank 0's request before the next size's
+        // SETUP so each rank holds at most one persistent request at a time; the
+        // iallreduce arm reuses the buffers.
+        let (send, mut recv) = persistent
+            .into_buffers()
+            .expect("persistent request completes");
 
         group.bench_with_input(BenchmarkId::new("iallreduce", bytes), &n, |b, _| {
             b.iter(|| {
                 common::lead(world, [IALLREDUCE, 0]);
                 for _ in 0..ITERS {
-                    let req = world
-                        .iallreduce(black_box(&send), black_box(&mut recv), ReduceOp::Sum)
-                        .unwrap();
-                    req.wait().unwrap();
+                    ferrompi::scope(|s| {
+                        let req = world.iallreduce(
+                            s,
+                            black_box(&send),
+                            black_box(&mut recv),
+                            ReduceOp::Sum,
+                        )?;
+                        req.wait()?;
+                        Ok(())
+                    })
+                    .unwrap();
                 }
             });
         });
@@ -83,26 +91,22 @@ fn bench_iterative_allreduce(c: &mut Criterion, world: &Communicator) {
 /// Mirror loop for ranks > 0.
 ///
 /// Loops until rank 0 sends `STOP`. On `SETUP` it frees its current persistent
-/// request first, reallocates buffers to the new element count, and re-initializes
-/// the request. On `PERSISTENT`/`IALLREDUCE` it runs the matching [`ITERS`]-iteration
-/// loop, mirroring rank 0's `b.iter` calls.
+/// request first and re-initializes the request over new buffers of the new
+/// element count. On `PERSISTENT`/`IALLREDUCE` it runs the matching [`ITERS`]-iteration
+/// loop, mirroring rank 0's `b.iter` calls; the first `IALLREDUCE` of a size takes the
+/// buffers back from the request, as rank 0 does.
 fn run_follower(world: &Communicator) {
     let mut send: Vec<f64> = Vec::new();
     let mut recv: Vec<f64> = Vec::new();
-    let mut persistent: Option<PersistentRequest> = None;
+    let mut persistent: Option<PersistentRequest<f64>> = None;
 
     common::follow(world, |[op, arg]| match op {
         SETUP => {
-            // Free the old request before reallocating: a request still pointing
-            // into freed buffers is harmless only while inactive, and it must
-            // never be started again after the buffers move.
             drop(persistent.take());
             let n = arg as usize;
-            send = vec![world.rank() as f64; n];
-            recv = vec![0.0f64; n];
             persistent = Some(
                 world
-                    .allreduce_init(&send, &mut recv, ReduceOp::Sum)
+                    .allreduce_init(vec![world.rank() as f64; n], vec![0.0f64; n], ReduceOp::Sum)
                     .expect("allreduce_init needs persistent collectives"),
             );
         }
@@ -118,9 +122,16 @@ fn run_follower(world: &Communicator) {
         }
 
         IALLREDUCE => {
+            if let Some(req) = persistent.take() {
+                (send, recv) = req.into_buffers().expect("persistent request completes");
+            }
             for _ in 0..ITERS {
-                let req = world.iallreduce(&send, &mut recv, ReduceOp::Sum).unwrap();
-                req.wait().unwrap();
+                ferrompi::scope(|s| {
+                    let req = world.iallreduce(s, &send, &mut recv, ReduceOp::Sum)?;
+                    req.wait()?;
+                    Ok(())
+                })
+                .unwrap();
             }
         }
 

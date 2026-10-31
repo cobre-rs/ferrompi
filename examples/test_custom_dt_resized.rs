@@ -1,9 +1,9 @@
 //! Integration test for `CustomDatatype::resized`.
 //!
 //! Exercises:
-//! - Successful resize of a `{ f64, i32 }` struct type to a 16-byte extent:
-//!   the resized handle is `>= 0` and differs from the original handle.
-//! - The original struct type remains valid (not consumed) after the resize.
+//! - Successful resize of a `{ f64, i32 }` struct type to a 16-byte extent.
+//! - The original struct type remains valid (not consumed) after the resize:
+//!   a second resize succeeds while the first resized type is alive.
 //! - Passing a negative extent (`-1`) returns `Err(Error::Mpi { .. })`.
 //!
 //! All assertions are protected by a sentinel allreduce(Min) before any
@@ -12,7 +12,7 @@
 //! Run with: mpiexec -n 2 ./target/debug/examples/test_custom_dt_resized
 // mpi-test: np=2
 
-use ferrompi::{CustomDatatype, DatatypeTag, Error, Mpi, ReduceOp, StructField};
+use ferrompi::{CustomDatatype, Error, Mpi, ReduceOp, StructField};
 
 mod common;
 
@@ -24,19 +24,11 @@ fn main() {
     // local_ok tracks whether this rank passed all its assertions.
     let mut local_ok: bool = true;
 
-    // Build the base struct type used by tests 1-3.
+    // Build the base struct type used by tests 1, 2 and 4.
     // Models `{ f64, i32 }`: 8-byte f64 at offset 0, i32 at offset 8.
     let s = match CustomDatatype::create_struct(&[
-        StructField {
-            blocklength: 1,
-            displacement: 0,
-            basetype: DatatypeTag::F64,
-        },
-        StructField {
-            blocklength: 1,
-            displacement: 8,
-            basetype: DatatypeTag::I32,
-        },
+        StructField::new::<f64>(1, 0),
+        StructField::new::<i32>(1, 8),
     ]) {
         Ok(s) => s,
         Err(e) => {
@@ -49,70 +41,39 @@ fn main() {
     };
 
     // ========================================================================
-    // Test 1: resized(0, 16) returns Ok with raw_handle() >= 0
+    // Test 1: resized(0, 16) returns Ok
     // ========================================================================
     {
         match s.resized(0, 16) {
-            Ok(r) => {
-                let h = r.raw_handle();
-                if h >= 0 {
-                    if rank == 0 {
-                        println!("PASS: Test 1 — resized(0, 16) raw_handle = {h}");
-                    }
-                } else {
-                    eprintln!("rank {rank}: FAIL Test 1 — raw_handle = {h}, expected >= 0");
-                    local_ok = false;
+            Ok(_first) => {
+                if rank == 0 {
+                    println!("PASS: Test 1 — resized(0, 16) returned Ok");
                 }
-                // r drops here, freeing the resized MPI handle
+
+                // ============================================================
+                // Test 2: with the first resized type alive, a second
+                //         resized(0, 16) is Ok too: the original `s` was not
+                //         consumed
+                // ============================================================
+                match s.resized(0, 16) {
+                    Ok(_second) => {
+                        if rank == 0 {
+                            println!("PASS: Test 2 — original still usable after resize");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "rank {rank}: FAIL Test 2 — second resized(0, 16) returned Err: {e}"
+                        );
+                        local_ok = false;
+                    }
+                }
+                // Both resized types drop here, freeing their MPI handles
             }
             Err(e) => {
                 eprintln!("rank {rank}: FAIL Test 1 — resized(0, 16) returned Err: {e}");
                 local_ok = false;
             }
-        }
-    }
-
-    // ========================================================================
-    // Test 2: the resized handle differs from the original handle
-    // ========================================================================
-    {
-        match s.resized(0, 16) {
-            Ok(r) => {
-                if r.raw_handle() != s.raw_handle() {
-                    if rank == 0 {
-                        println!(
-                            "PASS: Test 2 — resized handle ({}) != original handle ({})",
-                            r.raw_handle(),
-                            s.raw_handle()
-                        );
-                    }
-                } else {
-                    eprintln!(
-                        "rank {rank}: FAIL Test 2 — resized handle == original handle ({})",
-                        s.raw_handle()
-                    );
-                    local_ok = false;
-                }
-            }
-            Err(e) => {
-                eprintln!("rank {rank}: FAIL Test 2 — resized(0, 16) returned Err: {e}");
-                local_ok = false;
-            }
-        }
-    }
-
-    // ========================================================================
-    // Test 3: the original `s` is not consumed; its raw_handle() remains valid
-    // ========================================================================
-    {
-        let h = s.raw_handle();
-        if h >= 0 {
-            if rank == 0 {
-                println!("PASS: Test 3 — original handle still valid after resize: {h}");
-            }
-        } else {
-            eprintln!("rank {rank}: FAIL Test 3 — original handle is {h}, expected >= 0");
-            local_ok = false;
         }
     }
 
@@ -135,15 +96,14 @@ fn main() {
                     println!("PASS: Test 4 — resized(0, -1) returned Err: {e}");
                 }
             }
-            Ok(r) => {
+            Ok(_) => {
                 // A few MPI implementations accept negative extent (treating it as
                 // a large unsigned value or allowing it as a hint).  Log a note but
                 // do not fail the test — the spec says "accept any Err(Mpi)".
                 if rank == 0 {
                     println!(
-                        "NOTE: Test 4 — resized(0, -1) succeeded (raw_handle={}) — \
-                         MPI implementation accepts negative extent (non-standard)",
-                        r.raw_handle()
+                        "NOTE: Test 4 — resized(0, -1) succeeded — \
+                         MPI implementation accepts negative extent (non-standard)"
                     );
                 }
             }

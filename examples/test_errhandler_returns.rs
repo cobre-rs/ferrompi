@@ -97,7 +97,7 @@ fn main() {
     // ========================================================================
     {
         let split_comm = world
-            .split(0, rank)
+            .split(Some(0), rank)
             .expect("comm_split failed")
             .expect("expected Some communicator, got None");
 
@@ -122,16 +122,22 @@ fn main() {
 
     // ========================================================================
     // Test 6: a bitwise reduction on f64 is not defined for floating-point
-    //         types and returns Err(class: Op)
+    //         types and is rejected before MPI with Err(InvalidArgument)
     // ========================================================================
     {
         let send = [1.0f64];
         let mut recv = [0.0f64];
-        let ok = expect_class(
-            world.allreduce(&send, &mut recv, ReduceOp::BitwiseOr),
-            MpiErrorClass::Op,
+        let result = world.allreduce(&send, &mut recv, ReduceOp::BitwiseOr);
+        let ok = matches!(result, Err(Error::InvalidArgument { arg: "op", .. }));
+        if !ok {
+            println!("expected InvalidArgument for op, got {result:?}");
+        }
+        report(
+            &world,
+            rank,
+            ok,
+            "allreduce f64 BitwiseOr rejected before MPI (InvalidArgument)",
         );
-        report(&world, rank, ok, "allreduce f64 BitwiseOr -> Op");
     }
 
     // ========================================================================
@@ -144,10 +150,14 @@ fn main() {
     // ========================================================================
     {
         let outgoing = [1i32; 4];
-        let req = world.isend(&outgoing, rank, 7).expect("isend failed");
         let mut incoming = [0i32; 1];
-        let ok = expect_class(world.recv(&mut incoming, rank, 7), MpiErrorClass::Truncate);
-        req.wait().expect("wait failed");
+        let ok = ferrompi::scope(|s| {
+            let req = world.isend(s, &outgoing, rank, 7).expect("isend failed");
+            let ok = expect_class(world.recv(&mut incoming, rank, 7), MpiErrorClass::Truncate);
+            req.wait().expect("wait failed");
+            Ok(ok)
+        })
+        .expect("scope failed");
         report(&world, rank, ok, "recv truncate -> Truncate");
     }
 

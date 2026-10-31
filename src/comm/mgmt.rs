@@ -27,7 +27,7 @@ impl Communicator {
     ///
     /// This is a **collective operation** — all ranks must call it.
     /// Every rank receives the complete [`TopologyInfo`], which includes the
-    /// rank-to-host mapping, MPI version metadata, and (with the `numa`
+    /// rank-to-host mapping, MPI version metadata, and (with the `slurm`
     /// feature) SLURM job information.
     ///
     /// [`TopologyInfo`]: crate::TopologyInfo
@@ -59,7 +59,8 @@ impl Communicator {
     /// Returns a [`Group`] containing all processes in this communicator.
     /// Use [`Group::include`] or [`Group::exclude`] on the returned group
     /// to derive sub-groups, which can then be used with
-    /// [`Communicator::create_from_group`](Self::create_from_group).
+    /// [`Communicator::create`](Self::create) or
+    /// [`Communicator::create_group`](Self::create_group).
     ///
     /// # Errors
     ///
@@ -96,9 +97,9 @@ impl Communicator {
     }
 
     /// Convert a communicator-handle result into `Option<Self>`, treating a
-    /// negative handle as `MPI_COMM_NULL` (used by split, split_type, and
-    /// create_from_group).
-    fn from_optional_handle(new_handle: i32) -> Result<Option<Self>> {
+    /// negative handle as `MPI_COMM_NULL` (used by split, split_type, create,
+    /// create_group and `Mpi::create_from_group`).
+    pub(crate) fn from_optional_handle(new_handle: i32) -> Result<Option<Self>> {
         if new_handle < 0 {
             Ok(None)
         } else {
@@ -108,10 +109,19 @@ impl Communicator {
 
     /// Split this communicator into sub-communicators based on color and key.
     ///
-    /// Processes with the same `color` are placed in the same new communicator.
-    /// The `key` controls the rank ordering within the new communicator.
+    /// This is a **collective operation**: every rank must call it. Processes
+    /// with the same `color` are placed in the same new communicator. The
+    /// `key` controls the rank ordering within the new communicator.
     ///
-    /// Returns `None` if this process used [`Communicator::UNDEFINED`] as color.
+    /// Pass `None` as `color` to opt out: the call returns `None` and the
+    /// process joins no new communicator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`] if `color` is a negative `Some`.
+    /// The check is local and precedes the MPI call, as described under
+    /// "Argument validation" on [`Communicator`]: peers that already entered
+    /// the collective are not told and may block.
     ///
     /// # Example
     ///
@@ -120,12 +130,23 @@ impl Communicator {
     ///
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
-    /// let color = world.rank() % 2; // Even/odd split
+    /// let color = Some(world.rank() % 2); // Even/odd split
     /// if let Some(sub) = world.split(color, world.rank()).unwrap() {
     ///     println!("Rank {} in sub-communicator of size {}", sub.rank(), sub.size());
     /// }
     /// ```
-    pub fn split(&self, color: i32, key: i32) -> Result<Option<Communicator>> {
+    pub fn split(&self, color: Option<i32>, key: i32) -> Result<Option<Communicator>> {
+        let color = match color {
+            // The shim maps -1 to MPI_UNDEFINED.
+            None => -1,
+            Some(c) if c >= 0 => c,
+            Some(_) => {
+                return Err(Error::InvalidArgument {
+                    arg: "color",
+                    reason: "negative color",
+                })
+            }
+        };
         let mut new_handle: i32 = 0;
         // SAFETY: self.handle is owned by this Communicator; remaining arguments are scalars.
         let ret = unsafe { ffi::ferrompi_comm_split(self.handle, color, key, &mut new_handle) };
@@ -187,11 +208,18 @@ impl Communicator {
             .ok_or_else(|| Error::Internal("split_shared returned null communicator".into()))
     }
 
-    /// Create a sub-communicator from a group.
+    /// Create a sub-communicator from a group, collectively over this
+    /// communicator (`MPI_Comm_create`).
     ///
     /// `group` must be a subset of `self`'s group. This call is collective
     /// over `self` — every rank in the parent communicator must invoke it,
-    /// even ranks not in `group`.
+    /// even ranks not in `group`. [`create_group`](Self::create_group) is
+    /// collective over the group only.
+    ///
+    /// The subset rule is checked on the calling rank, before the creating
+    /// call. The check is local work that grows with the sizes of `group` and
+    /// of `self`'s group: with their sum in MPICH 4.2 and with their product
+    /// in Open MPI 4.1 and 5.0, by the sources of those libraries.
     ///
     /// Returns `Ok(None)` for ranks that are not members of `group`
     /// (MPI returns `MPI_COMM_NULL` for those ranks). Returns
@@ -199,8 +227,12 @@ impl Communicator {
     ///
     /// # Errors
     ///
-    /// Returns an error if `group` contains a rank not present in the parent
-    /// communicator (`MPI_ERR_GROUP`), or
+    /// Returns [`Error::InvalidArgument`](crate::Error::InvalidArgument) if
+    /// `group` has a member that is not in `self`, to every rank that passes
+    /// such a group, whether it is a member of it or not. The check is local
+    /// and precedes the creating call, as described under "Argument
+    /// validation" on [`Communicator`]: ranks that already entered the
+    /// collective are not told and may block. Returns
     /// [`Error::ResourceExhausted`](crate::Error::ResourceExhausted) if the
     /// communicator table is full.
     ///
@@ -212,19 +244,74 @@ impl Communicator {
     /// let mpi = Mpi::init().unwrap();
     /// let world = mpi.world();
     /// let g = world.group().unwrap().include(&[0, 2]).unwrap();
-    /// // Collective: every rank calls create_from_group
-    /// if let Some(sub) = world.create_from_group(&g).unwrap() {
+    /// // Collective: every rank calls create
+    /// if let Some(sub) = world.create(&g).unwrap() {
     ///     assert_eq!(sub.size(), 2);
     /// }
     /// ```
-    pub fn create_from_group(&self, group: &Group) -> Result<Option<Communicator>> {
+    pub fn create(&self, group: &Group) -> Result<Option<Communicator>> {
+        let mut new_handle: i32 = -1;
+        // SAFETY: self.handle is owned by this Communicator; group.handle is owned by the Group
+        // argument and remains valid for the duration of this call.
+        let ret = unsafe { ffi::ferrompi_comm_create(self.handle, group.handle, &mut new_handle) };
+        Error::check_with_op(ret, "comm_create")?;
+        Self::from_optional_handle(new_handle)
+    }
+
+    /// Create a sub-communicator from a group, collectively over the members
+    /// of the group only (`MPI_Comm_create_group`).
+    ///
+    /// `group` must be a subset of `self`'s group. Every member of `group`
+    /// must invoke the call, with a group of the same members in the same
+    /// order and with the same `tag`; the other ranks of `self` take no part.
+    /// A rank that is not a member may still make the call: it is then local
+    /// and returns `Ok(None)`, as it does for the empty group.
+    ///
+    /// The subset rule is checked on the calling rank, before the creating
+    /// call. The check is local work that grows with the sizes of `group` and
+    /// of `self`'s group: with their sum in MPICH 4.2 and with their product
+    /// in Open MPI 4.1 and 5.0, by the sources of those libraries. The other
+    /// rules are not checked, here or by MPICH and Open MPI: if the members
+    /// pass different groups or tags, the call can block, or return
+    /// communicators on which a later call blocks.
+    ///
+    /// Threads of one process that make this call on this communicator at
+    /// the same time must each pass a different `tag`: it is how MPI tells
+    /// their calls apart. It does not conflict with the tags of
+    /// point-to-point messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`](crate::Error::InvalidArgument) if
+    /// `group` has a member that is not in `self`, to a member of `group` and
+    /// to any other caller alike; [`Error::Mpi`] with class
+    /// [`MpiErrorClass::Tag`](crate::MpiErrorClass::Tag) if `tag` is negative
+    /// or above the library's tag limit; or
+    /// [`Error::ResourceExhausted`](crate::Error::ResourceExhausted) if the
+    /// communicator table is full.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use ferrompi::Mpi;
+    ///
+    /// let mpi = Mpi::init().unwrap();
+    /// let world = mpi.world();
+    /// let g = world.group().unwrap().include(&[0, 2]).unwrap();
+    /// // Collective over the group: only its members, ranks 0 and 2, call
+    /// if [0, 2].contains(&world.rank()) {
+    ///     let sub = world.create_group(&g, 0).unwrap().expect("a member gets a communicator");
+    ///     assert_eq!(sub.size(), 2);
+    /// }
+    /// ```
+    pub fn create_group(&self, group: &Group, tag: i32) -> Result<Option<Communicator>> {
         let mut new_handle: i32 = -1;
         // SAFETY: self.handle is owned by this Communicator; group.handle is owned by the Group
         // argument and remains valid for the duration of this call.
         let ret = unsafe {
-            ffi::ferrompi_comm_create_from_group_parent(self.handle, group.handle, &mut new_handle)
+            ffi::ferrompi_comm_create_group(self.handle, group.handle, tag, &mut new_handle)
         };
-        Error::check_with_op(ret, "comm_create_from_group_parent")?;
+        Error::check_with_op(ret, "comm_create_group")?;
         Self::from_optional_handle(new_handle)
     }
 
@@ -285,5 +372,25 @@ impl Communicator {
         // destructor that touches MPI state after a failed or rejected
         // MPI_Abort has undefined behavior.
         std::process::abort()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::comm::test_comm;
+    use crate::error::Error;
+
+    #[test]
+    fn split_negative_color_returns_invalid_argument() {
+        let comm = test_comm(0, 1);
+        for color in [-1, -2, i32::MIN] {
+            assert!(
+                matches!(
+                    comm.split(Some(color), 0),
+                    Err(Error::InvalidArgument { arg: "color", .. })
+                ),
+                "color {color}"
+            );
+        }
     }
 }

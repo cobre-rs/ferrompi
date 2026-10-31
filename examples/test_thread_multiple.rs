@@ -30,9 +30,12 @@ fn main() {
                     for i in 0..ITERS {
                         let send = [i as i32; 1];
                         let mut recv = [0i32; 1];
-                        let req = world_ref.irecv(&mut recv, 0, tag)?;
-                        world_ref.send(&send, 0, tag)?;
-                        req.wait()?;
+                        ferrompi::scope(|ms| {
+                            let req = world_ref.irecv(ms, &mut recv, 0, tag)?;
+                            world_ref.send(&send, 0, tag)?;
+                            req.wait()?;
+                            Ok(())
+                        })?;
                         if recv[0] != i as i32 {
                             return Ok(false);
                         }

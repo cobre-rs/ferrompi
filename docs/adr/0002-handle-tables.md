@@ -12,6 +12,8 @@ tables for MPI handles:
 | `win_table`     | 256      | `MPI_Win`     | `int win_used[256]`       |
 | `info_table`    | 64       | `MPI_Info`    | `int info_used[64]`       |
 
+> **Amended 2026-10-29 — Info table removed; a mutex for group calls.** See [Amendments](#amendments).
+
 The `request_table` is by far the most active: every non-blocking send, receive,
 and collective operation allocates a slot via `alloc_request` and later frees it
 via `free_request`. At line 99-111, `alloc_request` performs a scan starting from
@@ -108,6 +110,8 @@ Cons:
 Introduce `static pthread_mutex_t request_table_mutex = PTHREAD_MUTEX_INITIALIZER`
 and acquire it at the top of `alloc_request`, `free_request`, and `get_request_ptr`.
 Requires `#include <pthread.h>`.
+
+> **Amended 2026-10-29 — Info table removed; a mutex for group calls.** See [Amendments](#amendments).
 
 Pros:
 
@@ -428,6 +432,10 @@ Instead, the table concurrency examples (`test_request_table_concurrency`,
 `Valgrind (mpich)` job runs the soundness regression examples under valgrind
 memcheck, which finds memory errors, not data races.
 
+### 2026-10-29 — Info table removed; a mutex for group calls
+
+0.7.0 removed the info table. The wrapper now includes `<pthread.h>` for one mutex, `group_mutex`, held around the MPI group calls that can write a shared group object; it is taken only when MPI granted `MPI_THREAD_SERIALIZED` or `MPI_THREAD_MULTIPLE`. The request table's lock-free design stands: no request path takes the mutex.
+
 ## Status
 
-Accepted — 2026-04-24; amended 2026-06-18 and 2026-09-24.
+Accepted — 2026-04-24; amended 2026-06-18, 2026-09-24 and 2026-10-29.

@@ -14,7 +14,7 @@
 - Generic over `MpiDatatype`: one API for `f32`, `f64`, `i32`, `i64`, `u8`, `u32`, and `u64`.
 - Fallible operations return `Result` with structured MPI error context, not panics.
 - Persistent collectives when the library reports MPI 4.0 or is Open MPI 5; counts above `i32::MAX` when it reports MPI 4.0.
-- RMA and shared-memory windows with RAII lock guards (feature: `rma`).
+- RMA and shared-memory windows (feature: `rma`): epochs are closures, and window memory is reached through views.
 - Hybrid MPI + threads: `Communicator` is `Send + Sync`, and a call from a thread the requested `ThreadLevel` does not permit is rejected at run time.
 - On MPICH at 2 ranks, a persistent allreduce was 20–58 % faster per call than `iallreduce` up to 4 KiB, at most 8 % faster at 32 KiB, and no faster from 256 KiB ([benches](benches/README.md)).
 
@@ -43,14 +43,14 @@ See [docs/mpi-compatibility.md](docs/mpi-compatibility.md) for build selection, 
 
 ```toml
 [dependencies]
-ferrompi = "0.6"
+ferrompi = "0.7"
 ```
 
-Enable `rma` for shared-memory windows, or `numa` for the SLURM job-topology helpers (implies `rma`):
+Enable `rma` for shared-memory windows, or `slurm` for the SLURM job-topology helpers:
 
 ```toml
 [dependencies]
-ferrompi = { version = "0.6", features = ["rma"] }
+ferrompi = { version = "0.7", features = ["rma"] }
 ```
 
 ```rust,no_run
@@ -85,6 +85,7 @@ mpiexec -n 4 ./target/release/my_program
 - [docs.rs](https://docs.rs/ferrompi) — API reference, built with all features; feature-gated items carry a badge.
 - [examples/](examples/) — runnable examples for collectives, RMA windows, and hybrid MPI+threads.
 - [Migrating from rsmpi](docs/migrating-from-rsmpi.md)
+- [Migrating from 0.6 to 0.7](docs/migrating-0.6-to-0.7.md) — every breaking change, with 0.6 and 0.7 code.
 - [MPI compatibility](docs/mpi-compatibility.md) — build selection, platforms, running, and known issues.
 - [Architecture](docs/architecture.md)
 - [Changelog](CHANGELOG.md)

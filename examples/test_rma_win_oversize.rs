@@ -7,7 +7,8 @@
 //! 1. The oversize request (`usize::MAX / 8 + 1` `u64` elements) comes from
 //!    rank 0, then from the last rank; every other rank requests 4 in both
 //!    cases (they coincide at np=1). Every rank checks that its
-//!    `Win::allocate` call returns `Err(Error::InvalidBuffer)` after each case.
+//!    `Win::allocate` call returns `Err(Error::InvalidArgument)` naming `count`
+//!    after each case.
 //! 2. Every rank then creates a `Win::<u64>::allocate` of 4 elements and
 //!    checks that `comm_size()` equals `world.size()`, proving a normal
 //!    window still works after the rejected ones.
@@ -33,11 +34,20 @@ fn main() {
         };
 
         let result = Win::<u64>::allocate(&world, count);
-        let ok = matches!(result, Err(Error::InvalidBuffer));
+        let ok = matches!(
+            result,
+            Err(Error::InvalidArgument {
+                arg: "count",
+                reason: "a rank's window length cannot be exchanged",
+                ..
+            })
+        );
         if !ok {
             match &result {
-                Ok(_) => eprintln!("rank {rank}: FAIL: expected Err(InvalidBuffer), got Ok"),
-                Err(e) => eprintln!("rank {rank}: FAIL: expected Err(InvalidBuffer), got Err({e})"),
+                Ok(_) => eprintln!("rank {rank}: FAIL: expected Err(InvalidArgument), got Ok"),
+                Err(e) => {
+                    eprintln!("rank {rank}: FAIL: expected Err(InvalidArgument), got Err({e})")
+                }
             }
         }
         common::check(&world, ok, "test_rma_win_oversize");

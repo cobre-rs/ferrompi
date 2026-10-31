@@ -27,9 +27,8 @@ fn main() {
     if rank == 1 {
         // Rank 1: post the persistent receive and start it BEFORE the barrier.
         // This guarantees the receive is active when rank 0's rsend start() fires.
-        let mut recv = vec![0.0f64; N];
         let mut recv_req = world
-            .recv_init(&mut recv, 0, TAG)
+            .recv_init(vec![0.0f64; N], 0, TAG)
             .expect("recv_init failed on rank 1");
         recv_req.start().expect("recv start failed on rank 1");
 
@@ -38,6 +37,7 @@ fn main() {
 
         recv_req.wait().expect("recv wait failed on rank 1");
 
+        let recv = recv_req.buffer().expect("recv buffer failed on rank 1");
         for (i, &v) in recv.iter().enumerate() {
             assert!(
                 (v - 42.0f64).abs() < f64::EPSILON,
@@ -49,9 +49,8 @@ fn main() {
         // then initialize and start the ready-mode persistent send.
         world.barrier().expect("barrier failed on rank 0");
 
-        let send = vec![42.0f64; N];
         let mut send_req = world
-            .rsend_init(&send, 1, TAG)
+            .rsend_init(vec![42.0f64; N], 1, TAG)
             .expect("rsend_init failed on rank 0");
         send_req.start().expect("rsend start failed on rank 0");
         send_req.wait().expect("rsend wait failed on rank 0");

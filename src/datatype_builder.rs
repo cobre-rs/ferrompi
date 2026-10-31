@@ -17,17 +17,16 @@
 //! # Example
 //!
 //! ```no_run
-//! use ferrompi::{CustomDatatype, DatatypeTag, Mpi};
+//! use ferrompi::{CustomDatatype, Mpi};
 //!
 //! let _mpi = Mpi::init().unwrap();
 //!
 //! // Create a contiguous block of 10 f64 values.
-//! let dt = CustomDatatype::contiguous(10, DatatypeTag::F64).unwrap();
-//! assert!(dt.raw_handle() >= 0);
+//! let dt = CustomDatatype::contiguous::<f64>(10).unwrap();
 //! // dt is freed when it goes out of scope.
 //! ```
 
-use crate::datatype::DatatypeTag;
+use crate::datatype::{tag_of, DatatypeTag, MpiDatatype};
 use crate::error::{Error, Result};
 use crate::ffi;
 use crate::rt;
@@ -42,25 +41,35 @@ use crate::rt;
 /// # Example
 ///
 /// ```no_run
-/// use ferrompi::{CustomDatatype, DatatypeTag, Mpi, StructField};
+/// use ferrompi::{CustomDatatype, Mpi, StructField};
 ///
 /// let _mpi = Mpi::init().unwrap();
 ///
 /// // Model a `{ f64, i32 }` C struct (8-byte f64 at offset 0, i32 at offset 8).
 /// let dt = CustomDatatype::create_struct(&[
-///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
-///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
+///     StructField::new::<f64>(1, 0),
+///     StructField::new::<i32>(1, 8),
 /// ]).unwrap();
-/// assert!(dt.raw_handle() >= 0);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StructField {
     /// Number of elements in this field's block.
-    pub blocklength: i32,
+    blocklength: i32,
     /// Byte displacement from the start of the struct.
-    pub displacement: i64,
-    /// Base type for this field.
-    pub basetype: DatatypeTag,
+    displacement: i64,
+    basetype: DatatypeTag,
+}
+
+impl StructField {
+    /// A block of `blocklength` elements of `T` at byte `displacement` from
+    /// the start of the struct.
+    pub fn new<T: MpiDatatype>(blocklength: i32, displacement: i64) -> Self {
+        StructField {
+            blocklength,
+            displacement,
+            basetype: tag_of::<T>(),
+        }
+    }
 }
 
 /// A committed derived MPI datatype backed by the C-side `datatype_table`.
@@ -77,12 +86,25 @@ pub struct StructField {
 /// (`send_custom`, `recv_custom`, `isend_custom`, `irecv_custom`) check these
 /// cached values against the element type before issuing any MPI call.
 ///
+/// # Base types
+///
+/// The constructors take the base type as a type parameter, so only an
+/// [`MpiDatatype`] can be one. A pair type is not:
+///
+/// ```compile_fail,E0277
+/// let _ = ferrompi::CustomDatatype::contiguous::<ferrompi::FloatInt>(5);
+/// ```
+///
+/// ```no_run
+/// let _ = ferrompi::CustomDatatype::contiguous::<f32>(5);
+/// ```
+///
 /// # No `Clone`
 ///
 /// Cloning is intentionally not supported: each `CustomDatatype` owns its
 /// handle slot, and cloning would risk a double-free when both copies are
 /// dropped. If you need to share a datatype, keep a single owned instance and
-/// pass its handle by reference.
+/// pass it by reference.
 ///
 /// # Thread Safety
 ///
@@ -113,127 +135,99 @@ unsafe impl Send for CustomDatatype {}
 unsafe impl Sync for CustomDatatype {}
 
 impl CustomDatatype {
-    /// Validate that `basetype` is a primitive type accepted by derived-type
-    /// constructors in this family.
-    ///
-    /// Returns `Ok(())` for the seven numeric primitives (`F32`, `F64`, `I32`,
-    /// `I64`, `U8`, `U32`, `U64`) and `Byte`. Returns [`Error::InvalidOp`] for
-    /// the indexed paired types (`FloatInt`, `DoubleInt`, etc.), which the
-    /// CustomDatatype builders do not accept.
-    fn validate_primitive_basetype(basetype: DatatypeTag) -> Result<()> {
-        match basetype {
-            DatatypeTag::FloatInt
-            | DatatypeTag::DoubleInt
-            | DatatypeTag::LongInt
-            | DatatypeTag::Int2
-            | DatatypeTag::ShortInt
-            | DatatypeTag::LongDoubleInt => Err(Error::InvalidOp),
-            DatatypeTag::F32
-            | DatatypeTag::F64
-            | DatatypeTag::I32
-            | DatatypeTag::I64
-            | DatatypeTag::U8
-            | DatatypeTag::U32
-            | DatatypeTag::U64
-            | DatatypeTag::Byte => Ok(()),
-        }
-    }
-
-    /// Create a contiguous block of `count` elements of the given `basetype`.
+    /// Create a contiguous block of `count` elements of the base type `T`.
     ///
     /// Wraps `MPI_Type_contiguous` followed by `MPI_Type_commit`. The returned
     /// `CustomDatatype` is always committed and ready for use.
     ///
     /// # Arguments
     ///
+    /// * `T` — the element type to replicate; see
+    ///   [Base types](CustomDatatype#base-types).
     /// * `count` — number of elements; must be positive. MPI returns
     ///   `MPI_ERR_COUNT` (or `MPI_ERR_ARG` on some implementations) for
     ///   non-positive values.
-    /// * `basetype` — the predefined primitive datatype to replicate. Must be
-    ///   one of `F32`, `F64`, `I32`, `I64`, `U8`, `U32`, `U64`, or `Byte`.
-    ///   Passing an indexed type (`FloatInt`, `DoubleInt`, etc.) returns
-    ///   [`Error::InvalidOp`] without invoking MPI.
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidOp`] — `basetype` is an indexed paired type.
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count)
     ///   or [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg) — `count` is non-positive.
     /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
     ///   — the internal datatype table is full (max 64 concurrent custom datatypes).
+    /// - [`Error::InvalidState`] — MPI is not initialized: no
+    ///   [`Mpi::init`](crate::Mpi::init) or
+    ///   [`Mpi::init_thread`](crate::Mpi::init_thread) call has returned yet.
+    ///   No MPI call is made.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{CustomDatatype, DatatypeTag, Mpi};
+    /// use ferrompi::{CustomDatatype, Mpi};
     ///
     /// let _mpi = Mpi::init().unwrap();
-    /// let dt = CustomDatatype::contiguous(10, DatatypeTag::F64).unwrap();
-    /// assert!(dt.raw_handle() >= 0);
+    /// let dt = CustomDatatype::contiguous::<f64>(10).unwrap();
     /// ```
-    pub fn contiguous(count: i32, basetype: DatatypeTag) -> Result<Self> {
-        Self::validate_primitive_basetype(basetype)?;
-
+    pub fn contiguous<T: MpiDatatype>(count: i32) -> Result<Self> {
         let mut handle: i32 = -1;
         // SAFETY: all arguments are scalar integers; no pointer or lifetime invariant at stake.
-        let ret = unsafe { ffi::ferrompi_type_contiguous(count, basetype as i32, &mut handle) };
+        let ret =
+            unsafe { ffi::ferrompi_type_contiguous(count, tag_of::<T>() as i32, &mut handle) };
         Error::check_with_op(ret, "type_contiguous")?;
         Self::from_committed(handle)
     }
 
-    /// Build a strided datatype with `count` blocks of `blocklength` base
-    /// elements, separated by `stride` base elements between the start of
-    /// consecutive blocks.
+    /// Build a strided datatype with `count` blocks of `blocklength` elements
+    /// of the base type `T`, separated by `stride` elements between the start
+    /// of consecutive blocks.
     ///
     /// Wraps `MPI_Type_vector` followed by `MPI_Type_commit`. The returned
     /// `CustomDatatype` is always committed and ready for use.
     ///
     /// # Arguments
     ///
+    /// * `T` — the element type of each block; see
+    ///   [Base types](CustomDatatype#base-types).
     /// * `count` — number of blocks. MPI returns `MPI_ERR_COUNT` (or
     ///   `MPI_ERR_ARG` on some implementations) for zero or negative values.
     /// * `blocklength` — number of base elements per block. Zero is accepted by
     ///   MPI and produces an empty-block type.
     /// * `stride` — number of base elements between the start of consecutive
     ///   blocks. May be negative (MPI allows reverse-direction strided types).
-    /// * `basetype` — the predefined primitive datatype. Must be one of `F32`,
-    ///   `F64`, `I32`, `I64`, `U8`, `U32`, `U64`, or `Byte`. Passing an indexed
-    ///   type (`FloatInt`, `DoubleInt`, etc.) returns [`Error::InvalidOp`]
-    ///   without invoking MPI.
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidOp`] — `basetype` is an indexed paired type.
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Count`](crate::MpiErrorClass::Count)
     ///   or [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg) — `count` is
     ///   zero or negative.
     /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
     ///   — the internal datatype table is full (max 64 concurrent custom datatypes).
+    /// - [`Error::InvalidState`] — MPI is not initialized: no
+    ///   [`Mpi::init`](crate::Mpi::init) or
+    ///   [`Mpi::init_thread`](crate::Mpi::init_thread) call has returned yet.
+    ///   No MPI call is made.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{CustomDatatype, DatatypeTag, Mpi};
+    /// use ferrompi::{CustomDatatype, Mpi};
     ///
     /// let _mpi = Mpi::init().unwrap();
     /// // 3 blocks of 2 f64 elements, with a stride of 5 elements between
     /// // the start of consecutive blocks (useful for column extraction in a
     /// // 5-column row-major matrix).
-    /// let dt = CustomDatatype::vector(3, 2, 5, DatatypeTag::F64).unwrap();
-    /// assert!(dt.raw_handle() >= 0);
+    /// let dt = CustomDatatype::vector::<f64>(3, 2, 5).unwrap();
     /// ```
-    pub fn vector(
-        count: i32,
-        blocklength: i32,
-        stride: i32,
-        basetype: DatatypeTag,
-    ) -> Result<Self> {
-        Self::validate_primitive_basetype(basetype)?;
-
+    pub fn vector<T: MpiDatatype>(count: i32, blocklength: i32, stride: i32) -> Result<Self> {
         let mut handle: i32 = -1;
         // SAFETY: all arguments are scalar integers; no pointer or lifetime invariant at stake.
         let ret = unsafe {
-            ffi::ferrompi_type_vector(count, blocklength, stride, basetype as i32, &mut handle)
+            ffi::ferrompi_type_vector(
+                count,
+                blocklength,
+                stride,
+                tag_of::<T>() as i32,
+                &mut handle,
+            )
         };
         Error::check_with_op(ret, "type_vector")?;
         Self::from_committed(handle)
@@ -251,39 +245,36 @@ impl CustomDatatype {
     /// * `fields` — slice of [`StructField`] descriptors. Must be non-empty:
     ///   an empty slice returns [`Error::Mpi`] with class
     ///   [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg) without calling MPI.
-    ///   Each field's `basetype` must be one of the primitive types (`F32`,
-    ///   `F64`, `I32`, `I64`, `U8`, `U32`, `U64`, `Byte`). Passing an indexed
-    ///   type (`FloatInt`, `DoubleInt`, etc.) returns [`Error::InvalidOp`]
-    ///   before invoking MPI.
     ///
     /// # Errors
     ///
-    /// - [`Error::InvalidOp`] — any field has an indexed paired basetype.
     /// - [`Error::Mpi`] with class [`MpiErrorClass::Arg`](crate::MpiErrorClass::Arg)
     ///   — `fields` is empty.
     /// - [`Error::ResourceExhausted`] with `resource: ResourceKind::Datatype`
     ///   — the internal datatype table is full (max 64 concurrent custom datatypes).
+    /// - [`Error::InvalidState`] — MPI is not initialized: no
+    ///   [`Mpi::init`](crate::Mpi::init) or
+    ///   [`Mpi::init_thread`](crate::Mpi::init_thread) call has returned yet.
+    ///   No MPI call is made.
     ///
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{CustomDatatype, DatatypeTag, Mpi, StructField};
+    /// use ferrompi::{CustomDatatype, Mpi, StructField};
     ///
     /// let _mpi = Mpi::init().unwrap();
     ///
     /// // Model a `{ f64, i32 }` C struct.
     /// let dt = CustomDatatype::create_struct(&[
-    ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
-    ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
+    ///     StructField::new::<f64>(1, 0),
+    ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
-    /// assert!(dt.raw_handle() >= 0);
     /// ```
     pub fn create_struct(fields: &[StructField]) -> Result<Self> {
         let mut blocklengths: Vec<i32> = Vec::with_capacity(fields.len());
         let mut displacements: Vec<i64> = Vec::with_capacity(fields.len());
         let mut basetype_tags: Vec<i32> = Vec::with_capacity(fields.len());
         for f in fields {
-            Self::validate_primitive_basetype(f.basetype)?;
             blocklengths.push(f.blocklength);
             displacements.push(f.displacement);
             basetype_tags.push(f.basetype as i32);
@@ -337,19 +328,17 @@ impl CustomDatatype {
     /// # Example
     ///
     /// ```no_run
-    /// use ferrompi::{CustomDatatype, DatatypeTag, Mpi, StructField};
+    /// use ferrompi::{CustomDatatype, Mpi, StructField};
     ///
     /// let _mpi = Mpi::init().unwrap();
     ///
     /// // Build a `{ f64, i32 }` struct type (natural extent = 12 bytes) and
     /// // resize it to a 16-byte stride for alignment-padded arrays.
     /// let s = CustomDatatype::create_struct(&[
-    ///     StructField { blocklength: 1, displacement: 0, basetype: DatatypeTag::F64 },
-    ///     StructField { blocklength: 1, displacement: 8, basetype: DatatypeTag::I32 },
+    ///     StructField::new::<f64>(1, 0),
+    ///     StructField::new::<i32>(1, 8),
     /// ]).unwrap();
     /// let r = s.resized(0, 16).unwrap();
-    /// assert!(r.raw_handle() >= 0);
-    /// assert_ne!(r.raw_handle(), s.raw_handle());
     /// ```
     pub fn resized(&self, lb: i64, extent: i64) -> Result<Self> {
         let mut h: i32 = -1;
@@ -357,14 +346,6 @@ impl CustomDatatype {
         let ret = unsafe { ffi::ferrompi_type_create_resized(self.handle, lb, extent, &mut h) };
         Error::check_with_op(ret, "type_create_resized")?;
         Self::from_committed(h)
-    }
-
-    /// Return the raw integer handle for this datatype.
-    ///
-    /// The handle is an index into the C-side `datatype_table`. It is always
-    /// `>= 0` for a successfully constructed `CustomDatatype`.
-    pub fn raw_handle(&self) -> i32 {
-        self.handle
     }
 
     /// Build a `CustomDatatype` from a just-committed handle, caching its
@@ -396,29 +377,31 @@ impl CustomDatatype {
     /// Check that this datatype's extent equals `size_of::<T>()` and that its
     /// true bounds lie within one `T`.
     ///
-    /// Returns [`Error::InvalidBuffer`] otherwise.
+    /// Returns [`Error::InvalidArgument`] naming `datatype` otherwise.
     pub(crate) fn check_layout<T>(&self) -> Result<()> {
         let size = std::mem::size_of::<T>() as i64;
-        if self.extent != size || self.true_lb < 0 {
-            return Err(Error::InvalidBuffer);
+        if self.extent != size {
+            return Err(Error::InvalidArgument {
+                arg: "datatype",
+                reason: "extent differs from the element size",
+            });
         }
-        let end = self
-            .true_lb
-            .checked_add(self.true_extent)
-            .ok_or(Error::InvalidBuffer)?;
-        if end > size {
-            return Err(Error::InvalidBuffer);
+        match self.true_lb.checked_add(self.true_extent) {
+            Some(end) if self.true_lb >= 0 && end <= size => Ok(()),
+            _ => Err(Error::InvalidArgument {
+                arg: "datatype",
+                reason: "data lies outside one element",
+            }),
         }
-        Ok(())
     }
 }
 
 impl Drop for CustomDatatype {
     fn drop(&mut self) {
         if self.handle >= 0 {
-            if !rt::drop_guard("CustomDatatype") {
+            let Some(_call) = rt::drop_guard("CustomDatatype") else {
                 return;
-            }
+            };
             // SAFETY: handle is a valid index allocated by one of the
             // CustomDatatype constructors. We only free non-negative handles and do
             // not use the handle after this point. The return value is intentionally
@@ -433,50 +416,8 @@ impl Drop for CustomDatatype {
 
 #[cfg(test)]
 mod tests {
-    use super::{CustomDatatype, StructField};
-    use crate::datatype::DatatypeTag;
+    use super::CustomDatatype;
     use crate::error::Error;
-
-    /// Calling `contiguous` with an indexed basetype returns `Error::InvalidOp`
-    /// without invoking any FFI. This test does not require an MPI runtime.
-    #[test]
-    fn contiguous_rejects_indexed_basetype() {
-        let result = CustomDatatype::contiguous(10, DatatypeTag::FloatInt);
-        assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "expected Err(Error::InvalidOp), got: {:?}",
-            result
-        );
-    }
-
-    /// Calling `vector` with an indexed basetype returns `Error::InvalidOp`
-    /// without invoking any FFI. This test does not require an MPI runtime.
-    #[test]
-    fn vector_rejects_indexed_basetype() {
-        let result = CustomDatatype::vector(3, 2, 5, DatatypeTag::FloatInt);
-        assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "expected Err(Error::InvalidOp), got: {:?}",
-            result
-        );
-    }
-
-    /// Calling `create_struct` with a field whose basetype is an indexed paired
-    /// type returns `Error::InvalidOp` without invoking any FFI. This test does
-    /// not require an MPI runtime.
-    #[test]
-    fn create_struct_rejects_indexed_basetype() {
-        let result = CustomDatatype::create_struct(&[StructField {
-            blocklength: 1,
-            displacement: 0,
-            basetype: DatatypeTag::FloatInt,
-        }]);
-        assert!(
-            matches!(result, Err(Error::InvalidOp)),
-            "expected Err(Error::InvalidOp), got: {:?}",
-            result
-        );
-    }
 
     /// `check_layout` boundaries against a 16-byte `#[repr(C)]` type, using
     /// inert (`handle: -1`) `CustomDatatype` values that need no MPI runtime.
@@ -499,10 +440,33 @@ mod tests {
 
         assert!(dt(16, 0, 12).check_layout::<Sample>().is_ok());
         assert!(dt(16, 0, 16).check_layout::<Sample>().is_ok());
-        assert!(dt(12, 0, 12).check_layout::<Sample>().is_err());
-        assert!(dt(32, 0, 12).check_layout::<Sample>().is_err());
-        assert!(dt(16, -1, 12).check_layout::<Sample>().is_err());
-        assert!(dt(16, 8, 12).check_layout::<Sample>().is_err());
-        assert!(dt(16, i64::MAX, 1).check_layout::<Sample>().is_err());
+
+        for (extent, true_lb, true_extent) in [(12, 0, 12), (32, 0, 12)] {
+            let result = dt(extent, true_lb, true_extent).check_layout::<Sample>();
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::InvalidArgument {
+                        arg: "datatype",
+                        reason: "extent differs from the element size"
+                    })
+                ),
+                "extent {extent}: got {result:?}"
+            );
+        }
+
+        for (true_lb, true_extent) in [(-1, 12), (8, 12), (i64::MAX, 1)] {
+            let result = dt(16, true_lb, true_extent).check_layout::<Sample>();
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::InvalidArgument {
+                        arg: "datatype",
+                        reason: "data lies outside one element"
+                    })
+                ),
+                "true_lb {true_lb}, true_extent {true_extent}: got {result:?}"
+            );
+        }
     }
 }

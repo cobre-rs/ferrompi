@@ -48,9 +48,13 @@ fn main() {
             *x = (i % 251) as u8;
         }
 
-        let req = world.isend(&a, 0, 1).expect("isend failed");
-        world.recv(&mut b, 0, 1).expect("recv failed");
-        req.wait().expect("wait failed");
+        ferrompi::scope(|s| {
+            let req = world.isend(s, &a, 0, 1).expect("isend failed");
+            world.recv(&mut b, 0, 1).expect("recv failed");
+            req.wait().expect("wait failed");
+            Ok(())
+        })
+        .expect("scope failed");
         all_ok &= report("isend/recv of 2^31+16 bytes", b == a);
 
         world.broadcast(&mut b, 0).expect("broadcast failed");
@@ -63,20 +67,20 @@ fn main() {
         all_ok &= report("allreduce of 2^31+16 bytes", b == a);
 
         b.fill(0);
-        {
-            let win = Win::create(&world, &mut b).expect("Win::create failed");
-            win.fence(WinFenceAssert::default())
-                .expect("opening fence failed");
-            win.put(&a, 0, 0, N as i64).expect("put failed");
-            win.fence(WinFenceAssert::default())
-                .expect("closing fence failed");
-            drop(win);
-        }
+        let mut win = Win::create(&world, b).expect("Win::create failed");
+        win.fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+            e.put(&a, 0, 0)
+        })
+        .expect("put epoch failed");
+        let b = win
+            .into_buffer()
+            .expect("into_buffer failed")
+            .expect("Win::create must return its buffer");
         all_ok &= report("put of 2^31+16 bytes", b == a);
     } else {
         all_ok &= report(
             "isend of 2^31+16 bytes below MPI 4 returns Count",
-            common::is_count(&world.isend(&a, 0, 1)),
+            common::is_count(&ferrompi::scope(|s| world.isend(s, &a, 0, 1).map(|_| ()))),
         );
 
         all_ok &= report(
@@ -89,12 +93,12 @@ fn main() {
             common::is_count(&world.allreduce(&a, &mut b, ReduceOp::Max)),
         );
 
-        let win = Win::<u8>::allocate(&world, N).expect("Win::allocate failed");
-        win.fence(WinFenceAssert::default())
-            .expect("opening fence failed");
-        let put_ok = common::is_count(&win.put(&a, 0, 0, N as i64));
-        win.fence(WinFenceAssert::default())
-            .expect("closing fence failed");
+        let mut win = Win::<u8>::allocate(&world, N).expect("Win::allocate failed");
+        let put_ok = win
+            .fence(WinFenceAssert::default(), WinFenceAssert::default(), |e| {
+                Ok(common::is_count(&e.put(&a, 0, 0)))
+            })
+            .expect("fence epoch failed");
         all_ok &= report("put of 2^31+16 bytes below MPI 4 returns Count", put_ok);
     }
 
