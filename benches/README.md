@@ -325,6 +325,47 @@ The increase is the extent token, two atomic read-modify-writes per request (one
 taken, one when it is released), plus, for a receive, the status fill. `multiple` has no
 limit: each call is counted (budget Y), and the 8x arm there depends on code placement.
 
+### 0.7.0 release check
+
+The budgets B, X, Y, Z and P measured again on the release candidate on 2026-10-31, on local
+MPICH 4.2.3 (`ch4:ofi`), a singleton, on an i7-12700KF. Four bench binaries ran: `0.6.0`
+(`2802bf9`), `pre-counter` (`030b3a5`), `E` (`250c7b1`, the build before persistent requests
+owned their buffers) and `H` (`78fb28e`), the release candidate.
+
+A session runs set F (`funneled`, `taskset -c 0-7`), set M (`multiple`, `taskset -c 0-7`) and
+set Z (`multiple`, `taskset -c 0,2,4,6,8,10,12,14`), in that order. Set F runs the binaries as
+`0.6.0` `H` `H` `0.6.0` four times, then `pre-counter` `H` `H` `pre-counter` twice, then `E` `H`
+`H` `E` twice: 8 slots of `0.6.0`, 4 of `pre-counter`, 4 of `E` and 16 of `H`. Sets M and Z drop
+the `E` rounds and hold 8, 4 and 12 slots. A slot whose `A/A direct iallreduce+wait` delta
+exceeded 2 ns in absolute value was re-run, at most four attempts. Three such sessions ran at
+least 15 minutes apart. In each session the increase is the median delta of `H` minus that of
+the reference, in ns per call; the table gives the three increases and their median, and a
+budget is met when the median is at most the budget plus the A/A allowance, by the rule above.
+P is gated on these default builds. The increases of the two 8x arms (16 requests) and of
+`persistent start+wait` (2 requests) are per request; the X limit over 16 requests is 5 plus the
+allowance divided by 16, and the P limits are 15 plus the largest |A/A| of the `E` and `H`
+slots, as in the persistent table above.
+
+| Budget | Case | Level, pinning | Reference | Session increases | Median increase | Limit | Verdict |
+|---|---|---|---|---|---|---|---|
+| B | allreduce f64 sum | funneled, `taskset -c 0-7` | `0.6.0` | +0.70, +0.75, +0.65 | +0.70 | ≤ 1 + 1.60 = 2.60 | met |
+| B | allreduce u64 bor | funneled, `taskset -c 0-7` | `0.6.0` | +0.50, +0.50, +0.50 | +0.50 | ≤ 1 + 1.60 = 2.60 | met |
+| B | allgatherv u8 x64 | funneled, `taskset -c 0-7` | `0.6.0` | +0.20, +0.50, +0.80 | +0.50 | ≤ 1 + 1.60 = 2.60 | met |
+| B | broadcast f64 | funneled, `taskset -c 0-7` | `0.6.0` | +0.40, +0.50, +0.45 | +0.45 | ≤ 1 + 1.60 = 2.60 | met |
+| B | barrier | funneled, `taskset -c 0-7` | `0.6.0` | −0.45, −0.50, −0.40 | −0.45 | ≤ 1 + 1.60 = 2.60 | met |
+| X | 8x(isend+irecv)+waitall (per request, over 16) | funneled, `taskset -c 0-7` | `pre-counter` | +3.00, +2.78, +2.58 | +2.78 | ≤ 5 + 1.60 / 16 = 5.10 | met |
+| X | iallreduce+wait | funneled, `taskset -c 0-7` | `pre-counter` | +1.65, +1.85, +1.50 | +1.65 | ≤ 5 + 1.60 = 6.60 | met |
+| Y | group size T=1 | multiple, `taskset -c 0-7` | `0.6.0` | +8.80, +9.30, +8.85 | +8.85 | ≤ 15 + 1.70 + 1.50 = 18.20 | met |
+| Y | group rank T=1 | multiple, `taskset -c 0-7` | `pre-counter` | +9.50, +10.10, +9.70 | +9.70 | ≤ 15 + 0.60 + 1.50 = 17.10 | met |
+| Z | group size T=8 | multiple, `taskset -c 0,2,4,6,8,10,12,14` | `0.6.0` | +7.10, +7.10, +7.10 | +7.10 | ≤ 30 + 1.50 + 1.50 = 33.00 | met |
+| Z | group rank T=8 | multiple, `taskset -c 0,2,4,6,8,10,12,14` | `pre-counter` | +8.45, +8.40, +8.50 | +8.45 | ≤ 30 + 1.90 + 1.50 = 33.40 | met |
+| P | persistent start+wait (per request, over 2) | funneled, `taskset -c 0-7` | `E` | +10.68, +10.78, +10.60 | +10.68 | ≤ 15 + 1.20 = 16.20 | met |
+| P | 8x persistent start_all+wait_all (per request, over 16) | funneled, `taskset -c 0-7` | `E` | +4.94, +5.26, +4.87 | +4.94 | ≤ 15 + 1.20 = 16.20 | met |
+
+The largest |A/A| of a kept slot over the three sessions was 1.6 ns in set F, 1.7 ns in set M
+and 1.9 ns in set Z. Two slots of the second session exceeded 2 ns (−2.3 ns in set F,
+−2.1 ns in set M) and were re-run once each; the re-runs read −0.1 and −0.3 ns.
+
 ## Design notes
 
 - `criterion_main!` is intentionally **not** used. That macro defines its own `fn main`
