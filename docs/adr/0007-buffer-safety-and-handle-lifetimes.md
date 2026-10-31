@@ -68,13 +68,14 @@ only if handles carry no borrow of `Mpi`, and that struct is the shape of a solv
    address it.
 
 4. **Epochs are closures.** `Win::fence`, `Win::start` (the PSCW access epoch),
-   `Win::lock` and `Win::lock_all` take a closure over `&mut Win` and always issue the
-   closing call. The epoch handles, `ActiveEpoch` and `PassiveEpoch`, carry the scope's
-   invariant lifetime, so a transfer's buffers outlive the closing call and must be
-   declared before the epoch call, and a view cannot leave its epoch's closure. Only the
-   passive-target handle carries `flush`, `flush_local`, `sync` and request-based RMA,
-   and its requests complete before the unlock. The guarantee: an epoch cannot be left
-   open by forgetting a guard, because no guard exists.
+   `Win::lock` and `Win::lock_all` borrow the window mutably, run a closure that receives
+   the epoch handle, and always issue the closing call. The epoch handles, `ActiveEpoch`
+   and `PassiveEpoch`, carry the scope's invariant lifetime, so a transfer's buffers
+   outlive the closing call and must be declared before the epoch call, and a view cannot
+   leave its epoch's closure. Only the passive-target handle carries `flush`,
+   `flush_local`, `sync` and request-based RMA, and its requests complete before the
+   unlock. The guarantee: an epoch cannot be left open by forgetting a guard, because no
+   guard exists.
 
 5. **Panics during unwind follow the closing call.** A nonblocking scope waits for its
    outstanding requests while unwinding, as `std::thread::scope` does. A fence or

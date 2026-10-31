@@ -1,6 +1,6 @@
 //! The MPI communication pattern of an SDDP solver.
 //!
-//! One long-lived context holds the MPI state. Each iteration then broadcasts
+//! One long-lived context holds the MPI state. The program then broadcasts
 //! run parameters, exchanges variable-length serialized cuts, reduces bounds
 //! and convergence flags, and reads scenario data from node-shared memory. The
 //! example has no LP solve and no I/O; it shows the communication only.
