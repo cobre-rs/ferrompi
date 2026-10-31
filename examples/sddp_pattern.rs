@@ -173,7 +173,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         e.sync()?;
         ctx.node.barrier()?;
         e.sync()?;
-        // Nothing writes the window from here on.
         for r in 0..node_size {
             let want: Vec<f64> = (0..COUNT).map(|k| value(r, k)).collect();
             let view = e.remote(r)?;

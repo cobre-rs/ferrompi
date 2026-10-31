@@ -141,6 +141,5 @@ only if handles carry no borrow of `Mpi`, and that struct is the shape of a solv
 
 ## Status
 
-Accepted — 2026-10-29. It supersedes the buffer-lifetime invariants of
-[ADR-0004](0004-persistent-collective-approach.md). The implementation lives in
-`src/scope.rs`, `src/request.rs`, `src/persistent.rs` and `src/window.rs`.
+Accepted — 2026-10-29. The implementation lives in `src/scope.rs`, `src/request.rs`,
+`src/persistent.rs` and `src/window.rs`.
