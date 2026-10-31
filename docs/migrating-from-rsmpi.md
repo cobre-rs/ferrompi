@@ -614,7 +614,7 @@ Use this checklist when porting a crate from rsmpi to ferrompi. The function
 mapping in [Section 2](#2-function-for-function-mapping) is the authoritative
 conversion reference.
 
-- [ ] Add `ferrompi = "0.6"` to `Cargo.toml`; remove `mpi` dependency.
+- [ ] Add `ferrompi = "0.7"` to `Cargo.toml`; remove `mpi` dependency.
 - [ ] Add `features = ["rma"]` if using shared memory windows; add `features =
 ["slurm"]` for SLURM helpers.
 - [ ] Replace `use mpi::traits::*` with `use ferrompi::{Mpi, ReduceOp}` (and

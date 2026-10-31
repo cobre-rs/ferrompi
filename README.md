@@ -43,14 +43,14 @@ See [docs/mpi-compatibility.md](docs/mpi-compatibility.md) for build selection, 
 
 ```toml
 [dependencies]
-ferrompi = "0.6"
+ferrompi = "0.7"
 ```
 
 Enable `rma` for shared-memory windows, or `slurm` for the SLURM job-topology helpers:
 
 ```toml
 [dependencies]
-ferrompi = { version = "0.6", features = ["rma"] }
+ferrompi = { version = "0.7", features = ["rma"] }
 ```
 
 ```rust,no_run
