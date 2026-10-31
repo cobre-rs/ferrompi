@@ -262,12 +262,14 @@ fn main() {
 
     if rank == 0 {
         let data = vec![1.0f64, 2.0, 3.0];
-        // WaitGuard forces MPI_Wait on drop
-        let _guard = WaitGuard::from(
-            world.process_at_rank(1)
-                 .immediate_send(&data[..]),
-        );
-        // _guard dropped here → implicit wait
+        mpi::request::scope(|scope| {
+            // WaitGuard forces MPI_Wait on drop
+            let _guard = WaitGuard::from(
+                world.process_at_rank(1)
+                     .immediate_send(scope, &data[..]),
+            );
+            // _guard dropped here → implicit wait
+        });
     } else {
         let mut buf = vec![0.0f64; 3];
         // Scope-based lifetime on the request

@@ -327,7 +327,7 @@ limit: each call is counted (budget Y), and the 8x arm there depends on code pla
 
 ### 0.7.0 release check
 
-The budgets B, X, Y, Z and P measured again on the release candidate on 2026-10-31, on local
+The budgets B, X, Y, Z and P were measured again on the release candidate on 2026-10-31, on local
 MPICH 4.2.3 (`ch4:ofi`), a singleton, on an i7-12700KF. Four bench binaries ran: `0.6.0`
 (`2802bf9`), `pre-counter` (`030b3a5`), `E` (`250c7b1`, the build before persistent requests
 owned their buffers) and `H` (`78fb28e`), the release candidate.
@@ -362,8 +362,9 @@ slots, as in the persistent table above.
 | P | persistent start+wait (per request, over 2) | funneled, `taskset -c 0-7` | `E` | +10.68, +10.78, +10.60 | +10.68 | ≤ 15 + 1.20 = 16.20 | met |
 | P | 8x persistent start_all+wait_all (per request, over 16) | funneled, `taskset -c 0-7` | `E` | +4.94, +5.26, +4.87 | +4.94 | ≤ 15 + 1.20 = 16.20 | met |
 
-The largest |A/A| of a kept slot over the three sessions was 1.6 ns in set F, 1.7 ns in set M
-and 1.9 ns in set Z. Two slots of the second session exceeded 2 ns (−2.3 ns in set F,
+The largest |A/A| of a kept slot over the three sessions, for `0.6.0`, `pre-counter`, `E` and
+`H`, was 1.6, 0.9, 0.5 and 1.2 ns in set F; for `0.6.0`, `pre-counter` and `H`, it was 1.7,
+0.6 and 1.5 ns in set M and 1.5, 1.9 and 1.5 ns in set Z. Two slots of the second session exceeded 2 ns (−2.3 ns in set F,
 −2.1 ns in set M) and were re-run once each; the re-runs read −0.1 and −0.3 ns.
 
 ## Design notes

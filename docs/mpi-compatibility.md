@@ -210,8 +210,8 @@ Run-time costs of ferrompi's own checks:
   took about 60 ms per create-and-free, against about 18 ms for the raw MPI
   calls without ferrompi's zeroing, measured on MPICH 4.2.3 on one host;
 - every transfer on an epoch handle (`ActiveEpoch`, `PassiveEpoch`) adds a
-  local bounds and access-set check — no communication — costing a few
-  nanoseconds.
+  local bounds and access-set check: a few integer comparisons and checked
+  multiplications, with no communication and no MPI call.
 
 ### Reporting compatibility
 

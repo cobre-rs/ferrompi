@@ -3,7 +3,7 @@
 **Status:** Accepted — 2026-10-29
 **Date:** 2026-10-29
 **Deciders:** Rogerio Alves
-**Supersedes:** the buffer-lifetime invariants of [ADR-0004](0004-persistent-collective-approach.md) and its argument against lifetime-bound requests
+**Supersedes:** the buffer-lifetime invariants of ADR-0004 (`docs/adr/0004-persistent-collective-approach.md`) and its argument against lifetime-bound requests
 
 ## Context
 
@@ -22,7 +22,7 @@ borrowing value is forgotten, not when MPI stops using the memory. Soundness nee
 owner that outlives the operation, or a scope that cannot be left before the operation
 completes.
 
-[ADR-0004](0004-persistent-collective-approach.md) rejected lifetime-bound persistent
+ADR-0004 rejected lifetime-bound persistent
 requests (its Option C) with two arguments: the lifetime parameter spreads through every
 type that holds a request, and a single lifetime cannot describe a collective with
 separate send and receive buffers. The second argument does not hold. One lifetime can
@@ -106,7 +106,7 @@ only if handles carry no borrow of `Mpi`, and that struct is the shape of a solv
   skipped `MPI_Finalize` while a token or a window remains. A skipped `MPI_Finalize`
   leaves the process to exit without finalizing MPI; stderr carries a warning.
 - **What stays the caller's:** the zero-copy slice contracts of window memory, which
-  [ADR-0008](0008-window-memory-access-model.md) records; the RMA assertions `NOPUT`,
+  ADR-0008 (`docs/adr/0008-window-memory-access-model.md`) records; the RMA assertions `NOPUT`,
   `NOSTORE` and `NOCHECK` (MPI-4.1 §12.5.5); and a peer that blocks in a collective free
   or a synchronizing close when a rank leaks its window or stops calling MPI.
 - **Costs:** one in-flight token per scope, per active persistent request and per
@@ -142,4 +142,5 @@ only if handles carry no borrow of `Mpi`, and that struct is the shape of a solv
 ## Status
 
 Accepted — 2026-10-29. The implementation lives in `src/scope.rs`, `src/request.rs`,
-`src/persistent.rs` and `src/window.rs`.
+`src/persistent.rs`, `src/window.rs` and `src/message.rs`; the run-time accounting of
+Decision 6 lives in `src/rt.rs` and in `Mpi`'s drop in `src/lib.rs`.

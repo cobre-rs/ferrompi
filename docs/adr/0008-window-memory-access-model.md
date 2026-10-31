@@ -16,7 +16,7 @@ never see the peer's write. The 0.6 accessors did exactly that: `Win::local_slic
 GitHub issue #28 proposed per-region borrow guards on shared windows. It raised the
 whole-window borrow problem, and its point that a remote zero-copy view has to be
 `unsafe`, because the library cannot verify that the owner stays read-only, is part of
-this design. [ADR-0007](0007-buffer-safety-and-handle-lifetimes.md) records the other
+this design. ADR-0007 (`docs/adr/0007-buffer-safety-and-handle-lifetimes.md`) records the other
 side of windows, who owns the buffer and how epochs close.
 
 Two facts from the verification stacks shape the decisions. `MPI_Win_allocate_shared`,

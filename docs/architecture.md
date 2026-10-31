@@ -336,13 +336,15 @@ The list below distinguishes what belongs in C from what belongs in Rust.
 - **Epochs are closures** — `Win::fence` and `Win::start` run a closure that
   receives an `ActiveEpoch`; `Win::lock` and `Win::lock_all` run one that
   receives a `PassiveEpoch`. The handle carries the transfers (`put`, `get`,
-  `accumulate`, `fetch_and_op`, `compare_and_swap`) and, on `PassiveEpoch`,
-  the flushes (`flush`, `flush_all`, `flush_local`, `flush_local_all`). The
-  closing call runs when the closure returns, so a safe caller cannot leave an
-  epoch open. A panic in a `fence` or `start` closure aborts the process,
-  because the closing call is collective or synchronizing; one in a `lock` or
-  `lock_all` closure completes the pending requests, unlocks, and keeps
-  unwinding. See
+  `accumulate`, `get_accumulate`, `fetch_and_op`, `compare_and_swap`) and, on
+  `PassiveEpoch`, the request-based transfers (`rput`, `rget`, `raccumulate`),
+  the flushes (`flush`, `flush_all`, `flush_local`, `flush_local_all`) and
+  `sync`. The closing call runs when the closure returns, so a safe caller
+  cannot leave an epoch open. A panic in a `fence` or `start` closure aborts the
+  process, because the closing call is collective or synchronizing; one in a
+  `lock` or `lock_all` closure completes the pending requests, unlocks, and
+  keeps unwinding. See `adr/0007-buffer-safety-and-handle-lifetimes.md`
+  (Decisions 4 and 5); the views the handles return are in
   `adr/0008-window-memory-access-model.md`.
 
 ## FFI / ABI Invariants

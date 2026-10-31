@@ -1,6 +1,6 @@
 # ADR-0004: PersistentRequest Lifecycle and Buffer-Lifetime Invariants
 
-**Status:** Accepted — 2026-05-17; amended 2026-09-24; buffer-safety model superseded by [ADR-0007](0007-buffer-safety-and-handle-lifetimes.md) (2026-10-29)
+**Status:** Accepted — 2026-05-17; amended 2026-09-24; buffer-safety model superseded by ADR-0007 (`docs/adr/0007-buffer-safety-and-handle-lifetimes.md`, 2026-10-29)
 **Date:** 2026-05-17
 **Deciders:** Rogerio Alves
 
@@ -549,7 +549,7 @@ large-count forms stay gated on `MPI_VERSION >= 4`. Elsewhere the constructors r
 
 The buffer-lifetime invariants and the `Drop` behaviour described in this ADR are those of
 0.6. In 0.7.0 a `PersistentRequest` owns its buffers, as
-[ADR-0007](0007-buffer-safety-and-handle-lifetimes.md) records. The `*_init` / `start` /
+ADR-0007 records. The `*_init` / `start` /
 `wait` design of this ADR stands.
 
 ### 2026-10-29 — Persistent barrier

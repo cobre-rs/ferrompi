@@ -228,7 +228,7 @@ static ATTACHED_BUFFER: Mutex<Option<Box<[u8]>>> = Mutex::new(None);
 /// | [`Single`](ThreadLevel::Single) | Only the thread that called [`Mpi::init_thread`] | N/A |
 /// | [`Funneled`](ThreadLevel::Funneled) | Only the thread that called [`Mpi::init_thread`] | N/A |
 /// | [`Serialized`](ThreadLevel::Serialized) | Any thread | Caller serializes; debug builds detect an overlap |
-/// | [`Multiple`](ThreadLevel::Multiple) | Any thread | Collective calls on one communicator or window must be ordered by the caller |
+/// | [`Multiple`](ThreadLevel::Multiple) | Any thread | Collective calls on one communicator must be issued in the same order on every process |
 ///
 /// A call from any other thread at [`Single`](ThreadLevel::Single) or
 /// [`Funneled`](ThreadLevel::Funneled) returns
@@ -242,11 +242,15 @@ static ATTACHED_BUFFER: Mutex<Option<Box<[u8]>>> = Mutex::new(None);
 /// be lower than the level requested to [`Mpi::init_thread`]; it is the
 /// granted level, not the requested one, that these rules apply to.
 ///
-/// At [`Multiple`](ThreadLevel::Multiple), MPI matches collective calls on a
-/// communicator or window in the order each process issues them
-/// (MPI-4.1 §11.6.2). Two threads that call collectives on one communicator at
-/// the same time must order those calls themselves, for example with a mutex.
-/// `Communicator` is `Sync`, so the compiler does not prevent it.
+/// At [`Serialized`](ThreadLevel::Serialized) and
+/// [`Multiple`](ThreadLevel::Multiple), MPI matches collective calls on a
+/// communicator in the order each process issues them (MPI-4.1 §11.6.2), so
+/// threads that share a communicator must issue its collective calls in the
+/// same order on every process. A mutex alone does not ensure that: the threads
+/// can take turns in a different order on each process. Give each thread its
+/// own communicator ([`Communicator::duplicate`](crate::Communicator::duplicate)),
+/// or make every collective call on one communicator from one thread.
+/// `Communicator` is `Sync`, so the compiler does not prevent the mismatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(i32)]
 pub enum ThreadLevel {

@@ -1,6 +1,6 @@
 # Migrating from ferrompi 0.6 to 0.7
 
-This guide lists every change that breaks ferrompi 0.6 code, section by section, with the 0.6 code and its 0.7 form. The CHANGELOG's migration notes point here. [ADR-0007](adr/0007-buffer-safety-and-handle-lifetimes.md) and [ADR-0008](adr/0008-window-memory-access-model.md) give the reasons for the buffer, handle and window changes.
+This guide lists every change that breaks ferrompi 0.6 code, section by section, with the 0.6 code and its 0.7 form. The CHANGELOG's migration notes point here. ADR-0007 (`adr/0007-buffer-safety-and-handle-lifetimes.md`) and ADR-0008 (`adr/0008-window-memory-access-model.md`) give the reasons for the buffer, handle and window changes.
 
 ## Errors
 
@@ -46,7 +46,7 @@ match world.allreduce(&send, &mut recv, ReduceOp::Sum) {
 # }
 ```
 
-Four constructors no longer exist outside the crate: `Error::from_code`, `Error::from_code_with_op`, `Error::check` and `Error::check_with_op` interpreted return codes of the crate's own C layer, which no caller can obtain. `MpiErrorClass::from_raw` mapped a class number of the linked MPI library, which no ferrompi call returns. Match on the `Error` a call returns instead, and read the `class` field of `Error::Mpi`.
+Four constructors no longer exist outside the crate: `Error::from_code`, `Error::from_code_with_op`, `Error::check` and `Error::check_with_op` interpreted return codes of the crate's own C layer, which no code outside the crate can produce. `MpiErrorClass::from_raw` mapped a class number of the linked MPI library, which no ferrompi call returns. Match on the `Error` a call returns instead, and read the `class` field of `Error::Mpi`.
 
 ## Sources, destinations and tags
 
@@ -235,7 +235,7 @@ let totals: Vec<f64> = sums.into_buffer()?;
 
 ## RMA epochs
 
-Everything here needs the `rma` feature. A window owns its buffer: `Win<T>` has no lifetime parameter, `Win::create` takes a `Vec<T>`, and `Win::into_buffer` (collective) frees the window and returns the buffer (`None` for `Win::allocate` and `Win::allocate_shared`). A window dropped or forgotten while MPI may still use its buffer leaks the buffer instead of freeing it ([ADR-0007](adr/0007-buffer-safety-and-handle-lifetimes.md)).
+Everything here needs the `rma` feature. A window owns its buffer: `Win<T>` has no lifetime parameter, `Win::create` takes a `Vec<T>`, and `Win::into_buffer` (collective) frees the window and returns the buffer (`None` for `Win::allocate` and `Win::allocate_shared`). A window dropped or forgotten while MPI may still use its buffer leaks the buffer instead of freeing it (ADR-0007).
 
 Every access epoch is a closure that receives an epoch handle, and the crate runs the closing call (fence, `MPI_Win_complete` or unlock) whether the closure returns `Ok` or `Err`; if the closure panics, `Win::lock` and `Win::lock_all` unlock and continue unwinding, while `Win::fence` and `Win::start` abort the process before any closing call.
 
