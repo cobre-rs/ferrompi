@@ -349,8 +349,8 @@ pub(crate) fn scopes_on_this_thread() -> usize {
 }
 
 /// Counts `n` persistent requests about to start, or one message about to be
-/// probed for, with one increment: returns
-/// the tokens, or `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or
+/// probed for, with one increment: returns the tokens, or
+/// `Err(FERROMPI_ERR_FINALIZED)` once state is `Finalizing` or
 /// `Finalized`, or `Err(FERROMPI_ERR_THREAD_LEVEL)` on a thread other than the
 /// init thread at `Single`/`Funneled`, counting nothing. The count rises before
 /// the guarded call that starts the requests or probes for the message, so that
@@ -413,8 +413,8 @@ pub(crate) fn release_forgotten_handle_token() {
 
 /// How many persistent requests are active and matched messages are unreceived,
 /// summed over the shards of `LIVE_HANDLES`. Read by `Mpi::drop` after
-/// [`begin_finalize`], which does not
-/// wait for them: a nonzero sum makes it skip `MPI_Finalize`.
+/// [`begin_finalize`], which does not wait for them: a nonzero sum makes it
+/// skip `MPI_Finalize`.
 ///
 /// The shards are read one after another, not as a snapshot, and a sum of zero
 /// is still exact:

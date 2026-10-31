@@ -311,18 +311,17 @@ pub enum ThreadLevel {
 ///
 /// A `wait` or `test` of a persistent request, an `mrecv`, a [`Message`] drop
 /// or a probe that matches nothing, run on another thread while this handle is
-/// dropped, can make the drop skip `MPI_Finalize`,
-/// although nothing is left outstanding once that call returns.
+/// dropped, can make the drop skip `MPI_Finalize`, although nothing is left
+/// outstanding once that call returns.
 ///
 /// When `MPI_Finalize` is skipped, MPI stays initialized: a `wait` or `test`
 /// on a request still pending completes it, a `cancel` on one still reaches
 /// MPI, a matched [`Message`] can still be received, an open RMA epoch still
-/// issues its closing call (fence,
-/// `MPI_Win_complete`, unlock; it can wait for a peer that no longer calls
-/// MPI), and an exposure epoch can still be waited for or tested; every other
-/// call returns `Err(`[`Error::Finalized`]`)`, and handles dropped afterwards
-/// are leaked without an MPI call, except a [`Message`], whose drop still
-/// receives it.
+/// issues its closing call (fence, `MPI_Win_complete`, unlock; it can wait
+/// for a peer that no longer calls MPI), and an exposure epoch can still be
+/// waited for or tested; every other call returns
+/// `Err(`[`Error::Finalized`]`)`, and handles dropped afterwards are leaked
+/// without an MPI call, except a [`Message`], whose drop still receives it.
 ///
 /// At [`ThreadLevel::Single`]/[`ThreadLevel::Funneled`], dropping a handle
 /// whose `Drop` calls MPI — a [`PersistentRequest`], a communicator other than
@@ -341,13 +340,12 @@ pub enum ThreadLevel {
 /// thread still holds, which the drop waits for. A `wait` or `test` on an
 /// active [`PersistentRequest`] is admitted too, and the drop does not wait for
 /// the request. So is the `mrecv` or the drop of a matched [`Message`]. The
-/// closing call of a fence,
-/// PSCW access or passive-target epoch (the unlock), `Win::wait_exposure` and
-/// `Win::test_exposure` (feature `rma`) are admitted too: the drop does not
-/// wait for an epoch, because the epoch's window keeps it on the skip path. A
-/// thread blocked forever inside an MPI call, for example in a collective its
-/// peers never enter, blocks the drop; MPI requires every thread's MPI calls to
-/// complete before `MPI_Finalize`.
+/// closing call of a fence, PSCW access or passive-target epoch (the unlock),
+/// `Win::wait_exposure` and `Win::test_exposure` (feature `rma`) are admitted
+/// too: the drop does not wait for an epoch, because the epoch's window keeps
+/// it on the skip path. A thread blocked forever inside an MPI call, for
+/// example in a collective its peers never enter, blocks the drop; MPI requires
+/// every thread's MPI calls to complete before `MPI_Finalize`.
 ///
 /// A call that would fail one of the checks above (finalized, wrong
 /// thread) and is also given invalid arguments may return the argument

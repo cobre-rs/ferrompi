@@ -39,8 +39,8 @@ pub const FERROMPI_LOCK_SHARED: int32_t = 1;
 // only from a `Drop` impl, and the op-table calls of `UserOp`'s constructors,
 // which hold an in-flight token from before they take a slot until they have
 // created its op or given the slot back. The error lookup is guarded by hand
-// after this block: MPI 3.1 libraries need not allow
-// it before MPI is initialized, nor during or after `MPI_Finalize`.
+// after this block: MPI 3.1 libraries need not allow it before MPI is
+// initialized, nor during or after `MPI_Finalize`.
 extern "C" {
     pub fn ferrompi_init_thread(required: c_int, provided: *mut c_int) -> c_int;
     pub fn ferrompi_finalize() -> c_int;
@@ -205,9 +205,9 @@ pub(crate) unsafe fn ferrompi_win_fence_close(assert_val: int32_t, win: int32_t)
 ///
 /// The externs after the trailing marker complete, test or cancel a request that
 /// is already pending, receive a message that is already matched, or close an
-/// epoch that is already open. Their wrappers
-/// take the completion entry instead, which admits them while finalizing; both
-/// lists share one `raw` module and one wrapper body.
+/// epoch that is already open. Their wrappers take the completion entry
+/// instead, which admits them while finalizing; both lists share one `raw`
+/// module and one wrapper body.
 macro_rules! guarded_extern {
     (@wrappers $enter:path; $(
         $(#[$meta:meta])*
