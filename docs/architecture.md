@@ -458,7 +458,7 @@ for which MPI operations.
 | ---------------------- | --------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
 | `MpiDatatype`          | `mod sealed`           | `f32`, `f64`, `i32`, `i64`, `u8`, `u32`, `u64`                                                 | All point-to-point, collectives, RMA                                  |
 | `AtomicMpiDatatype`    | `mod sealed_atomic`    | `i32`, `i64`, `u32`, `u64`, `u8`                                                               | `compare_and_swap` on epoch handles only (feature `rma`)              |
-| `MpiIndexedDatatype`   | `mod sealed_indexed`   | `FloatInt`, `DoubleInt`, `Int2`, `ShortInt`, and (Linux `x86_64`/`aarch64`/little-endian `powerpc64` only) `LongInt`/`LongDoubleInt` | `allreduce_indexed` (MaxLoc/MinLoc)                                   |
+| `MpiIndexedDatatype`   | `mod sealed_indexed`   | `FloatInt`, `DoubleInt`, `Int2`, `ShortInt`, and (Linux `x86_64`/`aarch64`/little-endian `powerpc64` only) `LongInt`/`LongDoubleInt` | `allreduce_indexed` (`CollectiveOp::MAX_LOC`/`MIN_LOC`)               |
 | `BytePermutable`       | `mod sealed_byte`      | `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `[T; N]`                                 | `allreduce_bytes` (bitwise ops only)                                  |
 
 Each trait uses a private `mod sealed` module containing a `Sealed` marker

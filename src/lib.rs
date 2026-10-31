@@ -235,8 +235,9 @@ static ATTACHED_BUFFER: Mutex<Option<Box<[u8]>>> = Mutex::new(None);
 /// `Err(`[`Error::ThreadLevelViolation`]`)` without calling MPI. At
 /// [`Serialized`](ThreadLevel::Serialized), the caller must serialize its own
 /// calls; a debug build that detects two calls overlapping also returns that
-/// error (a consuming [`Request::wait`](crate::Request::wait) aborts the
-/// process instead), but a release build does not check.
+/// error (a consuming [`Request::wait`](crate::Request::wait), the final wait
+/// of a [`scope`](crate::scope()) and the closing call of an RMA epoch abort
+/// the process instead), but a release build does not check.
 ///
 /// [`Mpi::thread_level()`] reports the level MPI actually granted, which may
 /// be lower than the level requested to [`Mpi::init_thread`]; it is the
@@ -308,6 +309,11 @@ pub enum ThreadLevel {
 /// whatever thread holds it: MPI requires every matched message to be received
 /// before `MPI_Finalize` (MPI-4.1 §11.2.2). It can still be received with
 /// `mrecv`, or dropped, afterwards.
+///
+/// The same holds while a nonblocking [`scope`](crate::scope()) is open on the
+/// thread that drops this handle: its requests complete when the scope ends.
+/// A scope open on another thread is waited for instead, with no timeout, at
+/// every thread level.
 ///
 /// A `wait` or `test` of a persistent request, an `mrecv`, a [`Message`] drop
 /// or a probe that matches nothing, run on another thread while this handle is
@@ -553,8 +559,8 @@ impl Mpi {
     /// Check if MPI has been finalized.
     ///
     /// Returns `true` from the start of the `Mpi` handle's drop, including
-    /// when `MPI_Finalize` itself was skipped because a window was still
-    /// alive.
+    /// when `MPI_Finalize` itself was skipped (see [`Mpi`]'s lifecycle section
+    /// for when it is).
     pub fn is_finalized() -> bool {
         if rt::is_finalized() {
             return true;

@@ -78,7 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `allreduce_with_op` is removed:** `reduce`, `allreduce`, `scan`, `exscan`,
   `reduce_scatter_block` and their scalar and in-place forms accept a
   `ReduceOp`, a `&UserOp<T>` or a `CollectiveOp`. A user op above `i32::MAX`
-  elements returns `Error::Mpi` with class `Count` on every MPI version.
+  elements (for `reduce_scatter_block`, a `send.len()` above it) returns
+  `Error::Mpi` with class `Count` on every MPI version.
   Migration: see "Reduction operations" in `docs/migrating-0.6-to-0.7.md`.
 - **`ReduceOp::Replace` and `ReduceOp::NoOp` are replaced by
   `AccumulateOp::REPLACE`, `FetchOp::REPLACE` and `FetchOp::NO_OP`**, present
@@ -375,15 +376,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancel call on a request that a scope open on another thread still holds,
   which the drop waits for. `Mpi::is_finalized()` is `true` from the start of
   the drop.
-- **A user op in `reduce_scatter_block` (blocking, nonblocking and persistent)
-  returns `Error::Mpi` with class `Count` when `send.len()` exceeds
-  `i32::MAX`**, instead of reaching MPI with a span the user function's `int`
-  length cannot hold.
 - **A window is not freed while its `post` exposure epoch is open.** A peer's
-  `start` epoch could still write into it, yet Open MPI 5 freed the window and
-  `Win::into_buffer` handed the buffer back. `into_buffer` now returns
-  `Error::InvalidState` without calling `MPI_Win_free`; that window, like one
-  dropped in that state, is leaked, and `Mpi` then skips `MPI_Finalize`. Close
+  `start` epoch could still write into it, yet dropping the window freed it on
+  Open MPI 5 and ended the borrow of its buffer. Such a window is now leaked
+  instead, and `Mpi` then skips `MPI_Finalize`; `Win::into_buffer` returns
+  `Error::InvalidState` in that state without calling `MPI_Win_free`. Close
   the epoch first with `wait_exposure` or a `test_exposure` that returns `true`.
 - **A zero-length `u8` buffer no longer reaches MPI as `MPI_IN_PLACE`.** An
   empty `Vec<u8>` points at address 1, which is `MPI_IN_PLACE` in Open MPI. On
@@ -434,13 +431,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both libraries accepted it. A tag that does not fit now returns
   `Error::InvalidArgument` with `arg: "stringtag"` before any MPI call. A
   tag of up to 62 bytes fits in every library.
-- **A panic that unwinds out of a call no longer leaves the overlap check
-  set.** In a debug build at `ThreadLevel::Serialized`, a call that panicked
-  while it held the check left it set: for example the `Drop` of a value that
-  the closure of `UserOp::new` captured, run when the table of user ops was
-  full. Every later call in the process then returned
-  `Error::ThreadLevelViolation`. The check is now released when the call
-  unwinds. Release builds were not affected.
 
 ## [0.6.0] - 2026-10-01
 

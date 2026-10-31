@@ -115,12 +115,16 @@ One item each: the symptom, the affected library, and what to do.
   newly created window (reported for Open MPI 4.x), ferrompi prints a
   warning to stderr, and RMA errors on that window then abort the process
   instead of returning `Err`.
-- When `MPI_Finalize` is skipped because a window is still alive — see the
-  `Mpi` type's own documentation for the full rule — MPICH's `mpiexec`
-  exits 0. Open MPI 4.1.6 and 5.0.7 instead exit 1 and print an "exiting
-  improperly" notice. On every library, drop all windows before the `Mpi`
-  handle so `MPI_Finalize` runs; under Open MPI, a skipped finalize makes
-  the job exit non-zero, which batch schedulers and CI treat as a failure.
+- When `MPI_Finalize` is skipped — a window still alive, a persistent
+  request still active, a matched `Message` not yet received, or a
+  nonblocking scope still open on the thread that drops `Mpi`; see the `Mpi`
+  type's own documentation for the full rule — MPICH's `mpiexec` exits 0.
+  Open MPI 4.1.6 and 5.0.7 instead exit 1 and print an "exiting improperly"
+  notice. On every library, drop every window, complete every persistent
+  request, receive or drop every `Message` and end every scope before
+  dropping the `Mpi` handle so `MPI_Finalize` runs; under Open MPI, a
+  skipped finalize makes the job exit non-zero, which batch schedulers and CI
+  treat as a failure.
 - Fault-tolerant MPI (ULFM): ferrompi exposes no failure-acknowledgement
   API. With the library's process-fault-tolerance mode enabled (Open MPI
   5: `mpiexec --with-ft ulfm`), a receive from any source that a process
