@@ -64,6 +64,8 @@ extern "C" {
 #define FERROMPI_ERR_OPS_FULL        (-7004)
 #define FERROMPI_ERR_WINDOWS_FULL    (-7005)
 #define FERROMPI_ERR_GROUPS_FULL     (-7006)
+/* -7007 is retired: it was the info table's sentinel, removed in 0.7.0.
+ * Do not reuse it. */
 
 /* Returned by the persistent-collective and comm_create_from_group stubs
  * compiled without FERROMPI_HAVE_MPI4_COLLECTIVES (the library lacks the

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`Error::Finalized` displays "MPI has been finalized or the Mpi handle
+  dropped"** instead of "MPI has been finalized": it is also returned after
+  a dropped `Mpi` skipped `MPI_Finalize`, when MPI is still initialized.
+
 ## [0.7.0] - 2026-10-31
 
 ### Breaking Changes

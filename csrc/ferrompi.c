@@ -25,7 +25,8 @@
  * Internal State and Handle Management
  * ============================================================ */
 
-// Maximum number of concurrent communicators (excluding COMM_WORLD)
+// Communicator table size, COMM_WORLD included: it holds slot 0, so at most
+// MAX_COMMS - 1 other communicators can exist at once
 #define MAX_COMMS 256
 
 // Maximum number of concurrent requests

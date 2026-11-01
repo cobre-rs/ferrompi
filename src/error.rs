@@ -19,6 +19,8 @@ const FERROMPI_ERR_DATATYPES_FULL: i32 = -7003;
 const FERROMPI_ERR_OPS_FULL: i32 = -7004;
 const FERROMPI_ERR_WINDOWS_FULL: i32 = -7005;
 const FERROMPI_ERR_GROUPS_FULL: i32 = -7006;
+// -7007 is retired: it was the info table's sentinel, removed in 0.7.0. Do
+// not reuse it.
 
 // Returned by the persistent-collective and comm_create_from_group stubs
 // compiled without FERROMPI_HAVE_MPI4_COLLECTIVES (the library lacks the
@@ -289,19 +291,20 @@ pub enum Error {
     #[error("MPI has already been initialized")]
     AlreadyInitialized,
 
-    /// MPI has been finalized.
+    /// MPI has been finalized, or the [`Mpi`](crate::Mpi) handle dropped.
     ///
     /// Returned by any MPI-calling method invoked after the [`Mpi`](crate::Mpi)
-    /// handle was dropped, and by `Mpi::init`/`Mpi::init_thread` once MPI has
-    /// been finalized. The refused call makes no MPI call. A method that makes
-    /// several MPI calls can be refused after an earlier one ran: a window
-    /// constructor after its length exchange, which leaves no window on this
-    /// rank while the other ranks can block creating theirs, and a
+    /// handle was dropped, whether or not its drop called `MPI_Finalize`, and
+    /// by `Mpi::init`/`Mpi::init_thread` once an `Mpi` handle has been dropped
+    /// or MPI has been finalized. The refused call makes no MPI call. A method
+    /// that makes several MPI calls can be refused after an earlier one ran: a
+    /// window constructor after its length exchange, which leaves no window on
+    /// this rank while the other ranks can block creating theirs, and a
     /// communicator constructor after its creating call, which loses the new
-    /// communicator (it is never freed, and keeps its handle-table slot).
-    /// After a skipped `MPI_Finalize`, `wait` and `test` on a request still
-    /// pending complete it, and `cancel` reaches it, instead.
-    #[error("MPI has been finalized")]
+    /// communicator (it is never freed, and keeps its handle-table slot). After
+    /// a skipped `MPI_Finalize`, `wait` and `test` on a request still pending
+    /// complete it, and `cancel` reaches it, instead.
+    #[error("MPI has been finalized or the Mpi handle dropped")]
     Finalized,
 
     /// MPI call not permitted on this thread at the provided thread level.
