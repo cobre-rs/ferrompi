@@ -387,12 +387,13 @@ impl Mpi {
     ///
     /// Returns `Err(`[`Error::AlreadyInitialized`]`)` while an `Mpi` handle
     /// exists or another thread is initializing, `Err(`[`Error::Finalized`]`)`
-    /// once MPI has been finalized, or `Err(`[`Error::Mpi`]`)` if
-    /// `MPI_Init_thread` itself fails. An error inside `MPI_Init_thread`
-    /// itself usually aborts the process before `Err(`[`Error::Mpi`]`)` can
-    /// be returned; see [`Error`]. If MPI then fails to report this process's
-    /// rank or the size of `MPI_COMM_WORLD`, that error is returned and MPI is
-    /// finalized, as it is when an `Mpi` handle is dropped.
+    /// once an `Mpi` handle has been dropped or MPI has been finalized, or
+    /// `Err(`[`Error::Mpi`]`)` if `MPI_Init_thread` itself fails. An error
+    /// inside `MPI_Init_thread` itself usually aborts the process before
+    /// `Err(`[`Error::Mpi`]`)` can be returned; see [`Error`]. If MPI then
+    /// fails to report this process's rank or the size of `MPI_COMM_WORLD`,
+    /// that error is returned and MPI is finalized, as it is when an `Mpi`
+    /// handle is dropped.
     pub fn init() -> Result<Self> {
         Self::init_thread(ThreadLevel::Single)
     }
@@ -412,14 +413,15 @@ impl Mpi {
     ///
     /// Returns `Err(`[`Error::AlreadyInitialized`]`)` while an `Mpi` handle
     /// exists or another thread is initializing, `Err(`[`Error::Finalized`]`)`
-    /// once MPI has been finalized, or `Err(`[`Error::Mpi`]`)` if
-    /// `MPI_Init_thread` itself fails. An error inside `MPI_Init_thread`
-    /// itself usually aborts the process before `Err(`[`Error::Mpi`]`)` can
-    /// be returned; see [`Error`]. That error's class is
-    /// [`MpiErrorClass::Unknown`], because MPI cannot be asked for the class
-    /// of an error from its own initialization. If MPI then fails to report
-    /// this process's rank or the size of `MPI_COMM_WORLD`, that error is
-    /// returned and MPI is finalized, as it is when an `Mpi` handle is dropped.
+    /// once an `Mpi` handle has been dropped or MPI has been finalized, or
+    /// `Err(`[`Error::Mpi`]`)` if `MPI_Init_thread` itself fails. An error
+    /// inside `MPI_Init_thread` itself usually aborts the process before
+    /// `Err(`[`Error::Mpi`]`)` can be returned; see [`Error`]. That error's
+    /// class is [`MpiErrorClass::Unknown`], because MPI cannot be asked for
+    /// the class of an error from its own initialization. If MPI then fails
+    /// to report this process's rank or the size of `MPI_COMM_WORLD`, that
+    /// error is returned and MPI is finalized, as it is when an `Mpi` handle
+    /// is dropped.
     pub fn init_thread(required: ThreadLevel) -> Result<Self> {
         rt::begin_init()?;
 
