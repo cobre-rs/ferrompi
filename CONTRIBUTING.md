@@ -33,6 +33,7 @@ Run every command CI runs, with its exact flags:
 ```bash
 cargo fmt --all -- --check
 bash .github/scripts/check-no-plan-leaks.sh
+python3 .github/scripts/check-ffi-signatures.py
 
 cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features rma -- -D warnings
@@ -63,7 +64,17 @@ Every public item needs a doc comment (`missing_docs`, fatal under `-D warnings`
 Shipped files (source, examples, benches, tests, docs, README, CHANGELOG) describe
 behaviour, not how the work was planned: no work-item, requirement or audit-register
 identifiers and no paths into planning notes. `check-no-plan-leaks.sh` enforces this;
-commit messages are exempt. To run it with `cargo fmt --check` before every commit:
+commit messages are exempt.
+
+`src/ffi.rs` declares the C layer's functions by hand, and a declaration that disagrees
+with `csrc/ferrompi.h` still compiles and links. `check-ffi-signatures.py` (Python 3.10+,
+standard library only) requires an extern for every `ferrompi_*` prototype and a
+prototype for every extern, with the same parameter count and corresponding types:
+`int` is `c_int`, `int32_t` is `int32_t` or `i32`, `const T*` is `*const T`, `T*` is
+`*mut T`. A prototype with no Rust caller by design goes in its `UNBOUND_PROTOTYPES`,
+with the reason.
+
+To run both checks with `cargo fmt --check` before every commit:
 `ln -sf ../../.github/scripts/pre-commit .git/hooks/pre-commit`.
 
 ## Writing an MPI test

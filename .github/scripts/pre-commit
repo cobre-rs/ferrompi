@@ -3,3 +3,4 @@
 set -euo pipefail
 cargo fmt --all -- --check
 bash .github/scripts/check-no-plan-leaks.sh
+python3 .github/scripts/check-ffi-signatures.py
