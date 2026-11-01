@@ -1,0 +1,733 @@
+/* The ferrompi tutorial's one stylesheet, shared by every page.
+   Layout: one reading column of prose; figures may run wider than it; on wide
+   screens the chapter's contents sit in a sticky rail to its left. */
+:root {
+  /* Iron ink on a cool paper; copper and its verdigris patina are the two
+     MPI "colors" the figures use, steel blue the third group. */
+  --paper: #f5f7f8;
+  --surface: #ffffff;
+  --code-bg: #edf1f3;
+  --ink: #1a2129;
+  --muted: #56616e;
+  --rule: #d3dae0;
+  --accent: #1f6f66;
+  --accent-soft: #dcefeb;
+  --copper: #a3501f;
+  --copper-soft: #f6e4d8;
+  --steel: #3b5a82;
+  --steel-soft: #dfe7f2;
+  --warn-bg: #fbf0da;
+  --warn-ink: #6b4a06;
+  --tok-kw: #8a3f8f;
+  --tok-str: #2f6f2a;
+  --tok-com: #6c7682;
+  --tok-mac: #1f5fa8;
+  --tok-ty: #a3501f;
+  --tok-num: #9a5b00;
+
+  --font-body: Charter, "Bitstream Charter", "Iowan Old Style", "Sitka Text",
+    "Source Serif 4", "Noto Serif", Cambria, Georgia, serif;
+  --font-ui: system-ui, -apple-system, "Segoe UI", Ubuntu, Cantarell,
+    "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono",
+    "Cascadia Code", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+
+  --step--1: 0.875rem;
+  --step-0: 1.0625rem;
+  --step-1: 1.25rem;
+  --step-2: 1.6rem;
+  --step-3: 2.3rem;
+  --measure: 68ch;
+  --wide: 56rem;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #11161b;
+    --surface: #182027;
+    --code-bg: #1b242c;
+    --ink: #e2e7eb;
+    --muted: #9aa5b1;
+    --rule: #2c363f;
+    --accent: #5cc2b3;
+    --accent-soft: #173a36;
+    --copper: #e48d5c;
+    --copper-soft: #432819;
+    --steel: #93b3dc;
+    --steel-soft: #1e2d42;
+    --warn-bg: #3a2f14;
+    --warn-ink: #f1d48f;
+    --tok-kw: #d59bd8;
+    --tok-str: #9fd38f;
+    --tok-com: #8a95a1;
+    --tok-mac: #8cbcf2;
+    --tok-ty: #eda57c;
+    --tok-num: #e8b86a;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --paper: #11161b;
+  --surface: #182027;
+  --code-bg: #1b242c;
+  --ink: #e2e7eb;
+  --muted: #9aa5b1;
+  --rule: #2c363f;
+  --accent: #5cc2b3;
+  --accent-soft: #173a36;
+  --copper: #e48d5c;
+  --copper-soft: #432819;
+  --steel: #93b3dc;
+  --steel-soft: #1e2d42;
+  --warn-bg: #3a2f14;
+  --warn-ink: #f1d48f;
+  --tok-kw: #d59bd8;
+  --tok-str: #9fd38f;
+  --tok-com: #8a95a1;
+  --tok-mac: #8cbcf2;
+  --tok-ty: #eda57c;
+  --tok-num: #e8b86a;
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-padding-top: 1.5rem;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: var(--step-0);
+  line-height: 1.62;
+}
+
+/* ---- page frame ---------------------------------------------------- */
+
+.site-bar {
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+  padding-block: 0.7rem;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+
+.site-bar nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+  align-items: baseline;
+  max-width: 80rem;
+  margin-inline: auto;
+}
+
+.site-bar .home {
+  color: var(--ink);
+  font-weight: 650;
+  text-decoration: none;
+  margin-right: auto;
+}
+
+.site-bar a {
+  color: var(--muted);
+}
+
+.page {
+  max-width: 80rem;
+  margin-inline: auto;
+  padding-block: 2.5rem 4rem;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2rem 3.5rem;
+}
+
+@media (min-width: 70rem) {
+  .page.with-toc {
+    grid-template-columns: 13rem minmax(0, 1fr);
+  }
+}
+
+main {
+  min-width: 0;
+}
+
+main > * {
+  max-width: var(--measure);
+}
+
+main > figure,
+main > .wide {
+  max-width: var(--wide);
+}
+
+/* A code block is as wide as its longest line, at least the prose measure and
+   at most the figure width, so typical programs need no sideways scroll. */
+main > pre,
+main > .code-block {
+  width: fit-content;
+  min-width: min(100%, var(--measure));
+  max-width: min(100%, var(--wide));
+}
+
+/* ---- contents rail ------------------------------------------------- */
+
+.toc {
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+  line-height: 1.4;
+}
+
+.toc h2 {
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 0.75rem;
+  padding: 0;
+  border: 0;
+}
+
+.toc ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.toc a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.toc a:hover {
+  color: var(--accent);
+}
+
+@media (min-width: 70rem) {
+  .toc > div {
+    position: sticky;
+    top: 1.5rem;
+  }
+}
+
+@media (max-width: 69.99rem) {
+  .toc {
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 0.9rem 1rem;
+    background: var(--surface);
+  }
+
+  .toc ol {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1.1rem;
+  }
+}
+
+/* ---- type ---------------------------------------------------------- */
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-ui);
+  line-height: 1.2;
+  text-wrap: balance;
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: var(--step-3);
+  font-weight: 720;
+  margin: 0.25rem 0 1.25rem;
+}
+
+h2 {
+  font-size: var(--step-2);
+  font-weight: 680;
+  margin: 3rem 0 0.9rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--rule);
+}
+
+h3 {
+  font-size: var(--step-1);
+  font-weight: 650;
+  margin: 2rem 0 0.6rem;
+}
+
+.eyebrow {
+  font-family: var(--font-ui);
+  font-size: 0.78rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
+  font-weight: 650;
+  margin: 0;
+}
+
+.lede {
+  font-size: var(--step-1);
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+p,
+ul,
+ol,
+table,
+pre,
+figure,
+aside,
+details {
+  margin-block: 0 1.1rem;
+}
+
+li + li {
+  margin-top: 0.3rem;
+}
+
+a {
+  color: var(--accent);
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 1px;
+}
+
+a:focus-visible,
+button:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  background: var(--code-bg);
+  border-radius: 3px;
+  padding: 0.08em 0.3em;
+  /* A long identifier breaks rather than widen the page on a phone. */
+  overflow-wrap: break-word;
+}
+
+a code {
+  color: inherit;
+}
+
+/* ---- code blocks --------------------------------------------------- */
+
+.code-block {
+  position: relative;
+  margin-block: 0 1.1rem;
+}
+
+.code-block > pre {
+  margin: 0;
+}
+
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  background: var(--code-bg);
+  border-radius: 6px;
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+  tab-size: 4;
+}
+
+pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+@media (max-width: 40rem) {
+  pre {
+    font-size: 0.8rem;
+  }
+}
+
+/* The label states what CI does with the block: run it under mpiexec at the
+   process count the block declares, compare its lines with a run, or check it
+   against the file it quotes. It stays lowercase, since `mpiexec -N` is a
+   different flag from `-n`. */
+pre[data-lang]::before,
+pre.output::before {
+  display: block;
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  margin-bottom: 0.55rem;
+}
+
+pre[data-lang="rust"]::before {
+  content: "rust";
+}
+
+pre[data-lang="rust"][data-run]::before {
+  content: "rust · mpiexec -n " attr(data-run);
+}
+
+pre[data-lang="bash"]::before {
+  content: "shell";
+}
+
+pre[data-lang="c"]::before {
+  content: "c";
+}
+
+pre[data-lang="toml"]::before {
+  content: "toml";
+}
+
+pre[data-source]::before {
+  content: attr(data-lang) " · " attr(data-source);
+}
+
+pre.output {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+}
+
+pre.output::before {
+  content: "output";
+}
+
+pre.output[data-output-of]::before {
+  content: "output · lines arrive in any order";
+}
+
+.copy {
+  position: absolute;
+  top: 0.55rem;
+  right: 0.6rem;
+  font-family: var(--font-ui);
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+}
+
+.copy:hover {
+  color: var(--ink);
+}
+
+.tok-kw {
+  color: var(--tok-kw);
+}
+
+.tok-str {
+  color: var(--tok-str);
+}
+
+.tok-com {
+  color: var(--tok-com);
+  font-style: italic;
+}
+
+.tok-mac {
+  color: var(--tok-mac);
+}
+
+.tok-ty {
+  color: var(--tok-ty);
+}
+
+.tok-num {
+  color: var(--tok-num);
+}
+
+/* ---- tables -------------------------------------------------------- */
+
+.table-scroll {
+  overflow-x: auto;
+  margin-block: 0 1.1rem;
+}
+
+table {
+  border-collapse: collapse;
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+  font-variant-numeric: tabular-nums;
+  width: 100%;
+  margin: 0;
+}
+
+th,
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.5rem 0.9rem 0.5rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+th {
+  font-weight: 650;
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+td:first-child {
+  white-space: nowrap;
+}
+
+/* On a phone, a long first column would squeeze the others to a word a line. */
+@media (max-width: 40rem) {
+  td:first-child {
+    white-space: normal;
+  }
+}
+
+/* ---- asides -------------------------------------------------------- */
+
+aside.note,
+aside.warn {
+  border-radius: 6px;
+  padding: 0.9rem 1.1rem;
+}
+
+aside.note {
+  background: var(--accent-soft);
+}
+
+aside.warn {
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+}
+
+aside.warn a {
+  color: inherit;
+}
+
+aside > :last-child {
+  margin-bottom: 0;
+}
+
+aside .label {
+  display: block;
+  font-family: var(--font-ui);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 700;
+  margin-bottom: 0.3rem;
+}
+
+/* ---- figures ------------------------------------------------------- */
+
+figure {
+  margin-inline: 0;
+  margin-block: 1.75rem 2rem;
+}
+
+figure .canvas {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+figure svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-width: 36rem;
+  font-family: var(--font-ui);
+  color: var(--ink);
+}
+
+figcaption {
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+  color: var(--muted);
+  line-height: 1.5;
+  margin-top: 0.6rem;
+  max-width: var(--measure);
+}
+
+/* SVG paint, all from the theme tokens so both themes stay legible. */
+.f-ink {
+  fill: var(--ink);
+}
+
+.f-muted {
+  fill: var(--muted);
+}
+
+.f-surface {
+  fill: var(--surface);
+}
+
+.f-paper {
+  fill: var(--paper);
+}
+
+.f-accent {
+  fill: var(--accent);
+}
+
+.f-accent-soft {
+  fill: var(--accent-soft);
+}
+
+.f-copper {
+  fill: var(--copper);
+}
+
+.f-copper-soft {
+  fill: var(--copper-soft);
+}
+
+.f-steel {
+  fill: var(--steel);
+}
+
+.f-steel-soft {
+  fill: var(--steel-soft);
+}
+
+.f-code {
+  fill: var(--code-bg);
+}
+
+.s-ink {
+  stroke: var(--ink);
+}
+
+.s-muted {
+  stroke: var(--muted);
+}
+
+.s-rule {
+  stroke: var(--rule);
+}
+
+.s-accent {
+  stroke: var(--accent);
+}
+
+.s-copper {
+  stroke: var(--copper);
+}
+
+.s-steel {
+  stroke: var(--steel);
+}
+
+svg text {
+  fill: currentColor;
+  font-size: 13px;
+}
+
+svg .t-small {
+  font-size: 11.5px;
+}
+
+svg .t-label {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 650;
+}
+
+svg .t-head {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+svg .t-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+/* ---- chapter list (index) ----------------------------------------- */
+
+.chapters {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1.5rem;
+  display: grid;
+  gap: 0;
+  font-family: var(--font-ui);
+}
+
+.chapters li {
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: baseline;
+  padding-block: 0.65rem;
+  border-bottom: 1px solid var(--rule);
+  margin: 0;
+}
+
+.chapters .num {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: var(--step--1);
+}
+
+.chapters .title {
+  min-width: 0;
+}
+
+.chapters a {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.chapters a:hover {
+  text-decoration: underline;
+}
+
+/* ---- chapter footer ------------------------------------------------ */
+
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 3rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--rule);
+  font-family: var(--font-ui);
+  font-size: var(--step--1);
+}
+
+.pager .next {
+  margin-left: auto;
+  text-align: right;
+}
+
+.pager span {
+  color: var(--muted);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}

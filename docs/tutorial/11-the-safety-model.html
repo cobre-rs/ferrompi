@@ -1,0 +1,1230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>11. The safety model · ferrompi tutorial</title>
+<meta name="description" content="How ferrompi’s safe API keeps Rust from touching memory MPI is still using: why a guard whose drop waits is not enough, the scope that replaces it and its invariant lifetimes, what a panic does to a pending operation, the requests and windows that own their buffers, the run-time states that guard handles without a lifetime, Send and Sync, the unsafe that is left, and what the model does not cover.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#two-owners">Two owners of one buffer</a></li>
+      <li><a href="#why-not-a-guard">Why a guard is not enough</a></li>
+      <li><a href="#the-scope">The scope</a></li>
+      <li><a href="#inside-the-scope">Inside the scope</a></li>
+      <li><a href="#panics">Panics</a></li>
+      <li><a href="#owning">Owning instead of borrowing</a></li>
+      <li><a href="#no-lifetimes">Handles without a lifetime</a></li>
+      <li><a href="#send-sync">Send, Sync and the thread level</a></li>
+      <li><a href="#unsafe-left">What unsafe asks of you</a></li>
+      <li><a href="#not-covered">What the model does not cover</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part II · Chapter 11</p>
+<h1>The safety model</h1>
+
+<p class="lede">A nonblocking call gives MPI the address of a buffer that Rust
+still owns, and until the request completes both may touch it. Nothing in
+Rust’s type system knows about MPI. This chapter shows how ferrompi’s safe API
+makes the compiler, and in a few places the run time, keep the rules the MPI
+standard leaves to the caller, and which rules it still leaves to you.</p>
+
+<p>By the end of the chapter you can say why a request whose drop waits is not
+enough, read the scope’s lifetimes and the errors they produce, say what a
+panic does to a pending operation, explain why persistent requests and windows
+own their buffers and why no handle borrows <code>Mpi</code>, name every case
+in which <code>Mpi</code>’s drop skips <code>MPI_Finalize</code>, and name the
+<code>unsafe</code> calls that remain and what they ask of you.</p>
+
+<p>The design is
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/docs/adr/0007-buffer-safety-and-handle-lifetimes.md">ADR
+0007</a>, and
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/docs/adr/0008-window-memory-access-model.md">ADR
+0008</a> for window memory. The excerpts of ferrompi’s source below name the
+file they come from. A comment <code>// …</code> marks lines left out. CI
+checks that every excerpt still matches its file.</p>
+
+<h2 id="two-owners">Two owners of one buffer</h2>
+
+<p>From the moment <code>MPI_Irecv</code> returns until its request completes,
+MPI may write the receive buffer at any time: inside any later MPI call, or
+from a progress thread. Until an <code>MPI_Isend</code> completes, MPI may read
+the send buffer. The standard (MPI-4.1 §3.7) asks the caller not to touch
+either in between, and not to free them. A C program that breaks the rule
+compiles, and usually runs, until a message arrives at the wrong moment.</p>
+
+<p>ferrompi’s nonblocking calls take the buffer as a borrow:</p>
+
+<pre data-lang="rust" data-source="src/comm/p2p.rs"><code>    pub fn isend&lt;'s, T: MpiDatatype&gt;(
+        &amp;self,
+        s: &amp;'s Scope&lt;'s, '_&gt;,
+        data: &amp;'s [T],
+        dest: impl Into&lt;Source&gt;,
+        tag: i32,
+    ) -&gt; Result&lt;Request&lt;'s&gt;&gt; {</code></pre>
+
+<pre data-lang="rust" data-source="src/comm/p2p.rs"><code>    pub fn irecv&lt;'s, T: MpiDatatype&gt;(
+        &amp;self,
+        s: &amp;'s Scope&lt;'s, '_&gt;,
+        data: &amp;'s mut [T],
+        source: impl Into&lt;Source&gt;,
+        tag: impl Into&lt;Tag&gt;,
+    ) -&gt; Result&lt;Request&lt;'s&gt;&gt; {</code></pre>
+
+<p>The send buffer is shared, <code>&amp;'s [T]</code>, so Rust may still read
+it but not write it. The receive buffer is exclusive,
+<code>&amp;'s mut [T]</code>, so nothing else may read or write it. Both
+borrows last for <code>'s</code>, the lifetime of the scope <code>s</code>,
+not for the life of the returned <code>Request&lt;'s&gt;</code>. That
+difference is most of this chapter. The table lists what MPI forbids while an
+operation is pending, and what stops each in ferrompi:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>MPI forbids</th><th>ferrompi stops it with</th><th>Checked by</th></tr></thead>
+  <tbody>
+    <tr><td>writing a send buffer</td><td>a shared borrow for <code>'s</code></td><td>the compiler</td></tr>
+    <tr><td>reading or writing a receive buffer</td><td>an exclusive borrow for <code>'s</code></td><td>the compiler</td></tr>
+    <tr><td>freeing either buffer</td><td>the borrow, which lasts until the scope has completed the request</td><td>the compiler and the scope</td></tr>
+    <tr><td>finalizing with a request pending</td><td>the scope’s end, which completes every request</td><td>the scope</td></tr>
+    <tr><td>reusing an active persistent request’s buffer</td><td>the request owns it and refuses to lend it while active</td><td>the run time</td></tr>
+    <tr><td>freeing a window’s memory while MPI can reach it</td><td>the window owns it</td><td>the compiler</td></tr>
+    <tr><td>calling MPI after <code>MPI_Finalize</code>, or from a thread the level does not allow</td><td>the lifecycle guard</td><td>the run time</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="why-not-a-guard">Why a guard is not enough</h2>
+
+<p>The obvious design is the one ferrompi 0.6 had: <code>irecv</code> returns
+a request that borrows the buffer, and the request’s <code>Drop</code> waits.
+While the request lives the buffer is borrowed, and when it drops MPI is done.
+It fails because Rust does not promise that a value’s drop runs.
+<code>std::mem::forget</code> is a safe function: it takes a value, ends every
+borrow the value holds, and runs no drop.</p>
+
+<p>Rust settled this weeks before 1.0. The standard library’s first scoped
+threads, <code>thread::scoped</code>, returned a guard whose drop joined the
+thread, and in April 2015 it was shown that forgetting the guard let the
+thread outlive the data it borrowed. Rust kept <code>mem::forget</code> safe
+(<a href="https://rust-lang.github.io/rfcs/1066-safe-mem-forget.html">RFC
+1066</a>) and removed <code>thread::scoped</code>.
+<code>std::thread::scope</code>, which takes a closure and joins every thread
+before it returns, arrived in Rust 1.63. MPI has the same problem: a borrow
+ends when the value holding it is forgotten, not when MPI stops using the
+memory.</p>
+
+<figure>
+  <div class="canvas"><svg viewBox="0 0 900 316" role="img" aria-label="Two timelines of a receive whose request is forgotten. With a guard whose drop waits, as in ferrompi 0.6: irecv borrows buf, forget(request) ends the borrow without running the drop, so Rust may free or reuse buf while MPI may still write it, and the message arriving later writes into memory Rust has given away. With a scope, as in ferrompi 0.7: irecv borrows buf for the scope’s lifetime, forget(request) changes nothing, the end of the closure runs MPI_Waitall, MPI writes buf, the wait returns, and only then does the scope return and the borrow end, so the borrow covers every moment MPI may write." style="min-width: 46rem">
+
+  <rect x="16" y="8" width="868" height="140" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="34" class="t-head">a guard whose drop waits (ferrompi 0.6)</text>
+  <line x1="250" y1="62" x2="250" y2="136" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="250" y="56" text-anchor="middle" class="t-mono">irecv(&amp;mut buf)</text>
+  <line x1="420" y1="62" x2="420" y2="136" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="420" y="56" text-anchor="middle" class="t-mono">forget(request)</text>
+  <line x1="590" y1="62" x2="590" y2="136" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="590" y="56" text-anchor="middle" class="t-mono">buf reused</text>
+  <line x1="760" y1="62" x2="760" y2="136" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="760" y="56" text-anchor="middle" class="t-mono">MPI writes buf</text>
+  <text x="36" y="89" class="t-small">buf borrowed</text>
+  <text x="36" y="121" class="t-small">MPI may write buf</text>
+  <rect x="250" y="72" width="170" height="24" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="335" y="88" text-anchor="middle" class="t-small">the request’s borrow</text>
+  <rect x="420" y="72" width="340" height="24" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="590" y="88" text-anchor="middle" class="t-small">no borrow: Rust may free or reuse it</text>
+  <rect x="250" y="104" width="510" height="24" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="505" y="120" text-anchor="middle" class="t-small">the receive is pending</text>
+
+  <rect x="16" y="166" width="868" height="140" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="192" class="t-head">a scope (ferrompi 0.7)</text>
+  <line x1="250" y1="220" x2="250" y2="294" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="250" y="214" text-anchor="middle" class="t-mono">irecv(s, &amp;mut buf)</text>
+  <line x1="420" y1="220" x2="420" y2="294" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="420" y="214" text-anchor="middle" class="t-mono">forget(request)</text>
+  <line x1="560" y1="220" x2="560" y2="294" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="560" y="214" text-anchor="middle" class="t-mono">MPI_Waitall</text>
+  <line x1="690" y1="220" x2="690" y2="294" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="690" y="214" text-anchor="middle" class="t-mono">MPI writes buf</text>
+  <line x1="816" y1="220" x2="816" y2="294" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="816" y="214" text-anchor="middle" class="t-mono">scope returns</text>
+  <text x="36" y="247" class="t-small">buf borrowed</text>
+  <text x="36" y="279" class="t-small">MPI may write buf</text>
+  <rect x="250" y="230" width="566" height="24" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="533" y="246" text-anchor="middle" class="t-small">borrowed for the scope’s lifetime</text>
+  <rect x="250" y="262" width="440" height="24" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="470" y="278" text-anchor="middle" class="t-small">the receive is pending</text>
+</svg></div>
+  <figcaption>A receive whose request is forgotten. With a guard, the forget
+  ends the borrow while the receive is pending: Rust may then give the
+  buffer’s memory to something else, and MPI writes into it when the message
+  arrives. With a scope, the borrow lasts until the scope returns, and the
+  scope returns only after <code>MPI_Waitall</code>.</figcaption>
+</figure>
+
+<p>The program below forgets a pending receive on rank 0. Rank 1 sends
+300 ms late, so the receive is still pending when its request is
+forgotten.</p>
+
+<pre data-lang="rust" data-run="2" id="forget"><code>use std::time::{Duration, Instant};
+
+use ferrompi::{Error, Mpi};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    if world.size() != 2 {
+        return Err(Error::Internal("run with -n 2".into()));
+    }
+    world.barrier()?;
+
+    if world.rank() == 0 {
+        let mut buf = [0u32; 4];
+        let start = Instant::now();
+        ferrompi::scope(|s| {
+            let request = world.irecv(s, &amp;mut buf, 1, 0)?;
+            // Safe code may forget any value. The receive is still pending.
+            std::mem::forget(request);
+            Ok(())
+        })?;
+        // The scope returned, so MPI has finished with buf.
+        let waited = start.elapsed() &gt;= Duration::from_millis(200);
+        println!("rank 0: after the scope, buf = {buf:?}");
+        println!("rank 0: the scope waited for the send: {waited}");
+    } else {
+        // Send late, so the receive is still pending when rank 0 forgets it.
+        std::thread::sleep(Duration::from_millis(300));
+        world.send(&amp;[42u32, 43, 44, 45], 0, 0)?;
+    }
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="forget"><code>rank 0: after the scope, buf = [42, 43, 44, 45]
+rank 0: the scope waited for the send: true</code></pre>
+
+<p>The scope did not return until the message had arrived. Under ferrompi 0.6
+the same program compiled too, but nothing waited: right after the forget,
+<code>buf</code> could be read, written or freed while the receive was still
+pending.</p>
+
+<h2 id="the-scope">The scope</h2>
+
+<p>ferrompi 0.7 moved the wait from the request into a function that takes a
+closure, the shape of <code>std::thread::scope</code>. A closure cannot be
+forgotten halfway: <code>scope</code> calls it, and whatever the closure does,
+the code after the call runs.</p>
+
+<pre data-lang="rust" data-source="src/scope.rs"><code>pub fn scope&lt;'env, R&gt;(f: impl for&lt;'s&gt; FnOnce(&amp;'s Scope&lt;'s, 'env&gt;) -&gt; Result&lt;R&gt;) -&gt; Result&lt;R&gt; {
+    let token = rt::open_scope().map_err(|code| Error::from_code_with_op(code, "scope"))?;
+    let scope = Scope {
+        registry: Registry::new(),
+        scope: PhantomData,
+        env: PhantomData,
+    };
+    let result = catch_unwind(AssertUnwindSafe(|| f(&amp;scope)));
+    let end = scope.registry.complete_all("scope");
+    drop(token);
+    match result {
+        Err(payload) =&gt; resume_unwind(payload),
+        Ok(Err(error)) =&gt; Err(error),
+        Ok(Ok(value)) =&gt; end.map(|()| value),
+    }
+}</code></pre>
+
+<ol>
+  <li><code>rt::open_scope</code> counts the scope as open on this thread,
+  and refuses before init or once finalize has begun. The token lives until
+  the requests are complete; <a href="#tokens">what <code>Mpi</code>’s drop
+  waits for</a> shows why.</li>
+  <li>The <code>Scope</code> holds a <code>Registry</code>, the list of
+  requests still pending.</li>
+  <li><code>catch_unwind</code> runs the closure, so a panic stops here
+  instead of unwinding past pending requests.</li>
+  <li><code>complete_all</code> completes every request still registered.
+  It runs whether the closure returned <code>Ok</code>, returned
+  <code>Err</code> or panicked.</li>
+  <li>Only then does <code>scope</code> return: it resumes the panic, returns
+  the closure’s error, or returns its value, unless the final wait
+  failed.</li>
+</ol>
+
+<p>A <code>Request</code> has no <code>Drop</code>. Dropping one, or
+forgetting it, leaves it in the registry, and the scope completes it.
+<code>wait</code> and <code>test</code> are for a program that needs the
+result earlier: the status of a receive, or the knowledge that a message has
+arrived before the next step.</p>
+
+<h3 id="lifetimes">Two lifetimes, both invariant</h3>
+
+<p>The closure takes <code>&amp;'s Scope&lt;'s, 'env&gt;</code> for every
+<code>'s</code>, which is what <code>for&lt;'s&gt;</code> says. Its body has
+to compile without knowing <code>'s</code>, except that <code>'s</code> lasts
+beyond the closure’s end. A buffer given to <code>irecv(s, …)</code> is
+borrowed for <code>'s</code>, so it has to outlive the closure, and one
+declared inside it does not. This doctest from <code>src/scope.rs</code> is
+rejected:</p>
+
+<pre data-lang="rust" data-source="src/scope.rs"><code>/// ```compile_fail,E0597
+/// # use ferrompi::Mpi;
+/// # fn main() -&gt; ferrompi::Result&lt;()&gt; {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// ferrompi::scope(|s| {
+///     let mut buf = vec![0u8; 4];
+///     world.irecv(s, &amp;mut buf, 1, 0)?;
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```</code></pre>
+
+<p>Written out as a program, the compiler says:</p>
+
+<pre class="output"><code>error[E0597]: `buf` does not live long enough
+  --&gt; src/main.rs:8:24
+   |
+ 6 |     ferrompi::scope(|s| {
+   |                      - has type `&amp;'1 ferrompi::Scope&lt;'1, '_&gt;`
+ 7 |         let mut buf = vec![0u8; 4];
+   |             ------- binding `buf` declared here
+ 8 |         world.irecv(s, &amp;mut buf, 1, 0)?;
+   |         ---------------^^^^^^^^-------
+   |         |              |
+   |         |              borrowed value does not live long enough
+   |         argument requires that `buf` is borrowed for `'1`
+ 9 |         Ok(())
+10 |     })?;
+   |     - `buf` dropped here while still borrowed</code></pre>
+
+<p><code>'1</code> is the compiler’s name for the scope’s lifetime. The
+buffer dies at the closure’s end, on line 10, and <code>'1</code> lasts
+longer. That the compiler cannot shorten <code>'1</code> to fit the buffer
+comes from the scope’s two marker fields:</p>
+
+<pre data-lang="rust" data-source="src/scope.rs"><code>pub struct Scope&lt;'s, 'env: 's&gt; {
+    registry: Registry,
+    scope: PhantomData&lt;&amp;'s mut &amp;'s ()&gt;,
+    env: PhantomData&lt;&amp;'env mut &amp;'env ()&gt;,
+}</code></pre>
+
+<p>A type that holds <code>&amp;'a T</code> is covariant in <code>'a</code>:
+the compiler may use a value with a long <code>'a</code> where a shorter one
+is wanted, which is what usually makes borrows convenient. Here it would be
+unsound. Were <code>Scope</code> covariant in <code>'s</code>, the compiler
+could shrink <code>'s</code> to the life of <code>buf</code> and accept the
+program above, and the final wait, after <code>buf</code> is gone, would
+complete a receive into freed memory. <code>&amp;'s mut &amp;'s ()</code>
+puts <code>'s</code> behind a <code>&amp;mut</code>, which makes the type
+invariant in <code>'s</code>: no longer and no shorter. The second field does
+the same for <code>'env</code>, the lifetime of what the closure borrows from
+outside. Neither holds anything at run time. The standard library’s
+<a href="https://github.com/rust-lang/rust/blob/master/library/std/src/thread/scoped.rs"><code>std::thread::Scope</code></a>
+declares the same two fields, with a comment that the invariance is necessary
+for soundness.</p>
+
+<p><code>src/scope.rs</code> keeps a pair of doctests for each rule: a program
+marked <code>compile_fail</code> with the error code it must produce, then the
+same program made correct. CI runs <code>cargo test --doc</code>, so a change
+that lets a rejected program compile fails the tests.</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>The rejected program</th><th>Error</th></tr></thead>
+  <tbody>
+    <tr><td>declares the receive buffer inside the closure</td><td>E0597, does not live long enough</td></tr>
+    <tr><td>drops the buffer while a receive borrows it</td><td>E0505, moved while borrowed</td></tr>
+    <tr><td>writes <code>buf[0]</code> while a receive borrows it</td><td>E0499, a second mutable borrow</td></tr>
+    <tr><td>reads <code>buf[0]</code> after <code>wait</code>, inside the scope</td><td>E0502, a shared borrow while the mutable one lives</td></tr>
+    <tr><td>stores the request in a variable outside the closure</td><td>E0521, a borrowed value escapes the closure</td></tr>
+    <tr><td>stores the scope itself outside the closure</td><td>E0521</td></tr>
+    <tr><td>drops a <code>UserOp</code> while a nonblocking reduction borrows it</td><td>E0505</td></tr>
+    <tr><td>sends a <code>Request</code> to another thread (<code>src/request.rs</code>)</td><td>E0277, <code>Request</code> is not <code>Send</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="wait-and-borrow">Why the borrow does not end at the wait</h3>
+
+<p>The fourth row surprises people. <code>wait</code> takes the request by
+value, and once it returns MPI is done with the buffer, yet the buffer is
+still borrowed. A borrow tied to the request would end when the request is
+gone, and the compiler cannot tell a request that was waited from one that was
+forgotten: both are gone. That is the guard of the previous section. The
+scope’s lifetime is the only one that no safe code can end early, so the
+buffer is borrowed for all of it. <code>wait</code> returns only the
+<code>Status</code>; the buffer is yours again when <code>scope</code> returns.
+A program that needs the data sooner ends the scope there and starts another,
+as
+<a href="02-point-to-point.html#what-the-compiler-rejects">chapter 2’s halo
+exchange</a> does.</p>
+
+<h2 id="inside-the-scope">Inside the scope</h2>
+
+<p>The registry is the list of requests the scope still has to complete:</p>
+
+<pre data-lang="rust" data-source="src/scope.rs"><code>pub(crate) struct Registry {
+    /// Written by `register` and read only for a set bit of `used`.
+    inline: [Cell&lt;MaybeUninit&lt;i64&gt;&gt;; INLINE],
+    /// Bit `i` set: `inline[i]` is live.
+    used: Cell&lt;u64&gt;,
+    /// `-1` marks a free entry.
+    spill: RefCell&lt;Vec&lt;i64&gt;&gt;,
+}</code></pre>
+
+<p>It keeps up to 64 handles inline, one bit of <code>used</code> per slot,
+and spills to a <code>Vec</code> past that, so a scope with few requests
+allocates nothing. Registering a handle takes the lowest free bit:</p>
+
+<pre data-lang="rust" data-source="src/scope.rs"><code>    fn register(&amp;self, handle: i64) -&gt; u32 {
+        let used = self.used.get();
+        if used != u64::MAX {
+            let slot = (!used).trailing_zeros();
+            self.inline[slot as usize].set(MaybeUninit::new(handle));
+            self.used.set(used | (1 &lt;&lt; slot));
+            return slot;
+        }
+        let mut spill = self.spill.borrow_mut();
+        let index = match spill.iter().position(|&amp;entry| entry == -1) {
+            Some(index) =&gt; {
+                spill[index] = handle;
+                index
+            }
+            None =&gt; {
+                spill.push(handle);
+                spill.len() - 1
+            }
+        };
+        (INLINE + index) as u32
+    }</code></pre>
+
+<p>A request records its slot and a reference to the registry, so that
+<code>wait</code>, <code>test</code> and the batch completions can release the
+slot once MPI has completed the request:</p>
+
+<pre data-lang="rust" data-source="src/request.rs"><code>pub struct Request&lt;'s&gt; {
+    handle: i64,
+    completed: bool,
+    kind: RequestKind,
+    registry: &amp;'s Registry,
+    // …
+    slot: usize,
+}</code></pre>
+
+<p>Two rules follow from these fields with no code of their own.
+<code>registry: &amp;'s Registry</code> borrows the scope, which is why a
+request cannot leave the closure. And <code>Registry</code> is made of
+<code>Cell</code> and <code>RefCell</code>, so it is not <code>Sync</code>,
+which makes <code>&amp;Registry</code> not <code>Send</code>, and
+<code>Request&lt;'s&gt;</code> with it. A request stays on the thread that
+created it, so the scope that completes it runs there too. No marker or
+<code>unsafe impl</code> says so: the compiler derives it from the fields.
+<code>&amp;Scope</code> is not <code>Send</code> either, so each thread that
+makes nonblocking calls opens a scope of its own, as the threads program in
+<a href="10-the-c-shim.html#threads">chapter 10</a> does.
+<a href="06-threads-and-hybrid-mpi.html#what-crosses-threads">Chapter 6</a>
+lists what else crosses threads.</p>
+
+<h3 id="final-wait">The final wait</h3>
+
+<p><code>complete_all</code> returns at once when nothing is registered.
+Otherwise it calls <code>complete_pending</code>:</p>
+
+<pre data-lang="rust" data-source="src/scope.rs"><code>    #[cold]
+    fn complete_pending(&amp;self, op: &amp;'static str) -&gt; Result&lt;()&gt; {
+        let mut first = Ok(());
+        loop {
+            let live = self.live();
+            if live == 0 {
+                return first;
+            }
+            let (ret, progress) = if live &lt;= INLINE {
+                self.wait_pass(
+                    &amp;mut [0; INLINE][..live],
+                    &amp;mut [0; INLINE][..live],
+                    &amp;mut [0; INLINE][..live],
+                )
+            } else {
+                self.wait_pass(&amp;mut vec![0; live], &amp;mut vec![0; live], &amp;mut vec![0; live])
+            };
+            if !progress {
+                // …
+                scope_abort(op, ret);
+            }
+            if ret != 0 &amp;&amp; first.is_ok() {
+                first = Error::check_with_op(ret, op);
+            }
+        }
+    }</code></pre>
+
+<p>Each pass copies the live handles, makes one <code>MPI_Waitall</code> over
+them through the C layer, and releases the slots MPI reports complete. A pass
+can fail and still make progress. When one request fails, Open MPI returns at
+the first failure with the others still pending, and MPICH returns once all
+have completed. Either way the loop repeats the pass for what is still
+registered, and returns the first error once every request has
+completed.</p>
+
+<p>A pass that completed nothing is different: MPI refused the call, or failed
+without saying which requests completed. The scope cannot know whether MPI is
+still using the buffers. Returning would end the borrows while MPI might still
+write, and waiting again would wait for ever, so the scope aborts the process
+with a line on standard error:</p>
+
+<pre class="output"><code>ferrompi: a nonblocking scope could not complete its requests (MPI_Waitall returned N); aborting</code></pre>
+
+<p>A passive-target epoch keeps a registry of its own, for the requests of
+<code>rput</code>, <code>rget</code> and <code>raccumulate</code>, and its end
+runs the same wait before the unlock, with “a passive-target epoch” in the
+message.</p>
+
+<h2 id="panics">Panics</h2>
+
+<p>A panic inside the closure unwinds into <code>scope</code>, which catches
+it before anything the requests borrow can be dropped, completes every
+request, and then resumes the panic. The program below panics with a receive
+pending, and catches the panic around the scope to look at the buffer:</p>
+
+<pre data-lang="rust" data-run="2" id="panic"><code>use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::time::Duration;
+
+use ferrompi::{Error, Mpi};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    if world.size() != 2 {
+        return Err(Error::Internal("run with -n 2".into()));
+    }
+
+    if world.rank() == 0 {
+        let mut buf = [0i32];
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            ferrompi::scope(|s| -&gt; ferrompi::Result&lt;()&gt; {
+                world.irecv(s, &amp;mut buf, 1, 0)?;
+                panic!("something went wrong while the receive was pending");
+            })
+        }));
+        // The scope completed the receive before the panic left it.
+        println!("rank 0: the panic was caught: {}", caught.is_err());
+        println!("rank 0: buf = {buf:?}");
+    } else {
+        std::thread::sleep(Duration::from_millis(300));
+        world.send(&amp;[7i32], 0, 0)?;
+    }
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="panic"><code>rank 0: the panic was caught: true
+rank 0: buf = [7]</code></pre>
+
+<p>Standard error has the panic message:</p>
+
+<pre class="output"><code>thread 'main' (…) panicked at examples/panic.rs:18:17:
+something went wrong while the receive was pending
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace</code></pre>
+
+<p>The receive completed before the panic left the scope, so <code>buf</code>
+holds rank 1’s 7. Waiting is not always possible. A fence or PSCW epoch ends
+with a call that is collective or synchronizing, <code>MPI_Win_fence</code> or
+<code>MPI_Win_complete</code>, and a panicking rank cannot take part in it
+alone. Leaving the epoch open would let the unwinding free buffers MPI may
+still read, so the epoch’s runner aborts:</p>
+
+<pre data-lang="rust" data-source="src/window.rs"><code>        let result = match catch_unwind(AssertUnwindSafe(|| f(&amp;epoch))) {
+            Ok(result) =&gt; result,
+            Err(_) =&gt; epoch_abort("a fence or PSCW epoch was still open during unwind"),
+        };
+        closing_result(close(self.win_handle), close_op, result)</code></pre>
+
+<p>A lock epoch closes with <code>MPI_Win_unlock</code>, which no other
+process has to take part in, so its runner completes the epoch’s requests, unlocks, and then
+resumes the panic:</p>
+
+<pre data-lang="rust" data-source="src/window.rs"><code>        let outcome = catch_unwind(AssertUnwindSafe(|| f(&amp;epoch)));
+        let completed = epoch.registry.complete_all(wait_op);
+        let ret = close(self.win_handle);
+        match outcome {
+            Err(payload) =&gt; {
+                let _ = closing_result(ret, close_op, Ok(()));
+                resume_unwind(payload)
+            }
+            Ok(result) =&gt; closing_result(
+                ret,
+                close_op,
+                result.and_then(|value| completed.map(|()| value)),
+            ),
+        }</code></pre>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Where the panic happens</th><th>What ferrompi does</th></tr></thead>
+  <tbody>
+    <tr><td>in a <code>scope</code> closure</td><td>completes every request, then resumes the panic</td></tr>
+    <tr><td>in a <code>lock</code> or <code>lock_all</code> closure</td><td>completes the epoch’s requests, unlocks, then resumes the panic</td></tr>
+    <tr><td>in a <code>fence</code> or <code>start</code> closure</td><td>prints “a fence or PSCW epoch was still open during unwind” and aborts</td></tr>
+    <tr><td>in a <code>UserOp</code> closure</td><td>aborts: MPI calls the closure from C, and unwinding into C is undefined behaviour</td></tr>
+    <tr><td>anywhere, under <code>panic = "abort"</code></td><td>nothing: the process stops at the panic</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>All but the last row rely on unwinding. A profile with
+<code>panic = "abort"</code> ends the process at the panic, before any scope
+can wait, and the launcher then ends the job
+(<a href="08-building-and-running.html#a-panic">chapter 8</a>).</p>
+
+<h2 id="owning">Owning instead of borrowing</h2>
+
+<p>A scope suits a request that lives for one step. A persistent request is
+made once and started many times, often for the whole run, and a window lives
+as long as the solver. A borrow that long would put a lifetime on the type,
+and on every struct that holds one. ferrompi gives these the buffer
+instead:</p>
+
+<pre data-lang="rust" data-source="src/persistent.rs"><code>pub struct PersistentRequest&lt;T&gt; {
+    handle: i64,
+    token: Option&lt;rt::HandleToken&gt;,
+    send: Vec&lt;T&gt;,
+    buffer: Vec&lt;T&gt;,
+    counts: Vec&lt;i32&gt;,
+    pub(crate) op: Option&lt;Arc&lt;OpRegistration&gt;&gt;,
+}</code></pre>
+
+<p><code>send_init</code> and <code>recv_init</code> take a
+<code>Vec&lt;T&gt;</code> by value. Moving a <code>Vec</code> copies its
+pointer, length and capacity, not its elements, so the memory MPI was given
+stays where it is for the request’s whole life, and the caller, who no longer
+has the <code>Vec</code>, cannot reallocate it. This doctest in
+<code>src/persistent.rs</code> is rejected with E0382, use of a moved
+value:</p>
+
+<pre data-lang="rust" data-source="src/persistent.rs"><code>/// ```compile_fail,E0382
+/// # fn f(world: &amp;ferrompi::Communicator) -&gt; ferrompi::Result&lt;()&gt; {
+/// let mut data = vec![0u64; 4];
+/// let _p = world.recv_init(data, 1, 9)?;
+/// data.reserve(4096);
+/// # Ok(())
+/// # }
+/// ```</code></pre>
+
+<p>The request lends its buffer through <code>buffer</code> and
+<code>buffer_mut</code> while it is inactive, and refuses while it is active.
+The accessors return a slice, so no caller can reallocate through them (E0599
+in the same file), and <code>buffer_mut</code> borrows the request mutably, so
+a slice cannot be held across <code>start</code> (E0499).</p>
+
+<pre data-lang="rust" data-run="2" id="persistent"><code>use ferrompi::{Error, Mpi};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    if world.size() != 2 {
+        return Err(Error::Internal("run with -n 2".into()));
+    }
+
+    if world.rank() == 0 {
+        // The request owns the Vec: MPI keeps a pointer into it until the
+        // request is freed.
+        let mut send = world.send_init(vec![0u64; 3], 1, 0)?;
+        for round in 1..=2u64 {
+            send.buffer_mut()?.fill(round);
+            send.start()?;
+            // Active: MPI may be reading the buffer, so the request refuses
+            // to lend it.
+            match send.buffer_mut() {
+                Err(err) =&gt; println!("rank 0: round {round}, while active: {err}"),
+                Ok(_) =&gt; println!("rank 0: round {round}, the buffer was lent"),
+            }
+            send.wait()?;
+        }
+        // Hands the buffer back; the request is freed first.
+        let buffer = send.into_buffer()?;
+        println!("rank 0: buffer returned: {buffer:?}");
+    } else {
+        let mut recv = world.recv_init(vec![0u64; 3], 0, 0)?;
+        for round in 1..=2 {
+            recv.start()?;
+            recv.wait()?;
+            println!("rank 1: round {round} received {:?}", recv.buffer()?);
+        }
+    }
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="persistent"><code>rank 0: round 1, while active: invalid state: request is active
+rank 0: round 2, while active: invalid state: request is active
+rank 0: buffer returned: [2, 2, 2]
+rank 1: round 1 received [1, 1, 1]
+rank 1: round 2 received [2, 2, 2]</code></pre>
+
+<p><code>token</code> is what makes a request active: <code>start</code>
+takes a token and completion gives it back, and <code>is_active</code> is
+<code>token.is_some()</code>. <code>into_buffer</code> waits if the request
+is active, frees it, and returns the <code>Vec</code>; a request dropped while
+active waits before <code>MPI_Request_free</code>. Its drop starts with the
+guard for drops:</p>
+
+<pre data-lang="rust" data-source="src/persistent.rs"><code>    fn drop(&amp;mut self) {
+        let Some(_call) = rt::drop_guard("PersistentRequest") else {
+            if self.is_active() {
+                self.leak();
+            }
+            return;
+        };
+        // …</code></pre>
+
+<p>Once finalizing has begun, the drop makes no MPI call, and a request still
+active leaks: <code>leak</code> forgets the buffers and the token, so the
+pointer MPI holds stays valid until the process exits. Forgetting on purpose
+is the safe answer when the wait cannot run. The program below forgets an
+active request itself, a receive that no send matches, and then drops
+<code>Mpi</code>:</p>
+
+<pre data-lang="rust" data-run="2" id="forgotten"><code>use ferrompi::Mpi;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    // A receive from this process itself, which no send will match.
+    let mut recv = world.recv_init(vec![0u8; 16], world.rank(), 99)?;
+    recv.start()?;
+    // MPI holds a pointer into the receive's buffer. Forgetting the request
+    // leaks the buffer, so the pointer stays valid, and its token, so Mpi's
+    // drop knows a request is still active.
+    std::mem::forget(recv);
+
+    drop(mpi);
+    println!("rank {}: Mpi dropped", world.rank());
+    // MPI_Finalize did not run, but Mpi is gone, so the guard refuses the
+    // barrier.
+    match world.barrier() {
+        Err(err) =&gt; println!("rank {}: barrier after the drop: {err}", world.rank()),
+        Ok(()) =&gt; println!("rank {}: barrier after the drop succeeded", world.rank()),
+    }
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="forgotten"><code>rank 0: Mpi dropped
+rank 0: barrier after the drop: MPI has been finalized
+rank 1: Mpi dropped
+rank 1: barrier after the drop: MPI has been finalized</code></pre>
+
+<p>Each rank writes one line to standard error:</p>
+
+<pre class="output"><code>ferrompi: MPI_Finalize skipped: 1 persistent request(s) still active or matched message(s) not yet received; request buffers stay valid until the process exits</code></pre>
+
+<p>Forgetting the request leaked its <code>Vec</code>, so MPI’s pointer still
+points at memory nobody else owns, and leaked its token, so <code>Mpi</code>’s
+drop saw a request still active. Finalizing with an active request is
+erroneous, and an implementation may free the request’s state, or write the
+buffer, during <code>MPI_Finalize</code>, so ferrompi skips the call and lets
+the process exit with MPI initialized. Under MPICH the exit status stays 0.
+Open MPI turns an exit without <code>MPI_Finalize</code> into status 1, and
+<code>tests/run_mpi_tests.sh</code> accepts both for the examples it expects
+to skip finalize. The barrier’s error reads “MPI has been finalized” although
+<code>MPI_Finalize</code> never ran: <code>Error::Finalized</code> means the
+<code>Mpi</code> handle is gone, whatever became of MPI.</p>
+
+<p>Windows follow the same rule. <code>Win::create</code> takes a
+<code>Vec&lt;T&gt;</code>, and <code>into_buffer</code>, which is collective,
+returns it after a successful <code>MPI_Win_free</code>. A window whose free is
+skipped or fails leaks its buffer, so no safe code can free a window’s memory
+while MPI can still reach it.</p>
+
+<h2 id="no-lifetimes">Handles without a lifetime</h2>
+
+<p>Requests borrow for a scope. Everything else, communicators, groups,
+windows, persistent requests, datatypes and user operations, is
+<code>'static</code>, and none borrows <code>Mpi</code>. An audit of 0.6
+proposed the opposite, <code>Communicator&lt;'mpi&gt;</code> and
+<code>Win&lt;'mpi, T&gt;</code>, so that the compiler would reject a handle
+used after <code>Mpi</code> is dropped. ADR 0007 rejects it because of structs
+like this one, from <code>examples/sddp_pattern.rs</code>:</p>
+
+<pre data-lang="rust" data-source="examples/sddp_pattern.rs"><code>/// A solver keeps one boxed context for the whole run. Handles carry no borrow
+/// of `Mpi`, so the context can own all of them.
+///
+/// Fields drop in declaration order, so the window and the communicators are
+/// freed before `mpi` finalizes MPI. `mpi` must stay the last field.
+struct Ctx {
+    win: Win&lt;f64&gt;,
+    node: Communicator,
+    world: Communicator,
+    mpi: Mpi,
+}</code></pre>
+
+<p>With a lifetime on each handle, <code>win</code>, <code>node</code> and
+<code>world</code> would borrow <code>mpi</code>, a field of the same struct,
+and Rust has no way to write a struct that borrows from itself. A solver that
+keeps one context for the whole run would not compile. The comment on
+<code>Ctx</code> names the rule that takes the lifetime’s place: fields drop
+in declaration order, so <code>mpi</code> goes last. The program below breaks
+it:</p>
+
+<pre data-lang="rust" data-run="2" id="order"><code>use ferrompi::{Communicator, Mpi, Win};
+
+/// Fields drop in declaration order. This one puts mpi first, so Mpi's drop
+/// runs while the window is still alive.
+struct Ctx {
+    mpi: Mpi,
+    world: Communicator,
+    win: Win&lt;f64&gt;,
+}
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let win = Win::&lt;f64&gt;::allocate(&amp;world, 4)?;
+    let ctx = Ctx { mpi, world, win };
+
+    let rank = ctx.world.rank();
+    println!(
+        "rank {rank}: a context at {:?}, with {} window elements",
+        ctx.mpi.thread_level(),
+        ctx.win.local().len()
+    );
+    drop(ctx);
+    println!("rank {rank}: the context was dropped");
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="order"><code>rank 0: a context at Single, with 4 window elements
+rank 0: the context was dropped
+rank 1: a context at Single, with 4 window elements
+rank 1: the context was dropped</code></pre>
+
+<p>Each rank writes one line to standard error:</p>
+
+<pre class="output"><code>ferrompi: MPI_Finalize skipped: 1 window(s) still alive; their memory stays valid until the process exits</code></pre>
+
+<p><code>Mpi</code>’s drop ran first, with the window alive, and skipped
+<code>MPI_Finalize</code>. Some MPI libraries free the memory of a window they
+allocated inside <code>MPI_Finalize</code>, and some tear down state that
+still tracks a buffer given to <code>MPI_Win_create</code> and abort; neither
+is safe while a <code>Win</code> can still reach the memory. The window’s own
+drop came next, found finalizing begun, and made no MPI call. Nothing crashed,
+but MPI was never finalized. Move <code>mpi</code> to the last field and the
+warning goes away.</p>
+
+<h3 id="lifecycle">The lifecycle</h3>
+
+<p>Without a lifetime, the compiler cannot stop a handle from being used
+after <code>Mpi</code> is gone, so every call checks at run time, in the guard
+<a href="09-a-tour-of-the-layers.html#the-guard">chapter 9</a> showed. The
+guard reads one state per process:</p>
+
+<figure>
+  <div class="canvas"><svg viewBox="0 0 900 236" role="img" aria-label="The lifecycle state that every guarded call reads. Uninit, before init. Initializing, while Mpi::init_thread runs, when only that thread may call MPI. Active at the granted level, when calls are admitted by the thread level. Finalizing, from the start of Mpi’s drop, when new calls are refused and only calls that complete a pending request or close an open epoch are admitted. Finalized, once MPI_Finalize is about to run, when every call is refused. From Finalizing, if a scope is open on the dropping thread, a persistent request is active, a matched message is unreceived or a window is alive, MPI_Finalize is skipped with a warning on standard error and the state stays Finalizing for the rest of the process." style="min-width: 46rem">
+  <defs>
+    <marker id="life-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+  <rect x="26" y="70" width="132" height="40" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="92" y="94" text-anchor="middle" class="t-mono">Uninit</text>
+  <text x="92" y="132" text-anchor="middle" class="t-small f-muted">before init</text>
+  <line x1="162" y1="90" x2="200" y2="90" class="s-accent" stroke-width="1.5" marker-end="url(#life-arrow)"/>
+  <text x="181" y="46" text-anchor="middle" class="t-small">init</text>
+  <text x="181" y="60" text-anchor="middle" class="t-small">begins</text>
+  <rect x="204" y="70" width="132" height="40" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="270" y="94" text-anchor="middle" class="t-mono">Initializing</text>
+  <text x="270" y="132" text-anchor="middle" class="t-small f-muted">init thread only</text>
+  <line x1="340" y1="90" x2="378" y2="90" class="s-accent" stroke-width="1.5" marker-end="url(#life-arrow)"/>
+  <text x="359" y="46" text-anchor="middle" class="t-small">init</text>
+  <text x="359" y="60" text-anchor="middle" class="t-small">returns</text>
+  <rect x="382" y="70" width="132" height="40" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="448" y="94" text-anchor="middle" class="t-mono">Active(level)</text>
+  <text x="448" y="132" text-anchor="middle" class="t-small f-muted">calls by the</text>
+  <text x="448" y="148" text-anchor="middle" class="t-small f-muted">thread level</text>
+  <line x1="518" y1="90" x2="556" y2="90" class="s-accent" stroke-width="1.5" marker-end="url(#life-arrow)"/>
+  <text x="537" y="46" text-anchor="middle" class="t-small">Mpi’s drop</text>
+  <text x="537" y="60" text-anchor="middle" class="t-small">begins</text>
+  <rect x="560" y="70" width="132" height="40" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="626" y="94" text-anchor="middle" class="t-mono">Finalizing</text>
+  <text x="626" y="132" text-anchor="middle" class="t-small f-muted">completions only</text>
+  <line x1="696" y1="90" x2="734" y2="90" class="s-accent" stroke-width="1.5" marker-end="url(#life-arrow)"/>
+  <text x="715" y="46" text-anchor="middle" class="t-small">MPI_Finalize</text>
+  <text x="715" y="60" text-anchor="middle" class="t-small">runs</text>
+  <rect x="738" y="70" width="132" height="40" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="804" y="94" text-anchor="middle" class="t-mono">Finalized</text>
+  <text x="804" y="132" text-anchor="middle" class="t-small f-muted">every call</text>
+  <text x="804" y="148" text-anchor="middle" class="t-small f-muted">refused</text>
+  <path d="M568 114 V162 H684 V118" fill="none" class="s-accent" stroke-width="1.5" marker-end="url(#life-arrow)"/>
+  <text x="626" y="188" text-anchor="middle" class="t-mono">MPI_Finalize skipped</text>
+  <text x="626" y="206" text-anchor="middle" class="t-small f-muted">a scope open on this thread, an active persistent</text>
+  <text x="626" y="222" text-anchor="middle" class="t-small f-muted">request, an unreceived message or a live window</text>
+</svg></div>
+  <figcaption>The states in <code>src/rt.rs</code>. Every guarded call reads
+  the state. <code>Mpi</code>’s drop moves it from <code>Active</code> to
+  <code>Finalizing</code>, and on to <code>Finalized</code> only when nothing
+  that makes <code>MPI_Finalize</code> unsafe is left.</figcaption>
+</figure>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>State</th><th>New calls</th><th>Completions and closing calls</th><th>Drops</th></tr></thead>
+  <tbody>
+    <tr><td><code>Uninit</code></td><td>refused: “MPI is not initialized”</td><td>refused</td><td>no handle exists yet</td></tr>
+    <tr><td><code>Initializing</code></td><td>refused on every thread but the one running init</td><td>the same</td><td>no handle exists yet</td></tr>
+    <tr><td><code>Active(level)</code></td><td>at <code>Single</code> and <code>Funneled</code>, only on the init thread; at <code>Serialized</code> and <code>Multiple</code>, on any thread, counted in flight</td><td>the same</td><td>below <code>Serialized</code>, abort on a wrong thread; at or above it, counted</td></tr>
+    <tr><td><code>Finalizing</code></td><td>refused: <code>Error::Finalized</code></td><td>admitted, so what is pending can end</td><td>no MPI call</td></tr>
+    <tr><td><code>Finalized</code></td><td>refused</td><td>refused</td><td>no MPI call</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><code>Initializing</code> covers the time <code>MPI_Init_thread</code>
+runs, before the level it grants is known. <code>Finalizing</code> exists
+because <code>Mpi</code>’s drop cannot finalize while another thread is in
+the middle of a call, or inside a scope with requests pending: it refuses
+anything new, admits the calls that finish what is pending, and waits for
+them. The externs the guard leaves out are those with nothing to check: the
+init call itself, the lifecycle and version queries, the error-message lookup,
+the op-table bookkeeping that makes no MPI call, and the calls made only from a
+drop, which have a guard of their own because a drop cannot return an
+error:</p>
+
+<pre data-lang="rust" data-source="src/rt.rs"><code>pub(crate) fn drop_guard(type_name: &amp;'static str) -&gt; Option&lt;InFlight&gt; {
+    // Relaxed: see `enter`'s comment.
+    let state = STATE.load(Ordering::Relaxed);
+    if state == FINALIZING || state == FINALIZED {
+        return None;
+    }
+    if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
+        if !ON_INIT_THREAD.with(Cell::get) {
+            drop_abort(type_name);
+        }
+    } else if state == ACTIVE_SERIALIZED || state == ACTIVE_MULTIPLE {
+        return enter_counted(false).ok();
+    }
+    Some(InFlight(None))
+}</code></pre>
+
+<p>Once finalizing has begun it returns <code>None</code> and the drop makes
+no MPI call; the C layer’s finalize has freed, or will free, what is left in
+its tables (<a href="10-the-c-shim.html#finalize">chapter 10</a>). Below
+<code>Serialized</code> a drop on the wrong thread can neither call MPI nor
+return an error, so it aborts with
+<code>ferrompi: Communicator dropped on thread …</code>, naming the type and
+the thread. <code>examples/test_drop_wrong_thread.rs</code> checks it.</p>
+
+<h3 id="tokens">What Mpi’s drop waits for</h3>
+
+<pre data-lang="rust" data-source="src/lib.rs"><code>impl Drop for Mpi {
+    fn drop(&amp;mut self) {
+        // …
+        if !rt::begin_finalize() {
+            return;
+        }
+        if let Some(reason) = finalize_skip_reason() {
+            // A single write so concurrent ranks' output cannot interleave mid-line.
+            let msg = format!("ferrompi: MPI_Finalize skipped: {reason}\n");
+            let _ = std::io::stderr().write_all(msg.as_bytes());
+            return;
+        }
+        rt::end_finalize();
+        // SAFETY: rt::begin_finalize() just returned true, so state was Active —
+        // MPI_Init(_thread) succeeded and MPI_Finalize has not yet been
+        // called for this process.
+        unsafe {
+            ffi::ferrompi_finalize();
+        }
+    }
+}</code></pre>
+
+<p><code>begin_finalize</code> moves the state to <code>Finalizing</code>,
+waits for the scopes open on other threads and for every call in flight, and
+returns <code>false</code> if MPI was not active, so there is nothing to
+finalize. Then
+<code>finalize_skip_reason</code> looks for anything that makes
+<code>MPI_Finalize</code> unsafe:</p>
+
+<pre data-lang="rust" data-source="src/lib.rs"><code>fn finalize_skip_reason() -&gt; Option&lt;String&gt; {
+    if rt::scopes_on_this_thread() &gt; 0 {
+        return Some(
+            "a nonblocking scope is still open on this thread; its requests complete when the scope ends"
+                .into(),
+        );
+    }
+    let live = rt::live_handle_tokens();
+    if live &gt; 0 {
+        return Some(format!(
+            "{live} persistent request(s) still active or matched message(s) not yet received; request buffers stay valid until the process exits"
+        ));
+    }
+    #[cfg(feature = "rma")]
+    {
+        let live = window::live_windows();
+        if live &gt; 0 {
+            return Some(format!(
+                "{live} window(s) still alive; their memory stays valid until the process exits"
+            ));
+        }
+    }
+    None
+}</code></pre>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Still alive when <code>Mpi</code> drops</th><th>The drop</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>a call in flight on another thread</td><td>waits for it</td><td>it returns on its own</td></tr>
+    <tr><td>a scope open on another thread</td><td>waits for it</td><td>the scope ends when its closure returns and its requests complete</td></tr>
+    <tr><td>a scope open on this thread</td><td>skips <code>MPI_Finalize</code></td><td>the drop runs inside the scope’s closure, so it would wait for itself</td></tr>
+    <tr><td>an active persistent request, or a matched message not yet received</td><td>skips</td><td>its holder may be waiting for this thread, and the request may never complete</td></tr>
+    <tr><td>a window</td><td>skips</td><td><code>MPI_Finalize</code> may free its memory, or abort</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Those are all the cases in which <code>MPI_Finalize</code> is skipped. A
+communicator, group or datatype still alive is not one of them: the C layer’s
+finalize frees it, and its own drop later makes no MPI call. Each skip writes
+one line, in a single write so that lines from several ranks cannot
+interleave, and the state stays <code>Finalizing</code> until the process
+exits. Together these give the run-time half of the model: a handle that
+outlives <code>Mpi</code> returns <code>Error::Finalized</code>, and
+<code>MPI_Finalize</code> never runs under an operation in flight.</p>
+
+<h2 id="send-sync">Send, Sync and the thread level</h2>
+
+<p><code>Send</code> and <code>Sync</code> are fixed when the program
+compiles. The thread level is known only when <code>Mpi::init_thread</code>
+returns, and may be lower than the one requested
+(<a href="06-threads-and-hybrid-mpi.html#thread-levels">chapter 6</a>). So
+ferrompi makes its handles <code>Send</code> and <code>Sync</code>, which lets
+them cross threads at all, and checks the level in the guard on every call.
+The <code>unsafe impl</code> on <code>Communicator</code> carries the
+argument:</p>
+
+<pre data-lang="rust" data-source="src/comm/mod.rs"><code>pub struct Communicator {
+    pub(crate) handle: i32,
+    pub(crate) rank: i32,
+    pub(crate) size: i32,
+}
+
+// SAFETY: Communicator handles are integer indices into a C-side table.
+// Every MPI call goes through the lifecycle guard (`rt::enter`): below
+// `ThreadLevel::Serialized` (Single or Funneled), it rejects a call from any
+// thread other than the one that called `Mpi::init`/`init_thread`, with
+// `Err(Error::ThreadLevelViolation)`, without touching MPI. A `Drop` cannot
+// return `Err`, so the equivalent guard (`rt::drop_guard`) instead aborts the
+// process on a wrong-thread drop below `Serialized`. At `Serialized`, the
+// caller must serialize its own calls (debug builds detect two overlapping
+// calls). At `Multiple`, calls from any thread may run concurrently.
+//
+// The C layer's handle tables claim slots lock-free: five with a C11
+// atomic compare-exchange, the request table with an atomic bitmap
+// (`fetch_or`), so there are no data races under MPI_THREAD_MULTIPLE.
+// See docs/adr/0002-handle-tables.md for the full rationale and design.
+unsafe impl Send for Communicator {}
+// SAFETY: &amp;Communicator exposes only reads of immutable fields and FFI calls
+// gated by the same lifecycle guard described above, so its thread safety
+// follows the requested `ThreadLevel` the same way.
+unsafe impl Sync for Communicator {}</code></pre>
+
+<p>The fields are three <code>i32</code>, so the compiler would derive both
+traits anyway. The <code>unsafe impl</code> is there to state the argument,
+which rests on the guard and on the C tables, not on the fields.
+<code>Group</code> and <code>CustomDatatype</code> carry the same pair.
+<code>Mpi</code> is the exception:</p>
+
+<pre data-lang="rust" data-source="src/lib.rs"><code>pub struct Mpi {
+    /// The thread level that was provided
+    thread_level: ThreadLevel,
+    /// This process's rank in `MPI_COMM_WORLD`, read once at init
+    world_rank: i32,
+    /// The size of `MPI_COMM_WORLD`, read once at init
+    world_size: i32,
+    /// Marker to make Mpi !Send and !Sync
+    _marker: PhantomData&lt;*const ()&gt;,
+}</code></pre>
+
+<p>A raw pointer is neither <code>Send</code> nor <code>Sync</code>, so
+<code>PhantomData&lt;*const ()&gt;</code> makes <code>Mpi</code> neither. The
+thread that initialized MPI keeps the handle, so <code>MPI_Finalize</code>
+runs on that thread, as the standard asks. Other threads borrow a
+<code>Communicator</code>.</p>
+
+<h2 id="unsafe-left">What unsafe asks of you</h2>
+
+<p>Two parts of the API stay <code>unsafe</code>, each with a written
+contract. The first is <code>PlainData</code>, which a type implements to be
+sent through a derived datatype:</p>
+
+<pre data-lang="rust" data-source="src/datatype.rs"><code>pub unsafe trait PlainData: Copy + 'static {}
+// SAFETY: every MpiDatatype is a primitive integer or float, and any bit pattern of its size is a valid value.
+unsafe impl&lt;T: MpiDatatype&gt; PlainData for T {}
+// SAFETY: an array of plain data is plain data — its bytes are exactly N back-to-back elements, each valid for any bit pattern.
+unsafe impl&lt;T: PlainData, const N: usize&gt; PlainData for [T; N] {}</code></pre>
+
+<p>An implementation promises that every bit pattern of the type’s size is a
+valid value, because MPI writes bytes and Rust then reads them as the type: a
+<code>bool</code> that receives a 2, or a <code>Box</code> that receives
+someone else’s address, is undefined behaviour. The numeric types and arrays
+of plain data have it already; a <code>#[repr(C)]</code> struct of them needs
+one line of <code>unsafe impl</code>, and <a href="12-user-defined-reductions-and-derived-datatypes.html#your-struct">chapter 12</a> writes one. Sending a
+<code>Box</code> through a datatype is rejected with E0277, in
+<code>src/datatype.rs</code>.</p>
+
+<p>The second is the zero-copy view of window memory. <code>WinView</code>
+reads and writes each element with one <code>Relaxed</code> atomic, so a
+peer’s put arriving at the same time never makes a load undefined, only stale.
+A program that knows its phases can borrow the region as a slice
+instead:</p>
+
+<pre data-lang="rust" data-source="src/window.rs"><code>    /// # Safety
+    ///
+    /// No process writes the region by store, put or accumulate while the slice
+    /// lives, and the writes it must observe were published before it was created,
+    /// either by a fence or `MPI_Win_wait` at this process that completed them, or
+    /// by process synchronization after they completed, then `MPI_Win_sync` at this
+    /// process inside a passive-target epoch.
+    ///
+    /// A store through any view of the region counts, this view's
+    /// [`write`](Self::write) and [`copy_from_slice`](Self::copy_from_slice)
+    /// included: the borrow checker does not stop them while the slice lives.
+    // …
+    pub unsafe fn as_slice(&amp;self) -&gt; &amp;[T] {</code></pre>
+
+<p>The contract is about MPI’s memory model, which the borrow checker cannot
+see: no process writes the region while the slice lives, and the writes the
+slice must observe were published before it was made, by a fence, a wait, or
+a sync inside a lock epoch. ADR 0008 records the reasoning;
+<a href="05-one-sided-communication.html#fence-epochs">chapter 5</a> shows the
+epochs. <code>as_mut_slice</code> has a contract of the same kind.</p>
+
+<p>The RMA assertions are a third obligation, without the keyword.
+<code>no_store</code>, <code>no_put</code>, <code>no_precede</code>,
+<code>no_succeed</code> and <code>no_check</code> are safe constructors, but an
+assertion that is false is erroneous, and MPI may act on it, for instance by
+skipping work the epoch needed. ferrompi cannot check them; ADR 0007 lists
+them as the caller’s.</p>
+
+<h2 id="not-covered">What the model does not cover</h2>
+
+<p>The model is about memory: no buffer is freed, aliased or reused while MPI
+may touch it, and no call reaches MPI after finalize or from a thread the
+level forbids. It does not make a program correct:</p>
+
+<ul>
+  <li>Deadlocks and mismatched collectives compile, and hang
+  (<a href="02-point-to-point.html#deadlock">chapter 2</a>,
+  <a href="03-collective-communication.html#when-a-collective-hangs">chapter
+  3</a>). A scope whose receive no send matches waits at its end for
+  ever.</li>
+  <li>A scope that hangs on another thread keeps <code>Mpi</code>’s drop
+  waiting too, without a timeout.</li>
+  <li>A peer that stops calling MPI, or leaks a window, leaves the others
+  blocked in a collective free or a closing call.</li>
+  <li>A message received as a type other than the one sent is plain data
+  reinterpreted: sound, and wrong
+  (<a href="04-datatypes-and-reductions.html#when-types-do-not-match">chapter
+  4</a>).</li>
+  <li>Under <code>panic = "abort"</code> nothing waits.</li>
+</ul>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Who checks</th><th>What</th></tr></thead>
+  <tbody>
+    <tr><td>the compiler</td><td>a nonblocking buffer outlives its request; a transfer’s buffers outlive its epoch’s closing call; a request, a scope or a view stays in its closure; a request stays on its thread; no handle borrows <code>Mpi</code>, so a struct can own them all</td></tr>
+    <tr><td>the run time</td><td><code>Error::Finalized</code> after <code>Mpi</code> is dropped; <code>Error::ThreadLevelViolation</code> on a thread the level forbids; <code>Error::InvalidState</code> for an active persistent request’s buffer; the skipped <code>MPI_Finalize</code>; the abort when a scope cannot establish completion</td></tr>
+    <tr><td>you</td><td><code>PlainData</code> and the zero-copy slice contracts; the RMA assertions; matching sends, receives and collectives; <code>mpi</code> as the last field of a struct that owns it</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>In the forget program, replace <code>std::mem::forget(request)</code>
+  with <code>drop(request)</code>, then with <code>request.wait()?</code>
+  followed by <code>let x = buf[0];</code> inside the closure. Which versions
+  compile, and what does each print?</li>
+  <li>In a local copy of ferrompi, change <code>Scope</code>’s first field to
+  <code>PhantomData&lt;&amp;'s ()&gt;</code> and run
+  <code>cargo test --doc scope</code>. Which doctests fail, and what does
+  their failure mean?</li>
+  <li>Remove the <code>catch_unwind</code> from the panic program. What does
+  rank 0 print, what exit status does the launcher report, and does rank 1
+  finish? Then add <code>panic = "abort"</code> to the dev profile and run it
+  again.</li>
+  <li>In the persistent program, call <code>into_buffer</code> right after
+  the second <code>start</code>, without <code>wait</code>. Then drop the
+  request there instead. What does rank 0 print each time?</li>
+  <li>Move <code>mpi</code> to the last field of the order program’s
+  <code>Ctx</code>. Then add a <code>PersistentRequest</code> field, start it
+  on a receive no send matches, and drop the context. What does standard
+  error say?</li>
+  <li>Move <code>mpi</code> into a scope’s closure and drop it there, with a
+  receive pending that rank 1 matches 300 ms later. What does standard error
+  say, and when does the receive complete?</li>
+  <li>Find out, by writing a function that requires it, whether
+  <code>PersistentRequest&lt;u64&gt;</code> and <code>Win&lt;f64&gt;</code>
+  are <code>Send</code> and <code>Sync</code>. Explain each answer from their
+  fields.</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>A nonblocking call shares a buffer with MPI until its request
+  completes. The standard leaves it to the caller to keep away from the
+  buffer in between.</li>
+  <li>A request whose drop waits is not enough, because
+  <code>mem::forget</code> is safe and ends a borrow without running the
+  drop. ferrompi moves the wait into <code>scope</code>, a closure that cannot
+  be left before every request has completed.</li>
+  <li>The scope’s lifetimes are invariant, so a buffer has to outlive the
+  scope, and stays borrowed after <code>wait</code>. The
+  <code>compile_fail</code> doctests in <code>src/scope.rs</code> pin each rule
+  to an error code.</li>
+  <li>The final wait repeats <code>MPI_Waitall</code> while it makes progress,
+  and aborts when it cannot establish completion, rather than hand back a
+  buffer MPI may still write.</li>
+  <li>A panic in a scope or a lock epoch completes or unlocks, then unwinds. A
+  panic in a fence or PSCW epoch, or in a reduction closure, aborts.</li>
+  <li>Persistent requests and windows own their buffers, and no handle has a
+  lifetime, so a struct can own <code>Mpi</code> and its handles, with
+  <code>mpi</code> as its last field.</li>
+  <li>A lifecycle state checked on every call replaces the lifetime. Calls
+  after <code>Mpi</code>’s drop return <code>Error::Finalized</code>, and
+  <code>MPI_Finalize</code> is skipped while a scope on the dropping thread,
+  an active persistent request, an unreceived message or a window
+  remains.</li>
+  <li>What stays with you: <code>PlainData</code> and the zero-copy slice
+  contracts, the RMA assertions, and the matching and ordering that MPI
+  always left to the program.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="10-the-c-shim.html">Previous: chapter 10, the C shim</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="12-user-defined-reductions-and-derived-datatypes.html">Next: chapter 12, user-defined reductions and derived datatypes</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

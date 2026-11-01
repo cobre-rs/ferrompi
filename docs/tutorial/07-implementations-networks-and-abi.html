@@ -1,0 +1,939 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>7. Implementations, networks and the ABI problem · ferrompi tutorial</title>
+<meta name="description" content="How MPI libraries differ: the MPICH and Open MPI families, error codes and missing features, how a message moves over shared memory, TCP and RDMA, why a binary runs only with the library it was built against, and how ferrompi builds against one library.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#one-standard">A standard and its libraries</a></li>
+      <li><a href="#what-differs">What differs between libraries</a></li>
+      <li><a href="#moving-bytes">How a message moves</a></li>
+      <li><a href="#abi-problem">The ABI problem</a></li>
+      <li><a href="#how-ferrompi-builds">How ferrompi builds against one library</a></li>
+      <li><a href="#standard-abi">The MPI 5.0 ABI</a></li>
+      <li><a href="#when-the-library-is-wrong">When the library is wrong</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part I · Chapter 7</p>
+<h1>Implementations, networks and the ABI problem</h1>
+
+<p class="lede">Every program in this tutorial so far ran on one MPI library.
+This chapter covers the libraries that implement the standard and how they
+differ, how a message moves within a node and across a network, and why a
+program compiled against one library does not run with another: the ABI
+problem, which decides how ferrompi is built.</p>
+
+<p>By the end of the chapter you can tell the MPI library families apart,
+handle an error or a missing feature the same way on every library, measure
+what a message costs, choose a transport, and explain why ferrompi compiles a
+small C layer against the library’s own <code>mpi.h</code> instead of
+declaring MPI’s types in Rust. It ends Part I; Part II takes ferrompi
+apart.</p>
+
+<h2 id="one-standard">A standard and its libraries</h2>
+
+<p><a href="01-the-mpi-model.html#a-standard-not-a-library">Chapter 1</a>
+said that MPI is a standard, and that what you install is an implementation of
+it. Most implementations in use come from one of two open-source code bases.
+MPICH, developed at Argonne National Laboratory, has tracked the standard
+since its first version. Open MPI began in 2004, when several earlier MPI
+projects merged into it. Vendors build their libraries from one of the two and
+add support for their own networks, launchers and compilers:</p>
+
+<figure>
+<div class="canvas"><svg viewBox="0 0 900 236" role="img" aria-label="Two families of MPI libraries. MPICH, and the libraries built from its source: Intel MPI, HPE Cray MPICH, MVAPICH and ParaStation MPI. The members of the MPICH ABI initiative link as libmpi.so.12, so a program built with one runs with the others. Open MPI, and the libraries built from its source: IBM Spectrum MPI, NVIDIA HPC-X and Fujitsu MPI. Open MPI links as libmpi.so.40, and its 4.x and 5.0.x releases share one ABI." style="min-width: 44rem">
+  <defs>
+    <marker id="fam-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-muted"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="16" width="425" height="204" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="44" class="t-head">The MPICH family</text>
+  <rect x="162.5" y="58" width="140" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="232.5" y="77" text-anchor="middle" class="t-head">MPICH</text>
+  <line x1="232.5" y1="88" x2="232.5" y2="116" class="s-muted" stroke-width="1.2"/>
+  <line x1="85.5" y1="116" x2="379.5" y2="116" class="s-muted" stroke-width="1.2"/>
+  <text x="240.5" y="106" class="t-small f-muted">built from its source</text>
+  <line x1="85.5" y1="116" x2="85.5" y2="136" class="s-muted" stroke-width="1.5" marker-end="url(#fam-arrow)"/>
+  <rect x="39.5" y="138" width="92" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="85.5" y="157" text-anchor="middle" class="t-small">Intel MPI</text>
+  <line x1="183.5" y1="116" x2="183.5" y2="136" class="s-muted" stroke-width="1.5" marker-end="url(#fam-arrow)"/>
+  <rect x="137.5" y="138" width="92" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="183.5" y="157" text-anchor="middle" class="t-small">HPE Cray MPICH</text>
+  <line x1="281.5" y1="116" x2="281.5" y2="136" class="s-muted" stroke-width="1.5" marker-end="url(#fam-arrow)"/>
+  <rect x="235.5" y="138" width="92" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="281.5" y="157" text-anchor="middle" class="t-small">MVAPICH</text>
+  <line x1="379.5" y1="116" x2="379.5" y2="136" class="s-muted" stroke-width="1.5" marker-end="url(#fam-arrow)"/>
+  <rect x="333.5" y="138" width="92" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="379.5" y="157" text-anchor="middle" class="t-small">ParaStation MPI</text>
+  <text x="36" y="194" class="t-small">the ABI initiative’s members link as libmpi.so.12</text>
+  <text x="36" y="212" class="t-small">a program built with one runs with the others</text>
+
+  <rect x="455" y="16" width="425" height="204" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="471" y="44" class="t-head">The Open MPI family</text>
+  <rect x="597.5" y="58" width="140" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="667.5" y="77" text-anchor="middle" class="t-head">Open MPI</text>
+  <line x1="667.5" y1="88" x2="667.5" y2="116" class="s-muted" stroke-width="1.2"/>
+  <line x1="535.5" y1="116" x2="799.5" y2="116" class="s-muted" stroke-width="1.2"/>
+  <text x="675.5" y="106" class="t-small f-muted">built from its source</text>
+  <line x1="535.5" y1="116" x2="535.5" y2="136" class="s-muted" stroke-width="1.5" marker-end="url(#fam-arrow)"/>
+  <rect x="475.5" y="138" width="120" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="535.5" y="157" text-anchor="middle" class="t-small">IBM Spectrum MPI</text>
+  <line x1="667.5" y1="116" x2="667.5" y2="136" class="s-muted" stroke-width="1.5" marker-end="url(#fam-arrow)"/>
+  <rect x="607.5" y="138" width="120" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="667.5" y="157" text-anchor="middle" class="t-small">NVIDIA HPC-X</text>
+  <line x1="799.5" y1="116" x2="799.5" y2="136" class="s-muted" stroke-width="1.5" marker-end="url(#fam-arrow)"/>
+  <rect x="739.5" y="138" width="120" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="799.5" y="157" text-anchor="middle" class="t-small">Fujitsu MPI</text>
+  <text x="471" y="194" class="t-small">Open MPI links as libmpi.so.40</text>
+  <text x="471" y="212" class="t-small">its 4.x and 5.0.x releases share one ABI</text>
+</svg></div>
+<figcaption>Two families of MPI libraries. The members of the MPICH ABI
+initiative, announced in 2013, keep one binary interface, so a program built
+with one of them runs with the others. Open MPI keeps a binary interface of
+its own. A program built with a library of one family does not run with the
+other; the section on the ABI problem shows why.</figcaption>
+</figure>
+
+<p><code>Mpi::library_version</code>, from chapter 1, names the library a
+program runs with. The libraries’ own tools tell more: MPICH’s
+<code>mpichversion</code> prints its release, its device and the options it
+was configured with, and Open MPI’s <code>ompi_info</code> prints its release
+and one line for each of its components. On a laptop the library usually
+comes from a package. On a cluster it is usually the vendor’s, built for that
+cluster’s network and loaded with a module.</p>
+
+<h2 id="what-differs">What differs between libraries</h2>
+
+<p>The standard fixes the names of the functions and constants and what each
+call does. It leaves the rest to each library: the numbers behind the
+constants, how a message travels, which algorithm a collective uses, how the
+launcher starts processes, how the library is tuned, and how much of the
+newest standard it implements. A program that keeps to the standard gets the
+same results with every library. The differences decide how fast it runs, and
+what it sees when something fails:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th></th><th>MPICH 4.2</th><th>Open MPI 5.0</th></tr></thead>
+  <tbody>
+    <tr><td>Standard version it reports</td><td>MPI 4.1</td><td>MPI 3.1, with some MPI-4.0 features</td></tr>
+    <tr><td>Launcher</td><td>Hydra (<code>mpiexec</code>)</td><td>PRRTE (<code>mpirun</code>, <code>mpiexec</code>)</td></tr>
+    <tr><td>Tuning</td><td>environment variables <code>MPIR_CVAR_*</code></td><td>MCA parameters: <code>--mca name value</code> or <code>OMPI_MCA_name</code></td></tr>
+    <tr><td>Process binding by default</td><td>none</td><td>to a core, for up to two processes (<a href="06-threads-and-hybrid-mpi.html#placement">chapter 6</a>)</td></tr>
+    <tr><td>Persistent collectives (MPI-4.0)</td><td>yes</td><td>yes; not in Open MPI 4.1</td></tr>
+    <tr><td>Counts above <code>i32::MAX</code> (MPI-4.0)</td><td>yes</td><td>no; ferrompi returns an error of class <code>Count</code></td></tr>
+    <tr><td>Error codes</td><td>a code that carries the class, and a stack of messages</td><td>the class itself, and one message</td></tr>
+    <tr><td>A process that ends without finalizing</td><td><code>mpiexec</code> exits 0</td><td><code>mpiexec</code> exits 1 and prints a notice</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The rest of this section shows how a program can handle the two
+differences it sees most directly: what an error looks like, and a feature
+the library does not have.</p>
+
+<h3 id="error-codes">Error codes and classes</h3>
+
+<p>An MPI call that fails returns an error code. The standard names a set of
+error classes, such as <code>MPI_ERR_RANK</code> for a rank that does not
+exist. A library can return any code it likes, as long as
+<code>MPI_Error_class</code> turns the code into its class. ferrompi’s
+<a href="../ferrompi/enum.Error.html#variant.Mpi"><code>Error::Mpi</code></a>
+carries the class, as an
+<a href="../ferrompi/enum.MpiErrorClass.html"><code>MpiErrorClass</code></a>,
+along with the library’s code and message. This program sends to a rank that
+does not exist:</p>
+
+<pre data-lang="rust" data-run="2" id="error-class"><code>use ferrompi::{Error, Mpi};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // No process has rank `size`, so MPI refuses the send.
+    match world.send(&amp;[rank], world.size(), 0) {
+        Err(Error::Mpi {
+            class,
+            code,
+            message,
+            ..
+        }) =&gt; {
+            // The class is the standard's; the code and message are the
+            // library's own.
+            println!("rank {rank}: the send failed with class {class}");
+            eprintln!("rank {rank}: code {code}: {message}");
+        }
+        Err(other) =&gt; return Err(other),
+        Ok(()) =&gt; println!("rank {rank}: the send succeeded"),
+    }
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints, on standard output:</p>
+
+<pre class="output" data-output-of="error-class"><code>rank 0: the send failed with class ERR_RANK
+rank 1: the send failed with class ERR_RANK</code></pre>
+
+<p>The class is the part to match on. The code and the message are the
+library’s own, and go to standard error. With MPICH 4.2.3, rank 0 writes:</p>
+
+<pre class="output"><code>rank 0: code 135423750: Invalid rank, error stack:
+internal_Send(63826): MPI_Send(buf=0x7fff5bfad0a0, count=1, dtype=0x4c000439, 2, 0, MPI_COMM_WORLD) failed
+internal_Send(63780): Invalid rank has value 2 but must be nonnegative and less than 2</code></pre>
+
+<p>MPICH packs the class into the code, along with an index into its stack of
+messages: 135423750 is <code>0x8126706</code>, and its low seven bits, 6, are
+the value of <code>MPI_ERR_RANK</code>. The message is that stack. Each line
+names a function inside MPICH, and the first shows the arguments of the call
+as MPICH received them, including <code>0x4c000439</code>, MPICH’s handle for
+the datatype <code>MPI_INT32_T</code> that ferrompi passed for an
+<code>i32</code>. Open MPI, according to its source, returns the class itself
+as the code, 6 for this error, with the message <code>MPI_ERR_RANK: invalid
+rank</code>.</p>
+
+<p>The classes’ numbers differ between libraries too:
+<code>MPI_ERR_TRUNCATE</code>, for a message longer than the receive buffer,
+is 14 in MPICH and 15 in Open MPI. ferrompi compares the class with the
+linked library’s own constants, in its C layer, so
+<code>MpiErrorClass::Rank</code> means <code>MPI_ERR_RANK</code> whatever its
+number:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int32_t ferrompi_error_class_index(int error_class) {
+    if (error_class == MPI_SUCCESS) return 0;
+    if (error_class == MPI_ERR_BUFFER) return 1;
+    if (error_class == MPI_ERR_COUNT) return 2;
+    /* ... one line per class ... */
+}</code></pre>
+
+<p>Match on the class, and log the code and the message: they help whoever
+reads the log, and they change from one library, and one release, to the
+next.</p>
+
+<h3 id="missing-features">Features a library lacks</h3>
+
+<p>A library may implement only part of the newest standard. Open MPI 4.1 has
+none of MPI-4.0’s persistent collectives
+(<a href="03-collective-communication.html">chapter 3</a>). ferrompi still
+builds against it: its C layer compiles each persistent collective to a stub
+that returns an error, and the Rust call returns
+<a href="../ferrompi/enum.Error.html#variant.NotSupported"><code>Error::NotSupported</code></a>.
+A program that should run on every library can try the persistent collective
+and fall back to the plain one:</p>
+
+<pre data-lang="rust" data-run="2" id="fallback"><code>use ferrompi::{Error, Mpi, ReduceOp};
+
+const STEPS: u32 = 3;
+
+fn value(rank: i32, step: u32) -&gt; i64 {
+    i64::from(rank + 1) * 10i64.pow(step)
+}
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    let mut totals = Vec::new();
+    match world.allreduce_init(vec![0i64], vec![0i64], ReduceOp::Sum) {
+        Ok(mut sum) =&gt; {
+            eprintln!("rank {rank}: persistent allreduce");
+            for step in 0..STEPS {
+                sum.send_buffer_mut()?[0] = value(rank, step);
+                sum.start()?;
+                sum.wait()?;
+                totals.push(sum.buffer()?[0]);
+            }
+        }
+        // Built against an MPI without persistent collectives, such as Open
+        // MPI 4.1. Every process takes this branch, since they all run the
+        // same binary.
+        Err(Error::NotSupported(what)) =&gt; {
+            eprintln!("rank {rank}: {what} not supported, using allreduce");
+            for step in 0..STEPS {
+                totals.push(world.allreduce_scalar(value(rank, step), ReduceOp::Sum)?);
+            }
+        }
+        Err(other) =&gt; return Err(other),
+    }
+    println!("rank {rank}: totals {totals:?}");
+    Ok(())
+}</code></pre>
+
+<p>It prints:</p>
+
+<pre class="output" data-output-of="fallback"><code>rank 0: totals [3, 30, 300]
+rank 1: totals [3, 30, 300]</code></pre>
+
+<p>With MPICH and with Open MPI 5, the program takes the persistent branch;
+with Open MPI 4.1, the fallback. ferrompi decides which when it is built,
+against one library, so every process of a job takes the same branch, and
+the collectives stay matched. Choosing the branch from
+<code>Mpi::version()</code> instead would be wrong: Open MPI 5 reports
+MPI 3.1, and has persistent collectives.</p>
+
+<h2 id="moving-bytes">How a message moves</h2>
+
+<p>Where the two processes run decides how a message gets from one to the
+other. On one node they share the node’s memory, and the library passes
+messages through a segment of memory that both processes map. Between nodes
+the message crosses a network, through a network interface card (NIC) on
+each node. Over TCP, the message passes through the kernel on both nodes.
+Networks built for HPC, such as InfiniBand, RoCE, HPE Slingshot and AWS EFA,
+let the NIC read the message straight from the sender’s buffer and write it
+into the receiver’s, which is called remote direct memory access (RDMA):</p>
+
+<figure>
+<div class="canvas"><svg viewBox="0 0 900 332" role="img" aria-label="The copies a message takes from process 0’s buffer to process 1’s. On one node, over shared memory: the sender copies the message into a shared segment and the receiver copies it out. Between two nodes over TCP: the CPU copies the message into the kernel, the network card reads it from there, and on the other node the card writes it into the kernel and the CPU copies it out. Between two nodes over RDMA: the network card reads the message from the sender’s buffer and the other card writes it into the receiver’s buffer, with no kernel in the path." style="min-width: 44rem">
+  <defs>
+    <marker id="path-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="16" width="860" height="116" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="42" class="t-head">Same node: shared memory</text>
+  <rect x="128" y="54" width="724" height="64" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="140" y="70" class="t-label f-muted">node</text>
+  <rect x="140" y="79" width="100" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="190" y="98" text-anchor="middle" class="t-small">P0 buffer</text>
+  <rect x="400" y="79" width="180" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="490" y="98" text-anchor="middle" class="t-small">shared segment</text>
+  <rect x="740" y="79" width="100" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="790" y="98" text-anchor="middle" class="t-small">P1 buffer</text>
+  <line x1="240" y1="94" x2="398" y2="94" class="s-accent" stroke-width="1.5" marker-end="url(#path-arrow)"/>
+  <text x="320" y="86" text-anchor="middle" class="t-small f-muted">copy</text>
+  <line x1="580" y1="94" x2="738" y2="94" class="s-accent" stroke-width="1.5" marker-end="url(#path-arrow)"/>
+  <text x="660" y="86" text-anchor="middle" class="t-small f-muted">copy</text>
+
+  <rect x="20" y="144" width="860" height="172" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="170" class="t-head">Different nodes</text>
+  <text x="490" y="170" text-anchor="middle" class="t-small f-muted">network</text>
+  <rect x="128" y="182" width="346" height="122" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <rect x="506" y="182" width="346" height="122" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="140" y="198" class="t-label f-muted">node A</text>
+  <text x="518" y="198" class="t-label f-muted">node B</text>
+  <text x="36" y="230" class="t-label f-muted">TCP</text>
+  <rect x="140" y="211" width="100" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="190" y="230" text-anchor="middle" class="t-small">P0 buffer</text>
+  <rect x="404" y="211" width="56" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="432" y="230" text-anchor="middle" class="t-small">NIC</text>
+  <rect x="520" y="211" width="56" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="548" y="230" text-anchor="middle" class="t-small">NIC</text>
+  <rect x="740" y="211" width="100" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="790" y="230" text-anchor="middle" class="t-small">P1 buffer</text>
+  <line x1="460" y1="226" x2="518" y2="226" class="s-accent" stroke-width="1.5" marker-end="url(#path-arrow)"/>
+  <rect x="287" y="211" width="70" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="322" y="230" text-anchor="middle" class="t-small">kernel</text>
+  <rect x="623" y="211" width="70" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="658" y="230" text-anchor="middle" class="t-small">kernel</text>
+  <line x1="240" y1="226" x2="285" y2="226" class="s-accent" stroke-width="1.5" marker-end="url(#path-arrow)"/>
+  <text x="263.5" y="218" text-anchor="middle" class="t-small f-muted">copy</text>
+  <line x1="357" y1="226" x2="402" y2="226" class="s-accent" stroke-width="1.5" marker-end="url(#path-arrow)"/>
+  <text x="380.5" y="218" text-anchor="middle" class="t-small f-muted">DMA</text>
+  <line x1="576" y1="226" x2="621" y2="226" class="s-accent" stroke-width="1.5" marker-end="url(#path-arrow)"/>
+  <text x="599.5" y="218" text-anchor="middle" class="t-small f-muted">DMA</text>
+  <line x1="693" y1="226" x2="738" y2="226" class="s-accent" stroke-width="1.5" marker-end="url(#path-arrow)"/>
+  <text x="716.5" y="218" text-anchor="middle" class="t-small f-muted">copy</text>
+  <text x="36" y="280" class="t-label f-muted">RDMA</text>
+  <rect x="140" y="261" width="100" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="190" y="280" text-anchor="middle" class="t-small">P0 buffer</text>
+  <rect x="404" y="261" width="56" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="432" y="280" text-anchor="middle" class="t-small">NIC</text>
+  <rect x="520" y="261" width="56" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="548" y="280" text-anchor="middle" class="t-small">NIC</text>
+  <rect x="740" y="261" width="100" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="790" y="280" text-anchor="middle" class="t-small">P1 buffer</text>
+  <line x1="460" y1="276" x2="518" y2="276" class="s-accent" stroke-width="1.5" marker-end="url(#path-arrow)"/>
+  <line x1="240" y1="276" x2="402" y2="276" class="s-accent" stroke-width="1.5" marker-end="url(#path-arrow)"/>
+  <text x="322" y="268" text-anchor="middle" class="t-small f-muted">DMA</text>
+  <line x1="576" y1="276" x2="738" y2="276" class="s-accent" stroke-width="1.5" marker-end="url(#path-arrow)"/>
+  <text x="658" y="268" text-anchor="middle" class="t-small f-muted">DMA</text>
+</svg></div>
+<figcaption>The copies a message takes from process 0’s buffer to process
+1’s. Over shared memory, the CPU copies the message into a segment that both
+processes map, and out of it. Over TCP, the CPU copies it into the kernel and
+the NIC reads it from there by direct memory access (DMA); the other node
+does the same in reverse. With RDMA, the NIC reads and writes the processes’
+own buffers, and the kernel stays out of the path.</figcaption>
+</figure>
+
+<p>A few details change the picture. For a large message on one node, a
+library can skip the segment and copy once, from the sender’s memory straight
+into the receiver’s, with a kernel facility such as CMA, XPMEM or KNEM; which
+one Open MPI uses depends on how it was built and on what the machine allows.
+A buffer must be registered with the NIC before RDMA can use it: the kernel
+pins the buffer’s pages, so they stay put while the NIC reads them.
+Registering is slow, so libraries remember which buffers they registered, and
+a program that sends from the same buffer again pays for it once. And the
+eager and rendezvous protocols of
+<a href="02-point-to-point.html">chapter 2</a> run on top: with RDMA, the
+rendezvous lets the NIC write a large message straight into the receive
+buffer, once the receiver has posted it.</p>
+
+<p>Each library splits the work into a layer for messages within a node and
+one that drives the network, and usually drives the network through a
+separate network library: libfabric, also called OFI, or UCX. A network
+library has a backend for each kind of network; libfabric calls them
+providers.</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Library</th><th>Within a node</th><th>Between nodes</th></tr></thead>
+  <tbody>
+    <tr><td>MPICH 4 (its <code>ch4</code> device)</td><td>its shared-memory module</td><td>one network module, chosen when MPICH is built: <code>ofi</code> (libfabric) or <code>ucx</code></td></tr>
+    <tr><td>Open MPI 5</td><td>the <code>ob1</code> PML with the <code>sm</code> BTL, called <code>vader</code> before 5.0</td><td><code>ob1</code> with the <code>tcp</code> BTL; the <code>ucx</code> PML for InfiniBand and RoCE; the <code>cm</code> PML with the <code>ofi</code> MTL for libfabric’s networks</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>In Open MPI, a PML carries point-to-point messages, and drives the network
+either through BTLs, which move bytes, or through an MTL, which hands whole
+messages to a network library. With the <code>ucx</code> PML, UCX carries
+the messages within a node as well. The networks and the backends that drive
+them:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Network</th><th>Driven by</th></tr></thead>
+  <tbody>
+    <tr><td>Ethernet</td><td>TCP: libfabric’s <code>tcp</code> provider, UCX, or Open MPI’s <code>tcp</code> BTL</td></tr>
+    <tr><td>InfiniBand, RoCE</td><td>UCX, or libfabric’s <code>verbs</code> provider</td></tr>
+    <tr><td>AWS EFA</td><td>libfabric’s <code>efa</code> provider</td></tr>
+    <tr><td>HPE Slingshot</td><td>libfabric’s <code>cxi</code> provider</td></tr>
+    <tr><td>Cornelis Omni-Path</td><td>libfabric’s <code>psm2</code> provider</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="measuring">Measuring the cost of a message</h3>
+
+<p>A message costs a fixed latency, paid by every message however small, plus
+a time per byte, set by the bandwidth. A ping-pong measures both: process 0
+sends a message to process 1, which sends it back, many times for each size.
+Half the time of a round trip is the time one message takes:</p>
+
+<pre data-lang="rust" data-run="2" id="pingpong"><code>use ferrompi::{Communicator, Mpi};
+
+const SIZES: [usize; 9] = [8, 64, 512, 4096, 16384, 65536, 262144, 1048576, 4194304];
+
+// Process 0 sends the buffer to process 1, which sends it back.
+fn round_trip(world: &amp;Communicator, buf: &amp;mut [u8]) -&gt; ferrompi::Result&lt;()&gt; {
+    match world.rank() {
+        0 =&gt; {
+            world.send(buf, 1, 0)?;
+            world.recv(buf, 1, 0)?;
+        }
+        1 =&gt; {
+            world.recv(buf, 0, 0)?;
+            world.send(buf, 0, 0)?;
+        }
+        _ =&gt; {}
+    }
+    Ok(())
+}
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    if world.size() &lt; 2 {
+        eprintln!("ping-pong needs two processes");
+        return Ok(());
+    }
+
+    if world.rank() == 0 {
+        println!("   bytes   one way (us)    MB/s");
+    }
+    for bytes in SIZES {
+        let mut buf = vec![0u8; bytes];
+        // Fewer round trips for large messages, so each size takes about as
+        // long as the others.
+        let trips = (20_000_000 / bytes).clamp(100, 10_000);
+        // One untimed round trip first, to set up the path.
+        round_trip(&amp;world, &amp;mut buf)?;
+        world.barrier()?;
+        let start = mpi.wtime();
+        for _ in 0..trips {
+            round_trip(&amp;world, &amp;mut buf)?;
+        }
+        let one_way = (mpi.wtime() - start) / (2 * trips) as f64;
+        if world.rank() == 0 {
+            let rate = bytes as f64 / one_way / 1e6;
+            println!("{bytes:&gt;8}   {:&gt;12.2}   {rate:&gt;6.0}", one_way * 1e6);
+        }
+    }
+    Ok(())
+}</code></pre>
+
+<p>Its numbers depend on the machine, the library and the run, so CI runs it
+but checks none of its output. On one laptop, with MPICH 4.2.3 and both
+processes on the same machine, it printed:</p>
+
+<pre class="output"><code>   bytes   one way (us)    MB/s
+       8           1.09        7
+      64           0.99       64
+     512           1.08      472
+    4096           2.09     1961
+   16384           6.54     2504
+   65536          12.93     5070
+  262144          31.55     8308
+ 1048576         115.94     9044
+ 4194304         654.38     6410</code></pre>
+
+<p>The next run sends the same messages through the network path.
+<code>MPIR_CVAR_NOLOCAL=1</code> makes MPICH treat every other process as if
+it ran on another node, and <code>FI_PROVIDER=tcp</code> makes libfabric use
+its TCP provider, here over the laptop’s own loopback interface:</p>
+
+<pre data-lang="bash"><code>MPIR_CVAR_NOLOCAL=1 FI_PROVIDER=tcp mpiexec -n 2 target/debug/examples/pingpong</code></pre>
+
+<pre class="output"><code>   bytes   one way (us)    MB/s
+       8          14.62        1
+      64          14.96        4
+     512          31.97       16
+    4096          33.62      122
+   16384          44.23      370
+   65536          52.92     1238
+  262144         118.95     2204
+ 1048576         420.64     2493
+ 4194304        1823.59     2300</code></pre>
+
+<p>Up to a few hundred bytes, the time barely changes with the size: the latency
+dominates. For large messages, it grows with the size: the bandwidth
+dominates. A small message took about 1 µs through shared memory and about
+15 µs through TCP, and the best rates were about 9 GB/s and 2.5 GB/s. No
+wire was involved, so the difference is the cost of the kernel and the TCP
+stack alone; a real network adds its own. RDMA networks take most of that
+software out of the path. On InfiniBand, a small message typically takes one
+to two microseconds, and a large one moves at close to the link’s rate,
+25 GB/s for a 200 Gb/s link.</p>
+
+<p>Two lessons follow for a program. Many small messages cost a latency each,
+so a program that has many values to send to one process sends them in one
+message. And the same program can run many times faster or slower depending
+on which path its messages take, which is why the next section matters.</p>
+
+<h3 id="choosing-a-transport">Choosing a transport</h3>
+
+<p>A library picks its transports when the job starts, from what it was built
+with and what it finds on the machine, and it usually picks the fastest. When
+it cannot use the fast network, for example because it was built without
+support for it, it falls back to TCP: the program still runs, only slower.
+Each library has a way to see and to change the choice:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>To</th><th>MPICH, with libfabric</th><th>Open MPI 5</th></tr></thead>
+  <tbody>
+    <tr><td>see what the library was built with</td><td><code>mpichversion</code></td><td><code>ompi_info</code></td></tr>
+    <tr><td>see what it picked</td><td><code>MPIR_CVAR_DEBUG_SUMMARY=1</code></td><td>force a choice, and see whether the job still starts</td></tr>
+    <tr><td>choose the network library’s backend</td><td><code>FI_PROVIDER=tcp</code></td><td><code>--mca mtl_ofi_provider_include psm2</code>, with the <code>cm</code> PML; <code>UCX_NET_DEVICES=mlx5_0:1</code>, with the <code>ucx</code> PML</td></tr>
+    <tr><td>choose the layer</td><td><code>MPIR_CVAR_NOLOCAL=1</code> sends messages within a node through the network module</td><td><code>--mca pml ucx</code>; <code>--mca pml cm --mca mtl ofi</code>; <code>--mca btl self,sm,tcp</code></td></tr>
+    <tr><td>set a choice for every run</td><td>export the variable</td><td><code>OMPI_MCA_name=value</code>, such as <code>OMPI_MCA_btl=self,tcp</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>With MPICH, <code>MPIR_CVAR_DEBUG_SUMMARY=1</code> prints a summary as the
+job starts, with a line that starts <code>libfabric provider:</code> and
+names the provider it picked. The summary also lists the machine’s network
+interfaces and their addresses, so read it before you paste it into a public
+issue. Open MPI passes <code>-x NAME=value</code> on to the processes it
+starts, which is how UCX’s variables reach them.</p>
+
+<h2 id="abi-problem">The ABI problem</h2>
+
+<p>The standard defines MPI’s application programming interface (API): the
+names in <code>mpi.h</code> and what they mean. Source code depends on the
+API. A compiled program depends on more: the size and layout of each type,
+the number behind each constant, the name of the library file, and the names
+of the symbols in it. That is the application binary interface (ABI), and
+until MPI 5.0 the standard left all of it to each library.</p>
+
+<p>MPI’s constants are macros, so their values are compiled into the program.
+Here is one call compiled against three <code>mpi.h</code> headers:</p>
+
+<figure>
+<div class="canvas"><svg viewBox="0 0 900 388" role="img" aria-label="One line of C source, a send to rank 1 on MPI_COMM_WORLD, compiled against three mpi.h headers. With MPICH’s, MPI_Comm is an int, MPI_COMM_WORLD is the number 0x44000000, MPI_INT is 0x4c000405, and the program links libmpi.so.12; it runs with MPICH and the ABI initiative’s members. With Open MPI’s, MPI_Comm is a pointer to the library’s own struct, MPI_COMM_WORLD and MPI_INT are the addresses of globals in the library, and the program links libmpi.so.40; it runs with Open MPI of the same or a later release in the series. With the MPI 5.0 ABI header, MPI_Comm is a pointer to an incomplete struct, MPI_COMM_WORLD is 0x101, MPI_INT is 0x209, and the program links libmpi_abi; it runs with any library that provides it." style="min-width: 44rem">
+  <defs>
+    <marker id="abi-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+  <rect x="240" y="16" width="420" height="34" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="450" y="37" text-anchor="middle" class="t-mono">MPI_Send(buf, 1, MPI_INT, 1, 0, MPI_COMM_WORLD);</text>
+  <line x1="360" y1="50" x2="160" y2="98" class="s-accent" stroke-width="1.5" marker-end="url(#abi-arrow)"/>
+
+  <rect x="20" y="100" width="280" height="272" rx="10" class="f-paper s-accent" stroke-width="1.2"/>
+  <text x="36" y="128" class="t-head">MPICH’s mpi.h</text>
+  <text x="36" y="158" class="t-small f-muted">MPI_Comm is</text>
+  <text x="36" y="176" class="t-mono">int</text>
+  <text x="36" y="202" class="t-small f-muted">MPI_COMM_WORLD is</text>
+  <text x="36" y="220" class="t-mono">0x44000000</text>
+  <text x="36" y="246" class="t-small f-muted">MPI_INT is</text>
+  <text x="36" y="264" class="t-mono">0x4c000405</text>
+  <text x="36" y="290" class="t-small f-muted">the program links</text>
+  <text x="36" y="308" class="t-mono">libmpi.so.12</text>
+  <text x="36" y="334" class="t-small f-muted">it runs with</text>
+  <text x="36" y="352" class="t-small">MPICH and the initiative’s members</text>
+  <line x1="450" y1="50" x2="450" y2="98" class="s-accent" stroke-width="1.5" marker-end="url(#abi-arrow)"/>
+
+  <rect x="310" y="100" width="280" height="272" rx="10" class="f-paper s-copper" stroke-width="1.2"/>
+  <text x="326" y="128" class="t-head">Open MPI’s mpi.h</text>
+  <text x="326" y="158" class="t-small f-muted">MPI_Comm is</text>
+  <text x="326" y="176" class="t-mono">struct ompi_communicator_t *</text>
+  <text x="326" y="202" class="t-small f-muted">MPI_COMM_WORLD is</text>
+  <text x="326" y="220" class="t-mono">&amp;ompi_mpi_comm_world</text>
+  <text x="326" y="246" class="t-small f-muted">MPI_INT is</text>
+  <text x="326" y="264" class="t-mono">&amp;ompi_mpi_int</text>
+  <text x="326" y="290" class="t-small f-muted">the program links</text>
+  <text x="326" y="308" class="t-mono">libmpi.so.40</text>
+  <text x="326" y="334" class="t-small f-muted">it runs with</text>
+  <text x="326" y="352" class="t-small">Open MPI, same or later in the series</text>
+  <line x1="540" y1="50" x2="740" y2="98" class="s-accent" stroke-width="1.5" marker-end="url(#abi-arrow)"/>
+
+  <rect x="600" y="100" width="280" height="272" rx="10" class="f-paper s-steel" stroke-width="1.2"/>
+  <text x="616" y="128" class="t-head">MPI 5.0 ABI mpi.h</text>
+  <text x="616" y="158" class="t-small f-muted">MPI_Comm is</text>
+  <text x="616" y="176" class="t-mono">struct MPI_ABI_Comm *</text>
+  <text x="616" y="202" class="t-small f-muted">MPI_COMM_WORLD is</text>
+  <text x="616" y="220" class="t-mono">0x00000101</text>
+  <text x="616" y="246" class="t-small f-muted">MPI_INT is</text>
+  <text x="616" y="264" class="t-mono">0x00000209</text>
+  <text x="616" y="290" class="t-small f-muted">the program links</text>
+  <text x="616" y="308" class="t-mono">libmpi_abi</text>
+  <text x="616" y="334" class="t-small f-muted">it runs with</text>
+  <text x="616" y="352" class="t-small">any library that provides libmpi_abi</text>
+  <text x="458" y="80" class="t-small f-muted">compile</text>
+</svg></div>
+<figcaption>One line of C, compiled against three <code>mpi.h</code> headers.
+MPICH’s handles are integers, and its constants are numbers compiled into the
+program. Open MPI’s handles are pointers, and its constants are the addresses
+of globals in its library, filled in when the program loads. The MPI 5.0 ABI
+fixes the values for every library that provides it.</figcaption>
+</figure>
+
+<p>MPICH’s handles are numbers that carry information: in
+<code>MPI_INT</code>, <code>0x4c000405</code>, the <code>04</code> is the
+type’s size in bytes, and <code>MPI_DOUBLE</code> is
+<code>0x4c00080b</code>. Open MPI’s <code>MPI_COMM_WORLD</code> is the address
+of <code>ompi_mpi_comm_world</code>, a global in <code>libmpi.so.40</code>,
+which the dynamic loader fills in when the program starts. A program built
+against one library and run with the other would pass numbers where the
+library expects pointers, or the reverse. In practice it gets no further than
+the loader, which looks for the library file the program was linked
+with:</p>
+
+<pre class="output"><code>target/debug/examples/pingpong: error while loading shared libraries: libmpi.so.12: cannot open shared object file: No such file or directory</code></pre>
+
+<p>The other constants differ too:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Constant</th><th>MPICH 4.2</th><th>Open MPI 5.0</th><th>MPI 5.0 ABI</th></tr></thead>
+  <tbody>
+    <tr><td><code>MPI_ANY_SOURCE</code></td><td>−2</td><td>−1</td><td>−1</td></tr>
+    <tr><td><code>MPI_PROC_NULL</code></td><td>−1</td><td>−2</td><td>−3</td></tr>
+    <tr><td><code>MPI_ROOT</code></td><td>−3</td><td>−4</td><td>−4</td></tr>
+    <tr><td><code>MPI_ANY_TAG</code></td><td>−1</td><td>−1</td><td>−2</td></tr>
+    <tr><td><code>MPI_UNDEFINED</code></td><td>−32766</td><td>−32766</td><td>−32766</td></tr>
+    <tr><td><code>MPI_ERR_TRUNCATE</code></td><td>14</td><td>15</td><td>15</td></tr>
+    <tr><td><code>MPI_MODE_NOCHECK</code></td><td>1024</td><td>1</td><td>1024</td></tr>
+    <tr><td><code>MPI_VERSION</code>.<code>MPI_SUBVERSION</code></td><td>4.1</td><td>3.1</td><td>5.0</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>MPICH’s <code>MPI_ANY_SOURCE</code> is Open MPI’s
+<code>MPI_PROC_NULL</code>. A receive that passed −2 to mean “from any
+process” would, with the other library, mean “from no process”, and return at
+once with no data. Three consequences follow:</p>
+
+<ul>
+  <li>A binary runs only with libraries of the ABI it was built against.
+  Moving a program to a cluster with an MPI of the other family means
+  building it again there.</li>
+  <li>A container image that brings its own MPI cannot use the host’s fast
+  network unless that MPI was built for it. The usual fix is to build the
+  image against an MPI with the host’s ABI and to mount the host’s library
+  in place of the image’s at run time. Container runtimes for HPC such as
+  Sarus and Shifter do this, and it works only when the two libraries share
+  an ABI, which in practice means the MPICH ABI.</li>
+  <li>Another language cannot declare MPI’s types and constants once for
+  every library. Rust that declared <code>type MPI_Comm = i32</code> and
+  <code>const MPI_ANY_SOURCE: i32 = -2</code> would match MPICH, and break
+  with Open MPI. A binding has two ways out: generate its declarations from
+  the installed <code>mpi.h</code> each time it is built, as bindgen does, or
+  compile a small C layer against <code>mpi.h</code> and give the other
+  language that layer’s own types.</li>
+</ul>
+
+<h2 id="how-ferrompi-builds">How ferrompi builds against one library</h2>
+
+<p>ferrompi takes the second way. Its build script, <code>build.rs</code>,
+finds an MPI installation, compiles the C layer, <code>csrc/ferrompi.c</code>,
+with the installation’s <code>mpi.h</code>, and links the library. Rust never
+sees an MPI type: the C layer’s functions take and return fixed-width
+integers, and the C layer keeps the library’s handles in tables, which Rust
+refers to by index. Chapter 10 covers the C layer; this section covers how it
+deals with the differences above.</p>
+
+<p><strong>The wildcards.</strong> Rust passes ferrompi’s own codes, which are
+the same for every library:
+<a href="../ferrompi/enum.Source.html#variant.Any"><code>Source::Any</code></a>
+becomes −1 and <code>Source::ProcNull</code> −2. The C layer swaps in the
+linked library’s values:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>static int source_to_mpi(int32_t s) {
+    if (s == FERROMPI_ANY_SOURCE) return MPI_ANY_SOURCE;
+    if (s == FERROMPI_PROC_NULL) return MPI_PROC_NULL;
+    return s;
+}
+
+static int tag_to_mpi(int32_t t) {
+    return (t == FERROMPI_ANY_TAG) ? MPI_ANY_TAG : t;
+}</code></pre>
+
+<p>With MPICH, <code>source_to_mpi</code> swaps −1 and −2; with the MPI 5.0
+ABI, it turns −2 into −3, and <code>tag_to_mpi</code> turns −1 into −2. A
+receive’s status comes back through the same translation in reverse, and a
+count of <code>MPI_UNDEFINED</code> comes back as −1.</p>
+
+<p><strong>Flags.</strong> A few values are flags a program passes through
+to MPI, such as the assertions of window synchronization in
+<a href="05-one-sided-communication.html">chapter 5</a>. ferrompi asks the C
+layer for them the first time it needs them, and keeps them:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>void ferrompi_win_fence_mode_values(int32_t* out) {
+    out[0] = MPI_MODE_NOSTORE;
+    out[1] = MPI_MODE_NOPUT;
+    out[2] = MPI_MODE_NOPRECEDE;
+    out[3] = MPI_MODE_NOSUCCEED;
+}</code></pre>
+
+<p><strong>Error classes</strong> are compared with the library’s own
+constants, as the error section showed.</p>
+
+<p><strong>Missing features.</strong> The C layer tests the version that
+<code>mpi.h</code> reports, and Open MPI’s own version macro, since Open MPI 5
+reports MPI 3.1:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>#if MPI_VERSION &gt;= 4 || (defined(OMPI_MAJOR_VERSION) &amp;&amp; OMPI_MAJOR_VERSION &gt;= 5)
+#define FERROMPI_HAVE_MPI4_COLLECTIVES 1
+#endif</code></pre>
+
+<p>Without it, each persistent collective compiles to a stub that returns
+ferrompi’s private code for an unsupported operation, which Rust turns into
+<code>Error::NotSupported</code>: the error the fallback program handles.
+Counts above <code>i32::MAX</code> need MPI-4.0’s large-count functions, such
+as <code>MPI_Send_c</code>:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>    if (count &gt; INT_MAX) {
+#if MPI_VERSION &gt;= 4
+        return MPI_Send_c(buf, (MPI_Count)count, dt, mpi_dest, tag, comm);
+#else
+        return MPI_ERR_COUNT;
+#endif
+    }
+    return MPI_Send(buf, (int)count, dt, mpi_dest, tag, comm);</code></pre>
+
+<p>Against a library without them, such as Open MPI 5, a call with more than
+<code>i32::MAX</code> elements fails with class <code>Count</code>.</p>
+
+<p>What this means when you build and run:</p>
+
+<ul>
+  <li>The same Rust source builds against any supported library, and the
+  binary runs with the library it was built against, or one with the same
+  ABI. ferrompi gives source portability, not binary portability.</li>
+  <li><code>build.rs</code> looks for MPI in a fixed order. The first of
+  <code>MPI_PKG_CONFIG</code>, <code>MPICC</code> and
+  <code>CRAY_MPICH_DIR</code> that is set wins, and if its probe fails the
+  build stops instead of trying the others. With none of them set, it tries
+  the pkg-config packages <code>mpich</code>, <code>ompi</code> and
+  <code>mpi</code>, then <code>mpicc</code> on the <code>PATH</code>, then
+  the usual prefixes. Where several libraries are installed, set one of the
+  three variables to choose.</li>
+  <li>Cargo runs <code>build.rs</code> again when one of those variables
+  changes, or <code>PATH</code> does, so loading another MPI module rebuilds
+  ferrompi against it.</li>
+  <li>The binary does not record where the library is (it has no rpath), so
+  the library must be found when the program starts: on the default library
+  path, through <code>LD_LIBRARY_PATH</code>, or by loading the same
+  module.</li>
+  <li>Launch with the <code>mpiexec</code> of the library you built against
+  (<a href="01-the-mpi-model.html#every-process-says-rank-0-of-1">chapter 1</a>).</li>
+</ul>
+
+<p>To build against a particular library, name its compiler wrapper:</p>
+
+<pre data-lang="bash"><code>MPICC=/opt/mpich/bin/mpicc cargo build --examples</code></pre>
+
+<p>When <code>build.rs</code> runs, it reports which probe found MPI, in a
+line that starts <code>Found MPI via</code>; <code>cargo build -vv</code>
+shows it. Chapter 8 covers building and running in more detail, and
+<a href="../ferrompi/doc/mpi_compatibility/index.html#building">the
+compatibility guide</a> lists every probe.</p>
+
+<h2 id="standard-abi">The MPI 5.0 ABI</h2>
+
+<p>MPI 5.0, published in June 2025, adds a standard ABI. Its
+<code>mpi.h</code> declares each handle type as a pointer to an incomplete
+struct, such as <code>struct MPI_ABI_Comm *</code>, and fixes the value of
+every constant and predefined handle, as in the third column of the table
+above. Its library is <code>libmpi_abi</code>. A library that implements the
+standard ABI keeps its own as well, and a program chooses one when it is
+built. A program built for the standard ABI links <code>libmpi_abi</code>,
+and runs with any library that provides it.</p>
+
+<p>ferrompi needs no change to build for it. The C layer uses only the names
+in <code>mpi.h</code>, so it compiles unchanged against an ABI header. Point
+<code>MPICC</code> at the ABI’s compiler wrapper, which the MPI Forum’s
+reference stubs install as <code>mpicc_abi</code>:</p>
+
+<pre data-lang="bash"><code>MPICC=/path/to/mpi-abi/bin/mpicc_abi cargo build --examples</code></pre>
+
+<p>ferrompi’s CI builds every example this way against the MPI Forum’s
+<a href="https://github.com/mpi-forum/mpi-abi-stubs">stubs</a>, which declare
+the whole ABI and implement none of it. That checks that the C layer
+compiles and links against the ABI; CI does not yet run programs on a
+library that implements it
+(<a href="../ferrompi/doc/adr_0006_mpi5_abi_direction/index.html">the
+decision record</a> has the plan).</p>
+
+<p>Some libraries shipped a draft of the ABI before the standard was final,
+such as MPICH 4.3 built with <code>-DMPI_ABI</code>, whose values for the
+error handlers and thread levels differ from the standard’s. The C layer
+refuses to compile against one:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>#if defined(MPI_ABI_VERSION) &amp;&amp; MPI_VERSION &lt; 5
+#error "ferrompi does not support the draft MPI ABI (MPI_ABI_VERSION with MPI_VERSION &lt; 5, as in MPICH 4.3 built with -DMPI_ABI); build against the native MPI headers or an MPI 5.0 ABI implementation"
+#endif</code></pre>
+
+<p>Once libraries ship the standard ABI, one binary will run with every
+library that provides it, and a container will be able to use the host’s
+<code>libmpi_abi</code>. ferrompi keeps its C layer either way: the layer
+still gives Rust fixed types, keeps the handle tables, and serves the
+libraries that offer only their own ABI.</p>
+
+<h2 id="when-the-library-is-wrong">When the library is wrong</h2>
+
+<p>Most problems with an MPI library show up when a program is built or
+started, and each has a recognizable sign:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>What you see</th><th>Why</th><th>What to do</th></tr></thead>
+  <tbody>
+    <tr><td><code>error while loading shared libraries: libmpi.so.12</code> (or another <code>libmpi</code>)</td><td>the library is not on the loader’s path; ferrompi records no rpath</td><td>load the module, set <code>LD_LIBRARY_PATH</code>, or run <code>ldconfig</code></td></tr>
+    <tr><td>every process prints rank 0 of 1</td><td>the <code>mpiexec</code> belongs to another library than the one the program was built against</td><td>use the <code>mpiexec</code> next to the <code>mpicc</code> you built with; check with <code>ldd</code></td></tr>
+    <tr><td><code>Could not find MPI</code> when building</td><td>no probe found a library</td><td>install one, or set <code>MPI_PKG_CONFIG</code>, <code>MPICC</code> or <code>CRAY_MPICH_DIR</code></td></tr>
+    <tr><td>the build stops with <code>MPICC=…</code> and an error</td><td>a variable you set names a probe that fails; ferrompi does not fall back</td><td>fix the path, or unset the variable</td></tr>
+    <tr><td>the program builds against the wrong library</td><td>auto-detection tries pkg-config’s <code>mpich</code> before <code>ompi</code></td><td>set <code>MPICC</code> or <code>MPI_PKG_CONFIG</code></td></tr>
+    <tr><td>the build stops with <code>ferrompi does not support the draft MPI ABI</code></td><td>the <code>mpi.h</code> is a draft ABI header</td><td>build against the library’s own headers, or an MPI 5.0 ABI</td></tr>
+    <tr><td><code>Error::NotSupported</code></td><td>the library lacks an MPI-4.0 operation, such as Open MPI 4.1’s persistent collectives</td><td>fall back to the plain operation, or use a newer library</td></tr>
+    <tr><td>an error of class <code>Count</code> for a large buffer</td><td>the library has no large-count functions, such as Open MPI</td><td>send the buffer in pieces of at most <code>i32::MAX</code> elements</td></tr>
+    <tr><td>with Open MPI, a job hangs at its first messages</td><td>the <code>tcp</code> BTL tries an interface the other process cannot reach, such as Docker’s <code>docker0</code></td><td>name the interface: <code>OMPI_MCA_btl_tcp_if_include=lo</code>, or the cluster’s</td></tr>
+    <tr><td>the program is much slower on the cluster than expected</td><td>messages go over TCP: the library was built without the cluster’s network, or another module is loaded</td><td>check the transport with the table above; load the cluster’s MPI module</td></tr>
+    <tr><td>with Open MPI, <code>mpiexec</code> exits 1 with a notice that a process exited improperly</td><td>a process ended without finalizing MPI, for example through <code>std::process::exit</code></td><td>return from <code>main</code>, so that <code>Mpi</code> is dropped</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><a href="../ferrompi/doc/mpi_compatibility/index.html#known-implementation-issues">The
+compatibility guide’s known issues</a> lists more, with the library versions
+they affect.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>In the error program, send to −1 instead of <code>world.size()</code>.
+  Which branch of the <code>match</code> runs, and why does the error not
+  come from MPI?</li>
+  <li>From the two ping-pong tables, take the 8-byte time as the latency and
+  the best rate as the bandwidth, and predict the time of a 65536-byte
+  message as latency plus size over bandwidth. How close is each prediction?
+  Above what size does each run spend more time on bytes than on
+  latency?</li>
+  <li>With MPICH, run the ping-pong with
+  <code>MPIR_CVAR_DEBUG_SUMMARY=1</code>, then with
+  <code>MPIR_CVAR_NOLOCAL=1</code> as well, then with
+  <code>FI_PROVIDER=tcp</code> added. Which libfabric provider does each run
+  use, and how do their small-message times compare?</li>
+  <li>Find the definitions of <code>MPI_Comm</code>,
+  <code>MPI_COMM_WORLD</code> and <code>MPI_ANY_SOURCE</code> in your
+  library’s <code>mpi.h</code>. For MPICH and Open MPI, it is in the
+  <code>include</code> directory next to the <code>bin</code> directory that
+  holds <code>mpicc</code>.</li>
+  <li>Build the examples with <code>MPICC</code> set to a path that does not
+  exist, and read the error. Why is it better for the build to stop than to
+  fall back to auto-detection?</li>
+  <li>In the fallback program, also print <code>Mpi::version()</code>. For
+  which library would choosing the branch by the version take the wrong one,
+  and what would happen?</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>Most MPI libraries come from MPICH or from Open MPI. The members of the
+  MPICH ABI initiative share one binary interface, through
+  <code>libmpi.so.12</code>; Open MPI has its own, through
+  <code>libmpi.so.40</code>.</li>
+  <li>The standard fixes names and behavior. Libraries differ in the
+  standard version they report, the MPI-4.0 features they have, their
+  launchers, their tuning, their default binding and their error codes.</li>
+  <li>Match an error on its class, and log its code and message. Try an
+  MPI-4.0 operation and fall back on <code>Error::NotSupported</code>, rather
+  than testing the version.</li>
+  <li>Within a node a message goes through shared memory. Between nodes it
+  goes over TCP, through the kernel, or by RDMA, where the NIC reads and
+  writes the buffers. A message costs a latency plus a time per byte, and a
+  ping-pong measures both.</li>
+  <li>MPICH drives the network through libfabric or UCX; Open MPI through its
+  BTLs, UCX or libfabric. Environment variables and MCA parameters show and
+  change the choice.</li>
+  <li>MPI’s constants and handles are compiled into a program, and their
+  values differ per library, so a binary runs only with libraries of its own
+  ABI.</li>
+  <li>ferrompi compiles a C layer against the library’s <code>mpi.h</code>,
+  which translates ferrompi’s fixed codes to the library’s values. That gives
+  source portability, not binary portability. MPI 5.0’s standard ABI fixes
+  the values for every library that provides it; ferrompi builds against it,
+  and CI does not yet run programs on it.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="06-threads-and-hybrid-mpi.html">Previous: chapter 6, threads and hybrid MPI</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="08-building-and-running.html">Next: chapter 8, building and running</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

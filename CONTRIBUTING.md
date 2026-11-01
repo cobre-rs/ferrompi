@@ -45,6 +45,9 @@ cargo test --doc
 cargo test --doc --all-features
 cargo +nightly-2026-09-30 test --doc --all-features   # enforces compile_fail error codes
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+bash .github/scripts/check-tutorial-test.sh
+cargo doc --no-deps --all-features
+bash .github/scripts/check-tutorial.sh   # after the all-features docs: runs the tutorial's programs, checks its excerpts and links
 
 bash tests/runner_selftest.sh
 bash tests/build_probe.sh
@@ -137,6 +140,31 @@ only unit test that initializes MPI, so it is `#[ignore]`d and runs alone, as a
 singleton: `cargo test --lib -- --ignored`. Never pass `--include-ignored`: some of the
 other unit tests need a process in which MPI was never initialized.
 
+## Writing the tutorial
+
+The tutorial is HTML, one page per chapter in `docs/tutorial/`, sharing
+`tutorial.css` and `tutorial.js`; `docs.yml` publishes it beside the rustdoc.
+A Rust block in it is either a complete program, marked with the process count
+it runs at, or an excerpt of a file in this repository, marked with that file;
+an output block can name the program whose lines it shows.
+`.github/scripts/check-tutorial.sh` builds and runs each program under
+`mpiexec`, compares the output blocks with the runs, checks that each excerpt
+still matches its file, and checks that every relative link resolves; its
+header gives the exact markup. An excerpt can skip lines with a comment that
+starts with an ellipsis, `// …` or `/* … */`, so when a change to the source
+breaks one, update the excerpt to the new code. Links into the API
+reference are relative (`../ferrompi/struct.Mpi.html#method.init`), so the
+check fails when an item they name is renamed or removed.
+
+To preview a page, run the check, which copies the tutorial into
+`target/doc/tutorial/`, then serve that directory:
+
+```bash
+python3 -m http.server --directory target/doc 8000
+```
+
+and open `http://localhost:8000/tutorial/`.
+
 ## Benchmarks
 
 Benchmarks run by hand; no CI job runs them. Build without running, then launch
@@ -158,7 +186,8 @@ Pull requests to `main` and `develop` run:
 - the test matrix (MPICH 4.2.1 and Open MPI 4.1.6, default and `rma` features),
   Open MPI 5.0.7 (`rma` only), the MSRV (1.85) build, the MPI Forum ABI-stubs
   build, the large-count example, code coverage, the documentation and package
-  build, and a Valgrind memcheck run (`.github/workflows/test.yml`);
+  build with the tutorial check, and a Valgrind memcheck run
+  (`.github/workflows/test.yml`);
 - `cargo audit` and a Dependency Review (`.github/workflows/security.yml`), which
   also run monthly on a schedule;
 - automatic PR labeling by changed files (`.github/workflows/pr-labels.yml`).

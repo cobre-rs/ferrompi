@@ -1,0 +1,1221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>10. The C shim · ferrompi tutorial</title>
+<meta name="description" content="A reading of csrc/ferrompi.c, the only part of ferrompi that sees mpi.h: why it exists, the interface Rust calls, the six tables that hold MPI’s handles, how threads share them, what happens when one is full, the values it translates, the codes it returns itself, the user-operation trampolines, finalize, and the rules a change to it follows.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#why-c">Why a C layer</a></li>
+      <li><a href="#the-contract">The contract</a></li>
+      <li><a href="#six-tables">Six tables</a></li>
+      <li><a href="#request-table">The request table</a></li>
+      <li><a href="#threads">Threads and the tables</a></li>
+      <li><a href="#table-full">When a table is full</a></li>
+      <li><a href="#translating">Translating values</a></li>
+      <li><a href="#own-codes">Codes the C layer returns itself</a></li>
+      <li><a href="#trampolines">Sixteen trampolines</a></li>
+      <li><a href="#finalize">Finalize</a></li>
+      <li><a href="#rules">Rules for the C layer</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part II · Chapter 10</p>
+<h1>The C shim</h1>
+
+<p class="lede"><code>csrc/ferrompi.c</code> is the only part of ferrompi that
+includes <code>mpi.h</code>. Rust calls its functions with integers and
+addresses, and it calls MPI with MPI’s own types. This chapter reads it: the
+interface it offers Rust, the tables where it keeps MPI’s handles, how threads
+share them, what it does when one is full, and how it tears everything down at
+the end.</p>
+
+<p>By the end of the chapter you can read any function in the C layer, say
+which table a Rust value holds a slot in and what happens when that table is
+full, call the C layer from a C program to test it alone, and name the rules a
+change to it has to keep.</p>
+
+<p>The excerpts of ferrompi’s source below name the file they come from. A
+comment <code>// …</code> or <code>/* ... */</code> marks lines left out. CI
+checks that every excerpt still matches its file.</p>
+
+<h2 id="why-c">Why a C layer</h2>
+
+<p>The usual way to call a C library from Rust is <code>bindgen</code>, which
+reads the library’s header at build time and writes the matching Rust
+declarations. ferrompi does not use it for MPI.
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/docs/adr/0001-why-c-wrapper.md">ADR
+0001</a> gives the reasons:</p>
+
+<ul>
+  <li><strong>The handle types differ.</strong> Generated from MPICH’s header,
+  <code>MPI_Comm</code> is an <code>i32</code>; from Open MPI’s, it is a
+  pointer
+  (<a href="07-implementations-networks-and-abi.html#abi-problem">chapter
+  7</a>). Every Rust type that held one would change with the library.</li>
+  <li><strong>Functions come and go with the version.</strong> An MPI 3.1
+  header has no <code>MPI_Send_c</code>. Rust code calling it would need the
+  build script to detect the version and a <code>cfg</code> at every call;
+  the C layer needs one <code>#if MPI_VERSION &gt;= 4</code> where it
+  calls.</li>
+  <li><strong>Callbacks need distinct C functions.</strong> MPI calls a
+  user-defined operation through a function pointer with no room for user
+  data, so each live operation needs a function of its own. With bindgen these
+  would still have to be written in C.</li>
+  <li><strong>The unsafe surface stays small.</strong> Rust calls only the
+  functions in <code>csrc/ferrompi.h</code>, which take fixed-width integers
+  and addresses, through the declarations in <code>src/ffi.rs</code>.</li>
+</ul>
+
+<p>The ADR also rejects building on a C++ MPI library such as Boost.MPI: a
+large dependency that leaves the handle and version problems where they were.
+The cost of the choice is code: <code>csrc/ferrompi.c</code> is about 4,900
+lines, every MPI call ferrompi offers is written twice, once in C and once as
+its Rust declaration, and a change at the boundary needs a reviewer who reads
+both languages.</p>
+
+<h2 id="the-contract">The contract</h2>
+
+<p>The header opens with the rules every function in it keeps:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.h"><code>/**
+ * ferrompi.h - the C interface between ferrompi's Rust code and MPI. Rust
+ * calls only these functions. MPI objects are held in fixed-size C handle
+ * tables and cross the FFI as integer handles. Every status-returning
+ * function returns an MPI error code (MPI_SUCCESS = 0) or one of the
+ * negative ferrompi sentinels below. MPI 4.0 operations are compiled only
+ * where the library provides them. Fixed-width types are used at the FFI
+ * boundary.
+ */</code></pre>
+
+<p>Everything that crosses the boundary is one of a few kinds of value:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>What</th><th>C type</th><th>Example</th></tr></thead>
+  <tbody>
+    <tr><td>a communicator, group, datatype, window or user operation</td><td><code>int32_t</code> handle</td><td><code>0</code> is <code>MPI_COMM_WORLD</code></td></tr>
+    <tr><td>a request</td><td><code>int64_t</code> handle</td><td>a slot and a generation, below</td></tr>
+    <tr><td>a matched message</td><td><code>int64_t</code></td><td>the <code>MPI_Message</code> itself</td></tr>
+    <tr><td>a buffer</td><td><code>const void*</code>, <code>void*</code></td><td>a null send buffer means in place</td></tr>
+    <tr><td>an element count</td><td><code>int64_t</code></td><td>above <code>INT_MAX</code>, a <code>_c</code> call</td></tr>
+    <tr><td>an element type</td><td><code>int32_t</code> tag</td><td><code>1</code> is <code>f64</code>, <code>MPI_DOUBLE</code></td></tr>
+    <tr><td>a reduction</td><td><code>int32_t</code> code</td><td><code>0</code> is <code>MPI_SUM</code>; <code>64</code> and up, a user operation</td></tr>
+    <tr><td>a rank or a tag</td><td><code>int32_t</code></td><td><code>-1</code> is any source</td></tr>
+    <tr><td>a result</td><td>a pointer to fill</td><td>a rank, a new handle, a status</td></tr>
+    <tr><td>the outcome</td><td><code>int</code> return value</td><td><code>0</code>, an MPI error code, or a negative ferrompi code</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Chapter 9 showed the Rust side of one call, the declaration in
+<code>src/ffi.rs</code> and the guard around it
+(<a href="09-a-tour-of-the-layers.html#the-guard">the guard</a>), and
+chapter 7 the translation of the wildcard ranks and tags
+(<a href="07-implementations-networks-and-abi.html#how-ferrompi-builds">how
+ferrompi builds</a>). The rest of this section is the two things both sides
+have to agree on.</p>
+
+<h3 id="one-struct-twice">One struct, written twice</h3>
+
+<p>A receive’s status comes back in a struct, the only one that crosses. The
+header declares it:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.h"><code>typedef struct {
+    int32_t source;
+    int32_t tag;
+    int64_t count;
+    int32_t error;
+} ferrompi_status;</code></pre>
+
+<p>and <code>src/ffi.rs</code> declares it again, with
+<code>#[repr(C)]</code> so that Rust lays it out as C does:</p>
+
+<pre data-lang="rust" data-source="src/ffi.rs"><code>/// Mirror of the C `ferrompi_status`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FerrompiStatus {
+    pub source: int32_t,
+    pub tag: int32_t,
+    pub count: int64_t,
+    pub error: int32_t,
+}
+
+const _: () = assert!(std::mem::size_of::&lt;FerrompiStatus&gt;() == 24);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, source) == 0);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, tag) == 4);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, count) == 8);
+const _: () = assert!(std::mem::offset_of!(FerrompiStatus, error) == 16);</code></pre>
+
+<p>The <code>const</code> items fail the Rust build if the size or an offset
+is not the one C uses, and the C file asserts the same numbers:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>_Static_assert(sizeof(ferrompi_status) == 24, "ferrompi_status layout");
+_Static_assert(offsetof(ferrompi_status, source) == 0, "ferrompi_status.source offset");
+_Static_assert(offsetof(ferrompi_status, tag) == 4, "ferrompi_status.tag offset");
+_Static_assert(offsetof(ferrompi_status, count) == 8, "ferrompi_status.count offset");
+_Static_assert(offsetof(ferrompi_status, error) == 16, "ferrompi_status.error offset");</code></pre>
+
+<p>A field added on one side only stops one of the two builds.</p>
+
+<h3 id="mirrored-values">Values with a mirror</h3>
+
+<p>Tags, operation codes and ferrompi’s own error codes are numbers that each
+side writes down. Nothing compiles one side against the other. Each carries
+a comment that names its mirror, on one side or on both:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.h"><code>/* Op codes at or above FERROMPI_OP_USER_BASE name the user op in slot
+ * (code - FERROMPI_OP_USER_BASE); smaller codes are the predefined ops get_op
+ * switches on. MUST stay in sync with the mirrored const in src/op.rs. */
+#define FERROMPI_OP_USER_BASE 64</code></pre>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>/// Op codes at or above this name the user op in slot `code - USER_OP_CODE_BASE`;
+/// smaller codes are the predefined ops `get_op` switches on. Mirrors
+/// `FERROMPI_OP_USER_BASE` in csrc/ferrompi.h; keep in sync.
+pub(crate) const USER_OP_CODE_BASE: i32 = 64;</code></pre>
+
+<p>A change to one means a change to the other, in the same commit.</p>
+
+<h3 id="by-value">The one handle passed by value</h3>
+
+<p>A matched message is the exception to the tables below. Its
+<code>MPI_Message</code> crosses as it is, copied into an
+<code>int64_t</code>:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>// An MPI_Message crosses to Rust by value in an int64_t: an integer handle in
+// MPICH, a pointer in Open MPI and in the MPI 5.0 ABI.
+_Static_assert(sizeof(MPI_Message) &lt;= sizeof(int64_t),
+               "MPI_Message must fit in the int64_t that carries it");
+
+static int64_t message_to_i64(MPI_Message m) {
+    int64_t v = 0;
+    memcpy(&amp;v, &amp;m, sizeof m);
+    return v;
+}</code></pre>
+
+<p>The <code>_Static_assert</code> stops the build against a library whose
+<code>MPI_Message</code> is larger.
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/docs/adr/0006-mpi5-abi-direction.md">ADR
+0006</a> makes storing every handle this way, instead of in the tables, the
+condition for testing ferrompi at run time against the MPI 5.0 ABI.</p>
+
+<h2 id="six-tables">Six tables</h2>
+
+<p>Every other MPI object that outlives a call is kept in a table in
+<code>csrc/ferrompi.c</code>: an array of MPI handles, an array of flags that
+say which slots are in use, and a hint of where to look for a free one. The
+handle Rust holds is the slot’s index:</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 940 280" role="img" aria-label="The communicator table: two arrays of 256 slots, comm_used holding a flag per slot and comm_table holding an MPI_Comm per slot. Slot 0 holds MPI_COMM_WORLD, set at init and never freed. Slots 1, 2 and 4 are in use, holding a duplicate, a split and another duplicate, with flag 1. Slots 3 and 5 are free, with flag 0 and MPI_COMM_NULL: slot 3 was freed, by storing MPI_COMM_NULL and then flag 0. Your program’s Communicator holds handle 2; get_comm(2) checks slot 2’s flag and reads slot 2. next_comm_hint points at slot 5, after the last slot claimed, so the next alloc_comm compares and swaps slot 5’s flag from 0 to 1 and then stores the new MPI_Comm there." style="min-width: 46rem">
+  <defs>
+    <marker id="tab-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+  <text x="40" y="38" class="t-head">your program</text>
+  <rect x="322" y="16" width="260" height="36" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="452" y="38" text-anchor="middle" class="t-mono">Communicator { handle: 2, … }</text>
+  <line x1="452" y1="52" x2="452" y2="92" class="s-accent" stroke-width="1.5" marker-end="url(#tab-arrow)"/>
+  <text x="462" y="78" class="t-small f-muted">get_comm(2): the flag, then the slot</text>
+  <text x="40" y="116" class="t-mono">comm_used</text>
+  <text x="40" y="156" class="t-mono">comm_table</text>
+  <rect x="150" y="96" width="116" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="208" y="116" text-anchor="middle" class="t-mono">1</text>
+  <rect x="150" y="136" width="116" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="208" y="156" text-anchor="middle" class="t-mono">MPI_COMM_WORLD</text>
+  <text x="208" y="186" text-anchor="middle" class="t-small f-muted">slot 0</text>
+  <rect x="272" y="96" width="116" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="330" y="116" text-anchor="middle" class="t-mono">1</text>
+  <rect x="272" y="136" width="116" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="330" y="156" text-anchor="middle" class="t-mono">a duplicate</text>
+  <text x="330" y="186" text-anchor="middle" class="t-small f-muted">slot 1</text>
+  <rect x="394" y="96" width="116" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="452" y="116" text-anchor="middle" class="t-mono">1</text>
+  <rect x="394" y="136" width="116" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="452" y="156" text-anchor="middle" class="t-mono">a split</text>
+  <text x="452" y="186" text-anchor="middle" class="t-small f-muted">slot 2</text>
+  <rect x="516" y="96" width="116" height="32" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="574" y="116" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="516" y="136" width="116" height="32" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="574" y="156" text-anchor="middle" class="t-mono f-muted">MPI_COMM_NULL</text>
+  <text x="574" y="186" text-anchor="middle" class="t-small f-muted">slot 3</text>
+  <rect x="638" y="96" width="116" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="696" y="116" text-anchor="middle" class="t-mono">1</text>
+  <rect x="638" y="136" width="116" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="696" y="156" text-anchor="middle" class="t-mono">a duplicate</text>
+  <text x="696" y="186" text-anchor="middle" class="t-small f-muted">slot 4</text>
+  <rect x="760" y="96" width="116" height="32" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="818" y="116" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="760" y="136" width="116" height="32" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="818" y="156" text-anchor="middle" class="t-mono f-muted">MPI_COMM_NULL</text>
+  <text x="818" y="186" text-anchor="middle" class="t-small f-muted">slot 5</text>
+  <text x="890" y="136" class="t-mono f-muted">… 255</text>
+  <text x="208" y="214" text-anchor="middle" class="t-small f-muted">set at init,</text>
+  <text x="208" y="230" text-anchor="middle" class="t-small f-muted">never freed</text>
+  <text x="574" y="214" text-anchor="middle" class="t-small f-muted">freed: MPI_COMM_NULL,</text>
+  <text x="574" y="230" text-anchor="middle" class="t-small f-muted">then flag 0</text>
+  <line x1="818" y1="226" x2="818" y2="196" class="s-accent" stroke-width="1.5" marker-end="url(#tab-arrow)"/>
+  <text x="818" y="244" text-anchor="middle" class="t-mono">next_comm_hint</text>
+  <text x="876" y="264" text-anchor="end" class="t-small f-muted">the next claim: flag 0 → 1, then the MPI_Comm</text>
+</svg>
+</div>
+<figcaption>The communicator table. A <code>Communicator</code> holds a slot
+number, and <code>get_comm</code> turns it into the <code>MPI_Comm</code> in
+that slot after checking its flag. A free slot holds
+<code>MPI_COMM_NULL</code> and flag 0. The next allocation starts at the
+hint, the slot after the last one claimed, so it takes slot 5 before slot
+3.</figcaption>
+</figure>
+
+<p>The six tables differ in size, and in the slot each keeps for itself:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Table</th><th>Slots</th><th>Reserved</th><th>Rust values that hold a slot</th></tr></thead>
+  <tbody>
+    <tr><td><code>comm_table</code></td><td>256</td><td>slot 0, <code>MPI_COMM_WORLD</code></td><td><code>Communicator</code></td></tr>
+    <tr><td><code>group_table</code></td><td>64</td><td>handle 0 is <code>MPI_GROUP_EMPTY</code>, and slot 0 is never used</td><td><code>Group</code></td></tr>
+    <tr><td><code>datatype_table</code></td><td>64</td><td></td><td><code>CustomDatatype</code></td></tr>
+    <tr><td><code>win_table</code></td><td>256</td><td></td><td><code>Win</code></td></tr>
+    <tr><td><code>op_table</code></td><td>16</td><td></td><td><code>UserOp</code></td></tr>
+    <tr><td><code>request_table</code></td><td>16,384</td><td></td><td><code>Request</code>, <code>PersistentRequest</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>This program makes communicators, groups and user operations until each
+table refuses one, keeping every value alive so that each holds its slot:</p>
+
+<pre data-lang="rust" data-run="2" id="limits"><code>use ferrompi::{Mpi, UserOp};
+
+/// Calls `make` until it fails, keeping every value it returns. Returns the
+/// values and a line naming how many there were and the error that stopped
+/// the loop.
+fn fill&lt;T&gt;(what: &amp;str, mut make: impl FnMut() -&gt; ferrompi::Result&lt;T&gt;) -&gt; (Vec&lt;T&gt;, String) {
+    let mut kept = Vec::new();
+    loop {
+        match make() {
+            Ok(value) =&gt; kept.push(value),
+            Err(err) =&gt; {
+                let line = format!("{what}: {} made, then: {err}", kept.len());
+                return (kept, line);
+            }
+        }
+    }
+}
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    // Every value made stays alive, so each one holds a slot.
+    let (comms, comm_line) = fill("communicators", || world.duplicate());
+    let (groups, group_line) = fill("groups", || world.group());
+    let (ops, op_line) = fill("operations", || {
+        UserOp::&lt;f64&gt;::new(|a, b| {
+            for (x, y) in a.iter().zip(b) {
+                *y += x;
+            }
+        })
+    });
+
+    // Dropping a value frees its slot.
+    drop((comms, groups, ops));
+    let again = world.duplicate()?;
+
+    if world.rank() == 0 {
+        println!("{comm_line}");
+        println!("{group_line}");
+        println!("{op_line}");
+        println!("after the drops, a duplicate of size {}", again.size());
+    }
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="limits"><code>communicators: 255 made, then: ferrompi communicator table is full
+groups: 63 made, then: ferrompi group table is full
+operations: 16 made, then: ferrompi operation table is full
+after the drops, a duplicate of size 2</code></pre>
+
+<p>A program gets 255 communicators besides <code>world</code>, since
+<code>MPI_COMM_WORLD</code> takes slot 0, and 63 groups. The sizes are
+constants at the top of the file
+(<a href="09-a-tour-of-the-layers.html#where-state-lives">chapter 9</a>
+quoted them), so a program that needs more changes them and rebuilds
+ferrompi. The tables are fixed so that the C layer never allocates for them,
+and a full one returns <code>Error::ResourceExhausted</code> instead of
+growing.</p>
+
+<h3 id="claiming-a-slot">Claiming and freeing a slot</h3>
+
+<p>Five of the tables work alike; <code>alloc_comm</code> shows how a slot is
+claimed:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>static int32_t alloc_comm(MPI_Comm comm) {
+    int hint = atomic_load_explicit(&amp;next_comm_hint, memory_order_relaxed);
+    for (int i = 0; i &lt; MAX_COMMS; i++) {
+        int idx = (hint + i) % MAX_COMMS;
+        if (idx == 0) continue;  // slot 0 is MPI_COMM_WORLD; never reuse
+        int expected = 0;
+        if (atomic_compare_exchange_strong_explicit(
+                &amp;comm_used[idx], &amp;expected, 1,
+                memory_order_acq_rel, memory_order_relaxed)) {
+            comm_table[idx] = comm;
+            atomic_store_explicit(&amp;next_comm_hint,
+                (idx + 1) % MAX_COMMS, memory_order_relaxed);
+            return (int32_t)idx;
+        }
+    }
+    return -1;  // No space
+}</code></pre>
+
+<p>The scan starts at the hint and wraps around the table once, skipping slot
+0. <code>atomic_compare_exchange_strong_explicit</code> changes a flag from 0
+to 1 only if it is still 0, so of two threads that reach the same free slot,
+one claims it and the other moves on. Then the slot gets its
+<code>MPI_Comm</code>, and the hint moves past it. A return of −1 becomes
+<code>FERROMPI_ERR_COMMS_FULL</code> in the caller.</p>
+
+<p>Freeing runs the other way:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int ferrompi_comm_free(int32_t comm_handle) {
+    if (comm_handle == 0) {
+        return MPI_ERR_COMM;  // Cannot free COMM_WORLD
+    }
+    if (comm_handle &lt; 0 || comm_handle &gt;= MAX_COMMS) {
+        return MPI_ERR_COMM;
+    }
+    if (!atomic_load_explicit(&amp;comm_used[comm_handle], memory_order_acquire)) {
+        return MPI_SUCCESS;  // Already freed
+    }
+    MPI_Comm comm = comm_table[comm_handle];
+    int ret = MPI_Comm_free(&amp;comm);
+    comm_table[comm_handle] = MPI_COMM_NULL;
+    atomic_store_explicit(&amp;comm_used[comm_handle], 0, memory_order_release);
+    return ret;
+}</code></pre>
+
+<p>Handle 0 is refused, so <code>MPI_COMM_WORLD</code> is never freed. A
+handle whose slot is free already returns success, and a live one is freed in
+MPI, set to <code>MPI_COMM_NULL</code>, and only then marked free, whatever
+<code>MPI_Comm_free</code> returned. <code>get_comm</code>, quoted in
+<a href="09-a-tour-of-the-layers.html#the-c-layer">chapter 9</a>, gives
+<code>MPI_COMM_NULL</code> for a free slot, and MPI then fails the call with
+class <code>Comm</code>.</p>
+
+<p>Groups, datatypes, windows and user operations have the same three
+functions, under their own names. The group table differs in one place:
+handle 0 stands for <code>MPI_GROUP_EMPTY</code>, a predefined group the
+program must not free, which <code>get_group</code> returns without looking at
+a slot.</p>
+
+<h2 id="request-table">The request table</h2>
+
+<p>Requests are made and freed far more often than anything else: every
+nonblocking call makes one and every completion frees it. Their table has
+16,384 slots and keeps them apart from the other five in two ways.</p>
+
+<p>Its flags are bits. Each 64-bit word of <code>request_bits</code> holds
+the flags of 64 slots, and <code>alloc_request</code> finds a free one with a
+single instruction:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>static int64_t alloc_request(MPI_Request req, int persistent) {
+    unsigned hint = (unsigned)atomic_load_explicit(&amp;next_request_hint,
+                                                    memory_order_relaxed);
+    for (int w = 0; w &lt; REQUEST_BITS_WORDS; w++) {
+        unsigned widx = (hint + (unsigned)w) % REQUEST_BITS_WORDS;
+        uint64_t cur = atomic_load_explicit(&amp;request_bits[widx],
+                                            memory_order_relaxed);
+        while (cur != UINT64_MAX) {
+            int bit = __builtin_ctzll(~cur);  // lowest free slot in this word
+            uint64_t mask = (uint64_t)1 &lt;&lt; bit;
+            uint64_t old = atomic_fetch_or_explicit(&amp;request_bits[widx], mask,
+                                                    memory_order_acq_rel);
+            if ((old &amp; mask) == 0) {
+                int64_t idx = (int64_t)widx * 64 + bit;
+                request_table[idx] = req;
+                request_state[idx] = persistent ? REQUEST_PERSISTENT : 0;
+                request_dtype[idx] = MPI_DATATYPE_NULL;
+                /* ... */
+                uint32_t gen = atomic_load_explicit(&amp;request_gen[idx],
+                                                    memory_order_relaxed);
+                /* ... */
+                return ((int64_t)gen &lt;&lt; 32) | idx;
+            }
+            cur = old;  // lost the race for that bit; retry the next free one
+        }
+    }
+    return -1;  /* No space */
+}</code></pre>
+
+<p><code>__builtin_ctzll(~cur)</code> counts the trailing zeros of the
+word’s complement, which is the position of the lowest 0 bit: the first free
+slot in the word. <code>atomic_fetch_or_explicit</code> sets the bit and
+returns the word as it was before. If the bit was already set, another thread
+took the slot in between, and the loop tries the next free bit.</p>
+
+<p>And its handles carry a <em>generation</em>. The return value puts the
+slot in the low 32 bits and, above them, the slot’s count of past frees:</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 300" role="img" aria-label="A request handle is a 64-bit integer: bit 63 is always 0, bits 62 to 32 hold a 31-bit generation, and bits 31 to 0 hold the slot. Below it, slots 0 to 3 of the request table during round 3 of the probe: request_bits word 0 has bits 0 and 1 set, request_gen holds 2, 2, 0 and 0, and request_table holds round 3’s receive and send in slots 0 and 1, and MPI_REQUEST_NULL in slots 2 and 3. request_slot accepts round 3’s receive handle, 0x200000000: bit 0 is set and its generation, 2, matches request_gen[0], so it returns slot 0. It refuses round 1’s receive handle, 0x000000000: bit 0 is set but its generation, 0, does not match 2, so it returns -1 and ferrompi_wait returns MPI_ERR_REQUEST." style="min-width: 44rem">
+  <defs>
+    <marker id="req-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+  <text x="40" y="52" class="t-head">a handle</text>
+  <rect x="180" y="30" width="28" height="34" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="194" y="51" text-anchor="middle" class="t-mono">0</text>
+  <rect x="212" y="30" width="320" height="34" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="372" y="51" text-anchor="middle" class="t-mono">generation</text>
+  <rect x="536" y="30" width="324" height="34" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="698" y="51" text-anchor="middle" class="t-mono">slot</text>
+  <text x="194" y="80" text-anchor="middle" class="t-small f-muted">63</text>
+  <text x="216" y="80" class="t-small f-muted">62</text>
+  <text x="528" y="80" text-anchor="end" class="t-small f-muted">32</text>
+  <text x="540" y="80" class="t-small f-muted">31</text>
+  <text x="856" y="80" text-anchor="end" class="t-small f-muted">0</text>
+  <text x="372" y="80" text-anchor="middle" class="t-small f-muted">31 bits, bumped on every free</text>
+  <text x="698" y="80" text-anchor="middle" class="t-small f-muted">the index into the arrays below</text>
+  <text x="226" y="124" text-anchor="middle" class="t-small f-muted">slot 0</text>
+  <text x="326" y="124" text-anchor="middle" class="t-small f-muted">slot 1</text>
+  <text x="426" y="124" text-anchor="middle" class="t-small f-muted">slot 2</text>
+  <text x="526" y="124" text-anchor="middle" class="t-small f-muted">slot 3</text>
+  <text x="40" y="158" class="t-mono">request_bits[0]</text>
+  <rect x="180" y="138" width="92" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="226" y="158" text-anchor="middle" class="t-mono">1</text>
+  <rect x="280" y="138" width="92" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="326" y="158" text-anchor="middle" class="t-mono">1</text>
+  <rect x="380" y="138" width="92" height="32" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="426" y="158" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="480" y="138" width="92" height="32" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="526" y="158" text-anchor="middle" class="t-mono f-muted">0</text>
+  <text x="584" y="158" class="t-mono f-muted">…</text>
+  <text x="40" y="198" class="t-mono">request_gen</text>
+  <rect x="180" y="178" width="92" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="226" y="198" text-anchor="middle" class="t-mono">2</text>
+  <rect x="280" y="178" width="92" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="326" y="198" text-anchor="middle" class="t-mono">2</text>
+  <rect x="380" y="178" width="92" height="32" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="426" y="198" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="480" y="178" width="92" height="32" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="526" y="198" text-anchor="middle" class="t-mono f-muted">0</text>
+  <text x="584" y="198" class="t-mono f-muted">…</text>
+  <text x="40" y="238" class="t-mono">request_table</text>
+  <rect x="180" y="218" width="92" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="226" y="238" text-anchor="middle" class="t-mono">a receive</text>
+  <rect x="280" y="218" width="92" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="326" y="238" text-anchor="middle" class="t-mono">a send</text>
+  <rect x="380" y="218" width="92" height="32" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="426" y="238" text-anchor="middle" class="t-mono f-muted">NULL</text>
+  <rect x="480" y="218" width="92" height="32" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="526" y="238" text-anchor="middle" class="t-mono f-muted">NULL</text>
+  <text x="584" y="238" class="t-mono f-muted">…</text>
+  <text x="620" y="132" class="t-head">request_slot(h)</text>
+  <text x="620" y="162" class="t-mono">0x200000000</text>
+  <text x="716" y="162" class="t-small f-muted">round 3’s receive</text>
+  <text x="620" y="180" class="t-small">bit set, generation 2 = 2</text>
+  <text x="620" y="198" class="t-mono">→ slot 0</text>
+  <text x="620" y="232" class="t-mono">0x000000000</text>
+  <text x="716" y="232" class="t-small f-muted">round 1’s receive</text>
+  <text x="620" y="250" class="t-small">bit set, generation 0 ≠ 2</text>
+  <text x="620" y="268" class="t-mono">→ −1: MPI_ERR_REQUEST</text>
+  <line x1="600" y1="118" x2="600" y2="282" class="s-rule" stroke-width="1.2"/>
+</svg>
+</div>
+<figcaption>A request handle and the table it refers to, during round 3 of
+the probe below. <code>request_slot</code> accepts a handle only if its slot’s
+bit is set and its generation is the slot’s current one. Round 3’s receive
+handle passes; round 1’s names the same slot and fails.</figcaption>
+</figure>
+
+<p><code>request_slot</code> does the checking:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>static int64_t request_slot(int64_t handle) {
+    if (handle &lt; 0) {
+        return -1;
+    }
+    uint64_t slot = (uint64_t)handle &amp; 0xffffffffu;
+    if (slot &gt;= (uint64_t)MAX_REQUESTS) {
+        return -1;
+    }
+    unsigned widx = (unsigned)(slot / 64);
+    uint64_t mask = (uint64_t)1 &lt;&lt; (slot % 64);
+    if ((atomic_load_explicit(&amp;request_bits[widx], memory_order_acquire)
+            &amp; mask) == 0) {
+        return -1;
+    }
+    /* ... */
+    uint32_t gen = atomic_load_explicit(&amp;request_gen[slot], memory_order_relaxed);
+    if (gen != (uint32_t)((uint64_t)handle &gt;&gt; 32)) {
+        return -1;
+    }
+    return (int64_t)slot;
+}</code></pre>
+
+<p>Without the generation, a handle kept after its request completed would
+name whatever request took the slot next, and a wait on it would complete
+someone else’s request. The Rust side never passes a completed request’s
+handle: it marks the request and passes −1 in its place. The generation makes
+the C layer refuse one that reaches it anyway. It was added after that
+mistake had happened; <code>examples/test_request_aba.rs</code> is the
+regression test.</p>
+
+<h3 id="calling-c-alone">Calling the C layer from C</h3>
+
+<p>Request handles never reach your program, but the C layer can be called
+without Rust. The build leaves it in a static library,
+<code>libferrompi.a</code>, which a C program can link. This one makes three
+rounds of a message to itself and prints each handle, then waits on round 1’s
+receive again:</p>
+
+<pre data-lang="c"><code>/* Calls ferrompi's C layer with no Rust in the program. */
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include "ferrompi.h"
+
+/* The two functions the C layer calls back into Rust. This program makes no
+ * user-defined operation, so neither is ever called. */
+void rust_user_op_invoke(int32_t slot, void* in, void* inout, int len) {
+    (void)slot; (void)in; (void)inout; (void)len;
+    abort();
+}
+void ferrompi_op_drop_closure(int32_t slot) { (void)slot; }
+
+static void show(const char* what, int64_t h) {
+    printf("  %s handle 0x%09llx: slot %lld, generation %lld\n", what,
+           (unsigned long long)h, (long long)(h &amp; 0xffffffff), (long long)(h &gt;&gt; 32));
+}
+
+int main(void) {
+    int provided;
+    ferrompi_init_thread(0, &amp;provided);
+    int64_t first_recv = -1;
+    for (int round = 1; round &lt;= 3; round++) {
+        int32_t out = round, in = 0;
+        int64_t recv, send;
+        /* A message to this process itself: datatype tag 2 is i32, comm 0 is
+         * MPI_COMM_WORLD. */
+        ferrompi_irecv(&amp;in, 1, 2, 0, 0, 0, &amp;recv);
+        ferrompi_isend(&amp;out, 1, 2, 0, 0, 0, &amp;send);
+        printf("round %d\n", round);
+        show("receive", recv);
+        show("send   ", send);
+        ferrompi_wait(recv, NULL);
+        ferrompi_wait(send, NULL);
+        if (round == 1) first_recv = recv;
+    }
+
+    int ret = ferrompi_wait(first_recv, NULL);
+    int32_t cls, len;
+    char msg[512];
+    ferrompi_error_info(ret, &amp;cls, msg, &amp;len);
+    printf("wait on round 1's receive handle: %s\n", msg);
+    return ferrompi_finalize();
+}</code></pre>
+
+<p>Built in ferrompi’s directory, against the library <code>cargo
+build</code> left:</p>
+
+<pre data-lang="bash"><code>cargo build
+mpicc -I csrc -o probe probe.c "$(find target/debug/build -name libferrompi.a | head -n 1)"
+mpiexec -n 1 ./probe</code></pre>
+
+<pre class="output"><code>round 1
+  receive handle 0x000000000: slot 0, generation 0
+  send    handle 0x000000001: slot 1, generation 0
+round 2
+  receive handle 0x100000000: slot 0, generation 1
+  send    handle 0x100000001: slot 1, generation 1
+round 3
+  receive handle 0x200000000: slot 0, generation 2
+  send    handle 0x200000001: slot 1, generation 2
+wait on round 1's receive handle: Invalid MPI_Request</code></pre>
+
+<p>Each round takes slots 0 and 1 again, under a new generation, and the stale
+handle gets <code>MPI_ERR_REQUEST</code>, whose message is MPICH’s. Nothing
+between the program and the C layer checks the thread or the lifecycle: the
+guard is Rust. The two stub functions stand in for the Rust functions the C
+layer calls back, which a program without user operations never reaches. A
+program like this is the quickest way to try a change to the C layer on its
+own.</p>
+
+<h2 id="threads">Threads and the tables</h2>
+
+<p>At <code>ThreadLevel::Multiple</code>, any thread can call into the C layer
+at any time
+(<a href="06-threads-and-hybrid-mpi.html#multiple">chapter 6</a>), and every
+nonblocking call claims a slot. The tables take no lock for that. Each
+operation on a slot uses one atomic access, with the ordering that makes the
+others safe:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Step</th><th>Atomic access</th><th>Ordering</th><th>What it guarantees</th></tr></thead>
+  <tbody>
+    <tr><td>claim a slot</td><td>compare and swap the flag, or <code>fetch_or</code> the bit</td><td>acquire and release</td><td>one thread wins the slot, and sees everything the thread that freed it last wrote</td></tr>
+    <tr><td>look up a handle</td><td>load the flag or the bit</td><td>acquire</td><td>a lookup that comes after a free sees the slot free, and for a request the new generation</td></tr>
+    <tr><td>free a slot</td><td>store the flag, or <code>fetch_and</code> the bit</td><td>release</td><td>the null handle, and for a request the new generation, are written before the slot looks free</td></tr>
+    <tr><td>move the hint</td><td>load or store</td><td>relaxed</td><td>nothing: a stale hint only makes the scan longer</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><code>free_request</code> shows the order of a free: the slot first, then
+the generation, then the bit, with release:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>static void free_request(int64_t handle) {
+    int64_t slot = request_slot(handle);
+    if (slot &lt; 0) {
+        return;
+    }
+    request_table[slot] = MPI_REQUEST_NULL;
+    /* ... */
+    uint32_t gen = atomic_load_explicit(&amp;request_gen[slot], memory_order_relaxed);
+    atomic_store_explicit(&amp;request_gen[slot], (gen + 1) &amp; REQUEST_GEN_MASK,
+                          memory_order_relaxed);
+    unsigned widx = (unsigned)(slot / 64);
+    uint64_t mask = (uint64_t)1 &lt;&lt; (slot % 64);
+    atomic_fetch_and_explicit(&amp;request_bits[widx], ~mask,
+                              memory_order_release);
+}</code></pre>
+
+<p>One ordering the tables do not give. A slot’s MPI handle is written
+<em>after</em> the claim, so a thread that receives a ferrompi handle from
+another needs the two threads ordered by something else. In safe Rust it
+always is: a value reaches another thread only through something that orders
+the two, such as a channel, a mutex, or the start or join of a thread. The comment above <code>alloc_comm</code> discusses this, and
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/docs/adr/0002-handle-tables.md">ADR
+0002</a> compares the choice with a mutex, which would put every wait and test
+behind one lock, and with a lock-free free list, whose correctness is harder
+to check by reading.</p>
+
+<p>This program runs four threads in each of two processes. Thread
+<em>t</em> of one process exchanges a thousand messages with thread
+<em>t</em> of the other, under tag <em>t</em>, so the request table sees
+eight threads claiming and freeing slots at once:</p>
+
+<pre data-lang="rust" data-run="2" id="thread-exchange"><code>use ferrompi::{Error, Mpi, ThreadLevel};
+
+const THREADS: i32 = 4;
+const ROUNDS: u32 = 1000;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init_thread(ThreadLevel::Multiple)?;
+    if mpi.thread_level() &lt; ThreadLevel::Multiple {
+        return Err(Error::Internal("this MPI does not grant Multiple".into()));
+    }
+    let world = mpi.world();
+    let peer = 1 - world.rank();
+
+    // Thread t of each process exchanges with thread t of the other, under
+    // tag t. Every round claims two request slots and frees them, on four
+    // threads at once.
+    let matched = std::thread::scope(|threads| {
+        let workers: Vec&lt;_&gt; = (0..THREADS)
+            .map(|t| {
+                let world = &amp;world;
+                threads.spawn(move || -&gt; ferrompi::Result&lt;u32&gt; {
+                    let mut matched = 0;
+                    for round in 0..ROUNDS {
+                        let out = [t as u32 * ROUNDS + round];
+                        let mut back = [0u32];
+                        ferrompi::scope(|s| {
+                            let recv = world.irecv(s, &amp;mut back, peer, t)?;
+                            world.isend(s, &amp;out, peer, t)?;
+                            recv.wait()?;
+                            Ok(())
+                        })?;
+                        if back == out {
+                            matched += 1;
+                        }
+                    }
+                    Ok(matched)
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| w.join().expect("a worker panicked"))
+            .sum::&lt;ferrompi::Result&lt;u32&gt;&gt;()
+    })?;
+
+    println!(
+        "rank {}: {THREADS} threads, {matched} of {} exchanges matched",
+        world.rank(),
+        THREADS as u32 * ROUNDS
+    );
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="thread-exchange"><code>rank 0: 4 threads, 4000 of 4000 exchanges matched
+rank 1: 4 threads, 4000 of 4000 exchanges matched</code></pre>
+
+<p>Nothing in the program locks anything. The repository’s
+<code>test_request_table_concurrency</code> and
+<code>test_comm_table_concurrency</code> examples do the same with more
+threads, in every CI test job.</p>
+
+<h3 id="one-lock">The one lock</h3>
+
+<p>The C layer has one mutex, and the tables do not use it. It is for MPI’s
+group calls. MPICH 4.2 builds a group’s ordered list of members the first time
+a call needs it, and Open MPI 4.1 fills in a group’s entries in place, without
+a lock in either, so two threads calling them on the same group race inside
+the library. Every such call is written through a macro:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>static pthread_mutex_t group_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int group_calls_overlap;
+
+#define GROUP_CALL(ret, call)                                      \
+    do {                                                           \
+        if (group_calls_overlap) pthread_mutex_lock(&amp;group_mutex); \
+        (ret) = (call);                                            \
+        if (group_calls_overlap) pthread_mutex_unlock(&amp;group_mutex); \
+    } while (0)</code></pre>
+
+<p><code>group_calls_overlap</code> is set at init from the thread level MPI
+granted: true at <code>Serialized</code> and <code>Multiple</code>, where two
+threads can be in a group call at once. Below that, the guard admits one
+thread, and the macro takes no lock. The lock is held for one local group
+call at a time, never across a collective.</p>
+
+<h2 id="table-full">When a table is full</h2>
+
+<p>By the time the C layer learns a table is full, MPI has usually done its
+part. The object exists, and the C layer has to decide what to do with an
+object it cannot hand back. For a nonblocking call, the operation is already
+running against your buffer:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>    if (ret == MPI_SUCCESS) {
+        *request_handle = alloc_request(req, 0);
+        if (*request_handle &lt; 0) {
+            complete_unregistered_request(&amp;req);
+            return FERROMPI_ERR_REQUESTS_FULL;
+        }
+    }</code></pre>
+
+<p>with <code>complete_unregistered_request</code>:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>static void complete_unregistered_request(MPI_Request* req) {
+    abort_if_pending_after_failure(MPI_Wait(req, MPI_STATUS_IGNORE));
+}</code></pre>
+
+<p>It waits. The comment above it in the source gives the reasons: freeing
+the request would let the transfer go on against a buffer Rust is about to
+give back, and cancelling is not allowed for every kind of request, which
+<code>MPI_Wait</code> is. So the call returns the error only after the
+operation is done. This program sends one message more than the table holds
+requests, to a process that receives them all:</p>
+
+<pre data-lang="rust" data-run="2" id="full-requests"><code>use ferrompi::{Error, Mpi};
+
+/// The request table's size, MAX_REQUESTS in csrc/ferrompi.c.
+const SLOTS: u32 = 16384;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    if world.size() != 2 {
+        return Err(Error::Internal("run with -n 2".into()));
+    }
+    // One value more than the table holds requests.
+    let values: Vec&lt;u32&gt; = (0..=SLOTS).collect();
+
+    if world.rank() == 0 {
+        let mut registered = 0;
+        let refused = ferrompi::scope(|s| {
+            for v in &amp;values {
+                match world.isend(s, std::slice::from_ref(v), 1, 0) {
+                    Ok(_) =&gt; registered += 1,
+                    Err(err) =&gt; return Ok(Some((*v, err))),
+                }
+            }
+            Ok(None)
+        })?;
+        println!("rank 0: {registered} sends registered");
+        if let Some((v, err)) = refused {
+            println!("rank 0: the send of {v} returned: {err}");
+        }
+    } else {
+        let mut count = 0;
+        let mut last = [0u32];
+        for _ in &amp;values {
+            world.recv(&amp;mut last, 0, 0)?;
+            count += 1;
+        }
+        println!(
+            "rank 1: {count} messages received, the last holding {}",
+            last[0]
+        );
+    }
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="full-requests"><code>rank 0: 16384 sends registered
+rank 0: the send of 16384 returned: ferrompi request table is full
+rank 1: 16385 messages received, the last holding 16384</code></pre>
+
+<p>The send that returned <code>ResourceExhausted</code> was delivered. An
+error from a nonblocking call on a full table means the call did not give
+you a request; it does not mean the operation did not happen. A receive in its
+place would have waited for its message before returning the error.</p>
+
+<p>A communicator gets the opposite treatment:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>/* Hand a communicator that MPI returned to Rust: -1 for MPI_COMM_NULL (this
+ * process is not in it), otherwise a table slot, after MPI_ERRORS_RETURN is
+ * installed on it. When that cannot be installed, or the table is full, the
+ * error is returned without freeing the communicator: MPI created it on every
+ * rank that belongs to it, MPI_Comm_free is collective over those ranks, and
+ * freeing it on this rank alone can hang or mismatch collectives. It stays
+ * allocated until MPI_Finalize. A full table leaves -1 in *out_h; a failed
+ * install leaves *out_h alone. */
+static int store_comm(MPI_Comm comm, int32_t* out_h) {
+    if (comm == MPI_COMM_NULL) {
+        *out_h = -1;
+        return MPI_SUCCESS;
+    }
+    int eh_ret = install_errors_return(comm);
+    if (eh_ret != MPI_SUCCESS) return eh_ret;
+    *out_h = alloc_comm(comm);
+    if (*out_h &lt; 0) return FERROMPI_ERR_COMMS_FULL;
+    return MPI_SUCCESS;
+}</code></pre>
+
+<p>Freeing it is a collective call, and only this process has failed, so the
+C layer leaves it allocated. A group is local to the process, so
+<code>store_group</code> frees it:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>static int store_group(MPI_Group group, int32_t* out_h) {
+    if (group == MPI_GROUP_EMPTY) {
+        *out_h = 0;
+        return MPI_SUCCESS;
+    }
+    *out_h = alloc_group(group);
+    if (*out_h &lt; 0) {
+        MPI_Group_free(&amp;group);
+        return FERROMPI_ERR_GROUPS_FULL;
+    }
+    return MPI_SUCCESS;
+}</code></pre>
+
+<p>For each kind of object:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Table full when</th><th>The C layer</th><th>Left behind</th></tr></thead>
+  <tbody>
+    <tr><td>a nonblocking call starts</td><td>waits for the operation</td><td>nothing; the operation has completed</td></tr>
+    <tr><td>a persistent request is made</td><td>frees the inactive request</td><td>nothing</td></tr>
+    <tr><td>a communicator is made</td><td>leaves it</td><td>the communicator, until <code>MPI_Finalize</code></td></tr>
+    <tr><td>a window is made</td><td>leaves it</td><td>the window and its memory; <code>Mpi</code> then skips <code>MPI_Finalize</code></td></tr>
+    <tr><td>a group is made</td><td>frees it</td><td>nothing</td></tr>
+    <tr><td>a datatype is made</td><td>frees it</td><td>nothing</td></tr>
+    <tr><td>a user operation is made</td><td>claims the slot first, so stops before <code>MPI_Op_create</code></td><td>nothing</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The communicator and window rows are the ones to plan for. A process
+whose table had room holds the new object, and a collective call on it cannot
+complete without this process. The
+<a href="../ferrompi/enum.Error.html#variant.ResourceExhausted"><code>Error::ResourceExhausted</code></a>
+documentation says the same.</p>
+
+<h2 id="translating">Translating values</h2>
+
+<p>Most of the C layer’s lines turn ferrompi’s integers into MPI’s values and
+back. Chapter 9 showed the switches for the datatype tag and the operation
+code; the thread level is one more:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int ferrompi_init_thread(int required, int* provided) {
+    init_tables();
+    int mpi_required;
+    switch (required) {
+        case 0: mpi_required = MPI_THREAD_SINGLE; break;
+        case 1: mpi_required = MPI_THREAD_FUNNELED; break;
+        case 2: mpi_required = MPI_THREAD_SERIALIZED; break;
+        case 3: mpi_required = MPI_THREAD_MULTIPLE; break;
+        default: mpi_required = MPI_THREAD_SINGLE; break;
+    }</code></pre>
+
+<p>Rust passes the position of the level in <code>ThreadLevel</code>, 0 to 3,
+and gets the granted level back the same way. MPI orders the four
+constants; their values are the library’s.</p>
+
+<p><code>MPI_UNDEFINED</code> is another value the standard does not fix. The
+C layer turns it into −1 on the way out, as the count of a status and a rank
+that <code>translate_ranks</code> cannot find, and −1 into it on the way in,
+as the colour of a split:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int ferrompi_comm_split(int32_t comm_handle, int32_t color, int32_t key, int32_t* newcomm_handle) {
+    MPI_Comm comm = get_comm(comm_handle);
+    int mpi_color = (color == -1) ? MPI_UNDEFINED : color;
+    MPI_Comm newcomm;
+    int ret = MPI_Comm_split(comm, mpi_color, key, &amp;newcomm);
+    if (ret != MPI_SUCCESS) return ret;
+    return store_comm(newcomm, newcomm_handle);
+}</code></pre>
+
+<p>Rust turns −1 into <code>None</code>, so
+<code>world.split(None, 0)</code> opts out and returns <code>None</code>.</p>
+
+<p>Some translations exist only where they have been checked. Two of the
+paired types for <code>MaxLoc</code> and <code>MinLoc</code> have a layout
+that depends on the platform, and the C layer offers them only where the
+layout matches the Rust structs:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>// MPI_LONG_INT / MPI_LONG_DOUBLE_INT are exposed only where their C layout is
+// verified against the Rust LongInt / LongDoubleInt structs.
+#if defined(__linux__) &amp;&amp; (defined(__x86_64__) || defined(__aarch64__) || (defined(__powerpc64__) &amp;&amp; __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__))
+#define FERROMPI_LONG_PAIRS_VERIFIED 1
+_Static_assert(sizeof(struct { long v; int i; }) == 16 &amp;&amp;
+               _Alignof(struct { long v; int i; }) == 8,
+               "MPI_LONG_INT pair layout differs from the Rust LongInt");
+_Static_assert(sizeof(struct { long double v; int i; }) == 32 &amp;&amp;
+               _Alignof(struct { long double v; int i; }) == 16,
+               "MPI_LONG_DOUBLE_INT pair layout differs from the Rust LongDoubleInt");
+#endif</code></pre>
+
+<p>The same platform test enables <code>LongInt</code> and
+<code>LongDoubleInt</code> on the Rust side. Every other case of the switches
+is compiled everywhere, including the operation codes only the
+<code>rma</code> feature sends: the C layer accepts any value a Rust enum can
+hold, whatever features are on.</p>
+
+<h2 id="own-codes">Codes the C layer returns itself</h2>
+
+<p>Some calls fail before MPI is called. The C layer then returns either an
+MPI error code of its own choosing or one of ferrompi’s negative codes. The
+main ones:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Code</th><th>When</th><th>In Rust</th></tr></thead>
+  <tbody>
+    <tr><td><code>MPI_ERR_COUNT</code></td><td>a count above <code>INT_MAX</code> where the large-count call is missing, for a v-collective, or for a user operation</td><td><code>Error::Mpi</code>, class <code>Count</code></td></tr>
+    <tr><td><code>MPI_ERR_TYPE</code></td><td>a datatype tag or handle that names no datatype</td><td><code>Error::Mpi</code>, class <code>Type</code></td></tr>
+    <tr><td><code>MPI_ERR_OP</code></td><td>an operation code that names no operation, in a one-sided call</td><td><code>Error::Mpi</code>, class <code>Op</code></td></tr>
+    <tr><td><code>MPI_ERR_REQUEST</code></td><td>a request handle <code>request_slot</code> refuses</td><td><code>Error::Mpi</code>, class <code>Request</code></td></tr>
+    <tr><td><code>MPI_ERR_WIN</code></td><td>a window handle that names no window</td><td><code>Error::Mpi</code>, class <code>Win</code></td></tr>
+    <tr><td><code>MPI_ERR_COMM</code></td><td>freeing handle 0, or a handle out of range</td><td><code>Error::Mpi</code>, class <code>Comm</code></td></tr>
+    <tr><td><code>MPI_ERR_ARG</code></td><td>an argument it checks itself, such as a freed group or a negative length</td><td><code>Error::Mpi</code>, class <code>Arg</code></td></tr>
+    <tr><td><code>MPI_ERR_NO_MEM</code></td><td>a scratch array it cannot allocate, for a batch of more than 64 requests or a struct datatype</td><td><code>Error::Mpi</code>, class <code>Raw</code>, since ferrompi names no class for it</td></tr>
+    <tr><td>−7001 to −7006</td><td>a full table</td><td><code>Error::ResourceExhausted</code></td></tr>
+    <tr><td>−7008</td><td>an MPI 4.0 call the library lacks</td><td><code>Error::NotSupported</code></td></tr>
+    <tr><td>−7009</td><td>a group with a member outside the communicator</td><td><code>Error::InvalidArgument</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>MPI’s codes are never negative, so <code>Error::from_code</code> tells
+ferrompi’s apart without asking MPI
+(<a href="09-a-tour-of-the-layers.html#the-way-back">chapter 9</a>). The guard
+has its own codes, from −7101, which never come from C.</p>
+
+<h2 id="trampolines">Sixteen trampolines</h2>
+
+<p>A user-defined operation is a Rust closure, and MPI calls it through a
+plain C function pointer that receives the two buffers, the length and the
+datatype: no pointer to the closure. The C layer gives each of the sixteen
+slots of <code>op_table</code> a function of its own, with the slot number
+built in:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>#define FERROMPI_DEFINE_OP_TRAMPOLINE(N)                              \
+static void ferrompi_user_op_trampoline_##N(                          \
+    void* invec, void* inoutvec, int* len, MPI_Datatype* dt) {        \
+    (void)dt;                                                         \
+    rust_user_op_invoke(N, invec, inoutvec, *len);                    \
+}
+
+FERROMPI_DEFINE_OP_TRAMPOLINE(0)
+FERROMPI_DEFINE_OP_TRAMPOLINE(1)
+/* ... */
+FERROMPI_DEFINE_OP_TRAMPOLINE(14)
+FERROMPI_DEFINE_OP_TRAMPOLINE(15)</code></pre>
+
+<p><code>MPI_Op_create</code> gets the function of the slot the operation
+claimed, and the function calls <code>rust_user_op_invoke</code>, in
+<code>src/op.rs</code>, which finds the closure registered for that slot. The
+operation code Rust passes in a reduction is 64 plus the slot. Freeing keeps
+the closure alive for as long as MPI can call it:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int ferrompi_op_free(int32_t handle) {
+    if (handle &lt; 0 || handle &gt;= MAX_OPS) return MPI_ERR_ARG;
+    if (!atomic_load_explicit(&amp;op_used[handle], memory_order_acquire)) return MPI_SUCCESS;  /* already freed */
+    /* ... */
+    MPI_Op tmp = atomic_load_explicit(&amp;op_table[handle], memory_order_acquire);
+    int ret = MPI_Op_free(&amp;tmp);
+    atomic_store_explicit(&amp;op_table[handle], tmp, memory_order_release);
+    /* ... */
+    if (ret != MPI_SUCCESS) {
+        return ret;
+    }
+    /* Step 2: drop the Rust-boxed closure via the Rust callback. */
+    ferrompi_op_drop_closure(handle);
+    /* Step 3: reclaim the slot (also overwrites op_table[handle] with MPI_OP_NULL). */
+    free_op_slot(handle);
+    return ret;
+}</code></pre>
+
+<p>The order is MPI’s operation first, then the closure, through a call back
+into Rust, then the slot. If <code>MPI_Op_free</code> fails, MPI may still
+call the function, so the closure and the slot stay.
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/docs/adr/0005-mpi-op-create.md">ADR
+0005</a> covers the design, and <a href="12-user-defined-reductions-and-derived-datatypes.html#closure-as-op">chapter 12</a> the Rust side.</p>
+
+<h2 id="finalize">Finalize</h2>
+
+<p><code>ferrompi_finalize</code> empties the tables before it calls
+<code>MPI_Finalize</code>, in an order that frees each object before the ones
+it may refer to:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Table</th><th>At finalize</th></tr></thead>
+  <tbody>
+    <tr><td>requests</td><td>frees each inactive persistent request, the only kind that can be left, and clears every bit</td></tr>
+    <tr><td>user operations</td><td>frees each with <code>ferrompi_op_free</code>, which drops its closure</td></tr>
+    <tr><td>groups</td><td><code>MPI_Group_free</code> on each</td></tr>
+    <tr><td>datatypes</td><td><code>MPI_Type_free</code> on each</td></tr>
+    <tr><td>windows</td><td>nothing: <code>Mpi</code> skips finalize while one is alive</td></tr>
+    <tr><td>communicators</td><td><code>MPI_Comm_free</code> on each but slot 0</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The user operations’ loop calls the same function a dropped
+<code>UserOp</code> does:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>    // Free every live user op: frees the MPI op and drops the Rust closure
+    // through the same path as OpRegistration's Drop; a failed MPI_Op_free keeps both.
+    for (int i = 0; i &lt; MAX_OPS; i++) {
+        if (atomic_load_explicit(&amp;op_used[i], memory_order_acquire)) {
+            ferrompi_op_free(i);
+        }
+    }</code></pre>
+
+<p>A slot still in use at finalize belongs to a Rust value that is still
+alive, such as a communicator kept after the <code>Mpi</code> handle was
+dropped. The sweep frees its MPI object, and its own drop, later, makes no MPI
+call: the guard skips every MPI call in a drop once finalizing has
+begun.</p>
+
+<h2 id="rules">Rules for the C layer</h2>
+
+<p>A change to <code>csrc/ferrompi.c</code> keeps these, most of them listed in
+the architecture guide’s
+<a href="../ferrompi/doc/architecture/index.html#ffi--abi-invariants">FFI and
+ABI invariants</a>:</p>
+
+<ul>
+  <li>Only fixed-width integers and addresses cross. A new kind of MPI object
+  gets a table, or crosses by value behind a size assertion, as
+  <code>MPI_Message</code> does.</li>
+  <li>Every function that can fail returns an <code>int</code>: an MPI code or
+  a negative ferrompi code that <code>src/error.rs</code> knows.</li>
+  <li>A value MPI does not fix, such as <code>MPI_UNDEFINED</code>, a wildcard
+  or a mode flag, is translated in C, never written as a number in Rust.</li>
+  <li>The switches accept every value a Rust enum can hold, whatever Cargo
+  features are on.</li>
+  <li>A new communicator gets <code>MPI_ERRORS_RETURN</code> before Rust sees
+  it.</li>
+  <li>The tables take no lock, and the one mutex is held around a single
+  local group call, never across a collective or blocking call.</li>
+  <li>An MPI 4.0 call compiles under the version test, with a fallback that
+  returns <code>MPI_ERR_COUNT</code> or ferrompi’s code for an unsupported
+  call.</li>
+  <li><code>build.rs</code> compiles the file with the C compiler’s warnings
+  and extra warnings on, and CI’s clippy and test jobs build it against MPICH
+  and Open MPI.</li>
+</ul>
+
+<p><a href="14-adding-an-mpi-call.html">Chapter 14</a> follows one MPI call
+that was added, from the header to the test, and what a reviewer checks in
+each place.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>Make the probe wait on round 1’s receive handle while round 2’s receive
+  is still pending, before round 2’s waits, and explain which request it
+  would have completed without the generation.</li>
+  <li>In the limits program, make the groups before the communicators.
+  Do the numbers change? Then make each group from <code>world.group()</code>
+  and <code>include(&amp;[0])</code>, and count again.</li>
+  <li>Change the full-requests program so that rank 0 receives and rank 1
+  sends, with <code>irecv</code> in place of <code>isend</code>. What does the
+  16,385th <code>irecv</code> wait for, and what happens if rank 1 sends one
+  message fewer? Run it under <code>timeout 20</code>.</li>
+  <li>Read the comment above <code>REQUEST_BITS_WORDS</code> in
+  <code>csrc/ferrompi.c</code>, and the measured numbers in ADR 0002. Run the
+  threads program with one, two and four threads, and time it.</li>
+  <li>Find every call to <code>GROUP_CALL</code>, and say why the calls that
+  create a communicator from a group are not among them.</li>
+  <li>Count the <code>switch</code> statements in the C layer, and name the
+  ferrompi value each one translates.</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>The C layer exists so that Rust never sees an MPI type: handle types
+  and the set of functions change from one library and version to the next,
+  and user operations need C functions of their own.</li>
+  <li><code>csrc/ferrompi.h</code> is the contract: fixed-width integers and
+  addresses in, an <code>int</code> code out. The status struct is checked on
+  both sides at compile time; the other shared numbers rely on a comment
+  naming their mirror.</li>
+  <li>Six fixed tables hold MPI’s handles, and Rust holds slot numbers.
+  <code>MPI_COMM_WORLD</code> and <code>MPI_GROUP_EMPTY</code> have handle 0.
+  Only a matched message crosses by value.</li>
+  <li>The request table tracks slots in bits and gives each handle a
+  generation, so a handle kept past its request’s completion is refused
+  instead of acting on another request.</li>
+  <li>Slots are claimed with a compare-and-swap or a <code>fetch_or</code>,
+  freed with a release store, and looked up with an acquire load. The tables
+  take no lock; the one mutex is for MPI’s group calls.</li>
+  <li>A full table returns <code>ResourceExhausted</code> after MPI has done
+  its part: a nonblocking operation has completed, and a communicator or a
+  window is left behind on every process that made it.</li>
+  <li>Sixteen generated functions let MPI call sixteen Rust closures, and
+  finalize frees what is left in each table before <code>MPI_Finalize</code>.
+  A C program can link <code>libferrompi.a</code> and call the C layer with
+  no Rust in between.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="09-a-tour-of-the-layers.html">Previous: chapter 9, a tour of the layers</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="11-the-safety-model.html">Next: chapter 11, the safety model</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

@@ -1,0 +1,1041 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>2. Point-to-point communication · ferrompi tutorial</title>
+<meta name="description" content="How one process sends a message to another: envelopes and matching, blocking and nonblocking calls, the eager and rendezvous protocols, deadlock, probing, persistent requests and send modes.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#messages-and-envelopes">Messages and envelopes</a></li>
+      <li><a href="#sending-and-receiving">Sending and receiving</a></li>
+      <li><a href="#matching">Matching</a></li>
+      <li><a href="#how-a-message-travels">How a message travels</a></li>
+      <li><a href="#deadlock">Deadlock</a></li>
+      <li><a href="#nonblocking-communication">Nonblocking communication</a></li>
+      <li><a href="#messages-of-unknown-size">Messages of unknown size</a></li>
+      <li><a href="#persistent-requests">Persistent requests</a></li>
+      <li><a href="#send-modes">Send modes</a></li>
+      <li><a href="#when-a-receive-fails">When a receive fails</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part I · Chapter 2</p>
+<h1>Point-to-point communication</h1>
+
+<p class="lede">How one process sends data to another: what a message
+carries, which receive takes it, how the library moves it, why a correct-looking
+exchange can hang, and how nonblocking and persistent calls let a process keep
+working while its messages travel.</p>
+
+<p>By the end of the chapter you can exchange data between any two processes,
+tell a safe exchange from one that works only by luck, and write the halo
+exchange at the heart of most domain-decomposed programs. The chapter assumes
+<a href="01-the-mpi-model.html">chapter 1</a>: ranks, communicators, and how
+to build and launch a program.</p>
+
+<h2 id="messages-and-envelopes">Messages and envelopes</h2>
+
+<p>A point-to-point message goes from one process to one other process of a
+communicator. It has two parts. The data is a slice of values. The envelope
+says where the message comes from and how to recognize it: the source rank,
+the destination rank, a tag, and the communicator. A tag is a non-negative
+integer that the program chooses, so that a receiver can tell kinds of message
+apart.</p>
+
+<p>A receive names the envelope it wants: a source, a tag, and the
+communicator it is called on. A message matches the receive when all three
+agree. Matching never looks at the data: not its values, not its length, not
+its type.</p>
+
+<h2 id="sending-and-receiving">Sending and receiving</h2>
+
+<p><a href="../ferrompi/struct.Communicator.html#method.send"><code>send(data, dest, tag)</code></a>
+(<code>MPI_Send</code>) sends a slice to rank <code>dest</code> of the
+communicator it is called on.
+<a href="../ferrompi/struct.Communicator.html#method.recv"><code>recv(data, source, tag)</code></a>
+(<code>MPI_Recv</code>) receives a message from <code>source</code> with tag
+<code>tag</code> into <code>data</code>. Both block: <code>send</code> returns
+once the program may change the slice again, and <code>recv</code> returns once
+the message is in the slice.</p>
+
+<pre data-lang="rust" data-run="2" id="ping-pong"><code>use ferrompi::Mpi;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    // Tag 0 marks the ping and tag 1 the pong.
+    match world.rank() {
+        0 =&gt; {
+            world.send(&amp;[1.0f64, 2.0, 3.0], 1, 0)?;
+            let mut pong = [0.0f64; 3];
+            let status = world.recv(&amp;mut pong, 1, 1)?;
+            println!("rank 0 got {pong:?} back from {:?}", status.source);
+        }
+        1 =&gt; {
+            let mut buf = [0.0f64; 3];
+            world.recv(&amp;mut buf, 0, 0)?;
+            println!("rank 1 got {buf:?}");
+            for x in &amp;mut buf {
+                *x *= 2.0;
+            }
+            world.send(&amp;buf, 0, 1)?;
+        }
+        _ =&gt; {}
+    }
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="ping-pong"><code>rank 1 got [1.0, 2.0, 3.0]
+rank 0 got [2.0, 4.0, 6.0] back from Rank(1)</code></pre>
+
+<p>That <code>send</code> has returned says nothing about the receiver. The
+library may have delivered the data, or only copied it into a buffer of its
+own; the sender cannot tell which, and
+<a href="#how-a-message-travels">How a message travels</a> explains why that
+matters.</p>
+
+<p>The slice holds any type that implements
+<a href="../ferrompi/trait.MpiDatatype.html"><code>MpiDatatype</code></a>:
+<code>f32</code>, <code>f64</code>, <code>i32</code>, <code>i64</code>,
+<code>u8</code>, <code>u32</code> and <code>u64</code>. ferrompi passes MPI
+the datatype of the element type and counts in elements, not bytes. MPI
+requires the receiver to name the type that was sent, and the libraries do not
+check it: an <code>f64</code> received as <code>i64</code> arrives as the same
+bytes, read as integers. Chapter 4 covers other types.</p>
+
+<p>The receive slice may be longer than the message, which then fills only its
+first elements; it may not be shorter
+(<a href="#when-a-receive-fails">When a receive fails</a>). A rank is an
+<code>i32</code> or a
+<a href="../ferrompi/enum.Source.html"><code>Source</code></a>, and a tag an
+<code>i32</code> or, for a receive, a
+<a href="../ferrompi/enum.Tag.html"><code>Tag</code></a>. MPI guarantees every
+tag from 0 to 32767; the largest tag above that depends on the library.</p>
+
+<h2 id="matching">Matching</h2>
+
+<h3 id="wildcards-and-the-status">Wildcards and the status</h3>
+
+<p>A receive can leave its source open with <code>Source::Any</code>
+(<code>MPI_ANY_SOURCE</code>) and its tag open with <code>Tag::Any</code>
+(<code>MPI_ANY_TAG</code>). The receiver then needs to know what it got, and
+the <a href="../ferrompi/struct.Status.html"><code>Status</code></a> that
+<code>recv</code> returns says: <code>source</code> and <code>tag</code> are
+the matched message’s, and <code>count</code> is the number of elements
+received, or <code>None</code> when the message is not a whole number of
+elements.</p>
+
+<pre data-lang="rust" data-run="4" id="any-source"><code>use ferrompi::{Mpi, Source, Tag};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let (rank, size) = (world.rank(), world.size());
+
+    if rank == 0 {
+        // Long enough for the longest message; shorter ones fill a prefix.
+        let mut buf = vec![0i32; size as usize];
+        for _ in 1..size {
+            let status = world.recv(&amp;mut buf, Source::Any, Tag::Any)?;
+            let n = status.count.expect("a whole number of i32");
+            println!("from {:?} with {:?}: {:?}", status.source, status.tag, &amp;buf[..n]);
+        }
+    } else {
+        // Rank r sends r copies of r, tagged 100 + r.
+        world.send(&amp;vec![rank; rank as usize], 0, 100 + rank)?;
+    }
+    Ok(())
+}</code></pre>
+
+<p>With four processes it prints these three lines, in the order the messages
+reached rank 0, which can change from run to run:</p>
+
+<pre class="output" data-output-of="any-source"><code>from Rank(1) with Value(101): [1]
+from Rank(2) with Value(102): [2, 2]
+from Rank(3) with Value(103): [3, 3, 3]</code></pre>
+
+<h3 id="which-message-a-receive-takes">Which message a receive takes</h3>
+
+<p>A message that arrives before a matching receive is posted waits in the
+receiving process’s library, in arrival order. A receive takes the oldest
+waiting message that matches it, or, if none does, the first matching message
+to arrive after it. A message no receive matches waits for as long as the
+process runs.</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 760 310" role="img" aria-label="Four messages have arrived at rank 0, oldest first: from source 2 with tag 5, from source 1 with tag 7, from source 2 with tag 7, and from source 3 with tag 1. Receive 1, for any source and tag 7, takes the second message, the oldest with tag 7. Receive 2, for source 2 and any tag, takes the first. Receive 3, for source 2 and tag 7, takes the third. No receive matches the fourth, which keeps waiting.">
+  <defs>
+    <marker id="match-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="20" width="720" height="120" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="40" class="t-label f-muted">arrived at rank 0, not yet received · oldest first</text>
+
+  <rect x="44" y="52" width="150" height="72" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="218" y="52" width="150" height="72" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="392" y="52" width="150" height="72" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="566" y="52" width="150" height="72" rx="6" class="f-surface s-rule" stroke-width="1.5"/>
+  <text x="119" y="76" text-anchor="middle" class="t-mono">source 2 · tag 5</text>
+  <text x="293" y="76" text-anchor="middle" class="t-mono">source 1 · tag 7</text>
+  <text x="467" y="76" text-anchor="middle" class="t-mono">source 2 · tag 7</text>
+  <text x="641" y="76" text-anchor="middle" class="t-mono">source 3 · tag 1</text>
+  <text x="119" y="96" text-anchor="middle" class="t-small f-muted">arrived 1st</text>
+  <text x="293" y="96" text-anchor="middle" class="t-small f-muted">arrived 2nd</text>
+  <text x="467" y="96" text-anchor="middle" class="t-small f-muted">arrived 3rd</text>
+  <text x="641" y="96" text-anchor="middle" class="t-small f-muted">arrived 4th</text>
+  <text x="119" y="113" text-anchor="middle" class="t-small f-accent">taken by receive 2</text>
+  <text x="293" y="113" text-anchor="middle" class="t-small f-accent">taken by receive 1</text>
+  <text x="467" y="113" text-anchor="middle" class="t-small f-accent">taken by receive 3</text>
+  <text x="641" y="113" text-anchor="middle" class="t-small f-muted">still waiting</text>
+
+  <rect x="20" y="190" width="720" height="100" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <rect x="44" y="214" width="150" height="56" rx="6" class="f-surface s-accent" stroke-width="1.5"/>
+  <rect x="218" y="214" width="150" height="56" rx="6" class="f-surface s-accent" stroke-width="1.5"/>
+  <rect x="392" y="214" width="150" height="56" rx="6" class="f-surface s-accent" stroke-width="1.5"/>
+  <text x="119" y="236" text-anchor="middle" class="t-label f-accent">receive 1</text>
+  <text x="293" y="236" text-anchor="middle" class="t-label f-accent">receive 2</text>
+  <text x="467" y="236" text-anchor="middle" class="t-label f-accent">receive 3</text>
+  <text x="119" y="257" text-anchor="middle" class="t-mono">source Any · tag 7</text>
+  <text x="293" y="257" text-anchor="middle" class="t-mono">source 2 · tag Any</text>
+  <text x="467" y="257" text-anchor="middle" class="t-mono">source 2 · tag 7</text>
+  <text x="566" y="238" class="t-label f-muted">posted by rank 0,</text>
+  <text x="566" y="256" class="t-label f-muted">in program order</text>
+
+  <g fill="none" stroke-width="1.5">
+    <line x1="119" y1="214" x2="293" y2="126" class="s-accent" marker-end="url(#match-arrow-accent)"/>
+    <line x1="293" y1="214" x2="119" y2="126" class="s-accent" marker-end="url(#match-arrow-accent)"/>
+    <line x1="467" y1="214" x2="467" y2="126" class="s-accent" marker-end="url(#match-arrow-accent)"/>
+  </g>
+</svg>
+</div>
+<figcaption>Three receives meet four waiting messages, all on one
+communicator. Each receive takes the oldest message whose envelope matches
+its own: receive 1 skips the message with tag 5, receive 2 takes the first
+message from rank 2 whatever its tag, and receive 3 takes the message
+receive 1 left behind. Nothing matches the message from rank 3, so it keeps
+waiting.</figcaption>
+</figure>
+
+<p>MPI guarantees one order: messages do not overtake each other. When one
+process sends two messages to another on the same communicator and both match
+a receive, the receive takes the one sent first. Nothing orders messages from
+different senders; they arrive in the order the network delivers them, so a
+receive from <code>Source::Any</code> can take a different message in each
+run. Tags are how a receiver takes messages out of order: a receive for tag 7
+passes over older messages with other tags.</p>
+
+<h3 id="sending-to-nobody">Sending to nobody</h3>
+
+<p><code>Source::ProcNull</code> (<code>MPI_PROC_NULL</code>) is a rank that is
+not there. A send to it sends nothing and returns at once. A receive from it
+receives nothing, leaves the slice as it was, and returns at once with a status
+whose source is <code>ProcNull</code> and whose count is <code>Some(0)</code>.
+Code at the edge of a domain uses it to treat a missing neighbor as one that
+never sends, as the halo exchange below does. <code>Source::Any</code> is not
+a destination: a send to it returns
+<code>Err(<a href="../ferrompi/enum.Error.html#variant.InvalidArgument">Error::InvalidArgument</a>)</code>
+without calling MPI.</p>
+
+<h2 id="how-a-message-travels">How a message travels</h2>
+
+<p>MPI says when <code>send</code> may return, not how the data gets across.
+MPICH and Open MPI both move a message by one of two protocols, chosen for
+each message by its size.</p>
+
+<p>For a small message the library uses the <em>eager</em> protocol: it sends
+the data with the envelope right away. If the receiver has not posted a
+matching receive yet, its library keeps the message in a buffer of its own and
+copies it out when the receive comes. The sender’s <code>send</code> returns
+as soon as the data has left its slice, whether or not anyone ever receives
+it.</p>
+
+<p>For a large message the library uses the <em>rendezvous</em> protocol: it
+sends only the envelope, waits until the receiver posts a matching receive,
+and then sends the data straight into the receive slice. No buffer at the
+receiver has to hold a large message, but the sender’s <code>send</code> waits
+for the receiver.</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 340" role="img" style="min-width: 44rem" aria-label="Two timelines of rank 0 sending to rank 1. Eager, for a small message: rank 0’s send puts the envelope and the data on the wire and returns at once; the message waits in a library buffer at rank 1, which copies it out when rank 1 later calls recv. Rendezvous, for a large message: rank 0’s send transmits only the envelope and waits; when rank 1 calls recv, its library answers that the receive is posted, the data goes straight into the receive buffer, and both calls return.">
+  <defs>
+    <marker id="proto-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+    <marker id="proto-arrow-copper" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-copper"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="20" width="420" height="300" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="42" class="t-label f-accent">eager · small message</text>
+  <rect x="70" y="58" width="80" height="30" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="260" y="58" width="80" height="30" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="110" y="78" text-anchor="middle" class="t-head">rank 0</text>
+  <text x="300" y="78" text-anchor="middle" class="t-head">rank 1</text>
+  <g fill="none" stroke-width="1.2" stroke-dasharray="4 4">
+    <line x1="110" y1="88" x2="110" y2="305" class="s-rule"/>
+    <line x1="300" y1="88" x2="300" y2="305" class="s-rule"/>
+  </g>
+  <rect x="104" y="110" width="12" height="34" rx="2" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="96" y="131" text-anchor="end" class="t-mono">send</text>
+  <text x="96" y="160" text-anchor="end" class="t-small f-muted">returns</text>
+  <text x="96" y="175" text-anchor="end" class="t-small f-muted">at once</text>
+  <text x="308" y="124" class="t-small f-muted">still computing</text>
+  <rect x="312" y="144" width="112" height="34" rx="4" class="f-surface s-muted" stroke-width="1.2"/>
+  <text x="368" y="165" text-anchor="middle" class="t-small">library buffer</text>
+  <rect x="294" y="226" width="12" height="34" rx="2" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="314" y="247" class="t-mono">recv</text>
+  <text x="205" y="113" text-anchor="middle" class="t-small">envelope + data</text>
+  <text x="344" y="212" class="t-small">copied out</text>
+  <g fill="none" stroke-width="1.5">
+    <line x1="116" y1="116" x2="310" y2="152" class="s-accent" marker-end="url(#proto-arrow-accent)"/>
+    <line x1="360" y1="178" x2="308" y2="232" class="s-accent" marker-end="url(#proto-arrow-accent)"/>
+  </g>
+
+  <rect x="460" y="20" width="420" height="300" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="476" y="42" class="t-label f-copper">rendezvous · large message</text>
+  <rect x="510" y="58" width="80" height="30" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="700" y="58" width="80" height="30" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="550" y="78" text-anchor="middle" class="t-head">rank 0</text>
+  <text x="740" y="78" text-anchor="middle" class="t-head">rank 1</text>
+  <g fill="none" stroke-width="1.2" stroke-dasharray="4 4">
+    <line x1="550" y1="88" x2="550" y2="305" class="s-rule"/>
+    <line x1="740" y1="88" x2="740" y2="305" class="s-rule"/>
+  </g>
+  <rect x="544" y="110" width="12" height="170" rx="2" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="536" y="131" text-anchor="end" class="t-mono">send</text>
+  <text x="536" y="200" text-anchor="end" class="t-small f-copper">waits</text>
+  <text x="536" y="296" text-anchor="end" class="t-small f-muted">returns</text>
+  <text x="748" y="152" class="t-small f-muted">still computing</text>
+  <rect x="734" y="180" width="12" height="100" rx="2" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="754" y="200" class="t-mono">recv</text>
+  <text x="754" y="296" class="t-small f-muted">returns</text>
+  <text x="645" y="113" text-anchor="middle" class="t-small">envelope only</text>
+  <text x="645" y="196" text-anchor="middle" class="t-small">ready: receive posted</text>
+  <text x="645" y="238" text-anchor="middle" class="t-small">data, into the receive slice</text>
+  <g fill="none" stroke-width="1.5">
+    <line x1="556" y1="116" x2="734" y2="140" class="s-copper" marker-end="url(#proto-arrow-copper)"/>
+    <line x1="734" y1="200" x2="556" y2="222" class="s-copper" marker-end="url(#proto-arrow-copper)"/>
+    <line x1="556" y1="244" x2="734" y2="266" class="s-copper" marker-end="url(#proto-arrow-copper)"/>
+  </g>
+</svg>
+</div>
+<figcaption>The same <code>send</code> and <code>recv</code> under the two
+protocols, time running down. Eager: the data travels at once and waits at the
+receiver, so <code>send</code> returns before the receive is posted.
+Rendezvous: only the envelope travels until the receive is posted, so
+<code>send</code> waits for the receiver.</figcaption>
+</figure>
+
+<p>The size at which a library switches depends on the library, its version
+and the path between the two processes: shared memory within a node, or the
+network between nodes. Both libraries let you change it: Open MPI through MCA
+parameters (<code>ompi_info --all</code> lists the ones named
+<code>eager_limit</code>), and MPICH through its <code>MPIR_CVAR_</code>
+environment variables. A correct program works whatever the value is. MPI
+calls this behavior of <code>send</code> the standard mode: the library may
+buffer the message or wait for the receive, and the program cannot choose.
+<a href="#send-modes">Send modes</a> lists the other three.</p>
+
+<h2 id="deadlock">Deadlock</h2>
+
+<p>A program that is correct only if <code>send</code> buffers is called
+unsafe. The most common one is an exchange in which both processes send
+first:</p>
+
+<pre data-lang="rust" data-run="2" id="head-to-head"><code>use ferrompi::Mpi;
+
+// 32 bytes: small enough for every MPI library to send eagerly.
+const N: usize = 4;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+    let other = 1 - rank;
+
+    let mine = vec![rank as f64; N];
+    let mut theirs = vec![0.0f64; N];
+
+    // Both processes send first and receive second.
+    world.send(&amp;mine, other, 0)?;
+    world.recv(&amp;mut theirs, other, 0)?;
+    println!("rank {rank} received {} values from rank {other}", theirs.len());
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="head-to-head"><code>rank 0 received 4 values from rank 1
+rank 1 received 4 values from rank 0</code></pre>
+
+<aside class="warn">
+<span class="label">Pitfall</span>
+<p>This program is wrong, and it passes: the tutorial’s CI runs it and checks
+both lines. At 4 values each send goes eagerly and returns before the other
+process has posted its receive. Make <code>N</code> <code>1 &lt;&lt; 20</code>
+and both processes block in <code>send</code> for good: each sends a
+rendezvous envelope and waits for a receive that the other process posts only
+after its own <code>send</code> returns. On one laptop with MPICH 4.2.3, 1024
+values (8 KiB) went through and 2048 (16 KiB) hung. A program like this
+passes its tests on small inputs and hangs in production.</p>
+</aside>
+
+<p>Three changes make the exchange safe: order the calls so that every send
+meets a receive, combine the send and the receive into one call, or make the
+calls nonblocking, which the next section covers.</p>
+
+<h3 id="ordering-the-calls">Ordering the calls</h3>
+
+<p>Let one side receive first: even ranks send and then receive, odd ranks
+receive and then send. Every blocking send then has a receive waiting for it,
+or about to be. <a href="https://github.com/cobre-rs/ferrompi/blob/main/examples/ring.rs"><code>examples/ring.rs</code></a>
+orders a ring of any size this way.</p>
+
+<h3 id="sendrecv">Send and receive in one call</h3>
+
+<p><a href="../ferrompi/struct.Communicator.html#method.sendrecv"><code>sendrecv(send, dest, sendtag, recv, source, recvtag)</code></a>
+(<code>MPI_Sendrecv</code>) sends one message and receives another in a single
+call, which behaves as if the two ran at the same time: the library posts the
+receive before it waits on the send, so two processes in <code>sendrecv</code>
+with each other cannot block each other. It is the call for a shift, in which
+every process sends to one neighbor and receives from the other:</p>
+
+<pre data-lang="rust" data-run="4" id="ring-sum"><code>use ferrompi::Mpi;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let (rank, size) = (world.rank(), world.size());
+    let next = (rank + 1) % size;
+    let prev = (rank + size - 1) % size;
+
+    // Move every value one step around the ring, size - 1 times, so that each
+    // process sees the rank of every other process once.
+    let mut passing = [rank];
+    let mut sum = rank;
+    for _ in 1..size {
+        let mut incoming = [0i32];
+        world.sendrecv(&amp;passing, next, 0, &amp;mut incoming, prev, 0)?;
+        sum += incoming[0];
+        passing = incoming;
+    }
+    println!("rank {rank}: the ranks sum to {sum}");
+    Ok(())
+}</code></pre>
+
+<p>With four processes it prints:</p>
+
+<pre class="output" data-output-of="ring-sum"><code>rank 0: the ranks sum to 6
+rank 1: the ranks sum to 6
+rank 2: the ranks sum to 6
+rank 3: the ranks sum to 6</code></pre>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 300" role="img" style="min-width: 44rem" aria-label="Left: under rendezvous, ranks 0 and 1 each call send to the other. Their envelopes cross, and each send waits for a receive that the other process would post only after its own send returns, so neither recv is ever reached. Right: ranks 0 and 1 each call sendrecv. Each call posts its receive before it waits on its send, both messages flow, and both calls return.">
+  <defs>
+    <marker id="deadlock-arrow-copper" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-copper"/>
+    </marker>
+    <marker id="deadlock-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="20" width="420" height="260" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="42" class="t-label f-copper">send, then receive · large message</text>
+  <rect x="70" y="58" width="80" height="30" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="310" y="58" width="80" height="30" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="110" y="78" text-anchor="middle" class="t-head">rank 0</text>
+  <text x="350" y="78" text-anchor="middle" class="t-head">rank 1</text>
+  <g fill="none" stroke-width="1.2" stroke-dasharray="4 4">
+    <line x1="110" y1="88" x2="110" y2="236" class="s-rule"/>
+    <line x1="350" y1="88" x2="350" y2="236" class="s-rule"/>
+  </g>
+  <rect x="104" y="104" width="12" height="116" rx="2" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <rect x="344" y="104" width="12" height="116" rx="2" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="96" y="124" text-anchor="end" class="t-mono">send</text>
+  <text x="364" y="124" class="t-mono">send</text>
+  <text x="230" y="104" text-anchor="middle" class="t-small">envelopes cross</text>
+  <text x="230" y="176" text-anchor="middle" class="t-small f-copper">each send waits for a receive</text>
+  <text x="230" y="192" text-anchor="middle" class="t-small f-copper">the other process never posts</text>
+  <rect x="70" y="236" width="80" height="26" rx="4" class="f-paper s-muted" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <rect x="310" y="236" width="80" height="26" rx="4" class="f-paper s-muted" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="110" y="253" text-anchor="middle" class="t-mono f-muted">recv</text>
+  <text x="350" y="253" text-anchor="middle" class="t-mono f-muted">recv</text>
+  <text x="230" y="253" text-anchor="middle" class="t-small f-muted">never reached</text>
+  <g fill="none" stroke-width="1.5">
+    <line x1="116" y1="112" x2="344" y2="142" class="s-copper" marker-end="url(#deadlock-arrow-copper)"/>
+    <line x1="344" y1="112" x2="116" y2="142" class="s-copper" marker-end="url(#deadlock-arrow-copper)"/>
+  </g>
+
+  <rect x="460" y="20" width="420" height="260" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="476" y="42" class="t-label f-accent">both directions in one call</text>
+  <rect x="510" y="58" width="80" height="30" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="750" y="58" width="80" height="30" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="550" y="78" text-anchor="middle" class="t-head">rank 0</text>
+  <text x="790" y="78" text-anchor="middle" class="t-head">rank 1</text>
+  <g fill="none" stroke-width="1.2" stroke-dasharray="4 4">
+    <line x1="550" y1="88" x2="550" y2="265" class="s-rule"/>
+    <line x1="790" y1="88" x2="790" y2="265" class="s-rule"/>
+  </g>
+  <rect x="544" y="104" width="12" height="110" rx="2" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="784" y="104" width="12" height="110" rx="2" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="536" y="124" text-anchor="end" class="t-mono">sendrecv</text>
+  <text x="804" y="124" class="t-mono">sendrecv</text>
+  <text x="670" y="142" text-anchor="middle" class="t-small">both messages flow</text>
+  <text x="670" y="204" text-anchor="middle" class="t-small f-accent">each call posts its receive</text>
+  <text x="670" y="220" text-anchor="middle" class="t-small f-accent">before it waits on its send</text>
+  <text x="536" y="232" text-anchor="end" class="t-small f-muted">returns</text>
+  <text x="804" y="232" class="t-small f-muted">returns</text>
+  <g fill="none" stroke-width="1.5">
+    <line x1="556" y1="150" x2="784" y2="180" class="s-accent" marker-end="url(#deadlock-arrow-accent)"/>
+    <line x1="784" y1="150" x2="556" y2="180" class="s-accent" marker-end="url(#deadlock-arrow-accent)"/>
+  </g>
+</svg>
+</div>
+<figcaption>The head-to-head exchange at a size that goes by rendezvous, and
+the same exchange with <code>sendrecv</code>. On the left each process waits
+inside <code>send</code> for a receive that it would post itself only
+afterwards. On the right each call has its receive posted before it waits, so
+both exchanges complete.</figcaption>
+</figure>
+
+<h2 id="nonblocking-communication">Nonblocking communication</h2>
+
+<p><a href="../ferrompi/struct.Communicator.html#method.isend"><code>isend</code></a>
+(<code>MPI_Isend</code>) and
+<a href="../ferrompi/struct.Communicator.html#method.irecv"><code>irecv</code></a>
+(<code>MPI_Irecv</code>) start a send or a receive and return at once with a
+<a href="../ferrompi/struct.Request.html"><code>Request</code></a>. The
+transfer goes on while the process does other work, and the request tells when
+it is done. Two rules come with them from MPI: the program must neither read
+nor write a receive slice until its receive completes, and must not write a
+send slice until its send completes. Reading a send slice is allowed, since
+MPI 3.0. In C nothing enforces either rule, and a slice reused too early holds
+wrong data without any error.</p>
+
+<h3 id="requests-and-scopes">Requests and scopes</h3>
+
+<p>ferrompi turns both rules into borrows. A nonblocking call takes the
+<a href="../ferrompi/struct.Scope.html"><code>Scope</code></a> that
+<a href="../ferrompi/fn.scope.html"><code>ferrompi::scope</code></a> passes to
+its closure, and borrows its slice for the whole scope. <code>isend</code>
+borrows its slice shared, so the program can still read it but not write it;
+<code>irecv</code> borrows its slice exclusively, so the program cannot touch
+it. When the closure returns, <code>scope</code> completes every request that
+is still pending and only then returns itself; the borrows end there, and the
+slices are the program’s again. A request needs no completion call of its
+own.</p>
+
+<h3 id="a-halo-exchange">A halo exchange</h3>
+
+<p>Most programs that split a domain across processes exchange halos. Here a
+line of twelve cells is split into four blocks of three, and each step
+replaces every cell by the sum of itself and its two neighbors. A cell at the
+edge of a block needs the edge cell of the next block, so each process keeps a
+copy of its neighbor’s edge cell, a ghost cell, on each side, and refreshes
+the ghost cells before each step:</p>
+
+<pre data-lang="rust" data-run="4" id="halo"><code>use ferrompi::{Mpi, Source};
+
+const CELLS: usize = 3;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let (rank, size) = (world.rank(), world.size());
+
+    // This process owns three cells of a line, each holding its index on the
+    // whole line.
+    let first = rank * CELLS as i32;
+    let cells: Vec&lt;i32&gt; = (first..first + CELLS as i32).collect();
+
+    // The two ends of the line have no neighbor on their outer side. A send
+    // to ProcNull sends nothing, and a receive from it receives nothing.
+    let left = if rank &gt; 0 { Source::Rank(rank - 1) } else { Source::ProcNull };
+    let right = if rank + 1 &lt; size { Source::Rank(rank + 1) } else { Source::ProcNull };
+
+    // One ghost cell on each side holds a copy of the neighbor's edge cell.
+    let mut ghost_left = [0i32];
+    let mut ghost_right = [0i32];
+    let mut next = [0i32; CELLS];
+
+    ferrompi::scope(|s| {
+        // Tag 0 travels to the right, tag 1 to the left.
+        world.irecv(s, &amp;mut ghost_left, left, 0)?;
+        world.irecv(s, &amp;mut ghost_right, right, 1)?;
+        world.isend(s, &amp;cells[CELLS - 1..], right, 0)?;
+        world.isend(s, &amp;cells[..1], left, 1)?;
+
+        // While the edge cells travel, update the cells that need no ghost.
+        for i in 1..CELLS - 1 {
+            next[i] = cells[i - 1] + cells[i] + cells[i + 1];
+        }
+        Ok(())
+    })?;
+
+    // Every request has completed: the ghost cells are filled.
+    next[0] = ghost_left[0] + cells[0] + cells[1];
+    next[CELLS - 1] = cells[CELLS - 2] + cells[CELLS - 1] + ghost_right[0];
+    println!("rank {rank}: {cells:?} -&gt; {next:?}");
+    Ok(())
+}</code></pre>
+
+<p>With four processes it prints:</p>
+
+<pre class="output" data-output-of="halo"><code>rank 0: [0, 1, 2] -&gt; [1, 3, 6]
+rank 1: [3, 4, 5] -&gt; [9, 12, 15]
+rank 2: [6, 7, 8] -&gt; [18, 21, 24]
+rank 3: [9, 10, 11] -&gt; [27, 30, 21]</code></pre>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 230" role="img" style="min-width: 44rem" aria-label="Four blocks of a twelve-cell line, one per rank, each with a ghost cell on either side. Each block’s last cell goes to the left ghost cell of the block to its right, with tag 0, and each block’s first cell goes to the right ghost cell of the block to its left, with tag 1. The outer ghost cells of ranks 0 and 3 have no neighbor: their receives are from ProcNull and they stay 0.">
+  <defs>
+    <marker id="halo-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+    <marker id="halo-arrow-copper" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-copper"/>
+    </marker>
+  </defs>
+
+  <text x="135" y="50" text-anchor="middle" class="t-head">rank 0</text>
+  <text x="345" y="50" text-anchor="middle" class="t-head">rank 1</text>
+  <text x="555" y="50" text-anchor="middle" class="t-head">rank 2</text>
+  <text x="765" y="50" text-anchor="middle" class="t-head">rank 3</text>
+
+  <rect x="39" y="76" width="192" height="52" rx="8" class="f-paper s-rule" stroke-width="1.2"/>
+  <rect x="249" y="76" width="192" height="52" rx="8" class="f-paper s-rule" stroke-width="1.2"/>
+  <rect x="459" y="76" width="192" height="52" rx="8" class="f-paper s-rule" stroke-width="1.2"/>
+  <rect x="669" y="76" width="192" height="52" rx="8" class="f-paper s-rule" stroke-width="1.2"/>
+
+  <g stroke-width="1.2" stroke-dasharray="3 3">
+    <rect x="45" y="84" width="36" height="36" class="f-surface s-muted"/>
+    <rect x="189" y="84" width="36" height="36" class="f-surface s-muted"/>
+    <rect x="255" y="84" width="36" height="36" class="f-surface s-muted"/>
+    <rect x="399" y="84" width="36" height="36" class="f-surface s-muted"/>
+    <rect x="465" y="84" width="36" height="36" class="f-surface s-muted"/>
+    <rect x="609" y="84" width="36" height="36" class="f-surface s-muted"/>
+    <rect x="675" y="84" width="36" height="36" class="f-surface s-muted"/>
+    <rect x="819" y="84" width="36" height="36" class="f-surface s-muted"/>
+  </g>
+  <g stroke-width="1.2">
+    <rect x="81" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+    <rect x="117" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+    <rect x="153" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+    <rect x="291" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+    <rect x="327" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+    <rect x="363" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+    <rect x="501" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+    <rect x="537" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+    <rect x="573" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+    <rect x="711" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+    <rect x="747" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+    <rect x="783" y="84" width="36" height="36" class="f-accent-soft s-accent"/>
+  </g>
+
+  <text x="63" y="107" text-anchor="middle" class="t-mono f-muted">0</text>
+  <text x="99" y="107" text-anchor="middle" class="t-mono">0</text>
+  <text x="135" y="107" text-anchor="middle" class="t-mono">1</text>
+  <text x="171" y="107" text-anchor="middle" class="t-mono">2</text>
+  <text x="207" y="107" text-anchor="middle" class="t-mono f-copper">3</text>
+  <text x="273" y="107" text-anchor="middle" class="t-mono f-accent">2</text>
+  <text x="309" y="107" text-anchor="middle" class="t-mono">3</text>
+  <text x="345" y="107" text-anchor="middle" class="t-mono">4</text>
+  <text x="381" y="107" text-anchor="middle" class="t-mono">5</text>
+  <text x="417" y="107" text-anchor="middle" class="t-mono f-copper">6</text>
+  <text x="483" y="107" text-anchor="middle" class="t-mono f-accent">5</text>
+  <text x="519" y="107" text-anchor="middle" class="t-mono">6</text>
+  <text x="555" y="107" text-anchor="middle" class="t-mono">7</text>
+  <text x="591" y="107" text-anchor="middle" class="t-mono">8</text>
+  <text x="627" y="107" text-anchor="middle" class="t-mono f-copper">9</text>
+  <text x="693" y="107" text-anchor="middle" class="t-mono f-accent">8</text>
+  <text x="729" y="107" text-anchor="middle" class="t-mono">9</text>
+  <text x="765" y="107" text-anchor="middle" class="t-mono">10</text>
+  <text x="801" y="107" text-anchor="middle" class="t-mono">11</text>
+  <text x="837" y="107" text-anchor="middle" class="t-mono f-muted">0</text>
+
+  <text x="63" y="146" text-anchor="middle" class="t-small f-muted">ProcNull</text>
+  <text x="837" y="146" text-anchor="middle" class="t-small f-muted">ProcNull</text>
+
+  <g fill="none" stroke-width="1.5">
+    <path d="M171 84Q222 34 273 84" class="s-accent" marker-end="url(#halo-arrow-accent)"/>
+    <path d="M381 84Q432 34 483 84" class="s-accent" marker-end="url(#halo-arrow-accent)"/>
+    <path d="M591 84Q642 34 693 84" class="s-accent" marker-end="url(#halo-arrow-accent)"/>
+    <path d="M309 120Q258 170 207 120" class="s-copper" marker-end="url(#halo-arrow-copper)"/>
+    <path d="M519 120Q468 170 417 120" class="s-copper" marker-end="url(#halo-arrow-copper)"/>
+    <path d="M729 120Q678 170 627 120" class="s-copper" marker-end="url(#halo-arrow-copper)"/>
+  </g>
+
+  <text x="450" y="192" text-anchor="middle" class="t-small f-accent">above: each block’s last cell goes right, with tag 0</text>
+  <text x="450" y="210" text-anchor="middle" class="t-small f-copper">below: each block’s first cell goes left, with tag 1</text>
+</svg>
+</div>
+<figcaption>The ghost cells after the exchange, the dashed cells on either
+side of each block. Each one holds a copy of the neighboring block’s edge
+cell, in the color of the message that brought it. The outer ghost cells of
+ranks 0 and 3 receive from <code>ProcNull</code> and keep their initial
+0.</figcaption>
+</figure>
+
+<p>No order of the four calls can deadlock, since none of them waits. The
+receives are posted first all the same, a habit worth keeping: a message whose
+receive is already posted can go straight into the receive slice, without
+waiting in a library buffer. The middle cell is updated while the messages
+travel, which it may be because it only reads <code>cells</code>, and the
+sends borrow <code>cells</code> shared. The edge cells are updated after the
+scope, once the ghost cells are filled.</p>
+
+<aside class="note">
+<span class="label">Note</span>
+<p>Starting a transfer early lets it overlap with computation, but MPI does
+not promise that it will. Many libraries move data only while the process is
+inside an MPI call, so a transfer can sit idle through a long computation and
+happen at the end of the scope. Whether a transfer progresses on its own
+depends on the library and the network.</p>
+</aside>
+
+<h3 id="what-the-compiler-rejects">What the compiler rejects</h3>
+
+<p>Try to finish the left edge cell inside the scope: name the first
+receive’s request <code>from_left</code>, call <code>from_left.wait()?</code>
+and compute <code>next[0]</code> before <code>Ok(())</code>. The receive has
+completed, but the borrow lasts until the scope returns, so the program does
+not compile:</p>
+
+<pre class="output"><code>error[E0503]: cannot use `ghost_left[_]` because it was mutably borrowed
+  --&gt; src/main.rs:37:19
+   |
+25 |     ferrompi::scope(|s| {
+   |                      - has type `&amp;'1 ferrompi::Scope&lt;'1, '_&gt;`
+26 |         // Tag 0 travels to the right, tag 1 to the left.
+27 |         let from_left = world.irecv(s, &amp;mut ghost_left, left, 0)?;
+   |                         ----------------------------------------
+   |                         |              |
+   |                         |              `ghost_left` is borrowed here
+   |                         argument requires that `ghost_left` is borrowed for `'1`
+...
+37 |         next[0] = ghost_left[0] + cells[0] + cells[1];
+   |                   ^^^^^^^^^^^^^ use of borrowed `ghost_left`</code></pre>
+
+<p>The other mistakes MPI forbids are rejected the same way: writing to a
+slice that <code>isend</code> is sending, dropping a slice while a request
+uses it, or letting a request outlive its scope. Data received in a scope is
+read after it; a program that needs the data sooner ends the scope there and
+starts another one. <a href="11-the-safety-model.html#wait-and-borrow">Chapter
+11</a> explains why the borrow cannot end at the wait,
+and the
+<a href="../ferrompi/fn.scope.html#compile-time-guarantees">rustdoc of
+<code>scope</code></a> lists every program it rejects.</p>
+
+<h3 id="completing-a-request-early">Completing a request early</h3>
+
+<p>A program that needs a request completed before the scope ends, to know
+that a send went out or to react to receives in the order they finish, has
+four calls.
+<a href="../ferrompi/struct.Request.html#method.wait"><code>Request::wait</code></a>
+blocks until the request completes and returns its <code>Status</code>.
+<a href="../ferrompi/struct.Request.html#method.test"><code>Request::test</code></a>
+returns at once, with <code>Some(status)</code> if the request has completed
+and <code>None</code> if not, for a program that polls between pieces of work.
+<a href="../ferrompi/struct.Request.html#method.wait_all"><code>Request::wait_all</code></a>
+completes a slice of requests, and
+<a href="../ferrompi/struct.Request.html#method.wait_any"><code>Request::wait_any</code></a>
+the first of them to finish, returning its index with its status.
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/examples/nonblocking.rs"><code>examples/nonblocking.rs</code></a>
+uses each of them with nonblocking collectives, which chapter 3 covers.</p>
+
+<h2 id="messages-of-unknown-size">Messages of unknown size</h2>
+
+<p>A receiver that does not know how long a message is can ask before it
+receives.
+<a href="../ferrompi/struct.Communicator.html#method.probe"><code>probe::&lt;T&gt;(source, tag)</code></a>
+(<code>MPI_Probe</code>) waits until a matching message has arrived and returns
+its <code>Status</code> without receiving it; <code>status.count</code> is the
+message’s length in elements of <code>T</code>.
+<a href="../ferrompi/struct.Communicator.html#method.iprobe"><code>iprobe</code></a>
+returns at once, with <code>None</code> if nothing matches yet.</p>
+
+<p>A probe followed by a receive has a race when several threads receive on
+one communicator: another thread can receive the probed message between the
+two calls.
+<a href="../ferrompi/struct.Communicator.html#method.mprobe"><code>mprobe</code></a>
+(<code>MPI_Mprobe</code>) closes it. It removes the message it matches from
+matching and returns it as a
+<a href="../ferrompi/struct.Message.html"><code>Message</code></a>, which only
+<a href="../ferrompi/struct.Message.html#method.mrecv"><code>Message::mrecv</code></a>
+can receive. It is correct with or without threads:</p>
+
+<pre data-lang="rust" data-run="4" id="mprobe"><code>use ferrompi::{Mpi, Source, Tag};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let (rank, size) = (world.rank(), world.size());
+
+    if rank == 0 {
+        for _ in 1..size {
+            // Match the next message without receiving it, and read its length.
+            let (message, status) = world.mprobe::&lt;u64&gt;(Source::Any, Tag::Any)?;
+            let len = status.count.expect("a whole number of u64");
+            let mut buf = vec![0u64; len];
+            message.mrecv(&amp;mut buf)?;
+            let sum: u64 = buf.iter().sum();
+            println!("{len} values from {:?}, summing to {sum}", status.source);
+        }
+    } else {
+        // Rank r sends the numbers 1 to 1000 r.
+        let data: Vec&lt;u64&gt; = (1..=1000 * rank as u64).collect();
+        world.send(&amp;data, 0, 0)?;
+    }
+    Ok(())
+}</code></pre>
+
+<p>With four processes it prints, in the order the messages arrive:</p>
+
+<pre class="output" data-output-of="mprobe"><code>1000 values from Rank(1), summing to 500500
+2000 values from Rank(2), summing to 2001000
+3000 values from Rank(3), summing to 4501500</code></pre>
+
+<p>MPI requires every matched message to be received. Dropping a
+<code>Message</code> without calling <code>mrecv</code> receives the data into
+a scratch buffer and discards it.
+<a href="../ferrompi/struct.Communicator.html#method.improbe"><code>improbe</code></a>
+is the form that returns at once.</p>
+
+<h2 id="persistent-requests">Persistent requests</h2>
+
+<p>A program that repeats the same exchange, with the same peers, tags and
+buffers, can describe it once.
+<a href="../ferrompi/struct.Communicator.html#method.send_init"><code>send_init</code></a>
+and
+<a href="../ferrompi/struct.Communicator.html#method.recv_init"><code>recv_init</code></a>
+(<code>MPI_Send_init</code>, <code>MPI_Recv_init</code>) create a
+<a href="../ferrompi/struct.PersistentRequest.html"><code>PersistentRequest</code></a>
+without starting anything.
+<a href="../ferrompi/struct.PersistentRequest.html#method.start"><code>start</code></a>
+begins one round,
+<a href="../ferrompi/struct.PersistentRequest.html#method.wait"><code>wait</code></a>
+completes it, and the request can then be started again. The library can do
+its setup once rather than every round; how much that saves depends on the
+library and the network.</p>
+
+<p>A persistent request owns its buffer. It takes a <code>Vec</code>, and
+<a href="../ferrompi/struct.PersistentRequest.html#method.buffer"><code>buffer</code></a>
+and
+<a href="../ferrompi/struct.PersistentRequest.html#method.buffer_mut"><code>buffer_mut</code></a>
+reach it between rounds, returning an error while a round is in progress.
+The borrows of a scope become a check at run time, and in exchange the request
+needs no scope: it can live across a loop or in a struct.</p>
+
+<pre data-lang="rust" data-run="3" id="persistent"><code>use ferrompi::{Mpi, PersistentRequest};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let (rank, size) = (world.rank(), world.size());
+    let next = (rank + 1) % size;
+    let prev = (rank + size - 1) % size;
+
+    // Describe the exchange once. Each request owns its buffer.
+    let mut requests = [
+        world.send_init(vec![0i32], next, 0)?,
+        world.recv_init(vec![0i32], prev, 0)?,
+    ];
+    for step in 0..3 {
+        requests[0].buffer_mut()?[0] = 10 * rank + step;
+        PersistentRequest::start_all(&amp;mut requests)?;
+        PersistentRequest::wait_all(&amp;mut requests)?;
+        let got = requests[1].buffer()?[0];
+        println!("step {step}: rank {rank} got {got} from rank {prev}");
+    }
+    Ok(())
+}</code></pre>
+
+<p>With three processes it prints:</p>
+
+<pre class="output" data-output-of="persistent"><code>step 0: rank 0 got 20 from rank 2
+step 1: rank 0 got 21 from rank 2
+step 2: rank 0 got 22 from rank 2
+step 0: rank 1 got 0 from rank 0
+step 1: rank 1 got 1 from rank 0
+step 2: rank 1 got 2 from rank 0
+step 0: rank 2 got 10 from rank 1
+step 1: rank 2 got 11 from rank 1
+step 2: rank 2 got 12 from rank 1</code></pre>
+
+<p><a href="../ferrompi/struct.PersistentRequest.html#method.start_all"><code>start_all</code></a>
+and
+<a href="../ferrompi/struct.PersistentRequest.html#method.wait_all"><code>wait_all</code></a>
+start and complete a slice of requests together. Starting the send and the
+receive together is what keeps this ring from deadlocking, as with
+<code>sendrecv</code>.</p>
+
+<h2 id="send-modes">Send modes</h2>
+
+<p>MPI has four send modes, which differ in when a send may complete.
+ferrompi offers the three besides the standard mode only as persistent
+requests.</p>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Mode</th><th>A send completes when</th><th>ferrompi</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Standard</td><td>the library is done with the send buffer, which
+    may or may not mean that the receive has started</td><td><code>send</code>,
+    <code>isend</code>, <code>send_init</code></td></tr>
+    <tr><td>Synchronous</td><td>the matching receive has started</td>
+    <td><a href="../ferrompi/struct.Communicator.html#method.ssend_init"><code>ssend_init</code></a></td></tr>
+    <tr><td>Buffered</td><td>the data is copied into a buffer the program
+    attached with
+    <a href="../ferrompi/struct.Mpi.html#method.buffer_attach"><code>Mpi::buffer_attach</code></a>;
+    it never waits for the receiver</td>
+    <td><a href="../ferrompi/struct.Communicator.html#method.bsend_init"><code>bsend_init</code></a></td></tr>
+    <tr><td>Ready</td><td>as in standard mode, but the program promises that
+    the matching receive is already posted; breaking the promise is an error
+    MPI need not detect</td>
+    <td><a href="../ferrompi/struct.Communicator.html#method.rsend_init"><code>rsend_init</code></a></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Synchronous mode is the one to test with. It never buffers, so a program
+that completes with synchronous sends in place of its standard sends does not
+depend on any eager threshold. Exercise 2 tries it on the head-to-head
+exchange.</p>
+
+<h2 id="when-a-receive-fails">When a receive fails</h2>
+
+<p>A message longer than the receive slice is an error. MPI reports
+<code>MPI_ERR_TRUNCATE</code>, which ferrompi returns as
+<code>Err(<a href="../ferrompi/enum.Error.html#variant.Mpi">Error::Mpi</a>)</code>
+with class
+<a href="../ferrompi/enum.MpiErrorClass.html#variant.Truncate"><code>MpiErrorClass::Truncate</code></a>:</p>
+
+<pre data-lang="rust" data-run="2" id="truncate"><code>use ferrompi::{Error, Mpi, MpiErrorClass};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    match world.rank() {
+        0 =&gt; {
+            let mut small = [0i32; 1];
+            match world.recv(&amp;mut small, 1, 0) {
+                Err(Error::Mpi { class: MpiErrorClass::Truncate, .. }) =&gt; {
+                    println!("4 values do not fit in 1: the receive failed with Truncate")
+                }
+                other =&gt; println!("unexpected: {other:?}"),
+            }
+        }
+        1 =&gt; world.send(&amp;[1i32, 2, 3, 4], 0, 0)?,
+        _ =&gt; {}
+    }
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="truncate"><code>4 values do not fit in 1: the receive failed with Truncate</code></pre>
+
+<p>Only the receiver sees the error; rank 1’s send succeeded. Matching the
+class rather than the error’s message keeps the program portable, since each
+library words its messages differently. When the length can vary, probe
+first, as above.</p>
+
+<p>Other mistakes are caught before MPI is called, on the process that makes
+them: a negative rank or tag, or <code>Source::Any</code> as a destination,
+returns <code>Err(Error::InvalidArgument)</code>. A rank that is not in the
+communicator reaches MPI, which reports it with class
+<a href="../ferrompi/enum.MpiErrorClass.html#variant.Rank"><code>Rank</code></a>.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>Set <code>N</code> to <code>1 &lt;&lt; 20</code> in the head-to-head
+  program and run it with <code>-n 2</code>; stop it with Ctrl-C. Find the
+  largest <code>N</code> that still completes on your machine, then make the
+  program safe twice: once by
+  <a href="#ordering-the-calls">ordering the calls</a> by rank parity, once
+  with <code>sendrecv</code>.</li>
+  <li>Back at <code>N = 4</code>, replace the head-to-head program’s
+  <code>send</code> with a synchronous send:
+  <code>let mut send = world.ssend_init(mine, other, 0)?;</code> followed by
+  <code>send.start()?;</code> and <code>send.wait()?;</code>. Run it. Why does
+  it hang at 32 bytes now?</li>
+  <li>In the any-source program, make rank 0 receive from rank 1, then 2,
+  then 3, with <code>Source::Rank(r)</code>. Does the order of the output
+  still vary? Where does a message that arrives before its receive wait?</li>
+  <li>Make the halo line a ring: rank 0’s left neighbor is the last rank,
+  and the last rank’s right neighbor is rank 0. Predict what ranks 0 and 3
+  print with <code>-n 4</code>, then run it.</li>
+  <li>In the mprobe program, allocate <code>len - 1</code> elements. What does
+  <code>mrecv</code> return?</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>A message is a slice and an envelope: source, destination, tag and
+  communicator. A receive takes the oldest message whose envelope matches its
+  own; the data’s length and type play no part.</li>
+  <li><code>send</code> returns when its slice may be reused, not when the
+  message is received. <code>recv</code> returns when the data is in its slice,
+  with a <code>Status</code> that says what arrived.</li>
+  <li>Messages from one sender to one receiver on one communicator stay in
+  order. Nothing orders messages from different senders.</li>
+  <li>Small messages travel eagerly, large ones by rendezvous. A program that
+  works only because <code>send</code> buffered is unsafe and hangs once its
+  messages grow; synchronous sends expose it.</li>
+  <li>Break a cycle of blocking sends by ordering the calls, with
+  <code>sendrecv</code>, or with nonblocking calls.</li>
+  <li>Nonblocking calls run inside <code>ferrompi::scope</code>, which borrows
+  their slices until it has completed every request, so the compiler rejects a
+  slice touched too early.</li>
+  <li>Use <code>mprobe</code> for a message of unknown length, persistent
+  requests for an exchange that repeats, and the class <code>Truncate</code>
+  to recognize a message too long for its slice.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="01-the-mpi-model.html">Previous: chapter 1, the MPI model</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="03-collective-communication.html">Next: chapter 3, collective communication</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

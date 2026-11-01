@@ -7,6 +7,10 @@
 //! a navigable index with relative-link support.
 //!
 //! [`docs/README.md`]: https://github.com/cobre-rs/ferrompi/blob/main/docs/README.md
+//!
+//! The tutorial, which teaches MPI through ferrompi programs, is HTML rather
+//! than Markdown, so it is not embedded here. It is published beside this API
+//! reference at <https://cobre-rs.github.io/ferrompi/tutorial/>.
 
 #[doc = include_str!("../docs/architecture.md")]
 pub mod architecture {}

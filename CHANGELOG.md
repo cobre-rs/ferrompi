@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Tutorial.** An HTML tutorial with diagrams, published beside the API
+  reference at <https://cobre-rs.github.io/ferrompi/tutorial/>, teaches MPI
+  through ferrompi programs. Its first chapter covers the MPI model: the
+  standard, launching a job, initialization and finalization, and
+  communicators. The second covers point-to-point communication: matching,
+  the eager and rendezvous protocols, deadlock, nonblocking calls in a scope,
+  probing, persistent requests and send modes. The third covers collective
+  communication: barrier, broadcast, scatter and gather, all-to-all,
+  reductions and scans, variable counts, how libraries implement collectives,
+  and their nonblocking and persistent forms. The fourth covers datatypes and
+  reductions: type signatures, derived datatypes for structs, columns and
+  strided data, MAXLOC and MINLOC, reduce-scatter, and user-defined
+  operations. The fifth covers one-sided communication: windows, fence,
+  post-start-complete-wait and lock epochs, accumulates and atomic
+  operations, and shared-memory windows. The sixth covers threads and hybrid
+  MPI: the four thread levels, funneled, serialized and multiple programs,
+  which handles may cross threads, and binding processes and threads to CPUs.
+  The seventh covers MPI implementations: the MPICH and Open MPI families,
+  error classes and missing features, how messages move over shared memory,
+  TCP and RDMA, the ABI problem, and how ferrompi builds against one library.
+  The eighth covers building and running: what the build script does, choosing
+  the MPI library, how the loader finds it, launching through Cargo and Slurm,
+  and debugging a job in which one process panics or hangs. The ninth follows
+  one call through ferrompi's layers, in a debugger and in the source, down to
+  MPI's profiling interface and back, and shows which layer refuses which
+  mistake, what a program links, what the layers cost, and where the code for
+  each lives. CI builds and runs every program in it, with the `rma` and
+  `slurm` features, and checks that every excerpt of ferrompi's source in it
+  still matches the file it quotes. The tenth reads the C layer: the interface
+  Rust calls, the six handle tables and how threads share them, what a full
+  table leaves behind, the values it translates and the codes it returns
+  itself, the user-operation trampolines, finalize, and a C program that calls
+  the layer without Rust. CI runs its Rust programs and checks its excerpts
+  the same way. The eleventh covers the safety model: why a request whose drop
+  waits is not enough, the scope and its invariant lifetimes, what a panic
+  does to a pending operation, the requests and windows that own their
+  buffers, the lifecycle states behind handles without a lifetime, every case
+  in which `MPI_Finalize` is skipped, and the `unsafe` left to the caller.
+  The twelfth opens the datatypes and reductions: the sealed traits behind the
+  datatype tag, the address of an empty buffer, the types that match an
+  operation to its buffers and the one check left to run time, how a closure
+  becomes an `MPI_Op` through the trampolines and a registry, when MPI calls
+  it and when it is freed, and the layout check on derived datatypes.
+  The thirteenth covers the tests: unit tests that never start MPI, the one
+  test that does and why it runs alone, doctests that must fail to compile
+  with the right error, MPI tests that run as jobs and give every process
+  one verdict, how the runner judges a run, and what CI adds. The
+  fourteenth follows one MPI call that was added, `create_group`, through
+  the header, the C function, a new error code, the Rust declaration, the
+  safe method and its test, then through what review added, what changes
+  when a call moves data, and what a reviewer checks in each place. The
+  fifteenth reads the communication of the SDDP example for the patterns an
+  iterative solver is built from: the rule they all keep, dividing the work
+  without exchanging counts, results whose length only their rank knows,
+  stopping every rank at the same iteration, sums with the same bits on every
+  rank, and stopping together when one rank fails.
+
 ### Changed
 
 - **`Error::Finalized` displays "MPI has been finalized or the Mpi handle

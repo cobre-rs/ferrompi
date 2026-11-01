@@ -1,0 +1,862 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>8. Building and running · ferrompi tutorial</title>
+<meta name="description" content="What cargo build does with ferrompi: the build script, the C layer and the link. How to choose the MPI library, how a program finds it when it starts, how to launch under mpiexec, mpirun and Slurm, and how to debug a job in which one process panics or hangs.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#adding-ferrompi">Adding ferrompi to a project</a></li>
+      <li><a href="#what-cargo-builds">What cargo build does</a></li>
+      <li><a href="#choosing-the-library">Choosing the MPI library</a></li>
+      <li><a href="#finding-the-library">Finding the library at run time</a></li>
+      <li><a href="#launching">Launching</a></li>
+      <li><a href="#on-a-cluster">On a cluster</a></li>
+      <li><a href="#panics-and-hangs">When a process panics or hangs</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part II · Chapter 8</p>
+<h1>Building and running</h1>
+
+<p class="lede">Part I ran every program with two commands, <code>cargo
+build</code> and <code>mpiexec</code>. This chapter opens both: what cargo does
+with ferrompi before your code compiles, how the program finds the MPI library
+when it starts, how a launcher starts it on a laptop and on a cluster, and what
+to do when one of its processes panics or hangs.</p>
+
+<p>By the end of the chapter you can add ferrompi to a project, read what its
+build script found, choose the MPI library a build uses, tell which library a
+program loads, launch a job through Cargo or Slurm, and get a backtrace from
+every process of a job that crashed or hung. Part II starts here because every
+later chapter builds and runs ferrompi; the next one takes its layers
+apart.</p>
+
+<h2 id="adding-ferrompi">Adding ferrompi to a project</h2>
+
+<p>ferrompi is an ordinary crate on crates.io. A program that uses it names it
+in <code>Cargo.toml</code>:</p>
+
+<pre data-lang="toml"><code>[dependencies]
+ferrompi = "0.7"</code></pre>
+
+<p>Two features add optional parts of the API. Neither needs another system
+library:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Feature</th><th>Adds</th></tr></thead>
+  <tbody>
+    <tr><td><code>rma</code></td><td>windows and one-sided communication, including shared-memory windows (<a href="05-one-sided-communication.html">chapter 5</a>)</td></tr>
+    <tr><td><code>slurm</code></td><td>the <a href="../ferrompi/slurm/index.html"><code>slurm</code></a> module, which reads a Slurm job’s variables, and <a href="../ferrompi/struct.TopologyInfo.html#method.slurm"><code>TopologyInfo::slurm</code></a></td></tr>
+    <tr><td><code>numa</code></td><td>deprecated: 0.6’s name for <code>slurm</code> and <code>rma</code> together, removed in 0.8.0</td></tr>
+  </tbody>
+</table>
+</div>
+
+<pre data-lang="toml"><code>[dependencies]
+ferrompi = { version = "0.7", features = ["rma", "slurm"] }</code></pre>
+
+<p>The machine that builds the program needs an MPI library with its headers,
+as <a href="index.html#before-you-start">Before you start</a> describes, and
+the machines that run it need the same library. ferrompi’s manifest also says
+<code>links = "ferrompi"</code>. Cargo allows one package per
+<code>links</code> name in a build, so a program contains one copy of
+ferrompi’s C layer: if two of its dependencies need versions of ferrompi that
+cannot be unified, such as 0.6 and 0.7, Cargo stops at dependency resolution
+instead of linking both.</p>
+
+<p>Build, then start the built program under a launcher, as in
+<a href="01-the-mpi-model.html#build-then-launch">chapter 1</a>. The rest of
+this chapter is about what each of those two steps does.</p>
+
+<h2 id="what-cargo-builds">What cargo build does</h2>
+
+<p>ferrompi is a Rust crate with a C file inside. Before it compiles any of
+ferrompi’s Rust, cargo runs its build script,
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/build.rs"><code>build.rs</code></a>,
+which does three things: it finds an MPI installation, compiles the C layer
+against that installation’s <code>mpi.h</code>, and tells rustc which library
+to link. The figure follows a build against MPICH, found through its compiler
+wrapper.</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 300" role="img" aria-label="What cargo build does with ferrompi. First cargo runs ferrompi’s build script, build.rs. It asks the MPI installation’s compiler wrapper, mpicc -show, for its flags, and keeps the -I, -L, -l and -D ones. With them the cc crate compiles ferrompi’s C layer, csrc/ferrompi.c, which includes the installation’s mpi.h, into libferrompi.a, and the script tells rustc to link the mpi library. Then rustc compiles your code and ferrompi’s Rust, and the linker joins them with libferrompi.a and libmpi.so into your program, which records that it needs libmpi.so.12 and records no path to it." style="min-width: 44rem">
+  <defs>
+    <marker id="pipe-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+    <marker id="pipe-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-muted"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="16" width="860" height="140" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="42" class="t-head">build.rs, which cargo runs first</text>
+  <rect x="36" y="58" width="170" height="72" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="52" y="78" class="t-mono">bin/mpicc</text>
+  <text x="52" y="98" class="t-mono">include/mpi.h</text>
+  <text x="52" y="118" class="t-mono">lib/libmpi.so</text>
+  <rect x="262" y="66" width="150" height="34" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="337" y="87" text-anchor="middle" class="t-mono">mpicc -show</text>
+  <line x1="206" y1="83" x2="260" y2="83" class="s-muted" stroke-width="1.5" marker-end="url(#pipe-dim)"/>
+  <rect x="486" y="66" width="206" height="34" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="589" y="87" text-anchor="middle" class="t-mono">cc csrc/ferrompi.c</text>
+  <line x1="412" y1="83" x2="484" y2="83" class="s-accent" stroke-width="1.5" marker-end="url(#pipe-arrow)"/>
+  <text x="449" y="76" text-anchor="middle" class="t-small f-muted">-I -L -l -D</text>
+  <rect x="748" y="66" width="116" height="34" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="806" y="87" text-anchor="middle" class="t-mono">libferrompi.a</text>
+  <line x1="692" y1="83" x2="746" y2="83" class="s-accent" stroke-width="1.5" marker-end="url(#pipe-arrow)"/>
+  <path d="M206 105 H236 V130 H589 V102" fill="none" class="s-muted" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#pipe-dim)"/>
+  <text x="250" y="125" class="t-small f-muted">#include &lt;mpi.h&gt;</text>
+  <text x="748" y="124" class="t-small f-muted">and tells rustc:</text>
+  <text x="748" y="140" class="t-small f-muted">link -lmpi</text>
+
+  <rect x="20" y="172" width="860" height="112" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="198" class="t-head">rustc, then the linker</text>
+  <rect x="36" y="216" width="196" height="46" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="134" y="243" text-anchor="middle" class="t-small">your code + ferrompi</text>
+  <text x="244" y="244" text-anchor="middle" class="t-head f-muted">+</text>
+  <rect x="256" y="216" width="124" height="46" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="318" y="243" text-anchor="middle" class="t-mono">libferrompi.a</text>
+  <text x="392" y="244" text-anchor="middle" class="t-head f-muted">+</text>
+  <rect x="404" y="216" width="112" height="46" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="460" y="243" text-anchor="middle" class="t-mono">libmpi.so</text>
+  <line x1="516" y1="239" x2="574" y2="239" class="s-accent" stroke-width="1.5" marker-end="url(#pipe-arrow)"/>
+  <text x="545" y="231" text-anchor="middle" class="t-small f-muted">link</text>
+  <rect x="576" y="216" width="288" height="46" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="592" y="235" class="t-small">your program</text>
+  <text x="592" y="252" class="t-mono">NEEDED libmpi.so.12, no RPATH</text>
+</svg>
+</div>
+<figcaption>The build script asks the MPI installation for its compiler flags,
+compiles <code>csrc/ferrompi.c</code> with them into a static library, and
+tells rustc to link <code>libmpi</code>. Only the C compiler sees
+<code>mpi.h</code>. The program records the library’s name, not where it
+is.</figcaption>
+</figure>
+
+<h3 id="wrapper-flags">The wrapper’s flags</h3>
+
+<p>An MPI compiler wrapper such as <code>mpicc</code> is a C compiler with the
+library’s flags added. Given <code>-show</code> (MPICH) or
+<code>--showme</code> (Open MPI), it prints the command it would run instead of
+running it. Here and below, <code>$PREFIX</code> is the directory MPICH 4.2.3
+is installed in:</p>
+
+<pre data-lang="bash"><code>mpicc -show</code></pre>
+
+<pre class="output"><code>gcc -I$PREFIX/include -L$PREFIX/lib -Wl,-rpath -Wl,$PREFIX/lib -Wl,--enable-new-dtags -lmpi</code></pre>
+
+<p><code>build.rs</code> keeps the <code>-I</code>, <code>-L</code>,
+<code>-l</code> and <code>-D</code> tokens and ignores the rest, the compiler
+included. The <a href="https://docs.rs/cc">cc crate</a> compiles
+<code>csrc/ferrompi.c</code> with the system’s C compiler, <code>cc</code>, or
+the one the <code>CC</code> variable names, and adds the include directories
+and defines itself. The <code>-Wl,-rpath</code> tokens are dropped too: they
+make a C program built with <code>mpicc</code> record where
+<code>libmpi</code> is, and a ferrompi program records no such directory.
+<a href="#finding-the-library">Finding the library at run time</a> covers what
+that means.</p>
+
+<p>Some pkg-config files also list the MPI library’s own dependencies, such as
+<code>hwloc</code>, <code>pmix</code> or <code>ucx</code>, among the libraries
+to link. <code>build.rs</code> leaves them out: <code>libmpi</code> loads its
+dependencies itself, and naming them again fails the link where they are not on
+the default library path.</p>
+
+<h3 id="build-script-output">What the build script reports</h3>
+
+<p>A build script talks to cargo through lines on its standard output, and
+leaves notes for people on standard error. <code>cargo build -vv</code> shows
+both, each line prefixed with the package’s name. Among the cc crate’s own
+lines, the build above printed:</p>
+
+<pre class="output"><code>[ferrompi 0.7.0] cargo:rerun-if-changed=csrc/ferrompi.c
+[ferrompi 0.7.0] cargo:rerun-if-changed=csrc/ferrompi.h
+[ferrompi 0.7.0] cargo:rerun-if-env-changed=MPI_PKG_CONFIG
+[ferrompi 0.7.0] cargo:rerun-if-env-changed=MPICC
+[ferrompi 0.7.0] cargo:rerun-if-env-changed=CRAY_MPICH_DIR
+[ferrompi 0.7.0] cargo:rerun-if-env-changed=PATH
+[ferrompi 0.7.0] Found MPI via MPICC=$PREFIX/bin/mpicc
+[ferrompi 0.7.0] cargo:rustc-link-lib=static=ferrompi
+[ferrompi 0.7.0] cargo:rustc-link-search=native=…/target/debug/build/ferrompi-…/out
+[ferrompi 0.7.0] cargo:rustc-link-search=native=$PREFIX/lib
+[ferrompi 0.7.0] cargo:rustc-link-lib=mpi</code></pre>
+
+<ul>
+  <li>The <code>rerun-if</code> lines say when cargo must run the script
+  again; the next section comes back to them.</li>
+  <li><code>Found MPI via</code> names the probe that found the library. Read
+  it first when a build picks up the wrong one.</li>
+  <li><code>link-lib=static=ferrompi</code> is the C layer, compiled into
+  <code>libferrompi.a</code> in the script’s <code>out</code>
+  directory.</li>
+  <li>The last two lines are the wrapper’s <code>-L</code> and
+  <code>-l</code>.</li>
+</ul>
+
+<p>Cargo prints these lines only when it runs the script. Once ferrompi is
+built, the same lines are in the files cargo kept, one directory per way
+ferrompi was built; the newest is the last build’s:</p>
+
+<pre data-lang="bash"><code>cat "$(ls -t target/debug/build/ferrompi-*/stderr | head -1)"
+cat "$(ls -t target/debug/build/ferrompi-*/output | head -1)"</code></pre>
+
+<h3 id="what-the-program-records">What the program records</h3>
+
+<p>The linker joins three things into the program: your code with ferrompi’s
+Rust, <code>libferrompi.a</code>, and <code>libmpi</code>. <code>readelf
+-d</code> shows what the program says about the libraries it needs:</p>
+
+<pre data-lang="bash"><code>readelf -d target/debug/examples/hello_world | grep -E 'NEEDED|RPATH|RUNPATH'</code></pre>
+
+<pre class="output"><code> 0x0000000000000001 (NEEDED)             Shared library: [libmpi.so.12]
+ 0x0000000000000001 (NEEDED)             Shared library: [libgcc_s.so.1]
+ 0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+ 0x0000000000000001 (NEEDED)             Shared library: [ld-linux-x86-64.so.2]</code></pre>
+
+<p><code>libferrompi.a</code> is not in the list: a static library is copied
+into the program. <code>libmpi</code> is a shared library, loaded when the
+program starts, and the program asks for it as <code>libmpi.so.12</code>, not
+the <code>libmpi.so</code> that <code>-lmpi</code> named. A shared library has
+three names:</p>
+
+<pre data-lang="bash"><code>ls -l $PREFIX/lib/libmpi.so*</code></pre>
+
+<pre class="output"><code>libmpi.so -> libmpi.so.12.4.3
+libmpi.so.12 -> libmpi.so.12.4.3
+libmpi.so.12.4.3</code></pre>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Name</th><th>What uses it</th></tr></thead>
+  <tbody>
+    <tr><td><code>libmpi.so</code></td><td>the linker, given <code>-lmpi</code>. Distributions ship it in the development package, next to <code>mpi.h</code>.</td></tr>
+    <tr><td><code>libmpi.so.12</code></td><td>the loader. It is the library’s <em>soname</em>, written into the library when it was built; the linker copies it into the program. It changes only when the ABI does (<a href="07-implementations-networks-and-abi.html#abi-problem">chapter 7</a>).</td></tr>
+    <tr><td><code>libmpi.so.12.4.3</code></td><td>nothing by this name: it is the file itself, this MPICH release’s build of that ABI.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="choosing-the-library">Choosing the MPI library</h2>
+
+<p><a href="07-implementations-networks-and-abi.html#how-ferrompi-builds">Chapter 7</a>
+gave the order in which <code>build.rs</code> looks for MPI. On a machine with
+one MPI library, that order finds it. On a machine with several, as a cluster
+usually has, choose one with a variable:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Variable</th><th>Names</th><th>For example</th></tr></thead>
+  <tbody>
+    <tr><td><code>MPI_PKG_CONFIG</code></td><td>a pkg-config package</td><td><code>MPI_PKG_CONFIG=ompi</code></td></tr>
+    <tr><td><code>MPICC</code></td><td>a compiler wrapper, asked with <code>-show</code>, then <code>--showme</code></td><td><code>MPICC=/usr/bin/mpicc.mpich</code></td></tr>
+    <tr><td><code>CRAY_MPICH_DIR</code></td><td>a Cray MPICH installation</td><td>set by the <code>cray-mpich</code> module</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The first of them that is set wins, in that order. If its probe fails, the
+build stops; it does not go on to look for another library, which could be the
+wrong one:</p>
+
+<pre data-lang="bash"><code>MPICC=/opt/nowhere/bin/mpicc cargo build --example hello_world</code></pre>
+
+<pre class="output"><code>error: failed to run custom build command for `ferrompi v0.7.0 (…)`
+…
+  --- stderr
+  thread 'main' (…) panicked at build.rs:70:61:
+  MPICC=/opt/nowhere/bin/mpicc: failed to run '/opt/nowhere/bin/mpicc': No such file or directory (os error 2)</code></pre>
+
+<p>On a Cray system, leave <code>MPICC</code> unset: Cray’s compiler wrapper,
+<code>cc</code>, answers neither <code>-show</code> nor <code>--showme</code>,
+and <code>CRAY_MPICH_DIR</code> already points at the library.</p>
+
+<h3 id="when-cargo-rebuilds">When cargo rebuilds ferrompi</h3>
+
+<p>The <code>rerun-if</code> lines tell cargo to run <code>build.rs</code>
+again, and so recompile the C layer, when <code>csrc/ferrompi.c</code> or
+<code>csrc/ferrompi.h</code> changes, or when one of the three variables or
+<code>PATH</code> does. Loading another MPI module changes <code>PATH</code>,
+so the next build is against the new module’s library, without a <code>cargo
+clean</code>. Two things follow:</p>
+
+<ul>
+  <li>Switching back and forth between two libraries rebuilds ferrompi, and
+  your program, at every switch. Give each library its own target directory,
+  such as <code>CARGO_TARGET_DIR=target/openmpi</code>, and each keeps its
+  build.</li>
+  <li>Reinstalling a library in place, at the same path, changes none of
+  them, so cargo does not notice. Run <code>cargo clean -p ferrompi</code> to
+  build against the new files.</li>
+</ul>
+
+<p><a href="../ferrompi/doc/mpi_compatibility/index.html#building">The
+compatibility guide’s Building section</a> lists every probe, including the
+directories tried last.</p>
+
+<h2 id="finding-the-library">Finding the library at run time</h2>
+
+<p>The program names <code>libmpi.so.12</code> and no directory. When it
+starts, the dynamic loader searches for a file of that name: first in the
+directories of <code>LD_LIBRARY_PATH</code>, then in the cache that
+<code>ldconfig</code> builds from the system’s library directories, then in
+<code>/lib</code> and <code>/usr/lib</code>. It loads the first file it
+finds. <code>ldd</code> shows which one that is, without running the
+program:</p>
+
+<pre data-lang="bash"><code>ldd target/debug/examples/hello_world | grep mpi</code></pre>
+
+<pre class="output"><code>	libmpi.so.12 => $PREFIX/lib/libmpi.so.12 (0x…)</code></pre>
+
+<p>When no directory has the file, the program does not start, as
+<a href="07-implementations-networks-and-abi.html#when-the-library-is-wrong">chapter 7</a>
+showed. The quieter failure is a directory with another library of the same
+name. The figure shows it on a machine with MPICH 4.2.3 under
+<code>$PREFIX</code>, which built the program, and Ubuntu 24.04’s MPICH 4.2.0
+package in <code>/usr/lib</code>: the package that starts every process as a
+separate job, as <a href="index.html#before-you-start">Before you start</a>
+warns.</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 290" role="img" aria-label="Which libmpi.so.12 the loader picks on a machine with MPICH 4.2.3 installed under a prefix and Ubuntu’s MPICH 4.2.0 package in /usr/lib. The program records only the name libmpi.so.12. The loader looks first in the directories of LD_LIBRARY_PATH, then in its cache and the system directories. With LD_LIBRARY_PATH set to the prefix’s lib directory, it loads MPICH 4.2.3, the library the program was built against, and the two processes are ranks 0 and 1 of 2. With LD_LIBRARY_PATH unset, it finds Ubuntu’s MPICH 4.2.0 in /usr/lib, which has the same name, and each process prints rank 0 of 1." style="min-width: 44rem">
+  <defs>
+    <marker id="load-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="16" width="425" height="258" rx="10" class="f-paper s-accent" stroke-width="1.2"/>
+  <text x="36" y="42" class="t-head">With LD_LIBRARY_PATH=$PREFIX/lib</text>
+  <rect x="36" y="56" width="393" height="32" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="232.5" y="76" text-anchor="middle" class="t-mono">NEEDED libmpi.so.12</text>
+  <text x="36" y="130" class="t-small f-muted">1  LD_LIBRARY_PATH</text>
+  <rect x="190" y="111" width="212" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="296" y="130" text-anchor="middle" class="t-mono">$PREFIX/lib/libmpi.so.12</text>
+  <text x="36" y="180" class="t-small f-muted">2  ld.so.cache, /usr/lib</text>
+  <rect x="190" y="161" width="212" height="30" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="296" y="180" text-anchor="middle" class="t-small f-muted">not searched</text>
+  <path d="M418 88 V126 H404" fill="none" class="s-accent" stroke-width="1.5" marker-end="url(#load-arrow)"/>
+  <text x="36" y="232" class="t-small">loads MPICH 4.2.3, as built</text>
+  <text x="36" y="252" class="t-small">mpiexec -n 2: ranks 0 and 1 of 2</text>
+
+  <rect x="455" y="16" width="425" height="258" rx="10" class="f-paper s-copper" stroke-width="1.2"/>
+  <text x="471" y="42" class="t-head">With LD_LIBRARY_PATH unset</text>
+  <rect x="471" y="56" width="393" height="32" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="667.5" y="76" text-anchor="middle" class="t-mono">NEEDED libmpi.so.12</text>
+  <text x="471" y="130" class="t-small f-muted">1  LD_LIBRARY_PATH</text>
+  <rect x="625" y="111" width="212" height="30" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="731" y="130" text-anchor="middle" class="t-small f-muted">not set</text>
+  <text x="471" y="180" class="t-small f-muted">2  ld.so.cache, /usr/lib</text>
+  <rect x="625" y="161" width="212" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="731" y="180" text-anchor="middle" class="t-mono">/usr/lib/…/libmpi.so.12</text>
+  <path d="M853 88 V176 H839" fill="none" class="s-accent" stroke-width="1.5" marker-end="url(#load-arrow)"/>
+  <text x="471" y="232" class="t-small">loads Ubuntu’s MPICH 4.2.0</text>
+  <text x="471" y="252" class="t-small">mpiexec -n 2: each process is rank 0 of 1</text>
+</svg>
+</div>
+<figcaption>The program names a file, and the loader takes the first file of
+that name it finds. Without <code>LD_LIBRARY_PATH</code>, it finds the
+distribution’s MPICH, which has the same name and the same ABI, so the program
+starts, with a library it was not built against.</figcaption>
+</figure>
+
+<pre data-lang="bash"><code>env -u LD_LIBRARY_PATH mpiexec -n 2 target/debug/examples/hello_world</code></pre>
+
+<pre class="output"><code>Hello from rank 0 of 1 on node01 (MPI 4.1)
+
+All processes reported in. Test passed!
+Hello from rank 0 of 1 on node01 (MPI 4.1)
+
+All processes reported in. Test passed!</code></pre>
+
+<p>The launcher was MPICH 4.2.3’s, the one the program was built for. The
+library was not. Chapter 7 gives a mismatched <code>mpiexec</code> as the cause
+of “rank 0 of 1”; this is the other cause, and <code>ldd</code> tells the two
+apart.</p>
+
+<p>To load the right library, put its directory first:</p>
+
+<ul>
+  <li>set <code>LD_LIBRARY_PATH</code>, as an MPI module or the
+  installation’s environment script does (<code>DYLD_LIBRARY_PATH</code> on
+  macOS);</li>
+  <li>for a library meant for every user of the machine, register its
+  directory with <code>ldconfig</code>;</li>
+  <li>or record the directory in your own program.</li>
+</ul>
+
+<p>ferrompi records no directory because it is a library: it cannot know
+where the programs built on it will run, and a directory on the build machine
+is usually wrong on a cluster or in a container. A program you build for the
+machine you build it on can record one itself, by passing the linker an
+rpath:</p>
+
+<pre data-lang="bash"><code>RUSTFLAGS="-C link-arg=-Wl,-rpath,$PREFIX/lib" cargo build --examples</code></pre>
+
+<p>With Ubuntu’s linker, <code>readelf -d</code> then shows a
+<code>RUNPATH</code> entry, and the program loads MPICH 4.2.3 with
+<code>LD_LIBRARY_PATH</code> unset. The loader searches a
+<code>RUNPATH</code> after <code>LD_LIBRARY_PATH</code>, so a module can still
+point the program at another build. Changing <code>RUSTFLAGS</code> rebuilds
+every crate of the project.</p>
+
+<h2 id="launching">Launching</h2>
+
+<h3 id="cargo-runner">Through cargo</h3>
+
+<p>Building and launching are two commands because <code>cargo run</code>
+starts the program itself, without a launcher. Cargo can start it through one:
+a <em>runner</em> is a command that cargo puts in front of the programs it
+runs. Set it for one command with an environment variable:</p>
+
+<pre data-lang="bash"><code>CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="mpiexec -n 2" cargo run --example launcher</code></pre>
+
+<p>or for a project in <code>.cargo/config.toml</code>:</p>
+
+<pre data-lang="toml"><code>[target.'cfg(target_os = "linux")']
+runner = "mpiexec -n 2"</code></pre>
+
+<p>Cargo uses the runner for <code>cargo run</code>, <code>cargo test</code>
+and <code>cargo bench</code>, so with this setting every test and benchmark
+binary also starts as a job of two processes. The environment variable wins
+over the file.</p>
+
+<h3 id="launcher-variables">What the launcher tells each process</h3>
+
+<p>A launcher gives each process its place in the job through environment
+variables, which the MPI library reads during initialization. They are set
+before <code>main</code> runs:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Launcher</th><th>Rank</th><th>Rank among the processes on its node</th></tr></thead>
+  <tbody>
+    <tr><td>MPICH’s <code>mpiexec</code> (Hydra)</td><td><code>PMI_RANK</code></td><td><code>MPI_LOCALRANKID</code></td></tr>
+    <tr><td>Open MPI’s <code>mpirun</code></td><td><code>OMPI_COMM_WORLD_RANK</code></td><td><code>OMPI_COMM_WORLD_LOCAL_RANK</code></td></tr>
+    <tr><td>Slurm’s <code>srun</code></td><td><code>SLURM_PROCID</code></td><td><code>SLURM_LOCALID</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>After <code>Mpi::init</code>, the communicator is what counts. Before it,
+the variables are all a process has, and they are enough to name a log file or
+choose a GPU before the library starts. When they disagree with the
+communicator, the program and the launcher are not in the same job. This
+program checks:</p>
+
+<pre data-lang="rust" data-run="2" id="launcher"><code>use std::env;
+
+use ferrompi::Mpi;
+
+// Where each launcher puts a process's rank, and its rank among the processes
+// on its node: MPICH's Hydra, Open MPI's mpirun, and Slurm's srun.
+const RANK: [&amp;str; 3] = ["PMI_RANK", "OMPI_COMM_WORLD_RANK", "SLURM_PROCID"];
+const LOCAL_RANK: [&amp;str; 3] = ["MPI_LOCALRANKID", "OMPI_COMM_WORLD_LOCAL_RANK", "SLURM_LOCALID"];
+
+// The first of `names` that is set to a number, and the number.
+fn launcher_var(names: &amp;[&amp;'static str]) -&gt; Option&lt;(&amp;'static str, i32)&gt; {
+    names
+        .iter()
+        .find_map(|&amp;name| Some((name, env::var(name).ok()?.parse().ok()?)))
+}
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    // Before MPI is initialized, only the launcher's variables say which
+    // process this is: enough to name a log file, or to choose a GPU.
+    let launcher_rank = launcher_var(&amp;RANK);
+    if let Some((name, local)) = launcher_var(&amp;LOCAL_RANK) {
+        eprintln!("before init: {name}={local}");
+    }
+
+    let mpi = Mpi::init()?;
+    let rank = mpi.world().rank();
+    match launcher_rank {
+        Some((name, early)) if early == rank =&gt; {
+            eprintln!("rank {rank}: {name}={early}");
+            println!("rank {rank}: the launcher's rank agrees with MPI's");
+        }
+        Some((name, early)) =&gt; println!("rank {rank}: {name} says rank {early}"),
+        None =&gt; println!("rank {rank}: no launcher variable is set"),
+    }
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints, on standard output:</p>
+
+<pre class="output" data-output-of="launcher"><code>rank 0: the launcher's rank agrees with MPI's
+rank 1: the launcher's rank agrees with MPI's</code></pre>
+
+<p>and on standard error, under Hydra, lines such as
+<code>before init: MPI_LOCALRANKID=0</code> and
+<code>rank 0: PMI_RANK=0</code>. Started with Ubuntu’s library, as in the
+figure above, both processes call themselves rank 0, and the second one says
+so:</p>
+
+<pre class="output"><code>rank 0: the launcher's rank agrees with MPI's
+rank 0: PMI_RANK says rank 1</code></pre>
+
+<p>Started without a launcher, it prints <code>rank 0: no launcher variable
+is set</code>.</p>
+
+<h3 id="environment-input-output">Environment, input and output</h3>
+
+<p><strong>Environment.</strong> Hydra passes its whole environment to every
+process (<code>-envall</code>, the default), and so does <code>srun</code>
+(<code>--export=ALL</code>, the default). Open MPI’s <code>mpirun</code>
+exports a variable to the processes on other nodes when you name it with
+<code>-x</code>:</p>
+
+<pre data-lang="bash"><code>mpirun -n 4 --hostfile hosts -x RUST_BACKTRACE -x RUST_LOG target/release/examples/launcher</code></pre>
+
+<p><strong>Input.</strong> Only rank 0 gets the terminal’s standard input.
+With MPICH, a read on another rank waited until the job was killed. Open MPI
+gives the other ranks <code>/dev/null</code>, and <code>--stdin</code> chooses
+other ranks, <code>all</code> or <code>none</code>. Read input on rank 0 and
+<a href="03-collective-communication.html#broadcast">broadcast</a> it.</p>
+
+<p><strong>Output.</strong> Every process’s output reaches the terminal
+through the launcher, a line at a time, in whatever order the lines arrive.
+Each launcher can label the lines or keep each rank’s output in a file of its
+own:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Launcher</th><th>Label each line</th><th>A file per rank</th></tr></thead>
+  <tbody>
+    <tr><td>MPICH’s <code>mpiexec</code></td><td><code>-prepend-rank</code>, which writes <code>[0]</code></td><td><code>-outfile-pattern 'out.%r.txt'</code>, <code>-errfile-pattern 'err.%r.txt'</code></td></tr>
+    <tr><td>Open MPI’s <code>mpirun</code></td><td><code>--output tag</code>, which writes <code>[job,rank]&lt;stdout&gt;:</code></td><td><code>--output file=out</code>, which writes <code>out.</code> and the rank</td></tr>
+    <tr><td>Slurm’s <code>srun</code></td><td><code>--label</code></td><td><code>--output 'out.%t.txt'</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="on-a-cluster">On a cluster</h2>
+
+<p>On a cluster the build and the run happen on different machines: you build
+on a login node, and the job runs on compute nodes that the scheduler picks.
+Three things have to match between them.</p>
+
+<ul>
+  <li><strong>The library.</strong> Load the same MPI module in the job script
+  as in the shell you built in. The module sets <code>PATH</code>, which
+  <code>build.rs</code> reads, and <code>LD_LIBRARY_PATH</code>, which the
+  loader reads; the job needs the second.</li>
+  <li><strong>The files.</strong> The compute nodes see the program where you
+  built it only when the target directory is on a shared filesystem, such as
+  home or a scratch filesystem. Otherwise copy it to each node, for example
+  with Slurm’s <code>sbcast</code>.</li>
+  <li><strong>The processor.</strong> A program built with <code>-C
+  target-cpu=native</code> uses every instruction the login node’s processor
+  has, and dies with an illegal instruction on a compute node whose processor
+  lacks one. Name the compute nodes’ processor instead, or keep the
+  default.</li>
+</ul>
+
+<p>A Slurm job script for a job of two nodes, four processes on each, with
+eight CPUs per process for its threads
+(<a href="06-threads-and-hybrid-mpi.html#placement">chapter 6</a>):</p>
+
+<pre data-lang="bash"><code>#!/bin/bash
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=8
+#SBATCH --time=00:30:00
+
+module load mpich                 # the module you built with; names vary by site
+srun --mpi=pmix --cpus-per-task="$SLURM_CPUS_PER_TASK" target/release/examples/job_report</code></pre>
+
+<p><code>srun</code> starts the processes itself, and <code>--mpi=pmix</code>
+connects them to the MPI library through PMIx, the process-management
+service that <a href="01-the-mpi-model.html#what-the-launcher-does">chapter 1</a>
+showed the library using to wire up the job. <code>srun --mpi=list</code> shows which
+interfaces your Slurm offers, and the MPI library must support the one you
+choose. Where it does not, run the library’s own <code>mpiexec</code> inside
+the job instead. Passing <code>--cpus-per-task</code> to <code>srun</code> as
+well keeps each process’s CPU count independent of what the job step inherits
+from the job. The time limit ends a job that hangs.</p>
+
+<h3 id="job-report">Where the processes ran</h3>
+
+<p>ferrompi can report where a job’s processes ran.
+<a href="../ferrompi/struct.Communicator.html#method.topology"><code>Communicator::topology</code></a>
+is a collective that gathers each process’s host name into a
+<a href="../ferrompi/struct.TopologyInfo.html"><code>TopologyInfo</code></a>.
+With the <code>slurm</code> feature, it also carries the Slurm job’s id, node
+list and CPUs per task, as a
+<a href="../ferrompi/struct.SlurmInfo.html"><code>SlurmInfo</code></a>. This
+program prints each process’s host and, on rank 0, the whole report:</p>
+
+<pre data-lang="rust" data-run="2" id="job_report"><code>use ferrompi::Mpi;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // A collective: each process contributes its host's name, and each gets
+    // the map of every host to its ranks.
+    let topo = world.topology(&amp;mpi)?;
+    for (host, entry) in topo.hosts().iter().enumerate() {
+        if entry.ranks.contains(&amp;rank) {
+            println!(
+                "rank {rank}: host {host} of {}, with ranks {:?}",
+                topo.num_hosts(),
+                entry.ranks
+            );
+        }
+    }
+
+    if rank == 0 {
+        // The whole report, host names and library included.
+        eprintln!("{topo}");
+        match topo.slurm() {
+            Some(job) =&gt; println!("Slurm job {}", job.job_id),
+            None =&gt; println!("not a Slurm job"),
+        }
+    }
+    Ok(())
+}</code></pre>
+
+<p>With two processes on one machine it prints:</p>
+
+<pre class="output" data-output-of="job_report"><code>rank 0: host 0 of 1, with ranks [0, 1]
+not a Slurm job
+rank 1: host 0 of 1, with ranks [0, 1]</code></pre>
+
+<p>and rank 0 writes the report on standard error. With MPICH 4.2.3, with the
+machine’s name where this shows <code>node01</code>:</p>
+
+<pre class="output"><code>================ MPI Topology ================
+Library:   MPICH Version:      4.2.3
+MPICH Release date: Wed Oct  2 09:35:21 AM CDT 2024
+MPICH ABI:          16:3:4
+MPICH Device:       ch4:ofi
+MPICH configure:    --prefix=$PREFIX --disable-fortran --with-device=ch4:ofi
+…
+Standard:  MPI 4.1
+Threads:   Single
+Processes: 2 across 1 node
+
+  node01: ranks 0, 1  (2 processes)
+==============================================</code></pre>
+
+<p>The <code>Library</code> line is the version string of the library rank 0
+loaded, from <a href="../ferrompi/struct.Mpi.html#method.library_version"><code>Mpi::library_version</code></a>:
+the check that the loader figure calls for, from inside the program. Its
+<code>MPICH ABI</code> line is the library’s version in libtool’s notation,
+which the file names come from: 16 − 4 = 12 for the soname, then 4 and 3 for
+the file, <code>libmpi.so.12.4.3</code>. Under Slurm the report adds the job’s
+id, node list and CPUs per task, and the program prints <code>Slurm job</code>
+and the id.</p>
+
+<h2 id="panics-and-hangs">When a process panics or hangs</h2>
+
+<p>A job fails as a whole: when one process stops, the others wait at their
+next call that needs it.
+<a href="01-the-mpi-model.html#when-something-goes-wrong">Chapter 1</a>
+showed how to stop a job on purpose, with
+<a href="../ferrompi/struct.Communicator.html#method.abort"><code>abort</code></a>.
+This section is about a process that stops on its own. The examples run a
+program, <code>panic_demo</code>, in which rank 1 indexes past the end of an
+empty <code>Vec</code> while the other ranks go on to a barrier.</p>
+
+<h3 id="a-panic">A panic on one process</h3>
+
+<p>With Rust’s default, the panic unwinds rank 1’s stack, the process prints
+the message and exits with status 101, and rank 0 waits in the barrier for a
+process that is gone. The job hangs, and <code>mpiexec</code> with it.</p>
+
+<p>To make a panic end the job, build with <code>panic = "abort"</code>, in the
+<code>Cargo.toml</code> at the root of the workspace:</p>
+
+<pre data-lang="toml"><code>[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"</code></pre>
+
+<p>The process then stops at the panic with <code>SIGABRT</code>, and the
+launcher, seeing a process killed, stops the others. With MPICH the job ended
+within a second, and <code>mpiexec</code> exited with a non-zero status after
+printing:</p>
+
+<pre class="output"><code>===================================================================================
+=   BAD TERMINATION OF ONE OF YOUR APPLICATION PROCESSES
+=   PID … RUNNING AT node01
+=   EXIT CODE: 134
+=   CLEANING UP REMAINING PROCESSES
+=   YOU CAN IGNORE THE BELOW CLEANUP MESSAGES
+===================================================================================
+YOUR APPLICATION TERMINATED WITH THE EXIT STRING: Aborted (signal 6)</code></pre>
+
+<p>Three limits. Cargo reads profiles only from the workspace’s root
+<code>Cargo.toml</code>, so a library cannot choose this for the programs that
+use it. Tests and benchmarks ignore the setting, since Rust’s test harness
+needs to unwind. And an aborting process runs no <code>Drop</code>: it does
+not finalize MPI, flush a <code>BufWriter</code>, or remove its temporary
+files.</p>
+
+<h3 id="backtraces">A backtrace from every process</h3>
+
+<p><code>RUST_BACKTRACE=1</code> makes a panicking process print its stack.
+Hydra and <code>srun</code> pass it on; with Open MPI’s <code>mpirun</code>,
+add <code>-x RUST_BACKTRACE</code> for the processes on other nodes.</p>
+
+<pre data-lang="bash"><code>RUST_BACKTRACE=1 mpiexec -n 2 target/debug/examples/panic_demo</code></pre>
+
+<p>A process that crashes in C, inside the MPI library or ferrompi’s C layer,
+prints no Rust backtrace. Run every process under gdb in batch mode instead:
+each gdb runs its process, and if the process stops on a signal, prints the
+stack and exits. <code>rust-gdb</code>, which rustup installs, is gdb with
+Rust’s pretty-printers loaded.</p>
+
+<pre data-lang="bash"><code>mpiexec -n 2 gdb -q -batch -ex run -ex bt --args target/debug/examples/panic_demo</code></pre>
+
+<p>Built with <code>panic = "abort"</code>, the panic is such a signal. Rank
+1’s gdb prints, after the panic’s message:</p>
+
+<pre class="output"><code>Thread 1 "panic_demo" received signal SIGABRT, Aborted.
+…
+#4  0x… in __GI_abort () at ./stdlib/abort.c:79
+…
+#15 0x… in core::panicking::panic_bounds_check () at library/core/src/panicking.rs:271
+…
+#19 0x… in panic_demo::main () at examples/panic_demo.rs:8</code></pre>
+
+<p>Built with unwinding, rank 1 instead exits normally, and its gdb prints
+<code>[Inferior 1 (process …) exited with code 0145]</code>: gdb writes exit
+codes in octal, and 0145 is 101.</p>
+
+<h3 id="hangs">Where a hung job waits</h3>
+
+<p>A hung job prints nothing. To see where each process waits, interrupt them
+all under gdb. MPICH’s <code>mpiexec</code> passes a <code>SIGINT</code> on to
+its processes, printing <code>Sending Ctrl-C to processes as
+requested</code>, and gdb, on <code>SIGINT</code>, stops its process and goes
+on to its next command, <code>bt</code>. <code>timeout</code> sends the
+signal after the number of seconds you give it:</p>
+
+<pre data-lang="bash"><code>timeout -s INT 60 mpiexec -n 2 gdb -q -batch -ex run -ex bt --args target/debug/examples/panic_demo</code></pre>
+
+<p>On the unwinding build, rank 0’s gdb shows it in the barrier, through every
+layer of ferrompi down to MPICH:</p>
+
+<pre class="output"><code>Thread 1 "panic_demo" received signal SIGINT, Interrupt.
+…
+#12 0x… in MPIR_Barrier_intra_dissemination () from $PREFIX/lib/libmpi.so.12
+…
+#18 0x… in PMPI_Barrier () from $PREFIX/lib/libmpi.so.12
+#19 0x… in ferrompi_barrier (comm_handle=0) at csrc/ferrompi.c:1108
+#20 0x… in ferrompi::ffi::ferrompi_barrier (comm=0) at …/ferrompi/src/ffi.rs:234
+#21 ferrompi::comm::Communicator::barrier (self=0x…) at …/ferrompi/src/comm/blocking.rs:29
+#22 0x… in panic_demo::main () at examples/panic_demo.rs:10</code></pre>
+
+<p>Read it from the bottom: your <code>main</code>; ferrompi’s
+<code>Communicator::barrier</code>; the declaration of the C function, in
+<code>src/ffi.rs</code>; the C layer’s <code>ferrompi_barrier</code>; and
+<code>PMPI_Barrier</code>, the library’s own entry point, under which MPICH
+waits for a message that will not come.
+<a href="03-collective-communication.html#when-a-collective-hangs">Chapter 3</a>
+lists the usual reasons a collective hangs, and
+<a href="09-a-tour-of-the-layers.html#in-a-debugger">chapter 9</a> follows the
+same path through ferrompi’s source.</p>
+
+<p>gdb can also attach to a running process, with <code>gdb -p</code> and its
+process id, without restarting the job, where the kernel allows it. Ubuntu
+sets <code>/proc/sys/kernel/yama/ptrace_scope</code> to 1, which lets a
+process trace only its own children, so gdb fails to attach to a rank that
+<code>mpiexec</code> started, and names that file. It can attach when run as
+root.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>Run <code>cargo clean -p ferrompi</code>, then <code>cargo build -vv
+  --example hello_world</code>, and find the <code>Found MPI via</code> line.
+  If pkg-config knows your library, build again with
+  <code>MPI_PKG_CONFIG</code> set to its package, and compare the
+  <code>rustc-link</code> lines.</li>
+  <li>Run <code>ldd</code> on an example with and without
+  <code>LD_LIBRARY_PATH</code>. If your machine has a second
+  <code>libmpi.so.12</code>, run the launcher program both ways and say which
+  line changes, and why.</li>
+  <li>Set the runner in <code>.cargo/config.toml</code> and run the job report
+  with <code>cargo run</code>. Then run <code>cargo test</code> in a project
+  with one unit test, and count the <code>test result</code> lines.</li>
+  <li>Change the job report so that each process also prints its rank on its
+  node, from the launcher’s variable, and compare it with the position of its
+  rank in its host’s list of ranks.</li>
+  <li>Write <code>panic_demo</code>. Run it under <code>timeout 20</code> as
+  built, then with <code>panic = "abort"</code>, and compare how each job
+  ends.</li>
+  <li>Run the unwinding <code>panic_demo</code> under the hang recipe, and find
+  the frame where ferrompi’s Rust calls its C layer.</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>Add ferrompi like any crate. The <code>rma</code> and
+  <code>slurm</code> features add parts of the API, and a program contains one
+  version of ferrompi.</li>
+  <li><code>build.rs</code> finds MPI, compiles <code>csrc/ferrompi.c</code>
+  with the library’s flags into <code>libferrompi.a</code>, and tells rustc to
+  link <code>libmpi</code>. <code>cargo build -vv</code>, or the
+  <code>output</code> and <code>stderr</code> files under
+  <code>target/debug/build</code>, show what it found.</li>
+  <li>Choose a library with <code>MPI_PKG_CONFIG</code>, <code>MPICC</code> or
+  <code>CRAY_MPICH_DIR</code>. A set variable whose probe fails stops the
+  build. Cargo rebuilds ferrompi when one of them or <code>PATH</code>
+  changes.</li>
+  <li>A program names <code>libmpi.so.12</code>, not a directory. The loader
+  takes the first file of that name on <code>LD_LIBRARY_PATH</code>, in its
+  cache, or in the system directories, and <code>ldd</code> shows which. A
+  library of the same name from another build can load silently.</li>
+  <li>A Cargo runner launches <code>cargo run</code>, <code>cargo test</code>
+  and <code>cargo bench</code> through <code>mpiexec</code>. Launchers put each
+  process’s rank in variables that exist before <code>Mpi::init</code>. Only
+  rank 0 reads standard input, and each launcher can label or separate the
+  ranks’ output.</li>
+  <li>On a cluster, build and run with the same module, put the program where
+  the compute nodes can read it, build for their processor, and launch with
+  <code>srun --mpi=pmix</code> or the library’s <code>mpiexec</code>.</li>
+  <li>A panic on one process hangs the job unless the program is built with
+  <code>panic = "abort"</code>. Run each process under gdb in batch mode to get
+  a backtrace of a crash, and send the job <code>SIGINT</code> to see where a
+  hung job waits.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="07-implementations-networks-and-abi.html">Previous: chapter 7, implementations, networks and the ABI problem</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="09-a-tour-of-the-layers.html">Next: chapter 9, a tour of the layers</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

@@ -1,0 +1,909 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>13. Testing · ferrompi tutorial</title>
+<meta name="description" content="How ferrompi tests a library that starts once per process and runs as a job: unit tests that never start MPI, the one test that does and why it runs alone, doctests that must fail to compile with the right error, MPI tests that run as jobs and report one verdict for every process, the runner that turns a run into PASS, SKIP or FAIL, and what CI adds.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#what-cargo-test-cannot-do">What cargo test cannot do</a></li>
+      <li><a href="#unit-tests">Unit tests</a></li>
+      <li><a href="#the-singleton">The one test that starts MPI</a></li>
+      <li><a href="#doctests">Doctests that must not compile</a></li>
+      <li><a href="#mpi-tests">MPI tests</a></li>
+      <li><a href="#the-runner">The runner</a></li>
+      <li><a href="#in-ci">What CI adds</a></li>
+      <li><a href="#writing-a-test">Where a new test goes</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part II · Chapter 13</p>
+<h1>Testing</h1>
+
+<p class="lede">An MPI library is hard to test with the usual tools: MPI
+starts once per process, a test of communication needs several processes, and
+a check can fail on one of them only. This chapter shows how ferrompi’s tests
+are split to fit: unit tests that never start MPI, one test that does,
+doctests that must fail to compile, and programs that run as jobs under a
+runner that decides what passed.</p>
+
+<p>By the end of the chapter you can say why <code>cargo test</code> alone
+cannot test ferrompi, why the one unit test that starts MPI is ignored and
+must run alone, why a doctest’s error code is checked on a pinned nightly,
+how an MPI test gives every process the same verdict, how the runner turns a
+run’s exit status and output into PASS, SKIP or FAIL, and where a new test
+belongs.</p>
+
+<p>The commands CI runs are listed in
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>,
+with the rules for writing an MPI test. The excerpts below name the file they
+come from. A comment <code>// …</code> marks lines left out. CI checks that
+every excerpt still matches its file.</p>
+
+<h2 id="what-cargo-test-cannot-do">What cargo test cannot do</h2>
+
+<p><code>cargo test</code> builds a test binary and runs it as one process,
+with its tests on a pool of threads. Three facts about MPI do not fit that
+model:</p>
+
+<ul>
+  <li><strong>MPI starts once per process.</strong> <code>MPI_Init</code> may
+  be called once, and after <code>MPI_Finalize</code> MPI cannot start again
+  in that process. The tests of one binary cannot each start and stop
+  it.</li>
+  <li><strong>A job needs a launcher.</strong> A binary that cargo starts is a
+  singleton (<a href="01-the-mpi-model.html#without-a-launcher">chapter 1</a>):
+  a world of one process. A test of a send or a collective needs two or more.
+  A runner (<a href="08-building-and-running.html#cargo-runner">chapter 8</a>)
+  can start each test binary as a job, but then every test runs in every
+  process, the ones that need a single process too.</li>
+  <li><strong>A check can fail on one process only.</strong> Each process
+  sees its own buffers and its own results. A test whose processes decide
+  apart can pass on one and fail on another, and leave a process waiting in a
+  collective for a partner that has exited.</li>
+</ul>
+
+<p>The first fact, in one process:</p>
+
+<pre data-lang="rust" data-run="1" id="once"><code>//! One process, one MPI: what a test binary runs into.
+use ferrompi::{CustomDatatype, Mpi};
+
+fn main() {
+    // Before init, a call that would reach MPI is refused without one.
+    match CustomDatatype::contiguous::&lt;f64&gt;(4) {
+        Ok(_) =&gt; println!("before init: a datatype"),
+        Err(e) =&gt; println!("before init: {e}"),
+    }
+
+    let mpi = Mpi::init().expect("MPI init failed");
+    println!("init: a world of {}", mpi.world().size());
+
+    // While an Mpi is alive, a second one cannot be made.
+    match Mpi::init() {
+        Ok(_) =&gt; println!("second init: ok"),
+        Err(e) =&gt; println!("second init: {e}"),
+    }
+
+    // Dropping the Mpi runs MPI_Finalize, and MPI cannot start again.
+    drop(mpi);
+    match Mpi::init() {
+        Ok(_) =&gt; println!("init after the drop: ok"),
+        Err(e) =&gt; println!("init after the drop: {e}"),
+    }
+}</code></pre>
+
+<pre class="output" data-output-of="once"><code>before init: invalid state: MPI is not initialized
+init: a world of 1
+second init: MPI has already been initialized
+init after the drop: MPI has been finalized</code></pre>
+
+<p>Before <code>Mpi::init</code>, the lifecycle guard
+(<a href="11-the-safety-model.html#lifecycle">chapter 11</a>) refuses the
+constructor, and no MPI call is made. While an <code>Mpi</code> is alive, a
+second one cannot be made. Once the drop has run <code>MPI_Finalize</code>,
+<code>Mpi::init</code> refuses for the rest of the process.</p>
+
+<p>So the suite is split into layers, each run in the way its tests
+need:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Layer</th><th>Command</th><th>Tests</th><th>Processes</th><th>MPI</th></tr></thead>
+  <tbody>
+    <tr><td>Unit tests</td><td><code>cargo test --lib --features slurm,rma</code></td><td>213, or 184 without the features</td><td>one, tests on threads</td><td>never started</td></tr>
+    <tr><td>The singleton</td><td><code>cargo test --lib -- --ignored</code></td><td>1</td><td>one</td><td>started once, in a world of one</td></tr>
+    <tr><td>Doctests</td><td><code>cargo test --doc --all-features</code></td><td>308, of which 58 must fail to compile</td><td>one per doctest that runs</td><td>never started</td></tr>
+    <tr><td>MPI tests</td><td><code>tests/run_mpi_tests.sh</code></td><td>122 examples: 103 tests and 19 programs</td><td>a job of <code>np</code> processes per run</td><td>started once in each process</td></tr>
+    <tr><td>The tools’ own tests</td><td><code>tests/runner_selftest.sh</code>, <code>tests/build_probe.sh</code></td><td>77 runner cases, and the build script’s cases</td><td>shell</td><td>none, or a build of <code>hello_world</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="unit-tests">Unit tests: MPI never started</h2>
+
+<p>Many of ferrompi’s checks run before MPI is called: a buffer’s length, an
+argument’s range, the lifecycle state. A unit test of such a check needs no
+MPI, and the crate’s unit tests are written so that none starts it. A test
+that needs an <code>Mpi</code> builds one without <code>Mpi::init</code>. Its
+fields are private to the crate, and a test module inside the crate can write
+them:</p>
+
+<pre data-lang="rust" data-source="src/lib.rs"><code>    /// Minimal stub `Mpi` handle for tests that never call `Mpi::init`
+    /// because their early-return path fires before any MPI call.
+    fn stub_mpi() -&gt; Mpi {
+        Mpi {
+            thread_level: ThreadLevel::Single,
+            world_rank: 3,
+            world_size: 8,
+            _marker: PhantomData,
+        }
+    }
+
+    /// `world()` on a stub handle: any MPI call here would run before
+    /// `MPI_Init_thread`.
+    #[test]
+    fn world_is_built_from_the_rank_and_size_read_at_init() {
+        let world = stub_mpi().world();
+        assert_eq!((world.rank(), world.size()), (3, 8));
+    }</code></pre>
+
+<p><code>world()</code> reads the rank and size that init stored and makes no
+MPI call, so a stub with rank 3 of 8 gives a world of rank 3 of 8. A call that
+would reach MPI is refused before it does. The test below relies on that: a
+tag that passes the length check goes on to the lifecycle guard, which refuses
+it because MPI was never started:</p>
+
+<pre data-lang="rust" data-source="src/lib.rs"><code>    /// The longest `stringtag` the linked library allows passes the length
+    /// check, and one byte more is refused by it. MPI is never initialized
+    /// here: a tag that passes goes on to the lifecycle guard, which refuses
+    /// the call, so no MPI call is made either way.
+    #[test]
+    fn create_from_group_checks_the_length_of_the_tag() {
+        let mpi = stub_mpi();
+        let g = group::Group { handle: 0 };
+        // …
+        let result = mpi.create_from_group(&amp;g, &amp;"t".repeat(longest));
+        assert!(
+            matches!(
+                result,
+                Err(Error::InvalidState {
+                    reason: "MPI is not initialized"
+                })
+            ),
+            "a tag of {longest} bytes passes the length check"
+        );
+        // …
+    }</code></pre>
+
+<p>Such a test depends on a fact about its process rather than about the code
+under test: MPI must never have been started in it. Several of the unit
+tests need that fact, and one test needs the opposite.</p>
+
+<h2 id="the-singleton">The one test that starts MPI</h2>
+
+<p>Some checks need a crate-private item and a running MPI at once, such as
+handing the C layer a group handle past the end of its table. They all go in
+one test:</p>
+
+<pre data-lang="rust" data-source="src/lib.rs"><code>    /// The one test that initializes MPI. Other tests of this binary need a
+    /// process in which MPI was never initialized, so this one is ignored by
+    /// default and runs alone, as a singleton: `cargo test --lib -- --ignored`.
+    #[test]
+    #[ignore = "initializes MPI; run alone with `cargo test --lib -- --ignored`"]
+    fn checks_that_need_mpi() {
+        use crate::{CustomDatatype, MpiDatatype, MpiErrorClass, StructField};
+
+        let mpi = Mpi::init_thread(ThreadLevel::Multiple).expect("MPI init failed");
+        let world = mpi.world();
+        // The threads below duplicate the world communicator with no order
+        // between their calls, which is valid only in a world of one process.
+        assert_eq!(world.size(), 1, "this test needs a world of one process");
+        // …
+        crate::request::tests::stale_handle_is_rejected(&amp;world);
+        // …
+    }</code></pre>
+
+<p>The test starts MPI at <code>Multiple</code>, runs every check that needs
+it, including helpers from other modules’ test code such as
+<code>request::tests::stale_handle_is_rejected</code>, and drops the
+<code>Mpi</code> at the end, which finalizes MPI for the rest of the process.
+That is why it is ignored: <code>cargo test --lib</code> skips it, and
+<code>cargo test --lib -- --ignored</code> runs it and nothing else, alone in
+its process. Started by cargo, it is a singleton, and it asserts a world of
+one. Its threads duplicate the world communicator with no order between their
+calls, which is valid only when no other process has to match them
+(<a href="06-threads-and-hybrid-mpi.html#collective-order">chapter 6</a>).</p>
+
+<p><code>--include-ignored</code> runs both kinds in one process, and then the
+result depends on timing. Three runs on the machine this chapter was written
+on, with the default pool of threads: two passed, and the third failed
+<code>rt::tests::only_the_initializing_thread_is_admitted_while_initializing</code>.
+On one thread the harness runs the tests in name order. The singleton then
+comes before three tests that need MPI never started, and they fail every
+time:</p>
+
+<pre data-lang="bash"><code>cargo test --lib -- --include-ignored --test-threads=1</code></pre>
+
+<pre class="output"><code>running 184 tests
+…
+test tests::create_from_group_checks_the_length_of_the_tag ... FAILED
+test tests::finalize_skip_reason_names_an_active_persistent_request ... FAILED
+test tests::finalize_skip_reason_names_an_open_scope ... FAILED
+…
+test result: FAILED. 181 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s</code></pre>
+
+<p>Each of the three finds MPI finalized where it expected MPI never started:
+the empty scope, for one, returns <code>Err(Finalized)</code>. A suite that
+passes or fails by timing hides the failure most of the time, so the rule is
+to run the two commands apart and never pass
+<code>--include-ignored</code>.</p>
+
+<h2 id="doctests">Doctests that must not compile</h2>
+
+<p>rustdoc builds every Rust code block in the API documentation as a
+program of its own. Of the 308, 220 are marked <code>no_run</code>: they are compiled and
+never run, since running one would start MPI, and most need more than one
+process. Five run, and none of them starts MPI. 25 are ignored, all in the
+design records and guides that <code>src/doc.rs</code> pulls into the
+documentation.</p>
+
+<p>The other 58 are marked <code>compile_fail</code>. Each is a program that
+must not compile, because the type system is what keeps it from being unsafe.
+They test the claims of chapters 11 and 12, such as a request that cannot
+leave its scope:</p>
+
+<pre data-lang="rust" data-source="src/scope.rs"><code>/// A request cannot leave the closure, because it borrows the scope:
+///
+/// ```compile_fail,E0521
+/// # use ferrompi::Mpi;
+/// # fn main() -&gt; ferrompi::Result&lt;()&gt; {
+/// # let mpi = Mpi::init()?;
+/// # let world = mpi.world();
+/// let mut buf = vec![0u8; 4];
+/// let mut keep = None;
+/// ferrompi::scope(|s| {
+///     keep = Some(world.irecv(s, &amp;mut buf, 1, 0)?);
+///     Ok(())
+/// })?;
+/// # Ok(())
+/// # }
+/// ```</code></pre>
+
+<p>A <code>compile_fail</code> doctest passes on any compile error, a typo
+included, so 55 of the 58 also name the error they expect:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>What the compiler refuses</th><th>Codes</th><th>Doctests</th><th>One of them</th></tr></thead>
+  <tbody>
+    <tr><td>a borrow that MPI’s use of a buffer needs, broken</td><td>E0499, E0500, E0502, E0503, E0505, E0521, E0597</td><td>31</td><td>reading a window inside the epoch that exposes it (E0503)</td></tr>
+    <tr><td>a trait bound that does not hold</td><td>E0277</td><td>12</td><td>a request moved to another thread</td></tr>
+    <tr><td>a method that the type does not have</td><td>E0599</td><td>8</td><td><code>MAX_LOC</code> on a primitive type</td></tr>
+    <tr><td>a value used after it was moved</td><td>E0382</td><td>2</td><td>a matched message received twice</td></tr>
+    <tr><td>a name that is not public</td><td>E0432</td><td>1</td><td>the datatype tag the C layer dispatches on</td></tr>
+    <tr><td>a type that does not match</td><td>E0308</td><td>1</td><td>a borrowed buffer lent to <code>Win::create</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The other three refuse with an error the compiler gives no code. Stable
+rustdoc ignores the code: a doctest marked <code>compile_fail,E0599</code>
+over <code>let x: u32 = "four";</code>, whose error is E0308, passes on
+rustc 1.99:</p>
+
+<pre class="output"><code>test src/lib.rs - (line 3) - compile fail ... ok</code></pre>
+
+<p>Only nightly rustdoc checks it, so CI runs the doctests once more on a
+nightly of fixed date, <code>nightly-2026-09-30</code>. A fixed date keeps the
+job from failing when a later nightly changes an error.</p>
+
+<h2 id="mpi-tests">MPI tests: programs run as jobs</h2>
+
+<p>A test that needs processes to talk is a program: an
+<code>examples/test_*.rs</code> with a directive on one line, which the
+runner reads. Nineteen of the other examples carry one too, so every example
+that can run unattended is run. This one checks that a scope completes a
+receive whose request was forgotten, the case of
+<a href="11-the-safety-model.html#why-not-a-guard">chapter 11</a>:</p>
+
+<pre data-lang="rust" data-source="examples/test_scope_forget.rs"><code>// mpi-test: np=2 valgrind
+
+use std::time::Duration;
+
+use ferrompi::Mpi;
+
+mod common;
+
+fn main() {
+    let mpi = Mpi::init().expect("MPI init failed");
+    let world = mpi.world();
+
+    if world.rank() == 0 {
+        let mut buf = vec![0u8; 64];
+        let result = ferrompi::scope(|s| {
+            let request = world.irecv(s, &amp;mut buf, 1, 3)?;
+            #[allow(
+                clippy::forget_non_drop,
+                reason = "a Request has drop glue only with the rma feature; the forget is the case under test"
+            )]
+            std::mem::forget(request);
+            world.send(&amp;[0u8], 1, 9)?;
+            Ok(())
+        });
+        common::check(&amp;world, result.is_ok(), "the scope returns Ok");
+        common::check(
+            &amp;world,
+            buf == [3; 64],
+            "scope end completes a forgotten receive",
+        );
+        println!("test_scope_forget: PASS");
+    } else {
+        let mut go = [0u8; 1];
+        world
+            .recv(&amp;mut go, 0, 9)
+            .expect("recv of the go signal failed");
+        std::thread::sleep(Duration::from_millis(100));
+        world.send(&amp;[3u8; 64], 0, 3).expect("send failed");
+        common::check(&amp;world, true, "the scope returns Ok");
+        common::check(&amp;world, true, "scope end completes a forgotten receive");
+    }
+}</code></pre>
+
+<p>The directive asks for a job of two processes, and for a run under
+valgrind in the valgrind mode, where a receive that outlived its buffer would
+show as an invalid write. Rank 1 calls <code>common::check</code> as many
+times as rank 0, in the same order, with nothing to check: the helper is a
+collective.</p>
+
+<h3 id="the-verdict">One verdict for every process</h3>
+
+<p>Every process decides whether its own checks held, and
+<code>common::check</code> makes that one decision:</p>
+
+<pre data-lang="rust" data-source="examples/common/mod.rs"><code>/// Aggregates this rank's verdict across `world` via `allreduce(Min)`. If any
+/// rank reports failure, rank 0 prints `FAIL: {name}` and every rank exits
+/// with status 2. Status 1 is not a failure under `expect=unfinalized`, where
+/// Open MPI turns a clean exit without `MPI_Finalize` into 1.
+pub fn check(world: &amp;Communicator, ok: bool, name: &amp;str) {
+    let global_ok = world
+        .allreduce_scalar(i32::from(ok), ReduceOp::Min)
+        .expect("check: allreduce failed");
+
+    if global_ok == 0 {
+        if world.rank() == 0 {
+            eprintln!("FAIL: {name}");
+        }
+        std::process::exit(2);
+    }
+}</code></pre>
+
+<p>The <code>Min</code> of the processes’ verdicts is 1 only if every process
+passed, and every process gets it. They then pass or fail together: rank 0
+prints one <code>FAIL</code> line, and every process exits with status 2. No
+process exits while another waits in MPI for it. Status 1 is avoided because
+Open MPI turns a clean exit without <code>MPI_Finalize</code> into status 1,
+and the runner accepts 1 from the tests that skip finalize on purpose.</p>
+
+<p>A check can fail on one process only. Here the test reads a reduction’s
+result on every process, though only the root has it:</p>
+
+<pre data-lang="rust" data-run="2" id="verdict"><code>//! A check can fail on one rank only, so every rank must hear the verdict.
+use ferrompi::{Communicator, Mpi, ReduceOp};
+
+/// True on every rank when `ok` is true on every rank.
+fn everywhere(world: &amp;Communicator, ok: bool) -&gt; bool {
+    let all = world
+        .allreduce_scalar(i32::from(ok), ReduceOp::Min)
+        .expect("allreduce failed");
+    all == 1
+}
+
+fn main() {
+    let mpi = Mpi::init().expect("MPI init failed");
+    let world = mpi.world();
+    let rank = world.rank();
+
+    let sum = world
+        .reduce_scalar(rank + 1, ReduceOp::Sum, 0)
+        .expect("reduce failed");
+
+    // Wrong: the sum is defined at the root only.
+    let ok = sum == 3;
+    let all = everywhere(&amp;world, ok);
+    println!("rank {rank}: sum == 3: here {ok}, everywhere {all}");
+
+    // Right: the root checks the sum, and the other ranks have nothing to check.
+    let ok = rank != 0 || sum == 3;
+    let all = everywhere(&amp;world, ok);
+    println!("rank {rank}: the root's sum == 3: here {ok}, everywhere {all}");
+}</code></pre>
+
+<pre class="output" data-output-of="verdict"><code>rank 0: sum == 3: here true, everywhere false
+rank 0: the root's sum == 3: here true, everywhere true
+rank 1: sum == 3: here false, everywhere false
+rank 1: the root's sum == 3: here true, everywhere true</code></pre>
+
+<figure>
+  <div class="canvas"><svg viewBox="0 0 900 226" role="img" aria-label="Two processes run the same check after reduce_scalar(rank + 1, Sum, root 0). On rank 0, the root, the result is the sum, 3, so the check sum == 3 holds and rank 0 contributes 1. On rank 1 the result is its own input, 2, since the sum is defined at the root only, so the check fails and rank 1 contributes 0. allreduce with Min combines the two into 0 on both ranks. common::check then has rank 0 print FAIL: name, and every rank exits with status 2." style="min-width: 46rem">
+  <defs>
+    <marker id="ver-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+  <text x="205" y="30" text-anchor="middle" class="t-small f-muted">reduce_scalar(rank + 1)</text>
+  <text x="355" y="30" text-anchor="middle" class="t-small f-muted">here</text>
+  <text x="525" y="30" text-anchor="middle" class="t-small f-muted">every rank</text>
+  <text x="670" y="30" text-anchor="middle" class="t-small f-muted">everywhere</text>
+  <text x="805" y="30" text-anchor="middle" class="t-small f-muted">common::check</text>
+  <rect x="20" y="56" width="90" height="40" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="65" y="80" text-anchor="middle" class="t-mono">rank 0</text>
+  <rect x="140" y="56" width="130" height="40" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="205" y="80" text-anchor="middle" class="t-mono">returns 3</text>
+  <rect x="300" y="56" width="110" height="40" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="355" y="80" text-anchor="middle" class="t-mono">sum == 3: 1</text>
+  <rect x="640" y="56" width="60" height="40" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="670" y="80" text-anchor="middle" class="t-mono">0</text>
+  <rect x="730" y="56" width="150" height="40" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="805" y="80" text-anchor="middle" class="t-mono">FAIL: name, exit 2</text>
+  <line x1="110" y1="76" x2="136" y2="76" class="s-accent" stroke-width="1.5" marker-end="url(#ver-arrow)"/>
+  <line x1="270" y1="76" x2="296" y2="76" class="s-accent" stroke-width="1.5" marker-end="url(#ver-arrow)"/>
+  <line x1="410" y1="76" x2="446" y2="76" class="s-accent" stroke-width="1.5" marker-end="url(#ver-arrow)"/>
+  <line x1="600" y1="76" x2="636" y2="76" class="s-accent" stroke-width="1.5" marker-end="url(#ver-arrow)"/>
+  <line x1="700" y1="76" x2="726" y2="76" class="s-accent" stroke-width="1.5" marker-end="url(#ver-arrow)"/>
+  <rect x="20" y="136" width="90" height="40" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="65" y="160" text-anchor="middle" class="t-mono">rank 1</text>
+  <rect x="140" y="136" width="130" height="40" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="205" y="160" text-anchor="middle" class="t-mono">returns 2</text>
+  <rect x="300" y="136" width="110" height="40" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="355" y="160" text-anchor="middle" class="t-mono">sum == 3: 0</text>
+  <rect x="640" y="136" width="60" height="40" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="670" y="160" text-anchor="middle" class="t-mono">0</text>
+  <rect x="730" y="136" width="150" height="40" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="805" y="160" text-anchor="middle" class="t-mono">exit 2</text>
+  <line x1="110" y1="156" x2="136" y2="156" class="s-accent" stroke-width="1.5" marker-end="url(#ver-arrow)"/>
+  <line x1="270" y1="156" x2="296" y2="156" class="s-accent" stroke-width="1.5" marker-end="url(#ver-arrow)"/>
+  <line x1="410" y1="156" x2="446" y2="156" class="s-accent" stroke-width="1.5" marker-end="url(#ver-arrow)"/>
+  <line x1="600" y1="156" x2="636" y2="156" class="s-accent" stroke-width="1.5" marker-end="url(#ver-arrow)"/>
+  <line x1="700" y1="156" x2="726" y2="156" class="s-accent" stroke-width="1.5" marker-end="url(#ver-arrow)"/>
+  <rect x="450" y="56" width="150" height="120" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="525" y="120" text-anchor="middle" class="t-mono">allreduce(Min)</text>
+  <text x="205" y="196" text-anchor="middle" class="t-small f-muted">its own input: the sum</text>
+  <text x="205" y="212" text-anchor="middle" class="t-small f-muted">is at the root only</text>
+</svg></div>
+  <figcaption>The first check of the verdict program. Rank 0, the root, gets
+  the sum and passes. Rank 1 gets its own input back and fails. The
+  <code>Min</code> gives 0 to both, so under <code>common::check</code> rank 0
+  prints the failure that only rank 1 saw, and both exit with status 2.</figcaption>
+</figure>
+
+<p>Had each process decided alone, rank 0 would have passed and printed
+nothing, and rank 1 would have exited with status 2. What a launcher does
+with one failed process varies: it may stop the others, or let them run, and
+it may lose that process’s exit status. Only a <code>FAIL</code> line in the
+output can be relied on.</p>
+
+<h3 id="directives">The directive</h3>
+
+<p>The directive says how to run the program and what output to expect. Its
+keys, and how many of the 122 examples use each:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Key</th><th>Meaning</th><th>Examples</th></tr></thead>
+  <tbody>
+    <tr><td><code>np=N</code></td><td>one run of <code>N</code> processes, whatever <code>MPI_NP_LIST</code> holds</td><td>86</td></tr>
+    <tr><td><code>np=N..</code></td><td>a run at each count in <code>MPI_NP_LIST</code> from <code>N</code> up, or one at <code>N</code> if there is none</td><td>36</td></tr>
+    <tr><td><code>timeout=S</code></td><td>the run’s limit in seconds, in place of <code>MPI_TEST_TIMEOUT</code>, 90 by default</td><td>5</td></tr>
+    <tr><td><code>skip-ok=P,…</code></td><td>the libraries on which a <code>SKIP:</code> line counts as a skip, by the start of their name, such as <code>mpich-4.2</code> or <code>openmpi-4</code></td><td>10</td></tr>
+    <tr><td><code>expect=abort</code></td><td>the run must exit with an error, with the stderr literal in its output</td><td>5</td></tr>
+    <tr><td><code>expect=unfinalized</code></td><td>the run may skip <code>MPI_Finalize</code>, and exit with status 0 or 1</td><td>15</td></tr>
+    <tr><td><code>valgrind</code></td><td>run under memcheck in the valgrind mode</td><td>28</td></tr>
+    <tr><td><code>release</code></td><td>run in the release mode</td><td>11</td></tr>
+    <tr><td><code>// mpi-test-stderr: TEXT</code></td><td>a second line: text the output must contain, required with <code>expect=</code></td><td>20</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>A file named <code>test_*.rs</code> without a directive, a key the runner
+does not know, or <code>expect=</code> without its literal stops the run
+before anything is built. Only two examples have no directive:
+<code>large_count</code>, which needs more than 4 GB of memory, and
+<code>ulfm_pending</code>, which needs a fault-tolerant MPI. CI runs them on
+their own: <code>large_count</code> in a job, and <code>ulfm_pending</code> in
+a step of the Open MPI 5 job.</p>
+
+<h2 id="the-runner">The runner</h2>
+
+<p><code>tests/run_mpi_tests.sh</code> runs every example that has a
+directive, in four stages:</p>
+
+<figure>
+  <div class="canvas"><svg viewBox="0 0 900 262" role="img" aria-label="The four stages of tests/run_mpi_tests.sh, left to right. Discover reads the one // mpi-test: line in each examples/*.rs. Build runs cargo build --examples and takes each executable’s path from cargo’s JSON messages. Run starts each example under timeout and mpiexec -n NP, once for every process count, with its output and errors in one file. Classify turns each run into PASS, SKIP or FAIL. The directive found by discover feeds two stages: np and timeout go to run; skip-ok, expect and the stderr literal go to classify. Classify also takes the library’s name and version, such as mpich-4.2.3, read from mpiexec --version." style="min-width: 46rem">
+  <defs>
+    <marker id="run-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+  <rect x="20" y="110" width="150" height="44" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="95" y="136" text-anchor="middle" class="t-mono">discover</text>
+  <rect x="220" y="110" width="150" height="44" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="295" y="136" text-anchor="middle" class="t-mono">build</text>
+  <rect x="420" y="110" width="170" height="44" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="505" y="136" text-anchor="middle" class="t-mono">run</text>
+  <rect x="640" y="110" width="150" height="44" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="715" y="136" text-anchor="middle" class="t-mono">classify</text>
+  <line x1="174" y1="132" x2="216" y2="132" class="s-accent" stroke-width="1.5" marker-end="url(#run-arrow)"/>
+  <line x1="374" y1="132" x2="416" y2="132" class="s-accent" stroke-width="1.5" marker-end="url(#run-arrow)"/>
+  <line x1="594" y1="132" x2="636" y2="132" class="s-accent" stroke-width="1.5" marker-end="url(#run-arrow)"/>
+  <text x="95" y="178" text-anchor="middle" class="t-small f-muted">one // mpi-test: line</text>
+  <text x="95" y="194" text-anchor="middle" class="t-small f-muted">in each examples/*.rs</text>
+  <text x="295" y="178" text-anchor="middle" class="t-mono f-muted">cargo build --examples</text>
+  <text x="295" y="194" text-anchor="middle" class="t-small f-muted">paths from cargo’s JSON</text>
+  <text x="505" y="178" text-anchor="middle" class="t-mono f-muted">timeout mpiexec -n NP</text>
+  <text x="505" y="194" text-anchor="middle" class="t-small f-muted">output and errors, one file</text>
+  <path d="M95 110 V66 H715 V106" fill="none" class="s-accent" stroke-width="1.5" marker-end="url(#run-arrow)"/>
+  <line x1="505" y1="66" x2="505" y2="106" class="s-accent" stroke-width="1.5" marker-end="url(#run-arrow)"/>
+  <text x="300" y="56" text-anchor="middle" class="t-small">the directive</text>
+  <text x="513" y="92" class="t-small f-muted">np, timeout</text>
+  <text x="610" y="56" text-anchor="middle" class="t-small f-muted">skip-ok, expect, stderr literal</text>
+  <rect x="640" y="204" width="150" height="30" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="715" y="223" text-anchor="middle" class="t-mono">mpiexec --version</text>
+  <line x1="715" y1="204" x2="715" y2="158" class="s-accent" stroke-width="1.5" marker-end="url(#run-arrow)"/>
+  <text x="723" y="186" class="t-small f-muted">mpich-4.2.3</text>
+  <line x1="794" y1="132" x2="810" y2="132" class="s-accent" stroke-width="1.5" marker-end="url(#run-arrow)"/>
+  <rect x="814" y="98" width="66" height="20" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="847" y="112" text-anchor="middle" class="t-small">PASS</text>
+  <rect x="814" y="122" width="66" height="20" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="847" y="136" text-anchor="middle" class="t-small">SKIP</text>
+  <rect x="814" y="146" width="66" height="20" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="847" y="160" text-anchor="middle" class="t-small">FAIL</text>
+</svg></div>
+  <figcaption>The runner’s four stages. The directive decides how often and
+  how long each example runs, and part of how its run is judged. The library’s
+  name and version, read once from <code>mpiexec --version</code>, decides
+  which skips count.</figcaption>
+</figure>
+
+<p>The build takes each executable’s path from cargo’s JSON messages, so it
+works with any <code>CARGO_TARGET_DIR</code>. It refuses to go on when the
+library was built without debug assertions, because some examples check
+diagnostics that only debug builds have, such as the check that
+<code>Serialized</code> calls do not overlap
+(<a href="06-threads-and-hybrid-mpi.html#serialized">chapter 6</a>):</p>
+
+<pre data-lang="bash" data-source="tests/run_mpi_tests.sh"><code>  if ((RELEASE_MODE)); then
+    if [[ "$(lib_opt_level "$json_file")" == "0" ]]; then
+      die "ferrompi was built with opt-level 0 in release mode; the mode exists to test optimised code"
+    fi
+  elif [[ "$(lib_debug_assertions "$json_file")" == "false" ]]; then
+    die "ferrompi was built without debug assertions; several examples check debug-only diagnostics"
+  fi</code></pre>
+
+<p>Each run goes through <code>timeout</code>, with the output and the
+errors of every process in one file:</p>
+
+<pre data-lang="bash" data-source="tests/run_mpi_tests.sh"><code>      local outfile="$TMPDIR_RUN/${name}.np${np}.out"
+      local rc=0
+      local -a exec_cmd=("$MPIEXEC" "${MPIEXEC_ARGS[@]}" -n "$np")
+      if ((VALGRIND_MODE)); then
+        exec_cmd+=(valgrind "${VALGRIND_ARGS[@]}" "--suppressions=$VALGRIND_SUPP")
+      fi
+      exec_cmd+=("$exe")
+      timeout --kill-after=10 "$run_timeout" "${exec_cmd[@]}" &gt;"$outfile" 2&gt;&amp;1 || rc=$?
+
+      local outcome
+      outcome=$(classify "$rc" "$outfile" "$skip_ok" "$expect" "$literal" "$IMPL_ID")</code></pre>
+
+<h3 id="outcomes">From a run to an outcome</h3>
+
+<p><code>classify</code> takes the exit status, the output and the
+directive’s fields, and returns the first rule that applies:</p>
+
+<pre data-lang="bash" data-source="tests/run_mpi_tests.sh"><code># A run whose output has FAIL as a word fails in every mode, whatever the exit
+# status. Examples report a failed check as `FAIL: &lt;name&gt;`, `rank N: FAIL: ...`
+# or `rank N: FAIL Test N ...`, and exit nonzero, but mpiexec on some MPICH
+# stacks (hydra 4.2.0 with libmpich 4.2.1) returns 0 for a job whose every rank
+# exited nonzero, so the exit status alone cannot be trusted.
+classify() {
+  local exit_code="$1" outfile="$2" skip_ok="$3" expect="$4" literal="$5" impl="$6"
+
+  if [[ "$exit_code" == "124" || "$exit_code" == "137" ]]; then
+    echo "FAIL timeout"
+    return 0
+  fi
+
+  if [[ "$exit_code" == "99" ]]; then
+    echo "FAIL valgrind errors"
+    return 0
+  fi
+
+  if grep -qwF -- "FAIL" "$outfile"; then
+    echo "FAIL output contains a FAIL: line"
+    return 0
+  fi
+
+  if [[ "$expect" != "unfinalized" ]] &amp;&amp; grep -qF -- "$FINALIZE_SKIPPED_MARKER" "$outfile"; then
+    echo "FAIL $FINALIZE_SKIPPED_MARKER without expect=unfinalized"
+    return 0
+  fi</code></pre>
+
+<ol>
+  <li>Exit status 124 or 137, from <code>timeout</code>: FAIL.</li>
+  <li>Exit status 99, valgrind’s status for an error in the valgrind mode:
+  FAIL.</li>
+  <li><code>FAIL</code> as a word anywhere in the output: FAIL, whatever the
+  exit status.</li>
+  <li>The warning that <code>MPI_Finalize</code> was skipped, from an example
+  without <code>expect=unfinalized</code>: FAIL.</li>
+  <li>With <code>expect=abort</code>: FAIL on exit status 0 or without the
+  literal, PASS otherwise, unless the run exited 0 after a
+  <code>SKIP:</code> line.</li>
+  <li>An exit status other than 0, or other than 0 and 1 with
+  <code>expect=unfinalized</code>: FAIL.</li>
+  <li>A <code>SKIP:</code> line: SKIP if <code>skip-ok</code> names this
+  library, FAIL otherwise.</li>
+  <li>The literal missing from the output: FAIL.</li>
+  <li>Otherwise: PASS.</li>
+</ol>
+
+<p>The <code>FAIL</code> rule comes before the exit status because the status
+cannot be trusted. On the stack of CI’s MPICH jobs, Ubuntu’s Hydra 4.2.0
+with the libmpich 4.2.1 that <a href="#in-ci">replaces Ubuntu’s</a>,
+<code>mpiexec</code> returns 0 for a job whose every process exited with an
+error. The warning rule catches a test that leaves a request or a window
+behind by mistake: <code>MPI_Finalize</code> is skipped, the process exits 0
+under MPICH, and without the rule the test would pass.</p>
+
+<h3 id="skips">Skips</h3>
+
+<p>A test prints <code>SKIP: reason</code> from rank 0, through
+<code>common::skip</code>, when the library cannot run it. The skip counts
+only on a library the directive names. <code>test_inplace</code>, with
+<code>skip-ok=mpich-4.2</code>, skips its persistent scatter on MPICH 4.2 for
+a deadlock in that library. The same line from Open MPI would be a failure,
+so a skip cannot hide a regression on a library it was not written for. A
+test that needs a feature the build lacks is not run at all, and is counted
+as <code>SKIP(feature)</code>. A run with the default features, two
+processes and MPICH 4.2.3, cut down:</p>
+
+<pre class="output"><code>ferrompi MPI test runner
+  mpiexec:      mpiexec (mpich-4.2.3)
+  mpiexec args: (none)
+  np list:      2
+  features:     default
+  timeout:      90s
+
+PASS allreduce (np=2)
+…
+PASS reduce_op_maxloc (np=4)
+…
+SKIP(feature) rma_accumulate (np=2) required-features=rma
+…
+SKIP test_count_overflow (np=2) MPI >= 4 takes the _c large-count path
+…
+SKIP test_inplace (np=2) MPICH 4.2.x MPI_Scatter_init + MPI_IN_PLACE deadlock
+…
+
+======================================================================
+Summary
+======================================================================
+PASS: 83
+SKIP: 2
+SKIP(feature): 37
+FAIL: 0
+
+SKIP reasons:
+  test_count_overflow (np=2): MPI >= 4 takes the _c large-count path
+  test_inplace (np=2): MPICH 4.2.x MPI_Scatter_init + MPI_IN_PLACE deadlock</code></pre>
+
+<p>With <code>MPI_NP_LIST="2 3 4"</code>, as on CI’s MPICH legs, each
+<code>np=2..</code> example runs three times.</p>
+
+<h3 id="aborts">An abort, and a race in the launcher</h3>
+
+<p>A test of <code>abort</code> passes when the job ends with an error and
+the literal is in its output. The literal is what tells a deliberate abort
+from a crash, and the launcher can lose it:</p>
+
+<pre data-lang="rust" data-source="examples/test_abort.rs"><code>// mpi-test: np=2 expect=abort
+// mpi-test-stderr: test_abort: calling abort
+// …
+fn main() -&gt; Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    if world.rank() == 0 {
+        eprintln!("test_abort: calling abort");
+    }
+
+    world.barrier()?;
+    // Covers the launcher's stderr-forwarding race with MPI_Abort (Hydra can tear the job down before forwarding rank 0's already-written marker).
+    std::thread::sleep(Duration::from_millis(100));
+
+    if world.rank() == 0 {
+        world.abort(3);
+    }</code></pre>
+
+<p>With <code>MPI_Abort</code> called right after the line was written, 6 of
+100 runs on MPICH 4.2.1 with Hydra had no output at all: the launcher stopped
+the job before it had passed on what rank 0 wrote. A barrier alone cut that to
+1 in 200, and the barrier with a pause of 100 ms to 0 in 500. The test’s
+header records the measurement, which is the reason for the pause.</p>
+
+<h3 id="testing-the-runner">Testing the runner</h3>
+
+<p>The runner decides what passed, so it has tests of its own. Its decisions
+are shell functions of their arguments, and it calls <code>main</code> only
+when it is run, not when it is sourced:</p>
+
+<pre data-lang="bash" data-source="tests/run_mpi_tests.sh"><code>if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi</code></pre>
+
+<p><code>tests/runner_selftest.sh</code> sources it and calls the functions
+on fixtures, with no MPI, cargo or network:</p>
+
+<pre data-lang="bash" data-source="tests/runner_selftest.sh"><code>SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &amp;&amp; pwd)"
+# shellcheck source=tests/run_mpi_tests.sh
+source "$SCRIPT_DIR/run_mpi_tests.sh"</code></pre>
+
+<p>It checks 77 cases, among them every rule of <code>classify</code>:</p>
+
+<pre class="output"><code>ok classify: exit 0, no SKIP -> PASS
+ok classify: unregistered SKIP, no skip-ok
+ok classify: SKIP registered by impl prefix
+…
+ok classify: normal, rank N: FAIL Test N line (no colon), exit 0
+ok classify: normal, PASS lines do not mask a FAIL: line</code></pre>
+
+<h2 id="in-ci">What CI adds</h2>
+
+<p>CI runs the layers above on more than one library, and adds jobs that a
+laptop seldom runs:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Job</th><th>What it adds</th></tr></thead>
+  <tbody>
+    <tr><td>Test, on MPICH and on Open MPI 4, with the default features and with <code>rma</code></td><td>formatting and clippy with <code>-D warnings</code>, the unit tests, the singleton, the runner’s self-test and every MPI test: MPICH at 2, 3 and 4 processes, Open MPI at 4 with <code>--oversubscribe</code></td></tr>
+    <tr><td>Release, fat LTO</td><td>the 11 <code>release</code> examples, built with <code>--release</code> and <code>CARGO_PROFILE_RELEASE_LTO=fat</code>, to test the code the optimizer produces</td></tr>
+    <tr><td>Open MPI 5</td><td>the MPI tests with <code>rma</code> and the singleton, in a Debian trixie container, and <code>ulfm_pending</code> under <code>--with-ft ulfm</code>, where a receive left pending by another process’s failure must abort rather than be reported complete</td></tr>
+    <tr><td>MSRV</td><td>the library, tests and examples built with Rust 1.85, the oldest version the crate supports</td></tr>
+    <tr><td>MPI ABI stubs</td><td>every example compiled and linked against the MPI Forum’s stubs of the standard ABI (<a href="07-implementations-networks-and-abi.html#standard-abi">chapter 7</a>); nothing runs</td></tr>
+    <tr><td>Large count</td><td><code>large_count</code> in release: more than 2<sup>31</sup> bytes through a send, a broadcast, a reduction and a put</td></tr>
+    <tr><td>Coverage</td><td>the unit tests, the singleton and the MPI tests, measured by <code>cargo-llvm-cov</code></td></tr>
+    <tr><td>Docs and package</td><td>the doctests on stable and on the pinned nightly, <code>cargo doc</code> with <code>-D warnings</code>, this tutorial’s check, and a check of which files the published package holds</td></tr>
+    <tr><td>Valgrind</td><td>the 28 <code>valgrind</code> examples, each at its smallest process count, under memcheck</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Valgrind reports errors inside MPI libraries too, so the job reads
+suppressions from <code>tests/valgrind/mpich.supp</code>. The file’s header
+sets four rules for an entry: an exact error kind, a frame inside MPICH, UCX,
+libfabric, hwloc or libc, no <code>ferrompi_*</code>, <code>rust_*</code> or
+example frame, and no <code>obj:</code> wildcard. A suppression that matched
+ferrompi’s own code would hide the defects the job is there to find. Today the
+file holds the rules and no entry, so nothing is suppressed.</p>
+
+<p>Ubuntu 24.04’s MPICH package, 4.2.0, is broken
+(<a href="https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338">Launchpad
+bug 2072338</a>). The MPICH jobs keep its launcher and replace its library
+with MPICH 4.2.1, and UCX with a later version, from a dated snapshot of a
+later Ubuntu release, checking both packages against SHA-256 sums
+written into <code>.github/scripts/mpich-hotfix.sh</code>, a script with a
+fixture test of its own.</p>
+
+<h2 id="writing-a-test">Where a new test goes</h2>
+
+<p>Put a test in the cheapest layer that can see what it checks:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>The test checks</th><th>It goes in</th></tr></thead>
+  <tbody>
+    <tr><td>a refusal before any MPI call: an argument, a length, the lifecycle state</td><td>a unit test in the module, with <code>stub_mpi()</code> if it needs an <code>Mpi</code></td></tr>
+    <tr><td>a crate-private item with MPI running, in one process</td><td><code>checks_that_need_mpi</code>, or a function it calls</td></tr>
+    <tr><td>a program the compiler must refuse</td><td>a <code>compile_fail,E….</code> doctest, with the code the pinned nightly reports</td></tr>
+    <tr><td>what happens between processes</td><td><code>examples/test_*.rs</code>, with a directive and <code>common::check</code></td></tr>
+    <tr><td>a deliberate abort</td><td>the same, with <code>expect=abort</code> and the line it prints first</td></tr>
+    <tr><td>a skipped <code>MPI_Finalize</code></td><td>the same, with <code>expect=unfinalized</code> and the warning’s text</td></tr>
+    <tr><td>memory safety at run time</td><td>an MPI test with the <code>valgrind</code> flag</td></tr>
+    <tr><td>code that only the optimizer exposes</td><td>an MPI test with the <code>release</code> flag, that checks no debug-only diagnostic</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Run what CI runs before you push. With MPICH, the layers of this
+chapter:</p>
+
+<pre data-lang="bash"><code>cargo test --lib --features slurm,rma
+cargo test --lib --features rma -- --ignored
+cargo test --doc --all-features
+bash tests/runner_selftest.sh
+MPI_NP_LIST="2 3 4" ./tests/run_mpi_tests.sh
+MPI_NP_LIST="2 3 4" ./tests/run_mpi_tests.sh rma</code></pre>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>In the once program, call <code>Mpi::init</code> on a second thread
+  while the first <code>Mpi</code> is alive, and then after the drop. Which
+  error does each call return, and which state of the lifecycle explains
+  it?</li>
+  <li>Run <code>cargo test --lib -- --include-ignored</code> ten times. How
+  many runs pass, and do the failures name the same tests each time? Explain
+  the difference with <code>--test-threads=1</code>.</li>
+  <li>Change the E0521 doctest in <code>src/scope.rs</code> to expect E0597,
+  and run <code>cargo test --doc</code> on stable. Does it fail? Which command
+  in CI would catch the change?</li>
+  <li>In the verdict program, have rank 1 exit with status 2 when its own
+  check fails, before the first call to <code>everywhere</code>. What does
+  rank 0 do, and what does <code>mpiexec</code> print and return? Compare it
+  with the program as written.</li>
+  <li>Add an example <code>test_mine.rs</code> that prints
+  <code>SKIP: not here</code> from rank 0, with
+  <code>// mpi-test: np=2</code>. What does the runner report? Then add
+  <code>skip-ok=</code> with the start of your library’s name.</li>
+  <li>Remove the barrier and the pause from <code>test_abort</code> and run
+  it 100 times under <code>mpiexec -n 2</code>. How many runs lose the
+  literal?</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>MPI starts once per process, a job needs a launcher, and a check can
+  fail on one process only. <code>cargo test</code> fits none of these, so the
+  suite is split into layers.</li>
+  <li>Unit tests never start MPI. A stub <code>Mpi</code> built inside the
+  crate reaches every check that runs before an MPI call, and the lifecycle
+  guard refuses the rest without calling MPI.</li>
+  <li>The one test that starts MPI is ignored and runs alone with
+  <code>cargo test --lib -- --ignored</code>. Run with the other tests in one
+  process, it makes them pass or fail by timing.</li>
+  <li>58 doctests must fail to compile, and 55 name their error. Stable
+  rustdoc ignores the code, so CI runs them again on a dated nightly.</li>
+  <li>MPI tests are examples with a directive. <code>common::check</code>
+  takes the <code>Min</code> of every process’s verdict, so every process
+  fails together, rank 0 prints <code>FAIL</code>, and all exit with status
+  2.</li>
+  <li>The runner judges a run by its output before its exit status, since a
+  launcher can lose the status. A <code>FAIL</code> word fails, a skipped
+  finalize fails unless declared, and a skip counts only on the libraries the
+  directive names.</li>
+  <li>CI adds a second and a third library, release with fat LTO, valgrind,
+  the oldest supported Rust, the standard ABI’s stubs, large counts,
+  fault tolerance and coverage.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="12-user-defined-reductions-and-derived-datatypes.html">Previous: chapter 12, user-defined reductions and derived datatypes</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="14-adding-an-mpi-call.html">Next: chapter 14, adding an MPI call</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>
