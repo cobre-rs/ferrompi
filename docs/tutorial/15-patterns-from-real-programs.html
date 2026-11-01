@@ -1,0 +1,656 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>15. Patterns from real programs · ferrompi tutorial</title>
+<meta name="description" content="The patterns an iterative MPI solver is built from, read in ferrompi’s SDDP example: the one rule they all keep, dividing the work, results of unknown length, deciding together when to stop, sums with the same bits on every rank, and what to do when one rank fails.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#the-rule">The rule</a></li>
+      <li><a href="#a-solver">The shape of a solver</a></li>
+      <li><a href="#dividing-work">Dividing the work</a></li>
+      <li><a href="#unknown-lengths">Results of unknown length</a></li>
+      <li><a href="#deciding-together">Deciding together when to stop</a></li>
+      <li><a href="#same-bits">The same bits on every rank</a></li>
+      <li><a href="#failing-together">When one rank fails</a></li>
+      <li><a href="#elsewhere">Patterns in earlier chapters</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part II · Chapter 15</p>
+<h1>Patterns from real programs</h1>
+
+<p class="lede">The programs ferrompi is written for are iterative solvers:
+they repeat the same communication every iteration, often thousands of times,
+on data that differs from rank to rank. This chapter reads the communication
+of one, ferrompi’s SDDP example, and takes out the patterns it is built from,
+each with a program of its own.</p>
+
+<p>By the end of the chapter you can state the rule that every pattern here
+keeps, divide a set of items among the ranks without exchanging counts,
+exchange results whose length only their rank knows, stop a loop on every rank
+at the same iteration, get the same bits from a floating-point sum on every
+rank, and have every rank stop together when one of them fails.</p>
+
+<p>The excerpts below come from
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/examples/sddp_pattern.rs"><code>examples/sddp_pattern.rs</code></a>
+and name it. CI checks that every excerpt still matches the file, and the
+example itself runs as an MPI test.</p>
+
+<h2 id="the-rule">The rule</h2>
+
+<p>Every rank runs the same program on different data. A real program keeps
+one rule while it does: <strong>the data never changes which collective calls
+a rank makes.</strong> Every rank of a communicator makes the same collective
+calls, in the same order, with arguments that agree: the same root, the same
+operation, counts that match. When one rank breaks it, the others wait in a
+collective that rank never calls, and the job hangs
+(<a href="03-collective-communication.html#when-a-collective-hangs">chapter
+3</a>).</p>
+
+<p>A short program keeps the rule by having no branches. A solver has them
+everywhere the data reaches its control flow: a loop that runs until the
+answer is good enough, an input that can be malformed on one rank, results
+whose size depends on the data, and floating-point sums whose last bits feed
+a test. Each pattern below keeps the rule in one of those places.</p>
+
+<h2 id="a-solver">The shape of a solver</h2>
+
+<p>SDDP, stochastic dual dynamic programming, solves optimization problems
+that unfold over stages under uncertainty, such as scheduling reservoirs and
+power plants over a year of uncertain inflows. Each iteration has a forward
+pass, which simulates scenarios and yields trial points and costs, and a
+backward pass, which builds cuts, linear bounds on the future cost, at those
+points. The ranks share the scenarios’ work, so each iteration exchanges the
+trial points and the cuts, and ends with the bounds and a convergence
+test.</p>
+
+<p><code>examples/sddp_pattern.rs</code> is the communication of such a solver
+without the solving. Its start-up:</p>
+
+<pre data-lang="rust" data-source="examples/sddp_pattern.rs"><code>fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    // Start-up: only the main thread calls MPI, which is `Funneled`.
+    let mpi = Mpi::init_thread(ThreadLevel::Funneled)?;
+    if mpi.thread_level() &lt; ThreadLevel::Funneled {
+        println!(
+            "sddp_pattern: MPI provided {:?}, Funneled is needed",
+            mpi.thread_level()
+        );
+        return Ok(());
+    }
+    let world = mpi.world();
+    // The processes of one node share memory.
+    let node = world.split_shared()?;
+    let win = Win::&lt;f64&gt;::allocate_shared(&amp;node, COUNT)?;
+    let mut ctx: Box&lt;Ctx&gt; = Box::new(Ctx {
+        win,
+        node,
+        world,
+        mpi,
+    });
+    let rank = ctx.world.rank();
+    let size = ctx.world.size();
+    // …
+    // `ctx` drops here: the window, then the communicators, then `MPI_Finalize`.
+    Ok(())
+}</code></pre>
+
+<p>In the solver it stands for, threads solve the linear programs and only
+the main thread calls MPI, so the program asks for <code>Funneled</code> and
+checks what it got
+(<a href="06-threads-and-hybrid-mpi.html#funneled">chapter 6</a>). The
+processes of a node share one window for the scenario data
+(<a href="05-one-sided-communication.html#shared-memory-windows">chapter
+5</a>). One boxed context owns <code>Mpi</code> and every handle for the whole
+run, with <code>mpi</code> as its last field, so that the window and the
+communicators are freed before MPI is finalized
+(<a href="11-the-safety-model.html#no-lifetimes">chapter 11</a>); the last
+lines of <code>main</code> say so.</p>
+
+<p>The rest of the program is one iteration’s communication, step by step:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Step</th><th>Calls</th><th>Pattern</th></tr></thead>
+  <tbody>
+    <tr><td>Topology</td><td><code>topology</code>: where the processes run</td><td><a href="08-building-and-running.html#job-report">Chapter 8</a></td></tr>
+    <tr><td>Run parameters</td><td><code>broadcast</code> from rank 0</td><td><a href="03-collective-communication.html#broadcast">Chapter 3</a></td></tr>
+    <tr><td>Points and cuts</td><td><code>allgather</code> of the lengths, <code>allgatherv</code> of the bytes</td><td><a href="#unknown-lengths">Results of unknown length</a></td></tr>
+    <tr><td>Bound</td><td>a compensated sum of the gathered values, in rank order</td><td><a href="#same-bits">The same bits on every rank</a></td></tr>
+    <tr><td>Statistics</td><td><code>allreduce_scalar</code> with <code>Sum</code>, <code>Min</code> and <code>Max</code> of the forward pass’s costs</td><td><a href="03-collective-communication.html#reductions">Chapter 3</a></td></tr>
+    <tr><td>Convergence</td><td><code>allreduce_scalar</code> with <code>BitwiseOr</code></td><td><a href="#deciding-together">Deciding together</a></td></tr>
+    <tr><td>Scenario data</td><td>stores in the node’s window, <code>sync</code>, <code>barrier</code>, <code>sync</code>, loads</td><td><a href="05-one-sided-communication.html#shared-memory-windows">Chapter 5</a></td></tr>
+    <tr><td>Teardown</td><td><code>barrier</code>, then the context’s drop</td><td><a href="11-the-safety-model.html#lifecycle">Chapter 11</a></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>A real solver runs the middle rows in a loop, and the loop is where the
+rule is easiest to break.</p>
+
+<h2 id="dividing-work">Dividing the work</h2>
+
+<p>A solver divides its scenarios, cells or rows among the ranks. When every
+rank knows the number of items and the number of ranks, it can compute every
+rank’s share without asking, so nothing needs to be exchanged to know who
+has what:</p>
+
+<pre data-lang="rust" data-run="3" id="blocks"><code>use ferrompi::Mpi;
+
+const N: usize = 10;
+
+/// The items of `n` that rank `r` of `p` owns, as (first, count): every rank
+/// gets `n / p`, and the first `n % p` ranks one more.
+fn block(n: usize, p: usize, r: usize) -&gt; (usize, usize) {
+    let (base, extra) = (n / p, n % p);
+    (r * base + r.min(extra), base + usize::from(r &lt; extra))
+}
+
+fn main() -&gt; Result&lt;(), Box&lt;dyn std::error::Error&gt;&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let (rank, size) = (
+        usize::try_from(world.rank())?,
+        usize::try_from(world.size())?,
+    );
+
+    let (first, count) = block(N, size, rank);
+    println!("rank {rank}: items {first}..{}", first + count);
+    // The work on each item this rank owns.
+    let mine: Vec&lt;f64&gt; = (first..first + count).map(|i| (i * i) as f64).collect();
+
+    // Every rank can compute every block, so the counts need no exchange.
+    let mut counts = Vec::with_capacity(size);
+    let mut displs = Vec::with_capacity(size);
+    for r in 0..size {
+        let (first, count) = block(N, size, r);
+        counts.push(i32::try_from(count)?);
+        displs.push(i32::try_from(first)?);
+    }
+    let mut all = if rank == 0 { vec![0.0; N] } else { Vec::new() };
+    world.gatherv(&amp;mine, &amp;mut all, &amp;counts, &amp;displs, 0)?;
+    if rank == 0 {
+        println!("rank 0: {all:?}");
+    }
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="blocks"><code>rank 0: items 0..4
+rank 1: items 4..7
+rank 2: items 7..10
+rank 0: [0.0, 1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0, 64.0, 81.0]</code></pre>
+
+<p><code>block</code> gives each rank <code>n / p</code> items, and one more to
+each of the first <code>n % p</code> ranks, so the shares differ by one item
+at most and cover every item once. Since every rank computes every share, the
+counts and displacements of <code>gatherv</code> come from the same function;
+chapter 3’s
+<a href="03-collective-communication.html#variable-counts"><code>gatherv</code></a>
+needed a collective first only because the counts were known to their own
+rank alone.</p>
+
+<p>The conversions to <code>i32</code> are checked with <code>?</code>: a
+v-collective takes its counts and displacements as <code>i32</code>, and the C
+layer refuses one whose buffer holds more than <code>INT_MAX</code> elements
+(<a href="10-the-c-shim.html#own-codes">chapter 10</a>).</p>
+
+<h2 id="unknown-lengths">Results of unknown length</h2>
+
+<p>A cut’s size depends on the problem, and the number of cuts a rank makes
+depends on its scenarios, so only the rank that made them knows how many
+bytes they take. The SDDP example sends them as bytes, lengths first:</p>
+
+<pre data-lang="rust" data-source="examples/sddp_pattern.rs"><code>    // The forward pass shares its trial points and the backward pass its cuts
+    // as serialized bytes of a different length on each rank. The byte counts
+    // go first, then the bytes, packed in rank order.
+    let mine = cut_bytes(rank);
+    let mut counts = vec![0i32; size as usize];
+    ctx.world
+        .allgather(&amp;[i32::try_from(mine.len())?], &amp;mut counts)?;
+    let mut displs = Vec::with_capacity(counts.len());
+    let mut total = 0i32;
+    for &amp;count in &amp;counts {
+        displs.push(total);
+        total = total
+            .checked_add(count)
+            .ok_or("the exchanged cuts exceed i32::MAX bytes")?;
+    }
+    let mut recv = vec![0u8; usize::try_from(total)?];
+    ctx.world.allgatherv(&amp;mine, &amp;mut recv, &amp;counts, &amp;displs)?;
+    // Every rank regenerates what all ranks sent, so it can check what it got.
+    let expected: Vec&lt;u8&gt; = (0..size).flat_map(cut_bytes).collect();
+    assert_eq!(recv, expected);
+    let cuts = recv
+        .chunks_exact(8)
+        .map(|b| b.try_into().map(f64::from_le_bytes))
+        .collect::&lt;Result&lt;Vec&lt;f64&gt;, _&gt;&gt;()?;</code></pre>
+
+<p>It is chapter 3’s two collectives, with what a real program adds. Every
+rank needs every cut, so both steps are <code>allgather</code>s. The data is
+serialized to bytes, so one call moves any structure, and the receiver
+decodes it with <code>chunks_exact</code>. The lengths cross as
+<code>i32</code>, and the running total is summed with
+<code>checked_add</code>, so a total above <code>i32::MAX</code> bytes is an
+error, not a negative displacement. The example then regenerates what every
+rank sent and compares, which is how a test of such an exchange knows what it
+received.</p>
+
+<p>Between two ranks, a message of unknown size needs no length first: probe
+it and receive it as matched
+(<a href="02-point-to-point.html#messages-of-unknown-size">chapter 2</a>).</p>
+
+<h2 id="deciding-together">Deciding together when to stop</h2>
+
+<p>An iterative solver stops when its error is small enough. Each rank knows
+only its own part of the error, and each part shrinks at its own pace. If each
+rank tested its own, each would leave the loop at a different iteration, and
+the rule would break. The test has to be on a collective result:</p>
+
+<pre data-lang="rust" data-run="3" id="converge"><code>use ferrompi::{Mpi, ReduceOp};
+
+const TOL: f64 = 1e-3;
+
+fn main() -&gt; Result&lt;(), ferrompi::Error&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // Each rank's part of the problem converges at its own pace.
+    let mut error = f64::from(rank + 1);
+    let mut iteration = 0;
+    let mut below = None;
+    loop {
+        iteration += 1;
+        error *= 0.5; // one step of the local solve
+        if error &lt; TOL &amp;&amp; below.is_none() {
+            below = Some(iteration);
+        }
+        // Whether to go on is decided by every rank together.
+        if world.allreduce_scalar(error, ReduceOp::Max)? &lt; TOL {
+            break;
+        }
+    }
+    let below = below.expect("the largest error is below, so this one is");
+    println!("rank {rank}: below the tolerance at iteration {below}, stopped at {iteration}");
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="converge"><code>rank 0: below the tolerance at iteration 10, stopped at 12
+rank 1: below the tolerance at iteration 11, stopped at 12
+rank 2: below the tolerance at iteration 12, stopped at 12</code></pre>
+
+<figure>
+  <div class="canvas"><svg viewBox="0 0 900 292" role="img" aria-label="Twelve iterations of three ranks. Each rank’s local error falls below the tolerance at a different iteration: rank 0 at 10, rank 1 at 11, rank 2 at 12. After each iteration an allreduce with Max gives every rank the largest error, which is below the tolerance only at iteration 12, so all three stop there together. Had each rank tested its own error, rank 0 would have left after iteration 10, and ranks 1 and 2 would wait in the allreduce of iteration 11 for a rank that never calls it." style="min-width: 46rem">
+  <text x="106" y="36" text-anchor="end" class="t-small f-muted">iteration</text>
+  <text x="147" y="36" text-anchor="middle" class="t-small f-muted">1</text>
+  <text x="209" y="36" text-anchor="middle" class="t-small f-muted">2</text>
+  <text x="271" y="36" text-anchor="middle" class="t-small f-muted">3</text>
+  <text x="333" y="36" text-anchor="middle" class="t-small f-muted">4</text>
+  <text x="395" y="36" text-anchor="middle" class="t-small f-muted">5</text>
+  <text x="457" y="36" text-anchor="middle" class="t-small f-muted">6</text>
+  <text x="519" y="36" text-anchor="middle" class="t-small f-muted">7</text>
+  <text x="581" y="36" text-anchor="middle" class="t-small f-muted">8</text>
+  <text x="643" y="36" text-anchor="middle" class="t-small f-muted">9</text>
+  <text x="705" y="36" text-anchor="middle" class="t-small f-muted">10</text>
+  <text x="767" y="36" text-anchor="middle" class="t-small f-muted">11</text>
+  <text x="829" y="36" text-anchor="middle" class="t-small f-muted">12</text>
+  <text x="106" y="70" text-anchor="end" class="t-small f-muted">rank 0 error</text>
+  <rect x="120" y="50" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="182" y="50" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="244" y="50" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="306" y="50" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="368" y="50" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="430" y="50" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="492" y="50" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="554" y="50" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="616" y="50" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="678" y="50" width="54" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="740" y="50" width="54" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="802" y="50" width="54" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="106" y="110" text-anchor="end" class="t-small f-muted">rank 1 error</text>
+  <rect x="120" y="90" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="182" y="90" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="244" y="90" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="306" y="90" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="368" y="90" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="430" y="90" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="492" y="90" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="554" y="90" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="616" y="90" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="678" y="90" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="740" y="90" width="54" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="802" y="90" width="54" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="106" y="150" text-anchor="end" class="t-small f-muted">rank 2 error</text>
+  <rect x="120" y="130" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="182" y="130" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="244" y="130" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="306" y="130" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="368" y="130" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="430" y="130" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="492" y="130" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="554" y="130" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="616" y="130" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="678" y="130" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="740" y="130" width="54" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <rect x="802" y="130" width="54" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="106" y="206" text-anchor="end" class="t-small">Max of all</text>
+  <rect x="120" y="186" width="54" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <rect x="182" y="186" width="54" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <rect x="244" y="186" width="54" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <rect x="306" y="186" width="54" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <rect x="368" y="186" width="54" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <rect x="430" y="186" width="54" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <rect x="492" y="186" width="54" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <rect x="554" y="186" width="54" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <rect x="616" y="186" width="54" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <rect x="678" y="186" width="54" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <rect x="740" y="186" width="54" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <rect x="802" y="186" width="54" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="829" y="205" text-anchor="middle" class="t-small">stop</text>
+  <line x1="736" y1="44" x2="736" y2="226" class="s-copper" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="728" y="246" text-anchor="end" class="t-small f-muted">a local test: rank 0 leaves here,</text>
+  <text x="728" y="262" text-anchor="end" class="t-small f-muted">and ranks 1 and 2 wait in iteration 11</text>
+  <rect x="120" y="266" width="18" height="14" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="146" y="277" class="t-small f-muted">below the tolerance</text>
+</svg></div>
+  <figcaption>Each rank’s error falls below the tolerance at its own
+  iteration, but the <code>Max</code> over all of them falls below only at
+  iteration 12, and every rank reads the same <code>Max</code>. A test of the
+  local error would let rank 0 leave after iteration 10, with the others
+  waiting for it in the next allreduce.</figcaption>
+</figure>
+
+<p>Rank 0 runs two iterations more than its part needs. That is the price
+of the rule, and it is the right one: the global error is what the solver
+reports, and it is above the tolerance until every part is below it.</p>
+
+<p>The operation depends on what the test asks. <code>Max</code> of the errors,
+or <code>Min</code> of a flag that is 1 when a rank is done, says whether every
+rank is done; <code>Max</code> of the flag says whether any is. The SDDP
+example’s test says which ranks are done: each sets its own bit, and the
+<code>BitwiseOr</code> is the set of them:</p>
+
+<pre data-lang="rust" data-source="examples/sddp_pattern.rs"><code>    // Convergence test: each rank sets bit `rank % 64`, so with up to 64
+    // ranks the OR is the set of ranks that have converged.
+    let flags = ctx
+        .world
+        .allreduce_scalar(1u64 &lt;&lt; (rank % 64), ReduceOp::BitwiseOr)?;
+    assert_eq!(
+        flags,
+        if size &gt;= 64 {
+            u64::MAX
+        } else {
+            (1u64 &lt;&lt; size) - 1
+        }
+    );</code></pre>
+
+<p>The test costs one allreduce of one value per iteration, small next to the
+work of an iteration; a solver that runs it thousands of times can make it
+persistent
+(<a href="03-collective-communication.html#persistent-collectives">chapter
+3</a>).</p>
+
+<h2 id="same-bits">The same bits on every rank</h2>
+
+<p>A floating-point sum depends on the order of its terms, and a reduction
+adds in an order the library chooses
+(<a href="03-collective-communication.html#floating-point-results">chapter
+3</a>). That matters most where a sum feeds a decision: two ranks that compare
+a bound with a tolerance must compare the same bits, or one goes on while the
+other stops. The order can be fixed by gathering the terms to every rank and
+adding them there:</p>
+
+<pre data-lang="rust" data-run="3" id="order"><code>use ferrompi::{Mpi, ReduceOp};
+
+/// Neumaier's compensated sum, in the order of `xs`.
+fn neumaier(xs: &amp;[f64]) -&gt; f64 {
+    let (mut sum, mut err) = (0.0, 0.0);
+    for &amp;x in xs {
+        let t = sum + x;
+        err += if sum.abs() &gt;= x.abs() {
+            (sum - t) + x
+        } else {
+            (x - t) + sum
+        };
+        sum = t;
+    }
+    sum + err
+}
+
+fn main() -&gt; Result&lt;(), ferrompi::Error&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // One value per rank: two that cancel, and 1 between them.
+    let big = 2f64.powi(60);
+    let mine = [big, 1.0, -big][rank as usize % 3];
+    let mut all = vec![0.0; world.size() as usize];
+    world.allgather(&amp;[mine], &amp;mut all)?;
+
+    if rank == 0 {
+        let in_order: f64 = all.iter().sum();
+        let other: f64 = [all[0], all[2], all[1]].iter().sum();
+        println!("ranks 0, 1, 2: {in_order}");
+        println!("ranks 0, 2, 1: {other}");
+        println!("compensated, ranks 0, 1, 2: {}", neumaier(&amp;all));
+    }
+    // Every rank sums the same values in the same order: check that the bits agree.
+    let bits = neumaier(&amp;all).to_bits();
+    let same = world.allreduce_scalar(bits, ReduceOp::Min)?
+        == world.allreduce_scalar(bits, ReduceOp::Max)?;
+    println!("rank {rank}: the same bits as every rank: {same}");
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="order"><code>ranks 0, 1, 2: 0
+ranks 0, 2, 1: 1
+compensated, ranks 0, 1, 2: 1
+rank 0: the same bits as every rank: true
+rank 1: the same bits as every rank: true
+rank 2: the same bits as every rank: true</code></pre>
+
+<p>Added in rank order, the 1 is lost against 2<sup>60</sup>, whose spacing
+between doubles is 256; added after the two large terms cancel, it is kept.
+Neumaier’s compensated sum carries the lost part along and gets 1 in either
+order here. After the <code>allgather</code>, every rank holds the same values
+in rank order, so every rank computes the same bits, and the
+<code>Min</code> and <code>Max</code> of those bits, as an integer, agree
+exactly when every rank has them.</p>
+
+<p>The SDDP example does the same with its bound, and checks it against a
+serial sum:</p>
+
+<pre data-lang="rust" data-source="examples/sddp_pattern.rs"><code>    // A bound summed by `allreduce` is summed in MPI's order, so its last bits
+    // may change between runs. The gathered values are in rank order on every
+    // rank: summing them there with a compensated sum is bit-identical on every
+    // rank and to a serial sum.
+    let oracle: Vec&lt;f64&gt; = (0..size)
+        .flat_map(|r| (0..=r as usize).map(move |k| value(r, k)))
+        .collect();
+    let bound = neumaier(&amp;cuts).to_bits();
+    assert_eq!(bound, neumaier(&amp;oracle).to_bits());
+    assert_eq!(
+        ctx.world.allreduce_scalar(bound, ReduceOp::Min)?,
+        ctx.world.allreduce_scalar(bound, ReduceOp::Max)?
+    );</code></pre>
+
+<p>Gathering every term costs memory and bandwidth that a reduction does not,
+so a solver does it for the few sums that decide something, and reduces the
+rest. Sums of integers that do not overflow, and <code>Min</code> and
+<code>Max</code> of anything, have no order to fix.</p>
+
+<h2 id="failing-together">When one rank fails</h2>
+
+<p>An error on one rank breaks the rule in the most common way: that rank
+returns from <code>main</code>, and the others wait in the next collective. A
+real program catches the error on the rank that has it, turns it into a value,
+and lets every rank learn it before going on:</p>
+
+<pre data-lang="rust" data-run="3" id="fail_together"><code>use ferrompi::{Communicator, Mpi, ReduceOp};
+
+/// Every rank's verdict on its own step, combined: `Ok` on every rank, or the
+/// same list of the ranks that failed on every rank.
+fn agree(world: &amp;Communicator, ok: bool) -&gt; ferrompi::Result&lt;Result&lt;(), Vec&lt;i32&gt;&gt;&gt; {
+    let mut all = vec![0i32; world.size() as usize];
+    world.allgather(&amp;[i32::from(ok)], &amp;mut all)?;
+    let failed: Vec&lt;i32&gt; = (0..world.size())
+        .filter(|&amp;r| all[r as usize] == 0)
+        .collect();
+    Ok(if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed)
+    })
+}
+
+fn main() -&gt; Result&lt;(), ferrompi::Error&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // Each rank reads its own part of the input. Rank 1's is malformed.
+    let text = if rank == 1 { "2,5" } else { "2.5" };
+    let value = match text.parse::&lt;f64&gt;() {
+        Ok(v) =&gt; Some(v),
+        Err(e) =&gt; {
+            println!("rank {rank}: cannot read {text:?}: {e}");
+            None
+        }
+    };
+
+    // Before the next collective, every rank learns whether all can go on.
+    match agree(&amp;world, value.is_some())? {
+        Ok(()) =&gt; {
+            let value = value.expect("every rank read its part");
+            let total = world.allreduce_scalar(value, ReduceOp::Sum)?;
+            println!("rank {rank}: total {total}");
+        }
+        Err(failed) =&gt; println!("rank {rank}: ranks {failed:?} failed, stopping"),
+    }
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="fail_together"><code>rank 1: cannot read "2,5": invalid float literal
+rank 0: ranks [1] failed, stopping
+rank 1: ranks [1] failed, stopping
+rank 2: ranks [1] failed, stopping</code></pre>
+
+<p><code>agree</code> is a collective, so every rank calls it, failed or not,
+and every rank gets the same answer, so every rank takes the same branch.
+An <code>allgather</code> of the flags tells every rank which ranks failed;
+the <code>Min</code> of the flags would say only whether one did, which is
+what ferrompi’s MPI tests use
+(<a href="13-testing.html#the-verdict">chapter 13</a>). Rank 1 prints its own
+error, since only it has the message.</p>
+
+<p>The pattern needs a point where every rank can still reach the agreement.
+When a rank cannot, because its state is lost or it is about to panic in the
+middle of a step, <code>world.abort(code)</code> asks MPI to end every
+process of the job, and never returns
+(<a href="01-the-mpi-model.html#when-something-goes-wrong">chapter 1</a>).
+Abort loses the other ranks’ work and their chance to report, so a
+solver agrees where it can and aborts where it must.</p>
+
+<h2 id="elsewhere">Patterns in earlier chapters</h2>
+
+<p>The earlier chapters each built one pattern that solvers use:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Pattern</th><th>What it is for</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr><td>Halo exchange</td><td>boundary values to and from the neighbours</td><td><a href="02-point-to-point.html#a-halo-exchange">Chapter 2</a>, with messages; <a href="05-one-sided-communication.html#neighbors-only">chapter 5</a>, with a window</td></tr>
+    <tr><td>Persistent collective</td><td>the same reduction every iteration, set up once</td><td><a href="03-collective-communication.html#persistent-collectives">Chapter 3</a></td></tr>
+    <tr><td>Overlap</td><td>computing while a reduction runs</td><td><a href="03-collective-communication.html#nonblocking-collectives">Chapter 3</a></td></tr>
+    <tr><td>Scan</td><td>each rank’s offset into a whole</td><td><a href="03-collective-communication.html#scans">Chapter 3</a></td></tr>
+    <tr><td>Shared counter</td><td>handing out work with an atomic operation</td><td><a href="05-one-sided-communication.html#accumulate-and-atomics">Chapter 5</a></td></tr>
+    <tr><td>Node-shared data</td><td>one copy of read-mostly data per node</td><td><a href="05-one-sided-communication.html#shared-memory-windows">Chapter 5</a></td></tr>
+    <tr><td>Funneled threads</td><td>threads compute, the main thread communicates</td><td><a href="06-threads-and-hybrid-mpi.html#funneled">Chapter 6</a>; <a href="06-threads-and-hybrid-mpi.html#serialized">serialized</a>, with a communication thread</td></tr>
+    <tr><td>Node leaders</td><td>one process per node talks to the other nodes</td><td><a href="01-the-mpi-model.html#one-communicator-per-node">Chapter 1</a></td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>Run <code>blocks</code> with 4 and with 12 processes. What does each
+  rank own with 12, and what does <code>gatherv</code> do with a count of
+  0?</li>
+  <li>In <code>converge</code>, test the rank’s own error in place of the
+  <code>Max</code>, keep the allreduce in the loop, and run it under
+  <code>timeout 20</code>. Which ranks print, and where do the others
+  wait?</li>
+  <li>Change <code>converge</code> to stop as soon as any rank is below the
+  tolerance. Which operation, on which value? When would a solver want
+  that?</li>
+  <li>Run <code>order</code> with 6 processes, so that each value appears
+  twice and the exact sum is 2. Which of the three sums gets it, and why does
+  the second not change? Then replace the gathered sum by
+  <code>allreduce_scalar(mine, ReduceOp::Sum)</code> and print its bits at 3,
+  4 and 6 processes.</li>
+  <li>Give <code>fail_together</code> good input on every rank. Then make
+  rank 1 return <code>Err</code> from <code>main</code> before
+  <code>agree</code>, and run it under <code>timeout 20</code>. What do the
+  other ranks do?</li>
+  <li>Run <code>examples/sddp_pattern.rs</code> with 4 processes, built with
+  <code>--features rma</code>, and match each line of its output to a row of
+  the table in <a href="#a-solver">The shape of a solver</a>.</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>Every pattern keeps one rule: the data never changes which collective
+  calls a rank makes, or in what order, or with which root and
+  operation.</li>
+  <li>An SDDP solver’s iteration is a broadcast, an exchange of trial points
+  and cuts, bounds and statistics, a convergence test and reads of shared
+  scenario data, around a context that owns every handle with
+  <code>Mpi</code> last.</li>
+  <li>When every rank can compute every share of the work, the counts of a
+  v-collective need no exchange.</li>
+  <li>Data whose length only its rank knows is sent in two collectives,
+  lengths and then bytes, with the total checked against
+  <code>i32::MAX</code>.</li>
+  <li>A loop stops on a collective result, such as the <code>Max</code> of the
+  errors, so every rank stops at the same iteration.</li>
+  <li>A sum that decides something is added in a fixed order on every rank,
+  from gathered terms, and its bits can be checked with <code>Min</code> and
+  <code>Max</code>.</li>
+  <li>An error is turned into a value and agreed on by every rank before the
+  next collective; <code>abort</code> is for the rank that cannot reach the
+  agreement.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="14-adding-an-mpi-call.html">Previous: chapter 14, adding an MPI call</a>
+  <a href="index.html">Contents</a>
+  <span class="next">The last chapter</span>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

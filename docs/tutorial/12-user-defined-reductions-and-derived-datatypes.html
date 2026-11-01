@@ -1,0 +1,1326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>12. User-defined reductions and derived datatypes · ferrompi tutorial</title>
+<meta name="description" content="How ferrompi maps Rust types to MPI datatypes and operations: the sealed traits behind the datatype tag, the address of an empty buffer, the types that tie an operation to its element type and the one check left to run time, how a Rust closure becomes an MPI_Op through sixteen C trampolines and a registry, when MPI calls it and when it is freed, and the layout check that keeps a derived datatype inside its slice.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#from-a-type">From a type to a datatype</a></li>
+      <li><a href="#the-seal">The seal</a></li>
+      <li><a href="#empty-buffers">An empty buffer</a></li>
+      <li><a href="#op-fits-type">An operation for each type</a></li>
+      <li><a href="#run-time-check">The check left to run time</a></li>
+      <li><a href="#closure-as-op">A closure as an MPI operation</a></li>
+      <li><a href="#when-mpi-calls">When MPI calls it</a></li>
+      <li><a href="#freeing">Freeing an operation</a></li>
+      <li><a href="#derived-inside">Derived datatypes inside</a></li>
+      <li><a href="#layout-check">The layout check</a></li>
+      <li><a href="#your-struct">A struct of your own</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part II · Chapter 12</p>
+<h1>User-defined reductions and derived datatypes</h1>
+
+<p class="lede">Chapter 4 used ferrompi’s datatypes and reductions. This
+chapter opens them up: how a Rust type becomes the datatype MPI is told about,
+how the compiler decides which operation may reduce which type, how a Rust
+closure becomes an <code>MPI_Op</code> that the MPI library calls, and how a
+derived datatype is checked against the slice it describes.</p>
+
+<p>By the end of the chapter you can say how the datatype tag is sealed and
+why no code outside the crate can read it, name the operation errors the
+compiler catches and the one the run time catches, follow a call to a
+user-defined operation from your program into MPI and back into your closure,
+say who frees an operation and in what order, and name the two numbers a
+derived datatype must match before a <code>_custom</code> call reaches
+MPI.</p>
+
+<p>The designs are
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/docs/adr/0003-generic-mpi-datatype.md">ADR
+0003</a> for the datatype traits and
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/docs/adr/0005-mpi-op-create.md">ADR
+0005</a> for user-defined operations. The excerpts of ferrompi’s source below
+name the file they come from. A comment <code>// …</code> marks lines left
+out. CI checks that every excerpt still matches its file.</p>
+
+<h2 id="from-a-type">From a type to a datatype</h2>
+
+<p>Every typed call turns its slices into what the C layer takes: an address,
+a count and a datatype tag, which <code>get_datatype</code> maps to an
+<code>MPI_Datatype</code> (<a href="10-the-c-shim.html#translating">chapter
+10</a>). One function does it for a slice that MPI reads, and its twin
+<code>buf_mut</code> for one that MPI writes:</p>
+
+<pre data-lang="rust" data-source="src/datatype.rs"><code>#[inline(always)]
+pub(crate) fn buf&lt;T: MpiDatatype&gt;(s: &amp;[T]) -&gt; (*const c_void, i64, i32) {
+    (
+        buf_ptr(s.as_ptr(), s.len(), false),
+        s.len() as i64,
+        tag_of::&lt;T&gt;() as i32,
+    )
+}</code></pre>
+
+<p>The count is the slice’s length, which never exceeds
+<code>isize::MAX</code>, so the cast to <code>i64</code> loses nothing. The
+tag comes from the element type, through a function that only the crate can
+call:</p>
+
+<pre data-lang="rust" data-source="src/datatype.rs"><code>pub trait MpiDatatype: sealed::Sealed + Copy + Send + 'static {}
+
+/// The tag the C layer dispatches on for `T`.
+#[inline]
+pub(crate) fn tag_of&lt;T: MpiDatatype&gt;() -&gt; DatatypeTag {
+    T::tag(sealed::Token)
+}</code></pre>
+
+<p><code>MpiDatatype</code> declares nothing of its own. What it means is in
+its supertraits: <code>Copy</code>, because MPI copies elements byte by byte;
+<code>Send</code> and <code>'static</code>, because a buffer may move to
+another thread or be owned by a request; and <code>sealed::Sealed</code>,
+which carries the tag.</p>
+
+<h2 id="the-seal">The seal</h2>
+
+<pre data-lang="rust" data-source="src/datatype.rs"><code>/// Internal module to seal [`MpiDatatype`] — prevents external implementations.
+mod sealed {
+    use super::DatatypeTag;
+
+    /// Argument of [`Sealed::tag`]: it cannot be named outside this crate, so
+    /// the tag cannot be read through a public bound.
+    pub struct Token;
+
+    pub trait Sealed {
+        fn tag(_: Token) -&gt; DatatypeTag;
+    }
+}</code></pre>
+
+<pre data-lang="rust" data-source="src/datatype.rs"><code>macro_rules! impl_mpi_datatype {
+    ($ty:ty, $tag:expr) =&gt; {
+        impl sealed::Sealed for $ty {
+            #[inline]
+            fn tag(_: sealed::Token) -&gt; DatatypeTag {
+                $tag
+            }
+        }
+        impl MpiDatatype for $ty {}
+    };
+}
+
+impl_mpi_datatype!(f32, DatatypeTag::F32);
+impl_mpi_datatype!(f64, DatatypeTag::F64);
+impl_mpi_datatype!(i32, DatatypeTag::I32);
+impl_mpi_datatype!(i64, DatatypeTag::I64);
+impl_mpi_datatype!(u8, DatatypeTag::U8);
+impl_mpi_datatype!(u32, DatatypeTag::U32);
+impl_mpi_datatype!(u64, DatatypeTag::U64);</code></pre>
+
+<p>The module <code>sealed</code> is private. Outside the crate its trait
+cannot be named, so no type there can implement <code>Sealed</code>, or
+therefore <code>MpiDatatype</code>. The tag’s function takes a
+<code>Token</code>, a public struct in that private module: a generic function
+outside the crate cannot make one, so it cannot call <code>tag</code> even
+through a bound. And <code>DatatypeTag</code> has no public path. Two
+<code>compile_fail</code> doctests in <code>src/datatype.rs</code> pin this:
+<code>use ferrompi::DatatypeTag</code> fails with E0432, and
+<code>T::TAG</code> in a function generic over <code>T: MpiDatatype</code>
+fails with E0599. Before 0.7.0 the tag was a public constant,
+<code>T::TAG</code>. ADR 0003’s amendments made its values internal, so that a
+release may renumber them, for instance to the handle values of the MPI 5
+standard ABI.</p>
+
+<p>The list is closed because the C layer’s <code>switch</code> on the tag is
+closed: a type outside it has no <code>MPI_Datatype</code> to map to.
+<a href="https://github.com/rsmpi/rsmpi">rsmpi</a>, the other MPI binding for
+Rust, lets any type implement its <code>Equivalence</code> trait and supply a
+datatype of its own. ADR 0003 rejected that, and also a run-time enum of
+element kinds, which the compiler could not check against the slice. A struct
+of your own goes through a <code>CustomDatatype</code> instead, with the
+checks at the <a href="#layout-check">end of this chapter</a>.</p>
+
+<p>Each family of types has a seal of its own, so the families stay
+apart:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Trait</th><th>Implemented for</th><th>Taken by</th></tr></thead>
+  <tbody>
+    <tr><td><code>MpiDatatype</code></td><td><code>f32</code>, <code>f64</code>, <code>i32</code>, <code>i64</code>, <code>u8</code>, <code>u32</code>, <code>u64</code></td><td>every typed buffer</td></tr>
+    <tr><td><code>MpiIndexedDatatype</code></td><td>the six value-and-index pairs, such as <code>DoubleInt</code></td><td>the <code>_indexed</code> reductions, with <code>MAX_LOC</code> and <code>MIN_LOC</code></td></tr>
+    <tr><td><code>BytePermutable</code></td><td>the integer types from <code>i8</code> to <code>u64</code>, and arrays of them</td><td>the byte reductions, such as <code>allreduce_bytes</code></td></tr>
+    <tr><td><code>AtomicMpiDatatype</code></td><td><code>i32</code>, <code>i64</code>, <code>u32</code>, <code>u64</code>, <code>u8</code></td><td><code>compare_and_swap</code>, with the <code>rma</code> feature</td></tr>
+    <tr><td><code>PlainData</code>, an <code>unsafe</code> trait you may implement</td><td>every <code>MpiDatatype</code>, arrays of <code>PlainData</code>, and your own types</td><td>the <code>_custom</code> calls</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>A pair type is not an <code>MpiDatatype</code>, so a broadcast of
+<code>DoubleInt</code>s does not compile, and neither does a
+<code>MAX_LOC</code> reduction of <code>f64</code>s, as the next section
+shows.</p>
+
+<h2 id="empty-buffers">An empty buffer</h2>
+
+<p>The address in <code>buf</code> is not always the slice’s own. An empty
+slice has no memory to point at, and Rust gives it a dangling address equal to
+the type’s alignment: address 1 for an empty <code>&amp;[u8]</code>. In Open
+MPI and in the MPI 5 standard ABI, address 1 is <code>MPI_IN_PLACE</code>, so
+an empty send buffer of bytes would ask for an in-place operation. ferrompi
+hands MPI a private address instead:</p>
+
+<pre data-lang="rust" data-source="src/datatype.rs"><code>static EMPTY: [u64; 2] = [0; 2];
+// …
+#[inline(always)]
+pub(crate) fn buf_ptr&lt;T&gt;(ptr: *const T, len: usize, written: bool) -&gt; *const c_void {
+    if align_of::&lt;T&gt;() == 1 &amp;&amp; (len == 0 || size_of::&lt;T&gt;() == 0) {
+        std::ptr::from_ref(&amp;EMPTY[usize::from(written)]).cast()
+    } else {
+        ptr.cast()
+    }
+}</code></pre>
+
+<p>Only a type of alignment 1 needs it. A larger alignment gives an even
+address, and <code>MPI_IN_PLACE</code> is an odd address in Open MPI, MPICH
+and the standard ABI. The pointer is never null either, which keeps null free
+for ferrompi’s own in-place marker: <code>allreduce_inplace</code> passes a
+null send buffer, and the C layer maps it to <code>MPI_IN_PLACE</code>. There
+are two addresses, one for a buffer MPI reads and one for a buffer it writes,
+because some MPI calls refuse a send and a receive buffer at the same address,
+even with a count of zero.</p>
+
+<h2 id="op-fits-type">An operation for each type</h2>
+
+<p>A reducing call takes its operation as
+<code>impl Into&lt;CollectiveOp&lt;'a, T&gt;&gt;</code>, where
+<code>T</code> is the element type of its buffers:</p>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>pub struct CollectiveOp&lt;'a, T&gt; {
+    op: CollectiveRepr&lt;'a&gt;,
+    // T appears only as a `fn` return, so it adds no auto-trait or drop bound.
+    _marker: PhantomData&lt;fn() -&gt; T&gt;,
+}</code></pre>
+
+<p><code>CollectiveOp</code> holds no <code>T</code>. The marker
+<code>PhantomData&lt;fn() -&gt; T&gt;</code> ties it to the type without
+making it <code>Send</code> or <code>Sync</code> only when <code>T</code> is,
+and without a drop check on <code>T</code>. What converts into it decides
+which operation compiles with which buffers:</p>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>impl&lt;T: MpiDatatype&gt; From&lt;ReduceOp&gt; for CollectiveOp&lt;'_, T&gt; {
+    fn from(op: ReduceOp) -&gt; Self {
+        Self {
+            op: CollectiveRepr::Builtin(Builtin::Reduce(op)),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl&lt;'a, T: MpiDatatype&gt; From&lt;&amp;'a UserOp&lt;T&gt;&gt; for CollectiveOp&lt;'a, T&gt; {
+    fn from(op: &amp;'a UserOp&lt;T&gt;) -&gt; Self {
+        Self {
+            op: CollectiveRepr::User(&amp;op.registration),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl&lt;T: MpiIndexedDatatype&gt; CollectiveOp&lt;'static, T&gt; {
+    /// `MPI_MAXLOC`: the maximum value and the index that came with it.
+    pub const MAX_LOC: Self = Self {
+        op: CollectiveRepr::Builtin(Builtin::PairMax),
+        _marker: PhantomData,
+    };
+
+    /// `MPI_MINLOC`: the minimum value and the index that came with it.
+    pub const MIN_LOC: Self = Self {
+        op: CollectiveRepr::Builtin(Builtin::PairMin),
+        _marker: PhantomData,
+    };
+}</code></pre>
+
+<p>A <code>ReduceOp</code> converts for any primitive type. A
+<code>&amp;UserOp&lt;T&gt;</code> converts only for its own <code>T</code>,
+and the borrow’s lifetime becomes the <code>'a</code>. <code>MAX_LOC</code>
+and <code>MIN_LOC</code> exist only for pair types. The one-sided calls take
+operations of their own, <code>AccumulateOp</code> and <code>FetchOp</code>,
+built the same way. Most of these programs are <code>compile_fail</code>
+doctests in <code>src/op.rs</code>:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>The rejected program</th><th>Error</th></tr></thead>
+  <tbody>
+    <tr><td><code>CollectiveOp::&lt;f64&gt;::MAX_LOC</code></td><td>E0599, no associated item: <code>MAX_LOC</code> is defined for pair types only</td></tr>
+    <tr><td>a <code>&amp;UserOp&lt;f64&gt;</code> as the operation of a reduction of <code>f32</code>s</td><td>E0277, no conversion into <code>CollectiveOp&lt;'_, f32&gt;</code></td></tr>
+    <tr><td><code>ReduceOp::Sum</code> in <code>allreduce_indexed</code></td><td>E0277, <code>DoubleInt: MpiDatatype</code> is not satisfied</td></tr>
+    <tr><td>a <code>&amp;UserOp</code> as an <code>AccumulateOp</code></td><td>E0277: MPI allows no user-defined operation in a one-sided accumulate</td></tr>
+    <tr><td><code>AccumulateOp::NO_OP</code></td><td>E0599: MPI allows <code>MPI_NO_OP</code> only in the fetching calls, as <code>FetchOp::NO_OP</code></td></tr>
+    <tr><td><code>AccumulateOp::REPLACE</code> in <code>allreduce</code></td><td>E0277: <code>MPI_REPLACE</code> is not a collective operation</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="run-time-check">The check left to run time</h2>
+
+<p>One rule is not in the types. <code>ReduceOp</code> is one enum for every
+primitive type, and MPI defines the bitwise and logical operations on integers
+only. Splitting the enum by type would make <code>ReduceOp::Sum</code> two
+different values, so the rule is checked when the call starts:</p>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>#[inline]
+fn op_fault(op: Builtin, tag: DatatypeTag) -&gt; Option&lt;OpFault&gt; {
+    match tag {
+        DatatypeTag::F32 | DatatypeTag::F64 =&gt; match op {
+            Builtin::Reduce(ReduceOp::Sum | ReduceOp::Max | ReduceOp::Min | ReduceOp::Prod)
+            | Builtin::Replace
+            | Builtin::NoOp =&gt; None,
+            Builtin::Reduce(
+                ReduceOp::BitwiseOr
+                | ReduceOp::BitwiseAnd
+                | ReduceOp::BitwiseXor
+                | ReduceOp::LogicalOr
+                | ReduceOp::LogicalAnd
+                | ReduceOp::LogicalXor,
+            ) =&gt; Some(OpFault::FloatBitwise),
+            Builtin::PairMax | Builtin::PairMin =&gt; Some(OpFault::LocNeedsPair),
+        },
+        // …
+    }
+}</code></pre>
+
+<p>The arms left out cover the other tags. Integers take every
+<code>ReduceOp</code>. Pair types take only <code>MAX_LOC</code> and
+<code>MIN_LOC</code>, which the types already ensure. Bytes take only the
+bitwise operations: the byte reductions of <code>BytePermutable</code> types
+take a plain <code>ReduceOp</code>, so for them this check is the only one.
+Each fault has its message:</p>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>#[cold]
+#[inline(never)]
+fn op_error(fault: OpFault) -&gt; Error {
+    Error::InvalidArgument {
+        arg: "op",
+        reason: match fault {
+            OpFault::FloatBitwise =&gt; "bitwise and logical ops do not apply to floating-point types",
+            OpFault::PairNeedsLoc =&gt; "only MAX_LOC and MIN_LOC apply to pair types",
+            OpFault::LocNeedsPair =&gt; "MAX_LOC and MIN_LOC apply only to pair types",
+            OpFault::ByteNeedsBitwise =&gt; "only the bitwise ops apply to byte reductions",
+        },
+    }
+}
+
+/// Rejects a predefined op that MPI does not define on the element kind `tag`. On
+/// pair and byte tags it also rejects `MPI_REPLACE` and `MPI_NO_OP`, which
+/// MPI-4.1 §12.3.4 allows but no window element type reaches.
+#[inline]
+pub(crate) fn check_op(op: Builtin, tag: DatatypeTag) -&gt; Result&lt;()&gt; {
+    match op_fault(op, tag) {
+        None =&gt; Ok(()),
+        Some(fault) =&gt; Err(op_error(fault)),
+    }
+}</code></pre>
+
+<p><code>CollectiveOp::code</code> runs the check and turns the operation
+into the code the C layer’s <code>get_op</code> maps to an
+<code>MPI_Op</code>. A user-defined operation needs no check, since its type
+was matched at compile time:</p>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>impl&lt;T&gt; CollectiveOp&lt;'_, T&gt; {
+    pub(crate) fn code(&amp;self, tag: DatatypeTag) -&gt; Result&lt;i32&gt; {
+        match self.op {
+            CollectiveRepr::Builtin(op) =&gt; check_op(op, tag).map(|()| op.code()),
+            CollectiveRepr::User(registration) =&gt; Ok(registration.code()),
+        }
+    }</code></pre>
+
+<p>Every reduction calls it first, before it compares the lengths or calls
+MPI:</p>
+
+<pre data-lang="rust" data-source="src/comm/blocking.rs"><code>    pub fn allreduce&lt;'a, T: MpiDatatype&gt;(
+        &amp;self,
+        send: &amp;[T],
+        recv: &amp;mut [T],
+        op: impl Into&lt;CollectiveOp&lt;'a, T&gt;&gt;,
+    ) -&gt; Result&lt;()&gt; {
+        let op = op.into().code(tag_of::&lt;T&gt;())?;
+        check_same_len("recv", send.len(), recv.len())?;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&amp;[T] vs &amp;mut [T]).
+        let ret = unsafe { ffi::ferrompi_allreduce(sp, rp, n, dt, op, self.handle) };
+        Error::check_with_op(ret, "allreduce")
+    }</code></pre>
+
+<p>The check reads nothing but the operation and <code>T</code>, which every
+process of a correct program passes alike. So every process refuses, and none
+is left waiting in <code>MPI_Allreduce</code> for a peer that returned an
+error. MPI itself calls a reduction with an operation its datatype does not
+support erroneous, and leaves what happens to the implementation. The program
+below runs one reduction that is fine, one that is refused, and one that is
+fine again:</p>
+
+<pre data-lang="rust" data-run="2" id="ops"><code>use ferrompi::{Mpi, ReduceOp};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    let mut sum = [0.0f64];
+    world.allreduce(&amp;[rank as f64 + 0.5], &amp;mut sum, ReduceOp::Sum)?;
+    println!("rank {rank}: Sum on f64: {sum:?}");
+
+    // MPI defines the bitwise operations on integers only. The check depends
+    // only on the operation and the element type, so every process refuses.
+    let mut bits = [0.0f64];
+    match world.allreduce(&amp;[1.0f64], &amp;mut bits, ReduceOp::BitwiseOr) {
+        Ok(()) =&gt; println!("rank {rank}: BitwiseOr on f64 ran"),
+        Err(err) =&gt; println!("rank {rank}: BitwiseOr on f64: {err}"),
+    }
+
+    let mut flags = [0u64];
+    world.allreduce(&amp;[1u64 &lt;&lt; rank], &amp;mut flags, ReduceOp::BitwiseOr)?;
+    println!("rank {rank}: BitwiseOr on u64: {:#b}", flags[0]);
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="ops"><code>rank 0: Sum on f64: [2.0]
+rank 0: BitwiseOr on f64: invalid argument `op`: bitwise and logical ops do not apply to floating-point types
+rank 0: BitwiseOr on u64: 0b11
+rank 1: Sum on f64: [2.0]
+rank 1: BitwiseOr on f64: invalid argument `op`: bitwise and logical ops do not apply to floating-point types
+rank 1: BitwiseOr on u64: 0b11</code></pre>
+
+<p>Both processes refused the second reduction and went on to the third, in
+which each contributed its own bit, <code>1 &lt;&lt; rank</code>.</p>
+
+<h2 id="closure-as-op">A closure as an MPI operation</h2>
+
+<p><code>MPI_Op_create</code> takes a C function and a flag that says whether
+the operation commutes. When MPI combines two buffers, it calls the function
+as <code>f(invec, inoutvec, &amp;len, &amp;datatype)</code>: the two buffers,
+a pointer to the count and a pointer to the datatype. Nothing in the call says
+which operation it belongs to, and there is no argument for data of the
+caller’s. A closure is code and the state it captured, so it cannot be passed
+as it is. ferrompi compiles sixteen C functions,
+<code>ferrompi_user_op_trampoline_0</code> to <code>_15</code>, each of which
+passes its own slot number on (<a href="10-the-c-shim.html#trampolines">chapter
+10</a>), and keeps the closures in a table in Rust that the slot number
+indexes:</p>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>/// Type-erased closure stored in each op slot: it receives MPI's raw
+/// `invec`/`inoutvec` pointers and element count.
+type ByteClosure = Box&lt;dyn Fn(*const c_void, *mut c_void, usize) + Send + Sync + 'static&gt;;
+
+/// Per-slot registry of thin pointers to boxed closures.
+///
+/// Each slot holds `Box::into_raw(Box::new(byte_closure))` — a thin
+/// `*mut ByteClosure` — or null.  Protocol:
+/// - `create_in_free_slot` publishes a slot with `Ordering::Release` before
+///   calling `MPI_Op_create`.
+/// - `rust_user_op_invoke` (the trampoline) loads a slot with
+///   `Ordering::Acquire`.
+/// - `ferrompi_op_drop_closure` swaps a slot to null only after
+///   `MPI_Op_free` returns, so no trampoline call can observe a freed
+///   closure.
+static REGISTRY: [AtomicPtr&lt;ByteClosure&gt;; MAX_OPS] =
+    [const { AtomicPtr::new(std::ptr::null_mut()) }; MAX_OPS];</code></pre>
+
+<p>An entry points to a boxed <code>ByteClosure</code>, which is itself a box:
+a box in a box. A pointer to a <code>dyn Fn</code> takes two words, one for
+the data and one for the table of its methods, and no atomic holds two words.
+A pointer to the outer box takes one. The comment states the protocol that the
+three functions below keep. This is how an operation is created:</p>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>    fn new_impl&lt;F&gt;(f: F, commute: i32) -&gt; Result&lt;Self&gt;
+    where
+        F: Fn(&amp;[T], &amp;mut [T]) + Send + Sync + 'static,
+    {
+        // The guard admits the call before it takes a slot, and its token
+        // covers the claim, the create and any rollback. `Mpi::init` resets
+        // the op table before `MPI_Init_thread`, and the guard orders every
+        // call it admits after `MPI_Init_thread`, so no claim meets that
+        // reset. `Mpi::drop` frees the ops left in the table only when no
+        // admitted call is in progress, so it never meets a slot claimed for
+        // an op not yet created.
+        let _call = rt::enter().map_err(|code| Error::from_code_with_op(code, "op_create"))?;
+        #[cfg(debug_assertions)]
+        let _flag = rt::begin_call().map_err(|code| Error::from_code_with_op(code, "op_create"))?;
+        let slot = create_in_free_slot(typed_adapter::&lt;T, F&gt;(f), commute)?;
+        Ok(UserOp {
+            registration: Arc::new(OpRegistration { slot }),
+            _marker: PhantomData,
+        })
+    }</code></pre>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>fn create_in_free_slot(closure: ByteClosure, commute: i32) -&gt; Result&lt;i32&gt; {
+    let mut slot: i32 = -1;
+    // SAFETY: slot is a local out-parameter written by ferrompi_op_alloc_slot
+    // before this function reads it below (guarded by the `ret != 0` check).
+    let ret = unsafe { ffi::ferrompi_op_alloc_slot(&amp;mut slot) };
+    if ret != 0 {
+        return Err(Error::from_code_with_op(ret, "op_create"));
+    }
+    let idx = slot as usize;
+    debug_assert!(idx &lt; MAX_OPS, "slot out of range");
+
+    // Publish the boxed closure to the registry.  A thin
+    // `*mut ByteClosure` — no fat-pointer decomposition needed.  This
+    // Release store, paired with the trampoline's Acquire load of the
+    // same atomic, synchronizes-with that load directly (no external
+    // happens-before edge required).
+    let ptr: *mut ByteClosure = Box::into_raw(Box::new(closure));
+    REGISTRY[idx].store(ptr, Ordering::Release);
+
+    let mut handle: i32 = -1;
+    // SAFETY: handle is a local out-parameter written by
+    // ferrompi_op_create_user before this function reads it below; slot is
+    // the value ferrompi_op_alloc_slot returned above; the caller holds the
+    // in-flight token this unguarded MPI call needs.
+    let ret = unsafe { ffi::ferrompi_op_create_user(slot, commute, &amp;mut handle) };
+    if ret != 0 {
+        // …
+        unsafe { ferrompi_op_drop_closure(slot) };
+        // …
+        unsafe { ffi::ferrompi_op_free_slot_only(slot) };
+        return Err(Error::from_code_with_op(ret, "op_create"));
+    }
+    debug_assert_eq!(handle, slot);
+    Ok(slot)
+}</code></pre>
+
+<ol>
+  <li><code>ferrompi_op_alloc_slot</code> claims a free slot of the C layer’s
+  operation table, with the compare-and-swap of
+  <a href="10-the-c-shim.html#threads">chapter 10</a>.</li>
+  <li>The closure is boxed and stored in <code>REGISTRY[slot]</code> with
+  <code>Release</code>, before any <code>MPI_Op</code> exists that could make
+  MPI call it.</li>
+  <li><code>ferrompi_op_create_user</code> calls <code>MPI_Op_create</code>
+  with the slot’s trampoline, and keeps the <code>MPI_Op</code> in the
+  slot.</li>
+  <li>If that fails, the closure is dropped and the slot given back without
+  <code>MPI_Op_free</code>, since no operation was made.</li>
+</ol>
+
+<p>The guard taken in <code>new_impl</code> covers the four steps, so
+<code>Mpi</code>’s drop, which frees the operations left in the table, never
+meets one half made.</p>
+
+<p>The closure in the registry is not yours. <code>typed_adapter</code> wraps
+yours in one that takes MPI’s untyped pointers:</p>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>/// Wraps a typed reduction closure in the type-erased form `REGISTRY` stores.
+fn typed_adapter&lt;T: MpiDatatype, F&gt;(f: F) -&gt; ByteClosure
+where
+    F: Fn(&amp;[T], &amp;mut [T]) + Send + Sync + 'static,
+{
+    Box::new(
+        move |invec: *const c_void, inoutvec: *mut c_void, len: usize| {
+            if len == 0 {
+                // MPI may pass null buffers for an empty reduction; an empty
+                // slice needs no pointer.
+                f(&amp;[], &amp;mut []);
+                return;
+            }
+            // SAFETY: invec/inoutvec point to `len` elements of the datatype the
+            // op was applied with, which every reduction passes as T's own
+            // because CollectiveOp&lt;'a, T&gt; ties the op's T to the buffers' T;
+            // MPI's buffers are aligned for that datatype; the two buffers
+            // are distinct; T: MpiDatatype is Copy with a stable layout.
+            let (invec, inoutvec) = unsafe {
+                (
+                    std::slice::from_raw_parts(invec.cast::&lt;T&gt;(), len),
+                    std::slice::from_raw_parts_mut(inoutvec.cast::&lt;T&gt;(), len),
+                )
+            };
+            f(invec, inoutvec);
+        },
+    )
+}</code></pre>
+
+<p>The adapter is generic over <code>T</code> and your closure’s type, so each
+<code>UserOp::new</code> compiles one of its own, and the element type is
+erased only when it is boxed. The slices rest on two facts. MPI may pass null
+pointers when there are no elements, and a slice may not be made from a null
+pointer even with length zero, so that case gets empty slices. And the
+pointers point at <code>T</code>s, because the only way to give a
+<code>UserOp&lt;T&gt;</code> to a reduction is as a
+<code>CollectiveOp&lt;'a, T&gt;</code>, whose <code>T</code> is the
+buffers’.</p>
+
+<figure>
+  <div class="canvas"><svg viewBox="0 0 940 376" role="img" aria-label="The path of a reduction with a user operation in slot N, across three lanes: Rust, the C layer and the MPI library. The call goes down on the left: allreduce turns the operation into the code 64 + N and calls ferrompi_allreduce; get_op maps the code to op_table[N], the MPI_Op that UserOp::new created; and MPI_Allreduce runs. The callback comes up on the right: to combine two buffers, MPI calls ferrompi_user_op_trampoline_N with invec, inoutvec, a pointer to the length and a pointer to the datatype; the trampoline ignores the datatype and calls rust_user_op_invoke with N, the two pointers and the length; that function loads REGISTRY[N] with Acquire and calls the closure stored there, the typed adapter, which makes two slices of T and calls your function." style="min-width: 46rem">
+  <defs>
+    <marker id="op-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="16" y="8" width="908" height="112" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="32" y="32" class="t-head">Rust · src/op.rs</text>
+
+  <rect x="16" y="132" width="908" height="112" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="32" y="156" class="t-head">C · csrc/ferrompi.c</text>
+
+  <rect x="16" y="256" width="908" height="112" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="32" y="280" class="t-head">the MPI library</text>
+  <rect x="80" y="46" width="300" height="38" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="230" y="69" text-anchor="middle" class="t-mono">allreduce(&amp;send, &amp;mut recv, &amp;op)</text>
+  <text x="242" y="104" class="t-small f-muted">op.code(tag): 64 + N</text>
+  <rect x="80" y="170" width="300" height="38" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="230" y="193" text-anchor="middle" class="t-mono">get_op(64 + N)</text>
+  <text x="242" y="228" class="t-small f-muted">op_table[N], made by UserOp::new</text>
+  <rect x="80" y="294" width="820" height="38" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="230" y="318" text-anchor="middle" class="t-mono">MPI_Allreduce</text>
+  <text x="560" y="352" text-anchor="middle" class="t-small f-muted">combines two buffers at a time by calling the op’s function</text>
+  <line x1="230" y1="84" x2="230" y2="166" class="s-accent" stroke-width="1.5" marker-end="url(#op-arrow)"/>
+  <text x="242" y="156" class="t-small">ferrompi_allreduce(…, 64 + N, …)</text>
+  <line x1="230" y1="208" x2="230" y2="290" class="s-accent" stroke-width="1.5" marker-end="url(#op-arrow)"/>
+  <text x="242" y="280" class="t-small">op_table[N]</text>
+  <rect x="420" y="170" width="240" height="38" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="540" y="193" text-anchor="middle" class="t-mono">ferrompi_user_op_trampoline_N</text>
+  <text x="552" y="228" class="t-small f-muted">one per slot; (void)dt</text>
+  <line x1="540" y1="294" x2="540" y2="212" class="s-accent" stroke-width="1.5" marker-end="url(#op-arrow)"/>
+  <text x="552" y="280" class="t-small">(invec, inoutvec, &amp;len, &amp;dt)</text>
+  <rect x="420" y="46" width="240" height="38" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="540" y="69" text-anchor="middle" class="t-mono">rust_user_op_invoke</text>
+  <text x="552" y="104" class="t-small f-muted">REGISTRY[N], Acquire</text>
+  <line x1="540" y1="170" x2="540" y2="88" class="s-accent" stroke-width="1.5" marker-end="url(#op-arrow)"/>
+  <text x="552" y="156" class="t-small">(N, invec, inoutvec, len)</text>
+  <rect x="684" y="46" width="104" height="38" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="736" y="69" text-anchor="middle" class="t-mono">adapter</text>
+  <text x="736" y="104" text-anchor="middle" class="t-small f-muted">two slices of T</text>
+  <line x1="660" y1="65" x2="680" y2="65" class="s-accent" stroke-width="1.5" marker-end="url(#op-arrow)"/>
+  <rect x="812" y="46" width="96" height="38" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="860" y="69" text-anchor="middle" class="t-mono">f(a, b)</text>
+  <text x="860" y="104" text-anchor="middle" class="t-small f-muted">your function</text>
+  <line x1="788" y1="65" x2="808" y2="65" class="s-accent" stroke-width="1.5" marker-end="url(#op-arrow)"/>
+</svg></div>
+  <figcaption>A reduction with the user-defined operation in slot N. The call
+  goes down on the left, carrying the code 64 + N, which the C layer maps to
+  the <code>MPI_Op</code> in slot N. MPI calls back up on the right, through
+  the trampoline that knows N, into the closure stored in
+  <code>REGISTRY[N]</code>.</figcaption>
+</figure>
+
+<h2 id="when-mpi-calls">When MPI calls it</h2>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_user_op_invoke(
+    slot: std::ffi::c_int,
+    invec: *const c_void,
+    inoutvec: *mut c_void,
+    len: std::ffi::c_int,
+) {
+    let ptr = REGISTRY[slot as usize].load(Ordering::Acquire);
+    if ptr.is_null() {
+        // A null slot here is an invariant violation: the publish-before-
+        // create / drop-after-free protocol on REGISTRY guarantees a live
+        // closure for every slot MPI can still invoke.  Treat it the same as
+        // the panic path below — abort rather than deref a null pointer.
+        std::process::abort();
+    }
+    // SAFETY: ptr is non-null, published by `create_in_free_slot` with `Ordering::Release`
+    // before `MPI_Op_create`, and this `Ordering::Acquire` load of the same
+    // atomic synchronizes-with that store.  `ferrompi_op_drop_closure` nulls
+    // the slot only after `MPI_Op_free` returns, so no drop can race with
+    // this borrow.
+    let closure: &amp;ByteClosure = unsafe { &amp;*ptr };
+
+    // Wrap the closure call in catch_unwind (ADR-0005 Decision 6).
+    // A panic across the FFI boundary is UB; abort on Err.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        closure(invec, inoutvec, len as usize);
+    }));
+    if result.is_err() {
+        // A panic inside a user-defined reduction closure is a fatal
+        // programming error.  Abort immediately to prevent silent data
+        // corruption in the collective result (ADR-0005 Decision 6).
+        std::process::abort();
+    }
+}</code></pre>
+
+<p>The <code>Acquire</code> load pairs with the <code>Release</code> store in
+<code>create_in_free_slot</code>, so whichever thread MPI calls from sees the
+closure fully built. The protocol leaves no way for the entry to be null; if
+it were, the function aborts rather than follow it. The datatype MPI passed is
+not read: the trampoline discards it with <code>(void)dt</code>, and the
+adapter relies on the types instead. ADR 0005’s first amendment records that
+there is no comparison of the two.</p>
+
+<p>A panic may not unwind into the MPI library, which is C and knows nothing
+of unwinding. The function catches it and aborts: a user function has no way
+to report a failure to MPI, and returning as if nothing had happened would
+hand every process a result with part of the reduction missing.
+<a href="11-the-safety-model.html#panics">Chapter 11</a> lists the other
+places where a panic aborts.</p>
+
+<p>The count is an <code>int</code>: ferrompi makes its operations with the
+classic <code>MPI_Op_create</code>, whose function takes an <code>int</code>
+length. Given a larger count, MPICH narrows it into that <code>int</code>
+rather than split the reduction, so the C layer refuses a user-defined
+operation over more than <code>INT_MAX</code> elements, on every MPI
+version:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>// A user op is a classic MPI_User_function with an int length; MPICH narrows a
+// larger count into it without splitting the reduction, so a user op above
+// INT_MAX elements is refused on every MPI version, never sent to a _c call.
+static int is_user_op(int32_t op) { return op &gt;= FERROMPI_OP_USER_BASE; }</code></pre>
+
+<p>MPI calls the function from inside any MPI call that makes progress on the
+reduction: the reduction itself, the wait or test of a nonblocking one, or
+another MPI call. Under <code>ThreadLevel::Multiple</code> that can be on any
+thread, and an implementation with a progress thread may use its own. The
+registry is a <code>static</code> that every thread reads, and an operation
+can outlive the function that made it, held by a persistent request. So the
+closure must be <code>Send</code>, <code>Sync</code> and
+<code>'static</code>, and the compiler refuses a capture that is not
+(<a href="04-datatypes-and-reductions.html#what-the-closure-may-do">chapter
+4</a> showed the rules from the caller’s side):</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>A capture</th><th>Refused because it is not</th></tr></thead>
+  <tbody>
+    <tr><td><code>Rc&lt;T&gt;</code></td><td><code>Send</code> or <code>Sync</code>: E0277 twice</td></tr>
+    <tr><td><code>Cell&lt;T&gt;</code>, <code>RefCell&lt;T&gt;</code></td><td><code>Sync</code></td></tr>
+    <tr><td><code>*const T</code></td><td><code>Send</code> or <code>Sync</code></td></tr>
+    <tr><td><code>&amp;'a T</code>, a borrow of a local</td><td><code>'static</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>A registry in thread-local storage would need no atomics. ADR 0005
+rejected it for this reason: MPI may call the function on a thread that never
+saw the entry.</p>
+
+<h2 id="freeing">Freeing an operation</h2>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>pub struct UserOp&lt;T: MpiDatatype&gt; {
+    pub(crate) registration: Arc&lt;OpRegistration&gt;,
+    _marker: PhantomData&lt;T&gt;,
+}
+
+/// One live `MPI_Op` slot and its closure; freed when the last holder drops.
+#[derive(Debug)]
+pub(crate) struct OpRegistration {
+    pub(crate) slot: i32,
+}
+
+/// Op codes at or above this name the user op in slot `code - USER_OP_CODE_BASE`;
+/// smaller codes are the predefined ops `get_op` switches on. Mirrors
+/// `FERROMPI_OP_USER_BASE` in csrc/ferrompi.h; keep in sync.
+pub(crate) const USER_OP_CODE_BASE: i32 = 64;
+
+impl OpRegistration {
+    pub(crate) fn code(&amp;self) -&gt; i32 {
+        USER_OP_CODE_BASE + self.slot
+    }
+}</code></pre>
+
+<p>A <code>UserOp</code> is its slot, shared through an <code>Arc</code>. A
+blocking or nonblocking reduction borrows it, and that borrow is the
+<code>'a</code> of <code>CollectiveOp&lt;'a, T&gt;</code>.
+<code>iallreduce</code> takes a <code>CollectiveOp&lt;'s, T&gt;</code>, so a
+nonblocking reduction borrows the operation for the whole scope, and dropping
+the operation inside the scope is refused with E0505, cannot move out of
+<code>op</code> because it is borrowed. A persistent reduction outlives any
+borrow, so <code>allreduce_init</code> clones the <code>Arc</code> into the
+request:</p>
+
+<pre data-lang="rust" data-source="src/comm/persistent.rs"><code>    pub fn allreduce_init&lt;'a, T: MpiDatatype&gt;(
+        &amp;self,
+        send: Vec&lt;T&gt;,
+        mut recv: Vec&lt;T&gt;,
+        op: impl Into&lt;CollectiveOp&lt;'a, T&gt;&gt;,
+    ) -&gt; Result&lt;PersistentRequest&lt;T&gt;&gt; {
+        let op = op.into();
+        let code = op.code(tag_of::&lt;T&gt;())?;
+        check_same_len("recv", send.len(), recv.len())?;
+        // …
+        Error::check_with_op(ret, "allreduce_init")?;
+        let mut request = PersistentRequest::new_pair(request_handle, send, recv, Vec::new());
+        request.op = op.registration();
+        Ok(request)
+    }</code></pre>
+
+<p>The <code>MPI_Op</code> is freed when the last holder drops, the
+<code>UserOp</code> or the last request made with it:</p>
+
+<pre data-lang="rust" data-source="src/op.rs"><code>impl Drop for OpRegistration {
+    fn drop(&amp;mut self) {
+        let Some(_call) = rt::drop_guard("UserOp") else {
+            return;
+        };
+        // Drop ordering (ADR-0005 Decision 3):
+        //   1. ferrompi_op_free → MPI_Op_free (MPI will not invoke the
+        //      trampoline after this returns, because no pending operation
+        //      references the op: the last OpRegistration holder is gone).
+        //   2. ferrompi_op_free → ferrompi_op_drop_closure (Rust callback,
+        //      drops the Box).
+        //   3. ferrompi_op_free → free_op_slot (reclaims the C-side slot).
+        //
+        // The slot is valid for the lifetime of this registration; it is freed
+        // exactly once here.
+        let ret = unsafe {
+            // SAFETY: self.slot was allocated by create_in_free_slot and has
+            // not been freed.  Drop is called exactly once.
+            ffi::ferrompi_op_free(self.slot)
+        };
+        // Log but do not panic in Drop.
+        if ret != 0 {
+            eprintln!("ferrompi: freeing a user op: ferrompi_op_free returned error code {ret}");
+        }
+    }
+}</code></pre>
+
+<p><code>ferrompi_op_free</code>, quoted in
+<a href="10-the-c-shim.html#trampolines">chapter 10</a>, runs the steps in
+that order. The closure is dropped only after <code>MPI_Op_free</code> has
+returned, and by then no pending operation uses the op, since its last holder
+is gone. If <code>MPI_Op_free</code> fails, both the closure and the slot
+stay: MPI may still hold the op, and a slot given back could be claimed for a
+new operation, whose closure the old op’s trampoline would then call.
+Operations still alive when <code>Mpi</code> drops are freed through the same
+function, by a sweep in <code>ferrompi_finalize</code>:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>    // Free every live user op: frees the MPI op and drops the Rust closure
+    // through the same path as OpRegistration's Drop; a failed MPI_Op_free keeps both.
+    for (int i = 0; i &lt; MAX_OPS; i++) {
+        if (atomic_load_explicit(&amp;op_used[i], memory_order_acquire)) {
+            ferrompi_op_free(i);
+        }
+    }</code></pre>
+
+<p>When <code>MPI_Finalize</code> is skipped
+(<a href="11-the-safety-model.html#no-lifetimes">chapter 11</a>), the sweep
+does not run, and the closures stay until the process exits. The program below
+makes an operation, gives it to a persistent reduction, and drops it. The
+request keeps it alive, and holds one of the sixteen slots until it goes:</p>
+
+<pre data-lang="rust" data-run="2" id="slots"><code>use ferrompi::{Mpi, UserOp};
+
+fn sum(a: &amp;[u64], b: &amp;mut [u64]) {
+    for (x, y) in a.iter().zip(b.iter_mut()) {
+        *y += x;
+    }
+}
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    let op = UserOp::new(sum)?;
+    let mut request = world.allreduce_init(vec![rank as u64 + 1], vec![0], &amp;op)?;
+    // The request shares the operation's registration, so this frees nothing:
+    // MPI calls the closure again on every start.
+    drop(op);
+    for round in 1..=2 {
+        request.start()?;
+        request.wait()?;
+        println!("rank {rank}: round {round}: {:?}", request.buffer()?);
+    }
+
+    // The request still holds one of the sixteen slots.
+    let mut ops = Vec::new();
+    let refused = loop {
+        match UserOp::new(sum) {
+            Ok(op) =&gt; ops.push(op),
+            Err(err) =&gt; break err,
+        }
+    };
+    println!(
+        "rank {rank}: {} more operations, then: {refused}",
+        ops.len()
+    );
+
+    // The last holder of the first operation goes, and its slot with it.
+    drop(request);
+    let again = UserOp::new(sum).is_ok();
+    println!("rank {rank}: after the request was dropped, one more: {again}");
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="slots"><code>rank 0: round 1: [3]
+rank 0: round 2: [3]
+rank 0: 15 more operations, then: ferrompi operation table is full
+rank 0: after the request was dropped, one more: true
+rank 1: round 1: [3]
+rank 1: round 2: [3]
+rank 1: 15 more operations, then: ferrompi operation table is full
+rank 1: after the request was dropped, one more: true</code></pre>
+
+<p>Each round adds 1 and 2, the two contributions, by calling
+<code>sum</code> after the <code>UserOp</code> was gone. The seventeenth
+operation is refused with <code>Error::ResourceExhausted</code> before any
+MPI call, because the C layer finds no free slot
+(<a href="10-the-c-shim.html#table-full">chapter 10</a>).</p>
+
+<p>ADR 0005 weighed other ways to keep a closure. <code>Box::leak</code> would
+make it <code>'static</code> with no way to free it, so a program that made
+an operation in every iteration would grow without end. A single trampoline
+for every operation would have to find its closure through something the call
+does not carry: MPI defines attributes on communicators, windows and
+datatypes, but not on operations, and machine code generated for each
+operation is refused by systems that forbid memory both writable and
+executable. Sixteen functions compiled in advance cost nothing at run time,
+and set the limit of sixteen operations alive at once.</p>
+
+<h2 id="derived-inside">Derived datatypes inside</h2>
+
+<p><a href="04-datatypes-and-reductions.html#derived-datatypes">Chapter 4</a>
+built derived datatypes. A <code>CustomDatatype</code> is an index into the C
+layer’s datatype table, which has 64 slots, and three numbers asked of MPI
+when the type is committed:</p>
+
+<pre data-lang="rust" data-source="src/datatype_builder.rs"><code>#[derive(Debug)]
+pub struct CustomDatatype {
+    /// Index into the C-side `datatype_table`.
+    pub(crate) handle: i32,
+    /// `MPI_Type_get_extent` extent, in bytes, recorded at commit.
+    extent: i64,
+    /// `MPI_Type_get_true_extent` true lower bound, in bytes, recorded at commit.
+    true_lb: i64,
+    /// `MPI_Type_get_true_extent` true extent, in bytes, recorded at commit.
+    true_extent: i64,
+}</code></pre>
+
+<p>Each constructor calls a C function that builds the type, commits it, and
+stores it in a free slot. <code>create_struct</code> translates each field’s
+tag with the same <code>get_datatype</code> as every other call, so a field is
+always a primitive type:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int ferrompi_type_create_struct(int32_t count,
+                                const int32_t* blocklengths,
+                                const int64_t* displacements,
+                                const int32_t* basetype_tags,
+                                int32_t* newtype_handle) {
+    /* Reject an empty field list before the stack arrays are filled. */
+    if (count &lt;= 0) return MPI_ERR_ARG;
+    MPI_Aint stack_disp[32];
+    MPI_Datatype stack_types[32];
+    MPI_Aint* disp = stack_disp;
+    MPI_Datatype* types = stack_types;
+    int heap_alloc = 0;
+    if (count &gt; 32) {
+        /* … */
+    }
+    for (int32_t i = 0; i &lt; count; i++) {
+        MPI_Datatype t = get_datatype(basetype_tags[i]);
+        if (t == MPI_DATATYPE_NULL) {
+            if (heap_alloc) { free(disp); free(types); }
+            return MPI_ERR_TYPE;
+        }
+        disp[i] = (MPI_Aint) displacements[i];
+        types[i] = t;
+    }
+    MPI_Datatype new_t;
+    int ret = MPI_Type_create_struct((int)count, (int*)blocklengths, disp, types, &amp;new_t);
+    if (heap_alloc) { free(disp); free(types); }
+    if (ret != MPI_SUCCESS) return ret;
+    ret = MPI_Type_commit(&amp;new_t);
+    if (ret != MPI_SUCCESS) {
+        MPI_Type_free(&amp;new_t);
+        return ret;
+    }
+    *newtype_handle = alloc_datatype(new_t);
+    if (*newtype_handle &lt; 0) {
+        MPI_Type_free(&amp;new_t);
+        return FERROMPI_ERR_DATATYPES_FULL;
+    }
+    return MPI_SUCCESS;
+}</code></pre>
+
+<p>Up to 32 fields go in arrays on the stack, more in arrays it allocates. If
+the table is full, the committed type is freed, and the call returns
+<code>FERROMPI_ERR_DATATYPES_FULL</code>, which Rust reports as
+<code>Error::ResourceExhausted</code>. Then <code>from_committed</code> asks
+MPI for the bounds:</p>
+
+<pre data-lang="rust" data-source="src/datatype_builder.rs"><code>    fn from_committed(handle: i32) -&gt; Result&lt;Self&gt; {
+        let mut dt = CustomDatatype {
+            handle,
+            extent: 0,
+            true_lb: 0,
+            true_extent: 0,
+        };
+        // SAFETY: handle was just committed by the caller; extent/true_lb/true_extent
+        // are exclusive stack locations valid for the duration of this call.
+        let ret = unsafe {
+            ffi::ferrompi_type_get_extents(
+                handle,
+                &amp;mut dt.extent,
+                &amp;mut dt.true_lb,
+                &amp;mut dt.true_extent,
+            )
+        };
+        Error::check_with_op(ret, "type_get_extents")?;
+        Ok(dt)
+    }</code></pre>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int ferrompi_type_get_extents(int32_t type_handle, int64_t* extent,
+                              int64_t* true_lb, int64_t* true_extent) {
+    MPI_Datatype dt = get_datatype_committed(type_handle);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Aint lb, ext;
+    int ret = MPI_Type_get_extent(dt, &amp;lb, &amp;ext);
+    if (ret != MPI_SUCCESS) return ret;
+    MPI_Aint tlb, text;
+    ret = MPI_Type_get_true_extent(dt, &amp;tlb, &amp;text);
+    if (ret != MPI_SUCCESS) return ret;
+    *extent = (int64_t)ext;
+    *true_lb = (int64_t)tlb;
+    *true_extent = (int64_t)text;
+    return MPI_SUCCESS;
+}</code></pre>
+
+<p>The two pairs of numbers answer different questions. The extent is the
+stride: element <code>i</code> of a count of the datatype starts
+<code>i</code> extents after the buffer’s address. It runs from the type’s
+lower bound to its upper bound, which MPI derives from the fields and rounds
+up for alignment, and which <code>resized</code> sets by hand. The true lower
+bound and the true extent say where the data is, from the first byte that a
+field covers to the last.</p>
+
+<h2 id="layout-check">The layout check</h2>
+
+<p>A <code>_custom</code> call passes <code>buf.len()</code> as the count, so
+MPI walks <code>buf.len()</code> elements of the datatype from the slice’s
+address. They are the slice’s elements only if the extent equals
+<code>size_of::&lt;T&gt;()</code>, and MPI stays inside the slice only if
+each element’s data lies within one <code>T</code>. Before every
+<code>_custom</code> call, ferrompi checks both:</p>
+
+<pre data-lang="rust" data-source="src/datatype_builder.rs"><code>    pub(crate) fn check_layout&lt;T&gt;(&amp;self) -&gt; Result&lt;()&gt; {
+        let size = std::mem::size_of::&lt;T&gt;() as i64;
+        if self.extent != size {
+            return Err(Error::InvalidArgument {
+                arg: "datatype",
+                reason: "extent differs from the element size",
+            });
+        }
+        match self.true_lb.checked_add(self.true_extent) {
+            Some(end) if self.true_lb &gt;= 0 &amp;&amp; end &lt;= size =&gt; Ok(()),
+            _ =&gt; Err(Error::InvalidArgument {
+                arg: "datatype",
+                reason: "data lies outside one element",
+            }),
+        }
+    }</code></pre>
+
+<pre data-lang="rust" data-source="src/comm/p2p.rs"><code>    pub fn recv_custom&lt;T: PlainData&gt;(
+        &amp;self,
+        buf: &amp;mut [T],
+        datatype: &amp;CustomDatatype,
+        source: impl Into&lt;Source&gt;,
+        tag: impl Into&lt;Tag&gt;,
+    ) -&gt; Result&lt;Status&gt; {
+        let source = source.into().source_code("source")?;
+        let tag = tag.into().tag_code("tag")?;
+        datatype.check_layout::&lt;T&gt;()?;
+        let mut status = ffi::FerrompiStatus::default();
+
+        // SAFETY: buf.as_mut_ptr() is exclusively writable for buf.len() elements; datatype.handle
+        // is an owned, committed CustomDatatype; the buffer outlives this blocking call; the
+        // PlainData bound on T makes any bytes MPI writes a valid T, and check_layout above
+        // guarantees each element's data lies within its T, so MPI touches only buf.
+        let ret = unsafe {
+            ffi::ferrompi_recv_custom(
+                buf.as_mut_ptr().cast::&lt;std::ffi::c_void&gt;(),
+                buf.len() as i64,
+                datatype.handle,
+                source,
+                tag,
+                self.handle,
+                &amp;mut status,
+            )
+        };
+        Error::check_with_op(ret, "recv_custom")?;
+        Ok(Status::from_ffi(status))
+    }</code></pre>
+
+<figure>
+  <div class="canvas"><svg viewBox="0 0 900 300" role="img" aria-label="Three datatypes checked against one f64 of 8 bytes, on a ruler of bytes 0 to 16 where element 0 of the slice is bytes 0 to 8 and element 1 starts at byte 8. pair, an f64 at 0 and an i32 at 8: its data is bytes 0 to 12 and its extent 16, which differs from the element size, so check_layout refuses it. shifted, one f64 at byte 8: its extent is 8, equal to the element size, but its data is bytes 8 to 16, outside element 0, so check_layout refuses it. plain, one contiguous f64: its data is bytes 0 to 8 and its extent 8, so it passes." style="min-width: 46rem">
+  <text x="200" y="26" text-anchor="middle" class="t-small f-muted">0</text>
+  <text x="320" y="26" text-anchor="middle" class="t-small f-muted">4</text>
+  <text x="440" y="26" text-anchor="middle" class="t-small f-muted">8</text>
+  <text x="560" y="26" text-anchor="middle" class="t-small f-muted">12</text>
+  <text x="680" y="26" text-anchor="middle" class="t-small f-muted">16</text>
+  <text x="694" y="26" class="t-small f-muted">bytes</text>
+  <text x="40" y="58" class="t-head">the slice</text>
+  <rect x="200" y="38" width="240" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="320" y="57" text-anchor="middle" class="t-mono">buf[0]: f64</text>
+  <rect x="440" y="38" width="240" height="30" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="560" y="57" text-anchor="middle" class="t-mono f-muted">buf[1]</text>
+  <line x1="440" y1="34" x2="440" y2="282" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="40" y="115" class="t-mono">pair</text>
+  <rect x="200" y="96" width="240" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="320" y="113" text-anchor="middle" class="t-mono">f64</text>
+  <rect x="440" y="96" width="120" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="500" y="113" text-anchor="middle" class="t-mono">i32</text>
+  <path d="M200 128 V132 H680 V128" fill="none" class="s-muted" stroke-width="1.2"/>
+  <text x="440" y="146" text-anchor="middle" class="t-small f-muted">extent 16</text>
+  <text x="720" y="115" class="t-small">extent 16 ≠ 8</text>
+  <text x="40" y="179" class="t-mono">shifted</text>
+  <rect x="440" y="160" width="240" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="560" y="177" text-anchor="middle" class="t-mono">f64</text>
+  <path d="M440 192 V196 H680 V192" fill="none" class="s-muted" stroke-width="1.2"/>
+  <text x="560" y="210" text-anchor="middle" class="t-small f-muted">extent 8</text>
+  <text x="720" y="179" class="t-small">data 8..16, outside 0..8</text>
+  <text x="40" y="243" class="t-mono">plain</text>
+  <rect x="200" y="224" width="240" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="320" y="241" text-anchor="middle" class="t-mono">f64</text>
+  <path d="M200 256 V260 H440 V256" fill="none" class="s-muted" stroke-width="1.2"/>
+  <text x="320" y="274" text-anchor="middle" class="t-small f-muted">extent 8</text>
+  <text x="720" y="243" class="t-small">passes</text>
+</svg></div>
+  <figcaption>Three datatypes meant for one <code>f64</code>, laid over a
+  slice of <code>f64</code>s; the dashed line is where <code>buf[1]</code>
+  starts. <code>pair</code> steps 16 bytes, so its element 1 would start at
+  <code>buf[2]</code>. <code>shifted</code> steps 8 bytes, but its data lies
+  in the next element, so the last element’s data would be past the end of
+  the slice. <code>plain</code> passes.</figcaption>
+</figure>
+
+<p>The program below sends two <code>f64</code>s with each of the three:</p>
+
+<pre data-lang="rust" data-run="2" id="layout"><code>use ferrompi::{CustomDatatype, Mpi, StructField};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // Three datatypes, each meant to describe one f64.
+    // An f64 and an i32: more than one f64.
+    let pair = CustomDatatype::create_struct(&amp;[
+        StructField::new::&lt;f64&gt;(1, 0),
+        StructField::new::&lt;i32&gt;(1, 8),
+    ])?;
+    // One f64 at byte 8, an offset taken from another struct. Its extent is
+    // 8 bytes, the size of an f64, but its data starts where the element ends.
+    let shifted = CustomDatatype::create_struct(&amp;[StructField::new::&lt;f64&gt;(1, 8)])?;
+    let plain = CustomDatatype::contiguous::&lt;f64&gt;(1)?;
+
+    for (name, datatype) in [("pair", &amp;pair), ("shifted", &amp;shifted), ("plain", &amp;plain)] {
+        // Both ends check the datatype against f64 before calling MPI.
+        let result = if rank == 0 {
+            world.send_custom(&amp;[1.5f64, 2.5], datatype, 1, 0)
+        } else {
+            let mut back = [0.0f64; 2];
+            world
+                .recv_custom(&amp;mut back, datatype, 0, 0)
+                .map(|_| println!("rank 1: {name}: received {back:?}"))
+        };
+        if let Err(err) = result {
+            println!("rank {rank}: {name}: {err}");
+        }
+    }
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="layout"><code>rank 0: pair: invalid argument `datatype`: extent differs from the element size
+rank 0: shifted: invalid argument `datatype`: data lies outside one element
+rank 1: pair: invalid argument `datatype`: extent differs from the element size
+rank 1: shifted: invalid argument `datatype`: data lies outside one element
+rank 1: plain: received [1.5, 2.5]</code></pre>
+
+<p>Both ends used the same datatype each time, so both refused the first two
+before calling MPI, and no send was left without its receive. Two ends that
+use different datatypes with the same type signature are correct MPI, and if
+only one end refuses, the other may block, as with any error on one side of a
+message.</p>
+
+<h2 id="your-struct">A struct of your own</h2>
+
+<p>The layout check covers where MPI writes. What it writes is the other half:
+a receive puts whatever bytes arrive into each <code>T</code>. So
+<code>recv_custom</code> requires <code>T: PlainData</code>, an
+<code>unsafe</code> trait whose implementor promises that any bit pattern is
+a valid value (<a href="11-the-safety-model.html#unsafe-left">chapter
+11</a>). It is implemented for the primitive types and for arrays of them. For
+a struct of your own, you write the one line:</p>
+
+<pre data-lang="rust" data-run="2" id="plain"><code>use std::mem::{offset_of, size_of};
+
+use ferrompi::{CustomDatatype, Mpi, PlainData, StructField};
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Sample {
+    value: f64,
+    count: u32,
+}
+
+// SAFETY: Sample is #[repr(C)] of an f64 and a u32. Every bit pattern of each
+// is a valid value, and padding may hold any bytes.
+unsafe impl PlainData for Sample {}
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // The fields at Rust's offsets, and the extent set to Rust's size, so the
+    // datatype's elements line up with the slice's whatever padding MPI adds.
+    let fields = CustomDatatype::create_struct(&amp;[
+        StructField::new::&lt;f64&gt;(1, offset_of!(Sample, value) as i64),
+        StructField::new::&lt;u32&gt;(1, offset_of!(Sample, count) as i64),
+    ])?;
+    let sample = fields.resized(0, size_of::&lt;Sample&gt;() as i64)?;
+
+    if rank == 0 {
+        let out = [
+            Sample {
+                value: 1.5,
+                count: 3,
+            },
+            Sample {
+                value: -0.25,
+                count: 7,
+            },
+        ];
+        world.send_custom(&amp;out, &amp;sample, 1, 0)?;
+    } else {
+        let mut back = [Sample {
+            value: 0.0,
+            count: 0,
+        }; 2];
+        let status = world.recv_custom(&amp;mut back, &amp;sample, 0, 0)?;
+        println!("rank 1: status.count = {:?}", status.count);
+        println!("rank 1: {back:?}");
+    }
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="plain"><code>rank 1: status.count = Some(2)
+rank 1: [Sample { value: 1.5, count: 3 }, Sample { value: -0.25, count: 7 }]</code></pre>
+
+<p>The fields are placed at the offsets Rust chose, from
+<code>offset_of!</code>, and <code>resized</code> sets the extent to Rust’s
+size, trailing padding included. MPICH also rounds this struct’s extent up to
+16 bytes, by its own alignment rules, which need not be Rust’s; with
+<code>resized</code> the check passes on any implementation. A
+<code>bool</code>, <code>char</code>, enum, reference or <code>Box</code>
+field would break the promise: a byte that arrives as 2 is not a
+<code>bool</code>.</p>
+
+<p>A <code>CustomDatatype</code> has no <code>Clone</code>, since two values
+would free one slot twice. Its drop frees the type through the lifecycle
+guard, and the C function clears the slot even when
+<code>MPI_Type_free</code> fails:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int ferrompi_type_free(int32_t type_handle) {
+    if (type_handle &lt; 0 || type_handle &gt;= MAX_DATATYPES) return MPI_ERR_ARG;
+    if (!atomic_load_explicit(&amp;datatype_used[type_handle],
+                              memory_order_acquire)) return MPI_SUCCESS;  /* already freed */
+    int ret = MPI_Type_free(&amp;datatype_table[type_handle]);
+    free_datatype_slot(type_handle);  /* clears slot regardless of MPI_Type_free outcome */
+    return ret;
+}</code></pre>
+
+<p>An operation’s free does the opposite, and the difference is the callback.
+MPI never calls into Rust through a datatype, so a datatype slot given back
+too early cannot lead MPI to Rust state that is gone. An operation’s slot
+can.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>In the ops program, give the second reduction
+  <code>CollectiveOp::MAX_LOC</code> as its operation. Which error does the
+  compiler give, and which of the <code>From</code> impls in
+  <code>src/op.rs</code> explains it? Then give <code>allreduce_bytes</code>
+  a <code>ReduceOp::Sum</code> on <code>u32</code>s. When is that refused,
+  and by which arm of <code>op_fault</code>?</li>
+  <li>In the slots program, pass <code>&amp;op</code> to a blocking
+  <code>allreduce</code> instead of <code>allreduce_init</code>, and drop the
+  operation after it. How many operations fit before the table is full, and
+  why?</li>
+  <li>In the slots program, replace <code>drop(request)</code> with
+  <code>std::mem::forget(request)</code>. What does the last line print?
+  Which code frees the first operation’s <code>MPI_Op</code> then, and
+  when?</li>
+  <li>Write a <code>UserOp&lt;f64&gt;</code> whose closure panics when an
+  element of <code>a</code> is negative, and reduce <code>[-1.0]</code> on
+  rank 1 and <code>[1.0]</code> on rank 0 with it. What does standard error
+  show, and what exit status does the launcher report? Which line of
+  <code>rust_user_op_invoke</code> ends the process?</li>
+  <li>In the plain program, remove the <code>resized</code> call. Does the
+  check still pass on MPICH? Then make <code>Sample</code>
+  <code>#[repr(C, packed)]</code>, with and without <code>resized</code>.
+  What is <code>size_of::&lt;Sample&gt;()</code> then, and what does each
+  version print?</li>
+  <li>Read <code>ferrompi_op_free</code> and <code>ferrompi_type_free</code>
+  in <code>csrc/ferrompi.c</code>. For each, write down what stays in the
+  table when MPI’s free fails, and why.</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>A typed slice reaches the C layer as an address, a count and a tag. The
+  tag comes from a sealed trait whose method takes a private token, so no code
+  outside the crate can implement the trait or read the tag.</li>
+  <li>An empty buffer of a type with alignment 1 gets a private address,
+  since its own, address 1, is <code>MPI_IN_PLACE</code> in Open MPI and the
+  standard ABI.</li>
+  <li><code>CollectiveOp&lt;'a, T&gt;</code> ties an operation to the element
+  type: <code>MAX_LOC</code> on a primitive type, a user-defined operation of
+  another type, or a predefined operation on a pair does not compile. A
+  bitwise or logical operation on a float is refused at run time, on every
+  process, before MPI is called.</li>
+  <li>A closure becomes an <code>MPI_Op</code> through one of sixteen C
+  trampolines and a static registry in Rust, and the slot number is all the
+  trampoline passes on. The closure is stored with <code>Release</code> before
+  <code>MPI_Op_create</code>, and loaded with <code>Acquire</code> when MPI
+  calls it.</li>
+  <li>The call runs your closure inside <code>catch_unwind</code> and aborts
+  on a panic. It ignores MPI’s datatype argument and relies on the types. The
+  closure is <code>Send</code>, <code>Sync</code> and <code>'static</code>
+  because MPI may call it on any thread, after the function that made it has
+  returned.</li>
+  <li>An operation is freed when its last holder drops, the
+  <code>UserOp</code> or a persistent request made with it:
+  <code>MPI_Op_free</code> first, then the closure, then the slot. A failed
+  <code>MPI_Op_free</code> keeps both the closure and the slot.</li>
+  <li>A <code>_custom</code> call checks that the datatype’s extent equals
+  <code>size_of::&lt;T&gt;()</code> and that its data lies within one
+  <code>T</code>, and requires <code>T: PlainData</code>, so MPI writes only
+  inside the slice, and only bytes that make valid values.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="11-the-safety-model.html">Previous: chapter 11, the safety model</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="13-testing.html">Next: chapter 13, testing</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

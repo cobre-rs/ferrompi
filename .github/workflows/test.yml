@@ -364,6 +364,17 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      - name: Documentation (all features, as published)
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Tutorial check fixture test
+        run: bash .github/scripts/check-tutorial-test.sh
+
+      - name: Tutorial programs, excerpts and links
+        run: bash .github/scripts/check-tutorial.sh
+
       - name: Package allow-list (all features)
         run: |
           cargo package --locked --all-features

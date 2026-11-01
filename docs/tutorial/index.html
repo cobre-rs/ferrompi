@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ferrompi tutorial</title>
+<meta name="description" content="MPI from the beginning, with ferrompi for every example, then how ferrompi brings MPI to Rust.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page">
+<main>
+<p class="eyebrow">Learn MPI through Rust</p>
+<h1>The ferrompi tutorial</h1>
+
+<p class="lede">This tutorial teaches MPI from the beginning, using ferrompi for
+every example, and then explains how ferrompi brings MPI to Rust: what it hands
+to the MPI library, what it adds on top, and how to work on it.</p>
+
+<p>It is written for developers joining the project and for anyone who wants to
+learn MPI through Rust. It assumes you can read Rust and use a Linux shell; it
+assumes no prior MPI knowledge.</p>
+
+<p>Part I covers MPI itself. The concepts are the MPI standard’s, not
+ferrompi’s, so they carry over to C, Fortran, Julia or Python MPI code; the
+examples are ferrompi programs you can run. Part II covers ferrompi’s
+internals: the build, the C shim, the safety model, testing, and how to add a
+new MPI call. Its last chapter reads the communication of a real program for
+the patterns it is built from. Read Part I in order; each chapter of Part II
+stands on Part I.</p>
+
+<p>The reference material this tutorial builds on is published next to it:
+<a href="../ferrompi/doc/architecture/index.html">the architecture guide</a>
+for the internals,
+<a href="../ferrompi/doc/mpi_compatibility/index.html">the MPI compatibility
+guide</a> for building and running under each MPI library, and the
+architecture decision records in
+<a href="../ferrompi/doc/index.html">the documentation index</a> for why each
+design was chosen. When the tutorial and one of those disagree, the reference
+document is right.</p>
+
+<h2 id="chapters">Chapters</h2>
+
+<h3 id="part-1">Part I: MPI</h3>
+<ol class="chapters">
+  <li><span class="num">1</span><span class="title"><a href="01-the-mpi-model.html">The MPI model: a standard, many processes, and communicators</a></span></li>
+  <li><span class="num">2</span><span class="title"><a href="02-point-to-point.html">Point-to-point communication: matching, deadlock, and nonblocking calls</a></span></li>
+  <li><span class="num">3</span><span class="title"><a href="03-collective-communication.html">Collective communication: moving and combining data across a communicator</a></span></li>
+  <li><span class="num">4</span><span class="title"><a href="04-datatypes-and-reductions.html">Datatypes and reductions: describing data to MPI, and combining it your way</a></span></li>
+  <li><span class="num">5</span><span class="title"><a href="05-one-sided-communication.html">One-sided communication and shared-memory windows: writing into another process’s memory</a></span></li>
+  <li><span class="num">6</span><span class="title"><a href="06-threads-and-hybrid-mpi.html">Threads and hybrid MPI: thread levels, and placing processes and threads on a node</a></span></li>
+  <li><span class="num">7</span><span class="title"><a href="07-implementations-networks-and-abi.html">Implementations, networks and the ABI problem: how MPI libraries differ, and why a binary needs its own</a></span></li>
+</ol>
+
+<h3 id="part-2">Part II: ferrompi</h3>
+<ol class="chapters">
+  <li><span class="num">8</span><span class="title"><a href="08-building-and-running.html">Building and running: what cargo builds, which library a program loads, and launching and debugging a job</a></span></li>
+  <li><span class="num">9</span><span class="title"><a href="09-a-tour-of-the-layers.html">A tour of the layers: one call from your program to the MPI library and back, which layer refuses what, and a map of the source</a></span></li>
+  <li><span class="num">10</span><span class="title"><a href="10-the-c-shim.html">The C shim: the interface Rust calls, the tables that hold MPI’s handles, how threads share them, and what happens when one is full</a></span></li>
+  <li><span class="num">11</span><span class="title"><a href="11-the-safety-model.html">The safety model: the scope that keeps a buffer borrowed while MPI uses it, panics, owned buffers, and the run-time states behind handles without a lifetime</a></span></li>
+  <li><span class="num">12</span><span class="title"><a href="12-user-defined-reductions-and-derived-datatypes.html">User-defined reductions and derived datatypes: the sealed datatype tag, the types that match an operation to its buffers, a Rust closure as an MPI operation, and the layout check on derived datatypes</a></span></li>
+  <li><span class="num">13</span><span class="title"><a href="13-testing.html">Testing: unit tests that never start MPI, the one test that does, doctests that must fail to compile, and MPI tests run as jobs by a runner that decides what passed</a></span></li>
+  <li><span class="num">14</span><span class="title"><a href="14-adding-an-mpi-call.html">Adding an MPI call: what to find out first, the five places a call touches, a new error code, the test, and what review added to one call that was added</a></span></li>
+  <li><span class="num">15</span><span class="title"><a href="15-patterns-from-real-programs.html">Patterns from real programs: the rule every pattern keeps, an SDDP solver’s communication, dividing the work, results of unknown length, stopping together, sums with the same bits on every rank, and failing together</a></span></li>
+</ol>
+
+<h2 id="before-you-start">Before you start</h2>
+
+<p>You need Rust 1.85 or newer and an MPI library with its development headers.
+On Ubuntu or Debian, install MPICH:</p>
+
+<pre data-lang="bash"><code>sudo apt-get install mpich libmpich-dev pkg-config</code></pre>
+
+<aside class="warn">
+<span class="label">Ubuntu 24.04 ships a broken MPICH</span>
+<p>Its <code>mpich</code> 4.2.0 package starts every process as a separate
+one-process job, so <code>mpiexec -n 4</code> prints “rank 0 of 1” four times
+(<a href="https://bugs.launchpad.net/ubuntu/+source/mpich/+bug/2072338">Launchpad
+bug 2072338</a>). Use an MPICH 4.2.1 or later package, as CI does
+(<a href="https://github.com/cobre-rs/ferrompi/blob/main/.github/scripts/mpich-hotfix.sh"><code>mpich-hotfix.sh</code></a>
+lists the exact packages), build MPICH from source, or install Open MPI
+instead: <code>sudo apt-get install openmpi-bin libopenmpi-dev pkg-config</code>.
+<a href="01-the-mpi-model.html#every-process-says-rank-0-of-1">Chapter 1</a>
+shows how to recognize the symptom.</p>
+</aside>
+
+<p>ferrompi’s build script finds the MPI library through
+<code>pkg-config</code>, the <code>mpicc</code> compiler wrapper, or a few
+common install prefixes. If it finds none, or finds the wrong one, point it at
+a wrapper explicitly:</p>
+
+<pre data-lang="bash"><code>MPICC=/usr/bin/mpicc.mpich cargo build --examples</code></pre>
+
+<p><a href="../ferrompi/doc/mpi_compatibility/index.html">The MPI compatibility
+guide</a> gives the full detection order and the other variables it reads.</p>
+
+<p>Every example in this tutorial is either one of the programs in
+<a href="https://github.com/cobre-rs/ferrompi/tree/main/examples"><code>examples/</code></a>
+or a complete <code>main</code> you can paste into a file there. Build first,
+then start the built binary under the launcher:</p>
+
+<pre data-lang="bash"><code>cargo build --example hello_world
+mpiexec -n 4 target/debug/examples/hello_world</code></pre>
+
+<p><a href="01-the-mpi-model.html#launching-a-job">Chapter 1</a> explains what
+<code>mpiexec</code> does and why you launch the binary rather than
+<code>cargo run</code>.</p>
+
+<aside class="note">
+<span class="label">Every program here is tested</span>
+<p>Each Rust program in the tutorial is built and run by CI under
+<code>mpiexec</code>, at the process count its label shows. Where a chapter
+prints a program’s output, CI compares it with a real run.</p>
+</aside>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

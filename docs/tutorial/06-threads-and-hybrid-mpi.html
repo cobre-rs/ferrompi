@@ -1,0 +1,846 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>6. Threads and hybrid MPI · ferrompi tutorial</title>
+<meta name="description" content="MPI with threads in ferrompi: the four thread levels, funneled, serialized and multiple programs, which handles may cross threads, and placing processes and threads on a node.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#why-threads">Why threads in an MPI program</a></li>
+      <li><a href="#thread-levels">The four thread levels</a></li>
+      <li><a href="#funneled">Funneled: threads compute, one thread calls MPI</a></li>
+      <li><a href="#serialized">Serialized: a communication thread</a></li>
+      <li><a href="#multiple">Multiple: any thread, at any time</a></li>
+      <li><a href="#what-crosses-threads">What may cross threads</a></li>
+      <li><a href="#placement">Placing processes and threads</a></li>
+      <li><a href="#when-threads-go-wrong">When threads go wrong</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part I · Chapter 6</p>
+<h1>Threads and hybrid MPI</h1>
+
+<p class="lede">A hybrid program runs a few MPI processes on each node and
+several threads in each process. This chapter covers how a program tells MPI
+which of its threads will call it, what each of MPI’s four thread levels
+allows, the rules MPI adds when threads call it at the same time, and how to
+place processes and their threads on a node.</p>
+
+<p>By the end of the chapter you can split a process’s work over threads
+between MPI calls, give communication a thread of its own, run collectives
+from several threads at once, and check how many CPUs the launcher gave each
+process. The programs start their threads with the standard library’s
+<code>std::thread::scope</code>; the rules are the same for a thread pool such
+as rayon’s.</p>
+
+<h2 id="why-threads">Why threads in an MPI program</h2>
+
+<p>The programs so far ran one process per core. Each process has its own
+memory, so data that every process needs, such as a mesh, a lookup table or a
+model, is stored once per process, and every process takes part in every
+collective. Threads share their process’s memory. A node with eight cores can
+run eight processes of one thread, two processes of four threads, or one
+process of eight:</p>
+
+<figure>
+<div class="canvas"><svg viewBox="0 0 900 236" role="img" aria-label="One node with two sockets of four cores each, filled three ways. Eight processes with one thread each: eight copies of read-only data, eight ranks per node in every collective, and each process’s memory is on its own socket. Two processes with four threads each, one process per socket: two copies, two ranks per node, and memory stays local. One process with eight threads: one copy, one rank per node, and the threads on socket 1 read memory on socket 0." style="min-width: 44rem">
+
+  <rect x="20" y="16" width="280" height="204" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="44" class="t-head">8 processes × 1 thread</text>
+  <text x="36" y="85" class="t-small f-muted">socket 0</text>
+  <rect x="96" y="66" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="118" y="85" text-anchor="middle" class="t-small">P0</text>
+  <rect x="146" y="66" width="44" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="168" y="85" text-anchor="middle" class="t-small">P1</text>
+  <rect x="196" y="66" width="44" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="218" y="85" text-anchor="middle" class="t-small">P2</text>
+  <rect x="246" y="66" width="44" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="268" y="85" text-anchor="middle" class="t-small">P3</text>
+  <text x="36" y="127" class="t-small f-muted">socket 1</text>
+  <rect x="96" y="108" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="118" y="127" text-anchor="middle" class="t-small">P4</text>
+  <rect x="146" y="108" width="44" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="168" y="127" text-anchor="middle" class="t-small">P5</text>
+  <rect x="196" y="108" width="44" height="30" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="218" y="127" text-anchor="middle" class="t-small">P6</text>
+  <rect x="246" y="108" width="44" height="30" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="268" y="127" text-anchor="middle" class="t-small">P7</text>
+  <text x="36" y="166" class="t-small">8 copies of read-only data</text>
+  <text x="36" y="184" class="t-small">8 ranks per node in collectives</text>
+  <text x="36" y="202" class="t-small f-muted">each process’s memory is local</text>
+
+  <rect x="310" y="16" width="280" height="204" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="326" y="44" class="t-head">2 processes × 4 threads</text>
+  <text x="326" y="85" class="t-small f-muted">socket 0</text>
+  <rect x="386" y="66" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="408" y="85" text-anchor="middle" class="t-small">P0</text>
+  <rect x="436" y="66" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="458" y="85" text-anchor="middle" class="t-small">P0</text>
+  <rect x="486" y="66" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="508" y="85" text-anchor="middle" class="t-small">P0</text>
+  <rect x="536" y="66" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="558" y="85" text-anchor="middle" class="t-small">P0</text>
+  <text x="326" y="127" class="t-small f-muted">socket 1</text>
+  <rect x="386" y="108" width="44" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="408" y="127" text-anchor="middle" class="t-small">P1</text>
+  <rect x="436" y="108" width="44" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="458" y="127" text-anchor="middle" class="t-small">P1</text>
+  <rect x="486" y="108" width="44" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="508" y="127" text-anchor="middle" class="t-small">P1</text>
+  <rect x="536" y="108" width="44" height="30" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="558" y="127" text-anchor="middle" class="t-small">P1</text>
+  <rect x="382" y="62" width="202" height="38" rx="6" fill="none" class="s-accent" stroke-width="1.5"/>
+  <rect x="382" y="104" width="202" height="38" rx="6" fill="none" class="s-copper" stroke-width="1.5"/>
+  <text x="326" y="166" class="t-small">2 copies of read-only data</text>
+  <text x="326" y="184" class="t-small">2 ranks per node in collectives</text>
+  <text x="326" y="202" class="t-small f-muted">each process’s memory is local</text>
+
+  <rect x="600" y="16" width="280" height="204" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="616" y="44" class="t-head">1 process × 8 threads</text>
+  <text x="616" y="85" class="t-small f-muted">socket 0</text>
+  <rect x="676" y="66" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="698" y="85" text-anchor="middle" class="t-small">P0</text>
+  <rect x="726" y="66" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="748" y="85" text-anchor="middle" class="t-small">P0</text>
+  <rect x="776" y="66" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="798" y="85" text-anchor="middle" class="t-small">P0</text>
+  <rect x="826" y="66" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="848" y="85" text-anchor="middle" class="t-small">P0</text>
+  <text x="616" y="127" class="t-small f-muted">socket 1</text>
+  <rect x="676" y="108" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="698" y="127" text-anchor="middle" class="t-small">P0</text>
+  <rect x="726" y="108" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="748" y="127" text-anchor="middle" class="t-small">P0</text>
+  <rect x="776" y="108" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="798" y="127" text-anchor="middle" class="t-small">P0</text>
+  <rect x="826" y="108" width="44" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="848" y="127" text-anchor="middle" class="t-small">P0</text>
+  <rect x="672" y="62" width="202" height="80" rx="6" fill="none" class="s-accent" stroke-width="1.5"/>
+  <text x="616" y="166" class="t-small">1 copy of read-only data</text>
+  <text x="616" y="184" class="t-small">1 rank per node in collectives</text>
+  <text x="616" y="202" class="t-small f-muted">half the threads read remote memory</text>
+</svg></div>
+<figcaption>One node with two sockets of four cores, filled three ways. Each
+core is labeled with the process that runs on it, and an outline holds the
+threads that share one process’s memory. Fewer processes mean fewer copies of shared data and fewer ranks in
+each collective; a process that spans both sockets has threads that read
+memory attached to the other socket.</figcaption>
+</figure>
+
+<p>Fewer processes per node means fewer copies of the data and fewer ranks in
+every collective, and at thousands of cores both add up. One process per node
+is not always best, though. Each socket of a node has its own memory, and a
+thread reads the other socket’s memory more slowly, so one process per socket,
+or per NUMA domain, is a common choice. Chapter 5’s shared-memory windows are
+the other way to keep one copy per node; threads also share the work inside a
+process without sending a message.</p>
+
+<p>Threads raise a question that a program with one thread per process never
+asks: which threads call MPI. MPI needs the answer when it starts, because a
+library that one thread calls can skip the locking that several threads
+need.</p>
+
+<h2 id="thread-levels">The four thread levels</h2>
+
+<p><a href="../ferrompi/struct.Mpi.html#method.init_thread"><code>Mpi::init_thread(required)</code></a>
+(<code>MPI_Init_thread</code>) starts MPI at a
+<a href="../ferrompi/enum.ThreadLevel.html"><code>ThreadLevel</code></a>.
+<code>Mpi::init()</code> is <code>init_thread(ThreadLevel::Single)</code>. The
+<em>main thread</em> is the one that called <code>init_thread</code>:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Level</th><th>MPI constant</th><th>Who may call MPI</th></tr></thead>
+  <tbody>
+    <tr><td><code>Single</code></td><td><code>MPI_THREAD_SINGLE</code></td><td>the process has only one thread</td></tr>
+    <tr><td><code>Funneled</code></td><td><code>MPI_THREAD_FUNNELED</code></td><td>only the main thread</td></tr>
+    <tr><td><code>Serialized</code></td><td><code>MPI_THREAD_SERIALIZED</code></td><td>any thread, one call at a time</td></tr>
+    <tr><td><code>Multiple</code></td><td><code>MPI_THREAD_MULTIPLE</code></td><td>any thread, at any time</td></tr>
+  </tbody>
+</table>
+</div>
+
+<figure>
+<div class="canvas"><svg viewBox="0 0 900 516" role="img" aria-label="Timelines of a main thread and two worker threads under each thread level; boxes are MPI calls. Single: there are no other threads, and the main thread makes the MPI calls. Funneled: the workers run, but only the main thread calls MPI. Serialized: the main thread and both workers call MPI, one call at a time. Multiple: the three threads call MPI at overlapping times." style="min-width: 44rem">
+
+  <rect x="20" y="16" width="860" height="112" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="42" class="t-head">Single</text>
+  <text x="290" y="42" class="t-small f-muted">only one thread runs in the process</text>
+  <text x="36" y="70" class="t-small f-muted">main thread</text>
+  <line x1="130" y1="66" x2="864" y2="66" class="s-rule" stroke-width="1.2"/>
+  <rect x="190" y="57" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="225" y="70" text-anchor="middle" class="t-small">MPI</text>
+  <rect x="430" y="57" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="465" y="70" text-anchor="middle" class="t-small">MPI</text>
+  <rect x="690" y="57" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="725" y="70" text-anchor="middle" class="t-small">MPI</text>
+  <rect x="130" y="81" width="734" height="42" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="497" y="106" text-anchor="middle" class="t-small f-muted">no other threads</text>
+
+  <rect x="20" y="140" width="860" height="112" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="166" class="t-head">Funneled</text>
+  <text x="290" y="166" class="t-small f-muted">threads run; only the main thread calls MPI</text>
+  <text x="36" y="194" class="t-small f-muted">main thread</text>
+  <line x1="130" y1="190" x2="864" y2="190" class="s-rule" stroke-width="1.2"/>
+  <rect x="190" y="181" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="225" y="194" text-anchor="middle" class="t-small">MPI</text>
+  <rect x="430" y="181" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="465" y="194" text-anchor="middle" class="t-small">MPI</text>
+  <rect x="690" y="181" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="725" y="194" text-anchor="middle" class="t-small">MPI</text>
+  <text x="36" y="218" class="t-small f-muted">worker 1</text>
+  <line x1="130" y1="214" x2="864" y2="214" class="s-rule" stroke-width="1.2"/>
+  <text x="36" y="242" class="t-small f-muted">worker 2</text>
+  <line x1="130" y1="238" x2="864" y2="238" class="s-rule" stroke-width="1.2"/>
+
+  <rect x="20" y="264" width="860" height="112" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="290" class="t-head">Serialized</text>
+  <text x="290" y="290" class="t-small f-muted">any thread calls MPI, one call at a time</text>
+  <text x="36" y="318" class="t-small f-muted">main thread</text>
+  <line x1="130" y1="314" x2="864" y2="314" class="s-rule" stroke-width="1.2"/>
+  <rect x="190" y="305" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="225" y="318" text-anchor="middle" class="t-small">MPI</text>
+  <rect x="610" y="305" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="645" y="318" text-anchor="middle" class="t-small">MPI</text>
+  <text x="36" y="342" class="t-small f-muted">worker 1</text>
+  <line x1="130" y1="338" x2="864" y2="338" class="s-rule" stroke-width="1.2"/>
+  <rect x="310" y="329" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="345" y="342" text-anchor="middle" class="t-small">MPI</text>
+  <text x="36" y="366" class="t-small f-muted">worker 2</text>
+  <line x1="130" y1="362" x2="864" y2="362" class="s-rule" stroke-width="1.2"/>
+  <rect x="450" y="353" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="485" y="366" text-anchor="middle" class="t-small">MPI</text>
+  <rect x="750" y="353" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="785" y="366" text-anchor="middle" class="t-small">MPI</text>
+
+  <rect x="20" y="388" width="860" height="112" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="414" class="t-head">Multiple</text>
+  <text x="290" y="414" class="t-small f-muted">any thread calls MPI, at any time</text>
+  <text x="36" y="442" class="t-small f-muted">main thread</text>
+  <line x1="130" y1="438" x2="864" y2="438" class="s-rule" stroke-width="1.2"/>
+  <rect x="190" y="429" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="225" y="442" text-anchor="middle" class="t-small">MPI</text>
+  <rect x="520" y="429" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="555" y="442" text-anchor="middle" class="t-small">MPI</text>
+  <text x="36" y="466" class="t-small f-muted">worker 1</text>
+  <line x1="130" y1="462" x2="864" y2="462" class="s-rule" stroke-width="1.2"/>
+  <rect x="230" y="453" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="265" y="466" text-anchor="middle" class="t-small">MPI</text>
+  <rect x="610" y="453" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="645" y="466" text-anchor="middle" class="t-small">MPI</text>
+  <text x="36" y="490" class="t-small f-muted">worker 2</text>
+  <line x1="130" y1="486" x2="864" y2="486" class="s-rule" stroke-width="1.2"/>
+  <rect x="250" y="477" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="285" y="490" text-anchor="middle" class="t-small">MPI</text>
+  <rect x="560" y="477" width="70" height="18" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="595" y="490" text-anchor="middle" class="t-small">MPI</text>
+</svg></div>
+<figcaption>Which threads call MPI at each level. Each lane is a thread and
+each box an MPI call. A level allows the patterns of the levels before it as
+well.</figcaption>
+</figure>
+
+<p>MPI may grant a lower level than the one asked for.
+<a href="../ferrompi/struct.Mpi.html#method.thread_level"><code>mpi.thread_level()</code></a>
+returns the level granted, and <code>ThreadLevel</code> is ordered, so
+<code>mpi.thread_level() &lt; ThreadLevel::Funneled</code> asks whether the
+program got less than it needs. The rules that apply, and that ferrompi
+enforces, are those of the granted level.</p>
+
+<p><code>Single</code> means one thread, not one thread that calls MPI. A
+program that starts threads, even threads that never call MPI, asks for
+<code>Funneled</code>: at <code>Single</code> a library may leave out
+protections it needs when other threads run. ferrompi checks the two levels
+the same way, by which thread makes the call, so a program with threads at
+<code>Single</code> passes its checks while it breaks MPI’s rule.</p>
+
+<h2 id="funneled">Funneled: threads compute, one thread calls MPI</h2>
+
+<p>In the most common hybrid program, worker threads compute between MPI
+calls, and the main thread makes the calls. This program sums the first two
+million integers. Each process sums its million of them with four threads,
+and then the main thread adds up the processes’ sums with an allreduce:</p>
+
+<pre data-lang="rust" data-run="2" id="funneled_sum"><code>use ferrompi::{Mpi, ReduceOp, ThreadLevel};
+
+const VALUES: u64 = 1_000_000;
+const THREADS: u64 = 4;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    // Threads will run, but only this one calls MPI.
+    let mpi = Mpi::init_thread(ThreadLevel::Funneled)?;
+    if mpi.thread_level() &lt; ThreadLevel::Funneled {
+        eprintln!("MPI granted only {:?}", mpi.thread_level());
+        return Ok(());
+    }
+    let world = mpi.world();
+    let rank = world.rank() as u64;
+
+    // This process sums its million values, from rank * VALUES on, with four
+    // threads, each taking a quarter of them. The threads make no MPI call.
+    let first = rank * VALUES;
+    let chunk = VALUES / THREADS;
+    let local: u64 = std::thread::scope(|s| {
+        let workers: Vec&lt;_&gt; = (0..THREADS)
+            .map(|t| {
+                let start = first + t * chunk;
+                s.spawn(move || (start..start + chunk).sum::&lt;u64&gt;())
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().unwrap()).sum()
+    });
+
+    // Back on the thread that called init_thread: combine the processes.
+    let total = world.allreduce_scalar(local, ReduceOp::Sum)?;
+    println!("rank {rank}: local sum {local}, total {total}");
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="funneled_sum"><code>rank 0: local sum 499999500000, total 1999999000000
+rank 1: local sum 1499999500000, total 1999999000000</code></pre>
+
+<p><code>std::thread::scope</code> joins the workers before it returns, so the
+allreduce starts after every worker has finished. A thread pool works the
+same way: the pool computes, and the main thread calls MPI between the
+parallel parts. The workers may also keep computing while the main thread is
+inside an MPI call; <code>Funneled</code> limits which thread calls MPI, not
+what the other threads do in the meantime.</p>
+
+<h3 id="what-ferrompi-checks">What ferrompi checks</h3>
+
+<p>A <code>Communicator</code> is <code>Send</code> and <code>Sync</code>, so
+the compiler lets a worker thread use one. ferrompi checks at run time
+instead. At <code>Single</code> and <code>Funneled</code>, a call from any
+thread but the main thread returns
+<code>Err(<a href="../ferrompi/enum.Error.html#variant.ThreadLevelViolation">Error::ThreadLevelViolation</a>)</code>
+without reaching MPI:</p>
+
+<pre data-lang="rust" data-run="2" id="wrong-thread"><code>use ferrompi::{Mpi, ThreadLevel};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init_thread(ThreadLevel::Funneled)?;
+    let world = mpi.world();
+
+    // A Communicator is Send and Sync, so a worker thread can hold one. At
+    // Funneled, its calls are refused before they reach MPI.
+    let refused = std::thread::scope(|s| s.spawn(|| world.barrier()).join().unwrap());
+    if let Err(err) = refused {
+        println!("rank {}: barrier on a worker thread: {err}", world.rank());
+    }
+
+    // The thread that called init_thread can still call MPI.
+    world.barrier()?;
+    println!("rank {}: barrier on the main thread: ok", world.rank());
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="wrong-thread"><code>rank 0: barrier on a worker thread: MPI call not permitted on this thread at the provided thread level
+rank 0: barrier on the main thread: ok
+rank 1: barrier on a worker thread: MPI call not permitted on this thread at the provided thread level
+rank 1: barrier on the main thread: ok</code></pre>
+
+<p><code>init_thread</code> marks the main thread, and every call checks the
+mark before it calls MPI; the architecture guide’s
+<a href="../ferrompi/doc/architecture/index.html#lifecycle-guard">lifecycle
+guard</a> describes the mechanism. A <code>Drop</code> cannot return an
+error, so a handle whose drop calls MPI, such as a communicator from
+<code>split</code>, aborts the process when a worker thread drops it at these
+levels. Each process prints a line naming the type and the thread:</p>
+
+<pre class="output"><code>ferrompi: Communicator dropped on thread ThreadId(2)</code></pre>
+
+<p>Drop such handles on the main thread: a worker that creates one can return
+it from its closure.</p>
+
+<h2 id="serialized">Serialized: a communication thread</h2>
+
+<p>At <code>Serialized</code> any thread may call MPI, but no two calls may
+overlap, and the program, not MPI, keeps them apart. One use is a thread that
+makes all of a process’s MPI calls while the main thread computes. Here the
+main thread sends one value per step over a channel, and the communication
+thread sums each value over the processes:</p>
+
+<pre data-lang="rust" data-run="2" id="comm-thread"><code>use std::sync::mpsc;
+
+use ferrompi::{Mpi, ReduceOp, ThreadLevel};
+
+const STEPS: u64 = 4;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    // One thread calls MPI, but not the one that called init_thread: that
+    // needs Serialized.
+    let mpi = Mpi::init_thread(ThreadLevel::Serialized)?;
+    if mpi.thread_level() &lt; ThreadLevel::Serialized {
+        eprintln!("MPI granted only {:?}", mpi.thread_level());
+        return Ok(());
+    }
+    let world = mpi.world();
+    let rank = world.rank() as u64;
+
+    let (to_comm, from_main) = mpsc::channel::&lt;u64&gt;();
+    std::thread::scope(|s| {
+        // The communication thread sums each step's result over the
+        // processes, while the main thread computes the next step.
+        let comm = s.spawn(|| -&gt; ferrompi::Result&lt;Vec&lt;u64&gt;&gt; {
+            let mut totals = Vec::new();
+            for partial in from_main {
+                totals.push(world.allreduce_scalar(partial, ReduceOp::Sum)?);
+            }
+            Ok(totals)
+        });
+
+        // The main thread computes and makes no MPI call until the
+        // communication thread has finished.
+        for step in 0..STEPS {
+            let partial = (rank + 1) * 10u64.pow(step as u32);
+            to_comm.send(partial).unwrap();
+        }
+        drop(to_comm);
+        let totals = comm.join().unwrap()?;
+        println!("rank {rank}: step totals {totals:?}");
+        Ok(())
+    })
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="comm-thread"><code>rank 0: step totals [3, 30, 300, 3000]
+rank 1: step totals [3, 30, 300, 3000]</code></pre>
+
+<p>Only one thread calls MPI, but it is not the main thread, so
+<code>Funneled</code> does not allow it. The channel keeps the steps in order,
+so both processes make their allreduces in the same order.
+<code>std::thread::scope</code> joins the communication thread before
+<code>main</code> returns and drops <code>mpi</code>, which finalizes MPI.</p>
+
+<p>When several threads take turns calling MPI, a <code>Mutex</code> usually
+keeps the calls apart, and two problems follow:</p>
+
+<ul>
+  <li>A thread that blocks in an MPI call while it holds the lock keeps the
+  other threads out of MPI until the call returns. If the message it waits
+  for depends on one of those threads, the call never returns.</li>
+  <li>A lock orders the calls of one process. On another process the threads
+  can take their turns in a different order, and collectives on a shared
+  communicator then match the wrong calls: the problem of
+  <a href="#collective-order">the next section</a>.</li>
+</ul>
+
+<p>ferrompi checks <code>Serialized</code> in debug builds only. When two
+calls overlap, the later one returns <code>ThreadLevelViolation</code>; if it
+is a consuming <code>Request::wait</code>, a scope’s final wait or the call
+that closes an RMA epoch, which cannot return the error, the process aborts
+instead. Release builds do not check. A program that cannot keep its calls
+apart needs <code>Multiple</code>.</p>
+
+<h2 id="multiple">Multiple: any thread, at any time</h2>
+
+<p>At <code>Multiple</code> threads call MPI at the same time, and the library
+does the locking. Each thread here runs an allreduce, at the same time as the
+other two:</p>
+
+<pre data-lang="rust" data-run="2" id="thread_sums"><code>use ferrompi::{Mpi, ReduceOp, ThreadLevel};
+
+const THREADS: usize = 3;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init_thread(ThreadLevel::Multiple)?;
+    if mpi.thread_level() &lt; ThreadLevel::Multiple {
+        eprintln!("MPI granted only {:?}", mpi.thread_level());
+        return Ok(());
+    }
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // One communicator per thread. duplicate is collective, so the main
+    // thread makes all of them, in the same order on every process.
+    let comms = (0..THREADS)
+        .map(|_| world.duplicate())
+        .collect::&lt;ferrompi::Result&lt;Vec&lt;_&gt;&gt;&gt;()?;
+
+    // Each thread runs its own allreduce, at the same time as the others.
+    // Collectives on different communicators never match each other.
+    let sums = std::thread::scope(|s| {
+        let workers: Vec&lt;_&gt; = comms
+            .iter()
+            .enumerate()
+            .map(|(t, comm)| {
+                s.spawn(move || {
+                    let value = (t as i32 + 1) * 100 + comm.rank();
+                    comm.allreduce_scalar(value, ReduceOp::Sum)
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|w| w.join().unwrap())
+            .collect::&lt;ferrompi::Result&lt;Vec&lt;_&gt;&gt;&gt;()
+    })?;
+    println!("rank {rank}: thread sums {sums:?}");
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="thread_sums"><code>rank 0: thread sums [201, 401, 601]
+rank 1: thread sums [201, 401, 601]</code></pre>
+
+<p>Each thread uses its own communicator, made with
+<a href="../ferrompi/struct.Communicator.html#method.duplicate"><code>duplicate</code></a>
+(<code>MPI_Comm_dup</code>) before the threads start. <code>duplicate</code>
+is collective, so the main thread makes all three, in the same order on every
+process. The copies are what keep the threads’ allreduces apart.</p>
+
+<h3 id="collective-order">Collectives on a shared communicator</h3>
+
+<p>MPI matches the collectives on a communicator in the order each process
+makes them, whichever thread made them and whatever operation they are. If two
+threads of each process share a communicator, their calls can reach MPI in a
+different order on each process:</p>
+
+<figure>
+<div class="canvas"><svg viewBox="0 0 900 258" role="img" aria-label="Two processes, each with a thread a that calls allreduce and a thread b that calls broadcast. One communicator: process 0 issues a’s allreduce first and process 1 issues b’s broadcast first, and MPI matches the first call on each process with each other, so the allreduce meets the broadcast. One communicator per thread: each thread calls on its own duplicate, comm_a or comm_b, and MPI matches the allreduces with each other and the broadcasts with each other, whatever the order.">
+  <defs>
+    <marker id="order-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" class="f-copper"/>
+    </marker>
+    <marker id="order-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="16" width="424" height="226" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="44" class="t-head">One communicator</text>
+  <text x="36" y="64" class="t-small f-muted">calls match in the order each process makes them</text>
+  <text x="36" y="112" class="t-small f-muted">process 0</text>
+  <text x="36" y="192" class="t-small f-muted">process 1</text>
+  <line x1="116" y1="108" x2="428" y2="108" class="s-rule" stroke-width="1.2"/>
+  <line x1="116" y1="188" x2="428" y2="188" class="s-rule" stroke-width="1.2"/>
+  <rect x="138" y="94" width="120" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="198" y="112" text-anchor="middle" class="t-mono">a: allreduce</text>
+  <rect x="290" y="94" width="120" height="28" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="350" y="112" text-anchor="middle" class="t-mono">b: broadcast</text>
+  <rect x="138" y="174" width="120" height="28" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="198" y="192" text-anchor="middle" class="t-mono">b: broadcast</text>
+  <rect x="290" y="174" width="120" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="350" y="192" text-anchor="middle" class="t-mono">a: allreduce</text>
+  <line x1="198" y1="125" x2="198" y2="171" class="s-copper" stroke-width="1.5" marker-start="url(#order-bad)" marker-end="url(#order-bad)"/>
+  <text x="206" y="152" class="t-small f-muted">1st call</text>
+  <line x1="350" y1="125" x2="350" y2="171" class="s-copper" stroke-width="1.5" marker-start="url(#order-bad)" marker-end="url(#order-bad)"/>
+  <text x="358" y="152" class="t-small f-muted">2nd call</text>
+  <text x="36" y="228" class="t-small">an allreduce meets a broadcast: wrong data or a hang</text>
+
+  <rect x="456" y="16" width="424" height="226" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="472" y="44" class="t-head">One communicator per thread</text>
+  <text x="472" y="64" class="t-small f-muted">calls match within their communicator</text>
+  <text x="472" y="112" class="t-small f-muted">process 0</text>
+  <text x="472" y="192" class="t-small f-muted">process 1</text>
+  <line x1="552" y1="108" x2="864" y2="108" class="s-rule" stroke-width="1.2"/>
+  <line x1="552" y1="188" x2="864" y2="188" class="s-rule" stroke-width="1.2"/>
+  <rect x="574" y="94" width="120" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="634" y="112" text-anchor="middle" class="t-mono">a: allreduce</text>
+  <rect x="726" y="94" width="120" height="28" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="786" y="112" text-anchor="middle" class="t-mono">b: broadcast</text>
+  <rect x="574" y="174" width="120" height="28" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="634" y="192" text-anchor="middle" class="t-mono">b: broadcast</text>
+  <rect x="726" y="174" width="120" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="786" y="192" text-anchor="middle" class="t-mono">a: allreduce</text>
+  <line x1="634" y1="125" x2="786" y2="171" class="s-accent" stroke-width="1.5" marker-start="url(#order-ok)" marker-end="url(#order-ok)"/>
+  <line x1="786" y1="125" x2="634" y2="171" class="s-accent" stroke-width="1.5" marker-start="url(#order-ok)" marker-end="url(#order-ok)"/>
+  <text x="636" y="143" text-anchor="end" class="t-mono">comm_a</text>
+  <text x="784" y="143" class="t-mono">comm_b</text>
+  <text x="472" y="228" class="t-small">each call meets its own kind</text>
+</svg></div>
+<figcaption>Two threads, a and b, in each of two processes. On one
+communicator, the first call of process 0 meets the first call of process 1,
+whatever each is. With one communicator per thread, an allreduce meets the
+other process’s allreduce, in whichever order the calls were
+made.</figcaption>
+</figure>
+
+<p>Depending on the library and the calls, the mismatched program returns
+wrong data, reports an error or hangs. A lock does not help: it keeps two
+calls from overlapping, but not in the same order on every process. Give each
+thread its own communicator, or make all the collectives on a communicator
+from one thread. <code>Communicator</code> is <code>Sync</code>, so neither
+the compiler nor ferrompi catches the mistake.</p>
+
+<h3 id="messages-across-threads">Messages across threads</h3>
+
+<p>Point-to-point messages follow
+<a href="02-point-to-point.html#matching">chapter 2’s matching rules</a>
+within a communicator: by source, tag and order. When two threads of one
+process post receives that match the same messages, which thread gets which
+message depends on timing. Give each thread its own tag or its own
+communicator, so that a receive matches only the messages meant for its
+thread.</p>
+
+<p>A probe followed by a receive has a race at <code>Multiple</code>: another
+thread can receive the probed message between the two calls.
+<a href="02-point-to-point.html#messages-of-unknown-size">Chapter 2’s
+<code>mprobe</code></a> closes the race, and the
+<a href="../ferrompi/struct.Message.html"><code>Message</code></a> it returns
+is <code>Send</code>, so one thread can probe and hand the message to another
+thread to receive.</p>
+
+<h3 id="what-multiple-costs">What Multiple costs</h3>
+
+<p>At <code>Multiple</code> the library protects its internal state on every
+call, and threads that call MPI at the same time can wait for each other
+inside it. How much that costs depends on the library and how it was built.
+MPICH can spread communicators over several internal channels, which it calls
+VCIs, so that threads on different communicators wait for each other less;
+<code>MPIR_CVAR_CH4_NUM_VCIS</code> sets how many it uses, and the default is
+one. Measure before you choose: a program whose threads call MPI rarely can
+run as fast at <code>Funneled</code>.</p>
+
+<p>A library can also raise the level on its own. With
+<code>MPIR_CVAR_ASYNC_PROGRESS=1</code>, MPICH starts the
+<a href="05-one-sided-communication.html#progress">progress thread from
+chapter 5</a>, a thread that the program did not start and that runs inside
+MPI, and grants <code>Multiple</code> whatever the program asked for.
+<a href="01-the-mpi-model.html#initializing-and-finalizing">Chapter 1’s context
+program</a>, which calls <code>Mpi::init()</code>, then prints:</p>
+
+<pre data-lang="bash"><code>MPIR_CVAR_ASYNC_PROGRESS=1 mpiexec -n 2 target/debug/examples/context</code></pre>
+
+<pre class="output"><code>rank 0 of 2 at thread level Multiple
+rank 1 of 2 at thread level Multiple</code></pre>
+
+<p>ferrompi then allows calls from every thread, because the rules follow the
+granted level. The progress thread needs a CPU too: MPICH’s description of the
+variable advises leaving a hardware thread free for it.</p>
+
+<h2 id="what-crosses-threads">What may cross threads</h2>
+
+<p>Rust’s <code>Send</code> and <code>Sync</code> say which handles a thread
+may move to another thread or share with one, and so where an MPI call can
+come from. The thread level then decides whether that thread may make the
+call:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Type</th><th><code>Send</code> and <code>Sync</code></th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td><code>Communicator</code>, <code>Group</code></td><td>yes</td><td>an index into a table of MPI handles, with no tie to a thread</td></tr>
+    <tr><td><code>CustomDatatype</code>, <code>UserOp</code></td><td>yes</td><td>a user op’s closure can run on any thread, even one of MPI’s own (<a href="04-datatypes-and-reductions.html#what-the-closure-may-do">chapter 4</a>)</td></tr>
+    <tr><td><code>PersistentRequest</code>, <code>Message</code>, <code>Status</code></td><td>yes</td><td>each owns what it refers to</td></tr>
+    <tr><td><code>Request</code></td><td>no</td><td>refers to the scope that started it</td></tr>
+    <tr><td><code>Mpi</code></td><td>no</td><td>stays on the main thread, where dropping it finalizes MPI</td></tr>
+    <tr><td><code>Win</code>, its epochs, <code>WinView</code></td><td>no</td><td>a window stays on the thread that created it</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>A thread that makes nonblocking calls opens its own
+<a href="../ferrompi/fn.scope.html"><code>ferrompi::scope</code></a>, and its
+requests stay on that thread. Try changing the Multiple program to start the
+three allreduces on the main thread, with
+<a href="../ferrompi/struct.Communicator.html#method.iallreduce"><code>iallreduce</code></a>
+in one scope, and to spawn a thread that waits for each request:
+<code>s.spawn(move || request.wait())</code>. It does not compile:</p>
+
+<pre class="output"><code>error[E0277]: `Cell&lt;u64&gt;` cannot be shared between threads safely
+   --&gt; src/main.rs:32:25
+    |
+ 32 |                 s.spawn(move || request.wait());
+    |                   ----- ^^^^^^^^^^^^^^^^^^^^^^ `Cell&lt;u64&gt;` cannot be shared between threads safely
+    |                   |
+    |                   required by a bound introduced by this call
+    |
+    = help: within `ferrompi::scope::Registry`, the trait `Sync` is not implemented for `Cell&lt;u64&gt;`
+    = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` or `std::sync::atomic::AtomicU64` instead
+note: required because it appears within the type `ferrompi::scope::Registry`
+    = note: required for `&amp;ferrompi::scope::Registry` to implement `Send`
+note: required because it appears within the type `ferrompi::Request&lt;'_&gt;`
+note: required because it's used within this closure
+   --&gt; src/main.rs:32:25
+    |
+ 32 |                 s.spawn(move || request.wait());
+    |                         ^^^^^^^
+note: required by a bound in `std::thread::Scope::&lt;'scope, 'env&gt;::spawn`</code></pre>
+
+<p>rustc reports two more errors like this one, for the other parts of the
+scope’s bookkeeping, and prints excerpts of ferrompi’s and the standard
+library’s sources, left out here. A request refers to its scope’s bookkeeping,
+which uses <code>Cell</code> and <code>RefCell</code> and so works on one
+thread at a time; the scope waits for the request on the thread that opened
+it. The program above is the fix: each thread makes its own calls, and could
+open its own scope for nonblocking ones.</p>
+
+<h2 id="placement">Placing processes and threads</h2>
+
+<p>The launcher decides which CPUs each process may run on, and the threads of
+a process share them. A program can ask how many it got with
+<code>std::thread::available_parallelism</code>, which on Linux counts the
+CPUs the process is bound to:</p>
+
+<pre data-lang="rust" data-run="2" id="cpus_available"><code>use ferrompi::Mpi;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    // How many CPUs the launcher left this process. This is the most threads
+    // it can run at once without sharing a CPU.
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
+    println!("rank {}: {cpus} CPUs available", world.rank());
+    Ok(())
+}</code></pre>
+
+<p>MPICH’s launcher, Hydra, binds nothing by default, so each process may run
+on every CPU of the node. On a laptop with 14 CPUs, the program prints:</p>
+
+<pre class="output"><code>rank 0: 14 CPUs available
+rank 1: 14 CPUs available</code></pre>
+
+<p><code>-bind-to core:2</code> binds each process to two cores:</p>
+
+<pre data-lang="bash"><code>mpiexec -n 2 -bind-to core:2 target/debug/examples/placement</code></pre>
+
+<pre class="output"><code>rank 0: 4 CPUs available
+rank 1: 2 CPUs available</code></pre>
+
+<p>The two processes got different counts because this processor has cores
+with two hardware threads and cores with one, and
+<code>available_parallelism</code> counts hardware threads. Count the CPUs a
+process got, not the cores you asked for.</p>
+
+<p>Unbound processes compete for the same CPUs. A thread pool sized to the
+node in each of two processes runs twice as many threads as there are CPUs,
+and the operating system switches them in and out. A thread that is switched
+out in the middle of a collective holds up every process waiting in that
+collective. Size each pool to its process’s CPUs: rayon reads
+<code>RAYON_NUM_THREADS</code>, OpenMP reads <code>OMP_NUM_THREADS</code>,
+and a pool sized with <code>available_parallelism</code> follows the
+binding.</p>
+
+<p>Open MPI’s <code>mpirun</code> binds by default: each process to one core
+when there are at most two processes, to a socket when there are more, and to
+nothing when there are more processes than cores. Two processes with four
+threads each then run each process’s threads on a single core. The
+<code>PE=n</code> modifier of <code>--map-by</code> gives each process
+<code>n</code> cores, and <code>--report-bindings</code> (<code>--display
+bind</code> in Open MPI 5) prints what each process got. The
+<code>mpirun</code> man page of your version has the syntax.</p>
+
+<p>Under Slurm, <code>srun</code> starts the processes. Its
+<code>--cpus-per-task</code> option gives each process that many CPUs, and
+<code>--cpu-bind=cores</code> asks for binding, which otherwise depends on how
+the cluster is configured. Some Slurm versions do not pass
+<code>sbatch</code>’s <code>--cpus-per-task</code> on to <code>srun</code>,
+so give it to <code>srun</code> as well. A job of two nodes, with two
+processes of four threads on each:</p>
+
+<pre data-lang="bash"><code>#!/bin/bash
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=2
+#SBATCH --cpus-per-task=4
+srun --cpus-per-task=4 --cpu-bind=cores target/release/examples/placement</code></pre>
+
+<p>Running the placement program as the first step of a job shows what each
+process got before the real program runs.</p>
+
+<h2 id="when-threads-go-wrong">When threads go wrong</h2>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Symptom</th><th>Likely cause</th></tr></thead>
+  <tbody>
+    <tr><td>“MPI call not permitted on this thread at the provided thread level”</td><td>A call from a thread the level does not allow. Check <code>thread_level()</code>: MPI may have granted less than the program asked for.</td></tr>
+    <tr><td>“ferrompi: … dropped on thread …”, then an abort</td><td>A worker thread dropped a handle whose drop calls MPI, at <code>Single</code> or <code>Funneled</code>.</td></tr>
+    <tr><td>A collective that hangs or returns wrong data, only sometimes</td><td>Threads that share a communicator made its collectives in a different order on different processes.</td></tr>
+    <tr><td>A receive that gets another thread’s message</td><td>Two threads receive with the same source and tag on one communicator.</td></tr>
+    <tr><td>An abort in a wait at <code>Serialized</code>, in a debug build</td><td>Two threads called MPI at the same time. A release build does not check.</td></tr>
+    <tr><td>Threads that make the program slower</td><td>More threads than CPUs, or every thread of a process bound to one core, as Open MPI does by default for two processes.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>In the funneled program, make each worker call
+  <code>world.allreduce_scalar</code> on its own sum, and read the error each
+  one returns. Then ask for <code>Multiple</code> instead. What else must
+  change before the workers’ allreduces are correct?</li>
+  <li>In the funneled program, sum <code>(x as f64).sqrt()</code> over a
+  hundred times more values, so that the work takes a while, and time it with
+  <code>std::time::Instant</code>. With MPICH, compare
+  <code>-bind-to core</code> and <code>-bind-to core:4</code>, and print
+  <code>available_parallelism</code> in each run.</li>
+  <li>In the communication-thread program, send each step’s total back to the
+  main thread over a second channel, and make each step’s value depend on the
+  total of the step before. What is left for the two threads to do at the
+  same time?</li>
+  <li>In the Multiple program, make every thread call its allreduce on
+  <code>world</code> instead of its own copy. Run it a few times with two and
+  four processes. Which sums can a thread get, and why is the program wrong
+  even when it prints the right ones?</li>
+  <li>With MPICH, run the wrong-thread program with
+  <code>MPIR_CVAR_ASYNC_PROGRESS=1</code>. Why does the line about the worker
+  thread disappear?</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>A hybrid program runs fewer processes per node, each with several
+  threads, which share one copy of the process’s data. One process per socket
+  keeps each process’s memory local.</li>
+  <li><code>Mpi::init_thread</code> asks for a thread level, and
+  <code>thread_level()</code> returns the one MPI granted, which can be lower,
+  or higher. The granted level’s rules are the ones that apply.</li>
+  <li>A program that starts threads asks for at least <code>Funneled</code>.
+  At <code>Funneled</code> only the main thread calls MPI; at
+  <code>Serialized</code> any thread, one call at a time; at
+  <code>Multiple</code>, any thread at any time.</li>
+  <li>ferrompi refuses a call from the wrong thread at <code>Single</code> and
+  <code>Funneled</code>, aborts on a wrong-thread drop there, and checks
+  <code>Serialized</code> in debug builds only.</li>
+  <li>Collectives on a communicator match in the order each process makes
+  them. Threads that make collectives at <code>Serialized</code> or
+  <code>Multiple</code> each need their own communicator; a lock is not
+  enough.</li>
+  <li>Communicators, groups, datatypes, user ops, persistent requests and
+  messages may cross threads. Requests stay with their scope, and
+  <code>Mpi</code> and windows stay on the thread that created them.</li>
+  <li>The launcher binds processes to CPUs: MPICH’s to none by default, Open
+  MPI’s to one core for up to two processes. Size each process’s threads to
+  the CPUs <code>available_parallelism</code> reports.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="05-one-sided-communication.html">Previous: chapter 5, one-sided communication and shared-memory windows</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="07-implementations-networks-and-abi.html">Next: chapter 7, implementations, networks and the ABI problem</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

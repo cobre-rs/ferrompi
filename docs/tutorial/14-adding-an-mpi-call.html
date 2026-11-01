@@ -1,0 +1,824 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>14. Adding an MPI call · ferrompi tutorial</title>
+<meta name="description" content="How an MPI call is added to ferrompi, followed through one that was: what to find out about the call first, the C declaration and function, a new ferrompi error code, the Rust declaration, the safe method and its documentation, the test that runs as a job, what review added afterwards, and what changes when a call moves data.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#the-call">The call</a></li>
+      <li><a href="#before-the-code">Before the code</a></li>
+      <li><a href="#the-header">The header</a></li>
+      <li><a href="#the-c-function">The C function</a></li>
+      <li><a href="#the-declaration">The Rust declaration</a></li>
+      <li><a href="#the-method">The safe method</a></li>
+      <li><a href="#the-test">The test</a></li>
+      <li><a href="#after-review">What review added</a></li>
+      <li><a href="#moving-data">When the call moves data</a></li>
+      <li><a href="#review">What a reviewer checks</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part II · Chapter 14</p>
+<h1>Adding an MPI call</h1>
+
+<p class="lede">Every MPI call ferrompi offers was added the same way: a C
+function and its declaration, a Rust declaration of that function, a safe
+method around it, and a test that runs as a job. This chapter follows one call
+that was added, <code>Communicator::create_group</code>, through each place it
+touched, then through what review added after its first commit.</p>
+
+<p>By the end of the chapter you can say what to find out about an MPI call
+before writing any code for it, write its five pieces in the order the
+architecture guide gives, add a ferrompi error code on both sides of the
+boundary, order a test’s steps so that a mistake fails instead of hanging,
+read a call’s history in its commit messages, and say what changes when the
+call moves data.</p>
+
+<p>The architecture guide’s
+<a href="../ferrompi/doc/architecture/index.html#entry-point-pattern">entry-point
+pattern</a> lists the five places, and
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>
+the commands to run before opening a pull request. The excerpts below name the
+file they come from. A comment <code>// …</code> or <code>/* ... */</code>
+marks lines left out. CI checks that every excerpt still matches its
+file.</p>
+
+<h2 id="the-call">The call</h2>
+
+<p><code>MPI_Comm_create_group</code>, from MPI 3.0, makes a communicator from
+a group of a parent communicator’s processes, as <code>MPI_Comm_create</code>
+does. The two differ in who takes part
+(<a href="01-the-mpi-model.html#creating-is-collective">chapter 1</a>).
+<code>MPI_Comm_create</code> is collective over the parent: every process of
+the parent calls it, members of the group or not.
+<code>MPI_Comm_create_group</code> is collective over the group only. The
+members call it with the same group and a tag, and the other processes may call
+it or not: for them the call is local and returns
+<code>MPI_COMM_NULL</code>.</p>
+
+<figure>
+  <div class="canvas"><svg viewBox="0 0 900 300" role="img" aria-label="Two calls on a world of three ranks with a group of ranks 0 and 1. On the left, create: all three ranks call MPI_Comm_create, which is collective over the world, so rank 2 must call too, or ranks 0 and 1 wait; ranks 0 and 1 get a communicator and rank 2 gets None. On the right, create_group: only ranks 0 and 1 take part in MPI_Comm_create_group, which is collective over the group; rank 2 may call, and its call is local and returns None, or it may not call at all." style="min-width: 46rem">
+  <defs>
+    <marker id="mem-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+    <marker id="mem-local" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-muted"/>
+    </marker>
+  </defs>
+
+  <rect x="10" y="10" width="430" height="280" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="225" y="38" text-anchor="middle" class="t-mono">world.create(&amp;pair)</text>
+  <rect x="35" y="56" width="110" height="32" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="90" y="76" text-anchor="middle" class="t-mono">rank 0</text>
+  <rect x="170" y="56" width="110" height="32" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="225" y="76" text-anchor="middle" class="t-mono">rank 1</text>
+  <rect x="305" y="56" width="110" height="32" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="360" y="76" text-anchor="middle" class="t-mono">rank 2</text>
+  <rect x="35" y="128" width="380" height="36" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="225" y="150" text-anchor="middle" class="t-mono">MPI_Comm_create</text>
+  <line x1="90" y1="92" x2="90" y2="124" class="s-accent" stroke-width="1.5" marker-end="url(#mem-arrow)"/>
+  <line x1="90" y1="168" x2="90" y2="200" class="s-accent" stroke-width="1.5" marker-end="url(#mem-arrow)"/>
+  <rect x="35" y="204" width="110" height="32" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="90" y="224" text-anchor="middle" class="t-mono">Some(sub)</text>
+  <line x1="225" y1="92" x2="225" y2="124" class="s-accent" stroke-width="1.5" marker-end="url(#mem-arrow)"/>
+  <line x1="225" y1="168" x2="225" y2="200" class="s-accent" stroke-width="1.5" marker-end="url(#mem-arrow)"/>
+  <rect x="170" y="204" width="110" height="32" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="225" y="224" text-anchor="middle" class="t-mono">Some(sub)</text>
+  <line x1="360" y1="92" x2="360" y2="124" class="s-accent" stroke-width="1.5" marker-end="url(#mem-arrow)"/>
+  <line x1="360" y1="168" x2="360" y2="200" class="s-muted" stroke-width="1.5" marker-end="url(#mem-local)"/>
+  <rect x="305" y="204" width="110" height="32" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="360" y="224" text-anchor="middle" class="t-mono">None</text>
+  <text x="225" y="266" text-anchor="middle" class="t-small f-muted">rank 2 must call, or ranks 0 and 1 wait</text>
+
+  <rect x="460" y="10" width="430" height="280" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="675" y="38" text-anchor="middle" class="t-mono">world.create_group(&amp;pair, 7)</text>
+  <rect x="485" y="56" width="110" height="32" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="540" y="76" text-anchor="middle" class="t-mono">rank 0</text>
+  <rect x="620" y="56" width="110" height="32" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="675" y="76" text-anchor="middle" class="t-mono">rank 1</text>
+  <rect x="755" y="56" width="110" height="32" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="810" y="76" text-anchor="middle" class="t-mono">rank 2</text>
+  <rect x="485" y="128" width="245" height="36" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="607.5" y="150" text-anchor="middle" class="t-mono">MPI_Comm_create_group</text>
+  <line x1="540" y1="92" x2="540" y2="124" class="s-accent" stroke-width="1.5" marker-end="url(#mem-arrow)"/>
+  <line x1="540" y1="168" x2="540" y2="200" class="s-accent" stroke-width="1.5" marker-end="url(#mem-arrow)"/>
+  <rect x="485" y="204" width="110" height="32" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="540" y="224" text-anchor="middle" class="t-mono">Some(sub)</text>
+  <line x1="675" y1="92" x2="675" y2="124" class="s-accent" stroke-width="1.5" marker-end="url(#mem-arrow)"/>
+  <line x1="675" y1="168" x2="675" y2="200" class="s-accent" stroke-width="1.5" marker-end="url(#mem-arrow)"/>
+  <rect x="620" y="204" width="110" height="32" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="675" y="224" text-anchor="middle" class="t-mono">Some(sub)</text>
+  <line x1="810" y1="92" x2="810" y2="124" class="s-muted" stroke-width="1.5" marker-end="url(#mem-local)"/>
+  <rect x="755" y="128" width="110" height="36" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="810" y="150" text-anchor="middle" class="t-small">local</text>
+  <line x1="810" y1="168" x2="810" y2="200" class="s-muted" stroke-width="1.5" marker-end="url(#mem-local)"/>
+  <rect x="755" y="204" width="110" height="32" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="810" y="224" text-anchor="middle" class="t-mono">None</text>
+  <text x="675" y="266" text-anchor="middle" class="t-small f-muted">rank 2 may call, or not</text>
+</svg></div>
+  <figcaption>The same group of ranks 0 and 1, turned into a communicator by
+  the two calls. <code>create</code> needs every rank of the world, so rank 2
+  must call it too; <code>create_group</code> needs only the members, and rank
+  2’s call, if it makes one, involves no other rank.</figcaption>
+</figure>
+
+<p>ferrompi had <code>create</code>, and 0.7.0 added
+<a href="../ferrompi/struct.Communicator.html#method.create_group"><code>create_group</code></a>.
+It is a good call to follow: it touches every layer, it adds an object to a
+table, it has a value that MPI checks and a rule that no library checks, and
+the history of how it was added is in the repository.</p>
+
+<h2 id="before-the-code">Before the code</h2>
+
+<p>The section of the standard that defines a call answers most of the
+questions the code depends on. <code>MPI_Comm_create_group</code> is in
+section 7.4.2 of MPI 4.1. For each question, the answer for
+<code>create_group</code>, and what it decides:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Question</th><th>For <code>create_group</code></th><th>What it decides</th></tr></thead>
+  <tbody>
+    <tr><td>Which MPI version defines it?</td><td>3.0</td><td>No version test. A call from MPI 4.0 compiles under a version test, with a stub for older libraries (<a href="#moving-data">below</a>).</td></tr>
+    <tr><td>Over which processes is it collective?</td><td>The members of the group</td><td>What the method’s documentation says, and which ranks the test lets skip the call.</td></tr>
+    <tr><td>What does it return, and where?</td><td><code>MPI_COMM_NULL</code> to a process outside the group</td><td><code>-1</code> in C, <code>None</code> in Rust.</td></tr>
+    <tr><td>Does it create an MPI object?</td><td>A communicator</td><td>A slot in the communicator table, <code>MPI_ERRORS_RETURN</code> on the new communicator, and an error for a full table.</td></tr>
+    <tr><td>Does it move data?</td><td>No</td><td>No count, element type or buffer to check.</td></tr>
+    <tr><td>Which of its values does MPI check?</td><td>The tag</td><td>Nothing to check in Rust: MPI returns an error of class <code>Tag</code>.</td></tr>
+    <tr><td>Which of its rules may a library leave unchecked?</td><td>The group is a subset of the parent’s; every member passes the same group and tag</td><td>What each library does when a rule is broken, which has to be measured.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The last row is where most of the work went, as
+<a href="#after-review">What review added</a> shows. The standard calls a
+program that breaks such a rule erroneous and lets the library do anything,
+and what MPICH and Open MPI do is found only by running them.</p>
+
+<h2 id="the-header">The header</h2>
+
+<p>The new function is declared in <code>csrc/ferrompi.h</code>, next to the
+other functions that create a communicator:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.h"><code>
+/**
+ * Create a sub-communicator from a parent communicator and a group
+ * (MPI_Comm_create_group). Collective over group_handle only: its members
+ * call with the same group and tag. For a rank not in group_handle the call
+ * is local and newcomm_handle is set to -1.
+ * Returns FERROMPI_ERR_GROUP_NOT_IN_COMM, before the MPI call, when group_handle
+ * has a member that is not in comm_handle.
+ */
+int ferrompi_comm_create_group(int32_t comm_handle,
+                               int32_t group_handle,
+                               int32_t tag,</code></pre>
+
+<p>It keeps the header’s rules
+(<a href="10-the-c-shim.html#the-contract">chapter 10</a>): handles are
+<code>int32_t</code>, the new handle comes back through a pointer, and the
+return value is an MPI error code or a negative ferrompi code. The comment
+says over which processes the call is collective, what a process outside the
+group receives, and which ferrompi code it can return. The Rust declaration
+and the safe method repeat those facts, and the header is where a reader of
+the C layer finds them.</p>
+
+<h2 id="the-c-function">The C function</h2>
+
+<p>The function, in <code>csrc/ferrompi.c</code>, is as short as most
+functions there:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int ferrompi_comm_create_group(int32_t comm_h,
+                               int32_t group_h,
+                               int32_t tag,
+                               int32_t* out_h) {
+    MPI_Comm parent = get_comm(comm_h);
+    MPI_Group g = get_group(group_h);
+    if (parent == MPI_COMM_NULL || g == MPI_GROUP_NULL) return MPI_ERR_ARG;
+    int in_ret = check_group_in_comm(parent, g);
+    if (in_ret != MPI_SUCCESS) return in_ret;
+    MPI_Comm new_comm;
+    int ret = MPI_Comm_create_group(parent, g, tag, &amp;new_comm);
+    if (ret != MPI_SUCCESS) return ret;
+    return store_comm(new_comm, out_h);
+}</code></pre>
+
+<p>It turns the two handles into MPI objects through the tables
+(<a href="10-the-c-shim.html#six-tables">chapter 10</a>). A handle that names
+no object returns <code>MPI_ERR_ARG</code>; safe Rust cannot pass one, since a
+<code>Communicator</code> and a <code>Group</code> each own their handle until
+they are dropped. It then checks the group, calls MPI with the tag unchanged,
+and hands the result to <code>store_comm</code>, which every function that
+gets a communicator from MPI shares
+(<a href="10-the-c-shim.html#table-full">chapter 10</a>): it writes
+<code>-1</code> for <code>MPI_COMM_NULL</code>, installs
+<code>MPI_ERRORS_RETURN</code> on the new communicator, and takes a slot for
+it. When the table is full, it returns the full-table code and leaves the
+communicator allocated, since freeing it is collective over its
+members.</p>
+
+<h3 id="the-subset-check">A check MPI does not make</h3>
+
+<p>The standard requires the group to be a subset of the parent’s group, and
+the libraries do not check it. The C layer does, before the call:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>/* MPI_SUCCESS if every member of `group` is in `comm`, FERROMPI_ERR_GROUP_NOT_IN_COMM
+ * if one is not, or the error of a group call. MPI requires the subset
+ * (MPI-4.1 7.4.2) and need not check it: with a group that has a member outside
+ * the communicator, MPI_Comm_create_group ends the process in MPICH 4.2 and in
+ * Open MPI 4.1 and 5.0, and MPI_Comm_create returns a communicator in Open MPI.
+ * The group calls go through GROUP_CALL, and they leave two things built
+ * before the creating call of MPICH 4.2: the communicator's group, which its
+ * MPI_Comm_create_group reads without building and without which it ends the
+ * process for any group of two or more members, and the ordered member lists
+ * of both groups, which it would otherwise build on first use inside the
+ * call. The work is local: in MPICH 4.2 it is linear in the two group sizes
+ * once the lists exist; in Open MPI it is the product of the two sizes. */
+static int check_group_in_comm(MPI_Comm comm, MPI_Group group) {
+    MPI_Group comm_group, outside;
+    int ret;
+    GROUP_CALL(ret, MPI_Comm_group(comm, &amp;comm_group));
+    if (ret != MPI_SUCCESS) return ret;
+    GROUP_CALL(ret, MPI_Group_difference(group, comm_group, &amp;outside));
+    MPI_Group_free(&amp;comm_group);
+    if (ret != MPI_SUCCESS) return ret;
+    int outside_size = 0;
+    ret = MPI_Group_size(outside, &amp;outside_size);
+    if (outside != MPI_GROUP_EMPTY) MPI_Group_free(&amp;outside);
+    if (ret != MPI_SUCCESS) return ret;
+    return outside_size == 0 ? MPI_SUCCESS : FERROMPI_ERR_GROUP_NOT_IN_COMM;
+}</code></pre>
+
+<p><code>MPI_Group_difference</code> gives the members of the group that are
+not in the communicator, which is empty exactly when the group is a subset.
+<code>MPI_Comm_group</code> and <code>MPI_Group_difference</code> go
+through <code>GROUP_CALL</code>, the one lock in the file (<a href="10-the-c-shim.html#one-lock">chapter 10</a>), because MPICH
+builds a group’s member list on first use without locking the group. They
+also leave built what <code>MPI_Comm_create_group</code> would otherwise build
+inside the call. The check is local and runs on every caller, member or not,
+so a rank that passes such a group is refused whether or not it is in
+it.</p>
+
+<h3 id="a-new-code">A new error code</h3>
+
+<p>No MPI error class says “a member outside the communicator”, so the check
+returns a ferrompi code. A new code is written twice. The header defines
+it:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.h"><code>/* Returned by ferrompi_comm_create and ferrompi_comm_create_group, before the
+ * MPI call, for a group with a member that is not in the communicator.
+ * src/error.rs maps it to Error::InvalidArgument. This MUST stay in sync with
+ * the mirrored const in src/error.rs. */
+#define FERROMPI_ERR_GROUP_NOT_IN_COMM (-7009)</code></pre>
+
+<p>and <code>src/error.rs</code> defines the same number and maps it to a
+variant:</p>
+
+<pre data-lang="rust" data-source="src/error.rs"><code>// Returned by the `ferrompi_comm_create` and `ferrompi_comm_create_group`
+// shims, before their MPI call, for a group with a member that is not in the
+// communicator. Intercepted in [`Error::from_code`] and mapped to
+// [`Error::InvalidArgument`]. This MUST match
+// `FERROMPI_ERR_GROUP_NOT_IN_COMM` in `csrc/ferrompi.h`.
+const FERROMPI_ERR_GROUP_NOT_IN_COMM: i32 = -7009;</code></pre>
+
+<pre data-lang="rust" data-source="src/error.rs"><code>        if code == FERROMPI_ERR_GROUP_NOT_IN_COMM {
+            return Error::InvalidArgument {
+                arg: "group",
+                reason: "member outside the communicator",
+            };
+        }</code></pre>
+
+<p>Each definition names the other in a comment, and that is all that ties
+them: no build step compares the two numbers. A unit test in
+<code>src/error.rs</code> checks that the Rust constant maps to
+<code>Error::InvalidArgument</code>, which runs without MPI
+(<a href="13-testing.html#unit-tests">chapter 13</a>). The C layer’s
+codes run from <code>-7001</code> to <code>-7009</code>, with a gap:
+<code>-7007</code> reported a full info table, the table was removed in
+0.7.0, and the header marks the number retired, so a new code never reuses
+it. Those from <code>-7101</code> on are the guard’s, defined in Rust alone,
+since C never returns them.</p>
+
+<h2 id="the-declaration">The Rust declaration</h2>
+
+<p><code>src/ffi.rs</code> declares the function again, in Rust:</p>
+
+<pre data-lang="rust" data-source="src/ffi.rs"><code>    pub fn ferrompi_comm_create_group(
+        comm: int32_t,
+        group: int32_t,
+        tag: int32_t,
+        newcomm: *mut int32_t,
+    ) -&gt; c_int;</code></pre>
+
+<p>The declaration sits inside the <code>guarded_extern!</code> block, so the
+macro declares the C function in a module of its own, <code>raw</code>, and
+gives the crate a wrapper of the same name that enters the lifecycle guard first
+(<a href="09-a-tour-of-the-layers.html#the-guard">chapter 9</a>). A function
+goes in the unguarded block above it only if it is one of the kinds the
+comment there lists: one that is legal before init or after finalize, one that
+makes no MPI call, <code>wtime</code>, one called only from a
+<code>Drop</code>, or the op-table calls of <code>UserOp</code>.</p>
+
+<p>The compiler does not check this declaration against the header. Rust
+takes an <code>extern</code> block on trust: with a wrong type or a missing
+argument, the crate compiles, links and passes garbage to the C function.
+<code>.github/scripts/check-ffi-signatures.py</code> makes the comparison
+instead. It requires an <code>extern</code> for every <code>ferrompi_*</code>
+prototype and a prototype for every <code>extern</code>, with the same number
+of parameters and corresponding types: <code>int</code> is
+<code>c_int</code>, <code>int32_t</code> is <code>int32_t</code> or
+<code>i32</code>, <code>const T*</code> is <code>*const T</code> and
+<code>T*</code> is <code>*mut T</code>. It runs in CI and in the pre-commit
+hook that CONTRIBUTING.md describes. It does not compare parameter names, and
+a prototype that has no Rust caller by design goes in its
+<code>UNBOUND_PROTOTYPES</code> list, with the reason.</p>
+
+<h2 id="the-method">The safe method</h2>
+
+<p>The method is in <code>src/comm/mgmt.rs</code>, with the other ways to
+make a communicator:</p>
+
+<pre data-lang="rust" data-source="src/comm/mgmt.rs"><code>    /// Create a sub-communicator from a group, collectively over the members
+    /// of the group only (`MPI_Comm_create_group`).
+    ///
+    /// `group` must be a subset of `self`'s group. Every member of `group`
+    /// must invoke the call, with a group of the same members in the same
+    /// order and with the same `tag`; the other ranks of `self` take no part.
+    /// A rank that is not a member may still make the call: it is then local
+    /// and returns `Ok(None)`, as it does for the empty group.
+    // …
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidArgument`](crate::Error::InvalidArgument) if
+    /// `group` has a member that is not in `self`, to a member of `group` and
+    /// to any other caller alike; [`Error::Mpi`] with class
+    /// [`MpiErrorClass::Tag`](crate::MpiErrorClass::Tag) if `tag` is negative
+    /// or above the library's tag limit; or
+    /// [`Error::ResourceExhausted`](crate::Error::ResourceExhausted) if the
+    /// communicator table is full.
+    // …
+    pub fn create_group(&amp;self, group: &amp;Group, tag: i32) -&gt; Result&lt;Option&lt;Communicator&gt;&gt; {
+        let mut new_handle: i32 = -1;
+        // SAFETY: self.handle is owned by this Communicator; group.handle is owned by the Group
+        // argument and remains valid for the duration of this call.
+        let ret = unsafe {
+            ffi::ferrompi_comm_create_group(self.handle, group.handle, tag, &amp;mut new_handle)
+        };
+        Error::check_with_op(ret, "comm_create_group")?;
+        Self::from_optional_handle(new_handle)
+    }</code></pre>
+
+<p>The body is the pattern every method follows: an out-value set to
+<code>-1</code>, one <code>unsafe</code> call with its
+<code>SAFETY</code> comment, which clippy requires, the return code checked by
+<code>Error::check_with_op</code> under the name of the C function without
+its <code>ferrompi_</code> prefix, and the handle turned into the value Rust
+returns:</p>
+
+<pre data-lang="rust" data-source="src/comm/mgmt.rs"><code>    /// Convert a communicator-handle result into `Option&lt;Self&gt;`, treating a
+    /// negative handle as `MPI_COMM_NULL` (used by split, split_type, create,
+    /// create_group and `Mpi::create_from_group`).
+    pub(crate) fn from_optional_handle(new_handle: i32) -&gt; Result&lt;Option&lt;Self&gt;&gt; {
+        if new_handle &lt; 0 {
+            Ok(None)
+        } else {
+            Self::from_handle(new_handle).map(Some)
+        }
+    }</code></pre>
+
+<p>The method checks nothing itself. It has no rank, count or buffer to check,
+MPI checks the tag, and the C layer checks the group. A method checks in Rust
+what MPI does not check, or would check only after a collective had started
+(<a href="09-a-tour-of-the-layers.html#who-refuses-what">chapter 9</a>).</p>
+
+<p>Most of the method is its documentation. It says over which processes the
+call is collective, what a process outside the group gets, what the C layer
+checks and what that costs, which rules nobody checks and what breaking them
+does, and what threads must do with the tag. Its <code># Errors</code>
+section names each error and when it comes. The example is compiled by
+<code>cargo test --doc</code> and not run, since it needs a job; the
+<code>missing_docs</code> lint, which CI turns into an error, refuses a public
+item with no documentation at all.</p>
+
+<p>A program that reaches four of the outcomes, on three processes:</p>
+
+<pre data-lang="rust" data-run="3" id="members"><code>use ferrompi::{Error, Mpi};
+
+fn main() -&gt; Result&lt;(), Error&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+    let world_group = world.group()?;
+    let pair = world_group.include(&amp;[0, 1])?;
+
+    // Every rank calls. For rank 2, outside the pair, the call is local.
+    match world.create_group(&amp;pair, 7)? {
+        Some(sub) =&gt; println!("rank {rank}: rank {} of {}", sub.rank(), sub.size()),
+        None =&gt; println!("rank {rank}: not a member, None"),
+    }
+
+    // A tag MPI refuses. The group of this rank alone: no other rank takes part.
+    let alone = world_group.include(&amp;[rank])?;
+    match world.create_group(&amp;alone, -5) {
+        Err(Error::Mpi { class, .. }) =&gt; println!("rank {rank}: tag -5: class {class:?}"),
+        other =&gt; println!("rank {rank}: tag -5: {:?}", other.map(|c| c.is_some())),
+    }
+
+    // A communicator of one rank, and a group of two: the C layer refuses it.
+    let single = world.split(Some(rank), 0)?.expect("every rank has a color");
+    match single.create_group(&amp;pair, 8) {
+        Err(e) =&gt; println!("rank {rank}: the pair on a communicator of one: {e}"),
+        Ok(c) =&gt; println!(
+            "rank {rank}: the pair on a communicator of one: {}",
+            c.is_some()
+        ),
+    }
+    Ok(())
+}</code></pre>
+
+<pre class="output" data-output-of="members"><code>rank 0: rank 0 of 2
+rank 0: tag -5: class Tag
+rank 0: the pair on a communicator of one: invalid argument `group`: member outside the communicator
+rank 1: rank 1 of 2
+rank 1: tag -5: class Tag
+rank 1: the pair on a communicator of one: invalid argument `group`: member outside the communicator
+rank 2: not a member, None
+rank 2: tag -5: class Tag
+rank 2: the pair on a communicator of one: invalid argument `group`: member outside the communicator</code></pre>
+
+<p>The first call gives the two members a communicator and rank 2
+<code>None</code>, from a call that waited for no one. The tag is refused by
+MPI itself, on each rank alone, since each passes a group of itself only. The
+last call is refused by the C layer before MPI is called, on every rank,
+including rank 2, which is in neither the communicator nor the group. Each
+outcome comes from a different layer:</p>
+
+<figure>
+  <div class="canvas"><svg viewBox="0 0 900 408" role="img" aria-label="One call to create_group goes down through four layers, and the first that refuses it returns. The guard in src/ffi.rs returns Error::Finalized once the Mpi value has been dropped. The C function ferrompi_comm_create_group returns ferrompi’s code -7009 for a group with a member outside the communicator, which Rust turns into Error::InvalidArgument. MPI_Comm_create_group refuses a tag it does not accept, which becomes Error::Mpi with class Tag. Last, store_comm turns the result into a handle: MPI_COMM_NULL becomes -1 and Ok(None), a free slot becomes Ok(Some(comm)), and a full table returns -7002, which becomes Error::ResourceExhausted." style="min-width: 46rem">
+  <defs>
+    <marker id="out-down" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-muted"/>
+    </marker>
+    <marker id="out-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+    <marker id="out-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-copper"/>
+    </marker>
+  </defs>
+  <text x="150" y="24" text-anchor="middle" class="t-small f-muted">the call, top to bottom</text>
+  <text x="755" y="24" text-anchor="middle" class="t-small f-muted">what create_group returns</text>
+  <rect x="20" y="40" width="260" height="36" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="150" y="62" text-anchor="middle" class="t-mono">Communicator::create_group</text>
+  <rect x="20" y="102" width="260" height="36" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="150" y="124" text-anchor="middle" class="t-mono">the guard, src/ffi.rs</text>
+  <rect x="20" y="164" width="260" height="36" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="150" y="186" text-anchor="middle" class="t-mono">ferrompi_comm_create_group</text>
+  <rect x="20" y="226" width="260" height="36" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="150" y="248" text-anchor="middle" class="t-mono">MPI_Comm_create_group</text>
+  <rect x="20" y="288" width="260" height="36" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="150" y="310" text-anchor="middle" class="t-mono">store_comm</text>
+  <line x1="150" y1="80" x2="150" y2="98" class="s-muted" stroke-width="1.5" marker-end="url(#out-down)"/>
+  <line x1="150" y1="142" x2="150" y2="160" class="s-muted" stroke-width="1.5" marker-end="url(#out-down)"/>
+  <line x1="150" y1="204" x2="150" y2="222" class="s-muted" stroke-width="1.5" marker-end="url(#out-down)"/>
+  <line x1="150" y1="266" x2="150" y2="284" class="s-muted" stroke-width="1.5" marker-end="url(#out-down)"/>
+  <text x="300" y="112" class="t-small f-muted">MPI finalized: the Mpi dropped</text>
+  <line x1="284" y1="120" x2="626" y2="120" class="s-copper" stroke-width="1.5" marker-end="url(#out-bad)"/>
+  <rect x="630" y="102" width="250" height="36" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="755" y="124" text-anchor="middle" class="t-mono">Error::Finalized</text>
+  <text x="300" y="174" class="t-small f-muted">a member outside the communicator: -7009</text>
+  <line x1="284" y1="182" x2="626" y2="182" class="s-copper" stroke-width="1.5" marker-end="url(#out-bad)"/>
+  <rect x="630" y="164" width="250" height="36" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="755" y="186" text-anchor="middle" class="t-mono">Error::InvalidArgument</text>
+  <text x="300" y="236" class="t-small f-muted">a tag MPI refuses</text>
+  <line x1="284" y1="244" x2="626" y2="244" class="s-copper" stroke-width="1.5" marker-end="url(#out-bad)"/>
+  <rect x="630" y="226" width="250" height="36" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="755" y="248" text-anchor="middle" class="t-mono">Error::Mpi, class Tag</text>
+  <path d="M284 306 C 300 306, 300 296, 330 296 H626" fill="none" class="s-accent" stroke-width="1.5" marker-end="url(#out-ok)"/>
+  <text x="340" y="289" class="t-small f-muted">MPI_COMM_NULL: -1</text>
+  <rect x="630" y="280" width="250" height="32" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="755" y="300" text-anchor="middle" class="t-mono">Ok(None)</text>
+  <path d="M284 306 C 300 306, 300 338, 330 338 H626" fill="none" class="s-accent" stroke-width="1.5" marker-end="url(#out-ok)"/>
+  <text x="340" y="331" class="t-small f-muted">a free slot</text>
+  <rect x="630" y="322" width="250" height="32" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="755" y="342" text-anchor="middle" class="t-mono">Ok(Some(comm))</text>
+  <path d="M284 306 C 300 306, 300 380, 330 380 H626" fill="none" class="s-copper" stroke-width="1.5" marker-end="url(#out-bad)"/>
+  <text x="340" y="373" class="t-small f-muted">a full table: -7002</text>
+  <rect x="630" y="364" width="250" height="32" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="755" y="384" text-anchor="middle" class="t-mono">Error::ResourceExhausted</text>
+</svg></div>
+  <figcaption>The first layer that refuses a call returns, and the layers below
+  it never run. The program reaches the C layer’s refusal, MPI’s, and two of
+  <code>store_comm</code>’s ends. A <code>Communicator</code> can outlive the
+  <code>Mpi</code> value, so the guard’s refusal can be reached; it also
+  refuses a call from a thread that the thread level does not admit
+  (<a href="06-threads-and-hybrid-mpi.html#what-ferrompi-checks">chapter
+  6</a>).</figcaption>
+</figure>
+
+<h2 id="the-test">The test</h2>
+
+<p>The test is a program in <code>examples/</code> with a directive, which the
+runner finds and runs as a job
+(<a href="13-testing.html#mpi-tests">chapter 13</a>). Its head and first two
+steps:</p>
+
+<pre data-lang="rust" data-source="examples/test_comm_create_group.rs"><code>//! Run with: mpiexec -n 4 ./target/debug/examples/test_comm_create_group
+// mpi-test: np=2.. timeout=30
+// …
+    // 1. A tag MPI does not accept. With the group of this rank alone, no
+    //    other rank takes part in the call.
+    let alone = world_group.include(&amp;[rank]).expect("include failed");
+    let ok = common::class_of(&amp;world.create_group(&amp;alone, -5)) == Some(MpiErrorClass::Tag);
+    common::check(&amp;world, ok, "create_group refuses a negative tag");
+
+    // 2. Only the members call.
+    let mut ok = true;
+    if member {
+        ok = match world.create_group(&amp;group, 3) {
+            Ok(Some(sub)) =&gt; {
+                sub.size() == members
+                    &amp;&amp; sub.rank() == rank / 2
+                    &amp;&amp; sub.allreduce_scalar(1i32, ReduceOp::Sum).ok() == Some(members)
+            }
+            _ =&gt; false,
+        };
+    }
+    common::check(&amp;world, ok, "create_group among the members of the group");</code></pre>
+
+<p><code>np=2..</code> runs it at every process count in
+<code>MPI_NP_LIST</code> from 2 up, and each step ends in
+<code>common::check</code>, which gives every rank the same verdict
+(<a href="13-testing.html#the-verdict">chapter 13</a>).</p>
+
+<p>The tag check comes first on purpose. Step 2 has only the members call. If
+the C function were collective over the parent, as
+<code>MPI_Comm_create</code> is, the members would wait in step 2 for ranks
+that had gone on to the check, and the job would hang until the runner’s
+timeout. Such a function would also ignore the tag, so step 1 catches it
+first, and the test fails on every rank at once with the name of the step.
+A test of a collective call orders its steps so that a likely mistake fails
+before a step where it would hang.</p>
+
+<p>The other four steps have every rank call, pass the empty group, create a
+communicator from a communicator made by <code>split</code>, and pass a group
+with a member outside the communicator. Two of them were added by review.</p>
+
+<h2 id="after-review">What review added</h2>
+
+<p>Three commits made <code>create_group</code> what it is now:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Commit</th><th>What it did</th><th>Files</th></tr></thead>
+  <tbody>
+    <tr><td><code>604fc9a</code> feat: add Communicator::create_group</td><td>The five places and a changelog entry.</td><td>6, +193 −13</td></tr>
+    <tr><td><code>ac6f523</code> fix: refuse a group outside the communicator in create and create_group</td><td>The subset check, the new code on both sides, steps 5 and 6 of the test, and steps in two other tests.</td><td>9, +224 −28</td></tr>
+    <tr><td><code>d93f72c</code> refactor: share the tail of the communicator constructors in the C layer</td><td><code>store_comm</code>, in place of the same lines in five functions.</td><td>1, +38 −71</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The first commit’s files are the five places of the pattern, with the
+changelog:</p>
+
+<pre data-lang="bash"><code>git show --stat --format='%h %s' 604fc9a</code></pre>
+
+<pre class="output"><code>604fc9a feat: add Communicator::create_group
+
+ CHANGELOG.md                       |  6 ++-
+ csrc/ferrompi.c                    | 30 +++++++++--
+ csrc/ferrompi.h                    | 11 ++++
+ examples/test_comm_create_group.rs | 80 ++++++++++++++++++++++++++++++
+ src/comm/mgmt.rs                   | 72 ++++++++++++++++++++++++---
+ src/ffi.rs                         |  7 +++
+ 6 files changed, 193 insertions(+), 13 deletions(-)</code></pre>
+
+<p>The fix came from the review’s probes of a group that is not a subset. A
+member’s call with such a group ended its process with a segmentation fault
+inside <code>MPI_Comm_create_group</code>, on all four stacks probed. The
+probes also found a crash with a valid group: on MPICH 4.2, a group of two or
+more members on a communicator whose group nothing had asked for, such as one
+just made by <code>split</code>, made the call read a null pointer. The
+check’s <code>MPI_Comm_group</code> builds that group first, which is why
+step 5 of the test makes its communicator with <code>split</code>.</p>
+
+<p>The commit messages record this, and follow a practice the history keeps.
+A message names the section of the standard, says what was measured, on which
+library and how, and, for a fix, lists the mutants under “Red”: each a part of
+the change undone or altered, with the test it turned red and how. Removing
+the two check lines from the C function, for one, made the test end with exit
+status 139 at step 5. “Green” lists the tests that passed, at which process
+counts. A reviewer reads the message as part of the change:</p>
+
+<pre data-lang="bash"><code>git show --no-patch ac6f523</code></pre>
+
+<h2 id="moving-data">When the call moves data</h2>
+
+<p><code>create_group</code> moves no data. A call with a buffer has more to
+get right on each side, and <code>exscan</code> shows most of it. The C
+function:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int ferrompi_exscan(
+    const void* sendbuf,
+    void* recvbuf,
+    int64_t count,
+    int32_t datatype_tag,
+    int32_t op,
+    int32_t comm_handle
+) {
+    MPI_Comm comm = get_comm(comm_handle);
+    MPI_Datatype dt = get_datatype(datatype_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Op mpi_op = get_op(op);
+    if (count &gt; INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
+#if MPI_VERSION &gt;= 4
+        return MPI_Exscan_c(sendbuf, recvbuf, (MPI_Count)count, dt, mpi_op, comm);
+#else
+        return MPI_ERR_COUNT;
+#endif
+    }
+    return MPI_Exscan(sendbuf, recvbuf, (int)count, dt, mpi_op, comm);
+}</code></pre>
+
+<p>The count crosses as <code>int64_t</code>. Up to <code>INT_MAX</code> it
+goes to the classic call; above, to the <code>_c</code> call where the library
+has MPI 4.0, and is refused with <code>MPI_ERR_COUNT</code> where it has not
+(<a href="07-implementations-networks-and-abi.html#how-ferrompi-builds">chapter
+7</a>). A reduction above <code>INT_MAX</code> with a user-defined operation
+is refused on every version, since the operation takes an <code>int</code>
+length (<a href="12-user-defined-reductions-and-derived-datatypes.html#when-mpi-calls">chapter
+12</a>). An element-type tag that names no datatype returns
+<code>MPI_ERR_TYPE</code>.</p>
+
+<p>The method checks the buffers before the call:</p>
+
+<pre data-lang="rust" data-source="src/comm/blocking.rs"><code>    pub fn exscan&lt;'a, T: MpiDatatype&gt;(
+        &amp;self,
+        send: &amp;[T],
+        recv: &amp;mut [T],
+        op: impl Into&lt;CollectiveOp&lt;'a, T&gt;&gt;,
+    ) -&gt; Result&lt;()&gt; {
+        let op = op.into().code(tag_of::&lt;T&gt;())?;
+        check_same_len("recv", send.len(), recv.len())?;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&amp;[T] vs &amp;mut [T]). MPI leaves recv undefined on rank 0, documented above.
+        let ret = unsafe { ffi::ferrompi_exscan(sp, rp, n, dt, op, self.handle) };
+        Error::check_with_op(ret, "exscan")
+    }</code></pre>
+
+<p>MPI cannot check a buffer’s length, so every method that passes one checks
+it first, with the validators of <code>src/comm/mod.rs</code> and
+<code>src/comm/v_collective.rs</code>:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Validator</th><th>Checks</th><th>Used by, for example</th></tr></thead>
+  <tbody>
+    <tr><td><code>check_same_len</code></td><td>two buffers that must have the same length</td><td><code>allreduce</code>, <code>scan</code>, <code>exscan</code></td></tr>
+    <tr><td><code>check_rank_slots</code></td><td>a buffer with one block for every rank</td><td>the root’s buffer of <code>gather</code> and <code>scatter</code></td></tr>
+    <tr><td><code>rank_block</code></td><td>a buffer that splits evenly across the ranks, and the block size</td><td><code>alltoall</code></td></tr>
+    <tr><td><code>check_v_args</code></td><td>the counts and displacements of a v-collective against the buffer</td><td><code>gatherv</code>, <code>alltoallv</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The operation is checked too: <code>code</code> refuses a predefined
+operation that MPI does not define on the element type, such as a bitwise one
+on <code>f64</code>. A nonblocking call adds a slot in the request table and a
+buffer that must outlive the request, which is what the scopes of
+<a href="11-the-safety-model.html#the-scope">chapter 11</a> are for.</p>
+
+<p>A call that MPI 4.0 added compiles only where the library has it. The C
+function then has a stub for older libraries, which returns ferrompi’s code
+for an unsupported call, and Rust maps it to
+<code>Error::NotSupported</code>:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int ferrompi_comm_create_from_group(int32_t group_h,
+                                    const char* stringtag,
+                                    int32_t* out_h) {
+#ifdef FERROMPI_HAVE_MPI4_COLLECTIVES
+    /* ... */
+#else
+    (void)group_h; (void)stringtag; (void)out_h;
+    return FERROMPI_ERR_NOT_SUPPORTED;  /* needs MPI 4.0, or Open MPI 5 */
+#endif
+}</code></pre>
+
+<p>A one-sided call belongs to the <code>rma</code> feature: its Rust side is
+compiled under <code>#[cfg(feature = "rma")]</code>, and its test needs an
+<code>[[example]]</code> entry in <code>Cargo.toml</code> with
+<code>required-features = ["rma"]</code>, or cargo builds it without the
+feature and fails.</p>
+
+<h2 id="review">What a reviewer checks</h2>
+
+<p>The architecture guide says that leaving out any of the five places is a
+scope violation. What a reviewer reads in each:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Place</th><th>What is checked</th></tr></thead>
+  <tbody>
+    <tr><td><code>csrc/ferrompi.h</code></td><td>Fixed-width types and an <code>int</code> result. The comment says over which processes the call is collective, what a process outside it gets, and which ferrompi codes it returns.</td></tr>
+    <tr><td><code>csrc/ferrompi.c</code></td><td>Handles decoded through the tables, and one that names nothing refused. Every value MPI does not fix translated here. <code>MPI_ERRORS_RETURN</code> on a new communicator before Rust sees it. The large-count branch, or the reason there is none. A call from MPI 4.0 under the version test, with its stub. The group lock around a local group call only, never around a collective. No new compiler warning.</td></tr>
+    <tr><td><code>src/error.rs</code></td><td>A new code defined with the same number as in the header, a comment on each side naming the other, an arm that maps it, and a unit test.</td></tr>
+    <tr><td><code>src/ffi.rs</code></td><td>Inside the guarded block, unless the function is one of the kinds outside it. <code>check-ffi-signatures.py</code> compares the types with the header’s.</td></tr>
+    <tr><td>The method</td><td>Every buffer, rank and count that MPI cannot check, checked before the call. A <code>SAFETY</code> comment that says why the call is sound. The name given to <code>check_with_op</code>. <code>-1</code> mapped to <code>None</code>. Documentation that says who calls, what is checked, and each error.</td></tr>
+    <tr><td>The test</td><td>A directive. Steps ordered so that a likely mistake fails before a step where it would hang. Every step through <code>common::check</code>. Runs at each process count the directive allows, on MPICH and Open MPI in CI.</td></tr>
+    <tr><td><code>CHANGELOG.md</code></td><td>An entry under <code>[Unreleased]</code> that says what a user can now do.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The commands in CONTRIBUTING.md run all of this as CI does, the MPI tests
+included; <code>check-no-plan-leaks.sh</code> among them keeps work-item
+identifiers out of the shipped files.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>Add <code>Communicator::compare</code> for <code>MPI_Comm_compare</code>.
+  Its four results, <code>MPI_IDENT</code>, <code>MPI_CONGRUENT</code>,
+  <code>MPI_SIMILAR</code> and <code>MPI_UNEQUAL</code>, have values the
+  standard does not fix. Where are they translated, and into what? Is the call
+  collective? Write the test’s steps: the world against itself, against a
+  duplicate, and against one half of a split.</li>
+  <li>Add <code>Mpi::wtick</code> for <code>MPI_Wtick</code>. Does its
+  declaration go in the guarded block or the one above it, and why is
+  <code>wtime</code> where it is?</li>
+  <li>Add <code>Communicator::ssend</code> for <code>MPI_Ssend</code>. Which
+  parts of <code>send</code> can it copy, and what is its large-count call?
+  Write a test step that shows it differs from <code>send</code>, and make
+  sure the step cannot hang when the call is wrong.</li>
+  <li>In the program, let rank 2 skip the first <code>create_group</code>
+  call. Does the output change? Then have every rank call
+  <code>world.create(&amp;pair)</code> instead, let rank 2 skip it, and run the
+  program under <code>timeout 20</code>. What happens to ranks 0 and 1?</li>
+  <li>Remove the two lines that call <code>check_group_in_comm</code> from
+  <code>ferrompi_comm_create_group</code>, and run
+  <code>test_comm_create_group</code> at 4 processes under
+  <code>timeout 30</code>. Which step ends it, and how? Compare what you see
+  with the “Red” list of <code>ac6f523</code>, then put the lines back and run
+  it again.</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>A new call touches five places in order: the header, the C function,
+  the Rust declaration, the safe method and a test, plus a changelog entry.
+  Leaving one out is a scope violation.</li>
+  <li>The standard’s section answers most questions before the code: the MPI
+  version, who takes part, what comes back where, what object is created and
+  what data moves. What a library does with a rule it need not check has to
+  be measured.</li>
+  <li>The C function decodes handles, checks what MPI will not, translates the
+  values MPI does not fix, and hands a new communicator to
+  <code>store_comm</code>. A new ferrompi code is defined in the header and in
+  <code>src/error.rs</code>, tied only by comments and a unit test.</li>
+  <li>The compiler takes the Rust declaration on trust;
+  <code>check-ffi-signatures.py</code> compares it with the header.</li>
+  <li>The method checks in Rust what MPI cannot, through the validators,
+  documents who calls and each error, and maps the code with
+  <code>check_with_op</code>.</li>
+  <li>The test orders its steps so that a likely mistake fails before it can
+  hang. Review of <code>create_group</code> added a check, a code and two
+  steps, and the commit messages record what was measured and which mutants
+  turned the tests red.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="13-testing.html">Previous: chapter 13, testing</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="15-patterns-from-real-programs.html">Next: chapter 15, patterns from real programs</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

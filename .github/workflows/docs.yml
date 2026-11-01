@@ -35,6 +35,9 @@ jobs:
         env:
           RUSTDOCFLAGS: "--cfg docsrs -D warnings"
 
+      - name: Add the tutorial
+        run: cp -r docs/tutorial target/doc/tutorial
+
       - name: Add index redirect
         run: |
           cat > target/doc/index.html << 'EOF'

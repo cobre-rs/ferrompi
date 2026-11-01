@@ -1,0 +1,801 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>1. The MPI model · ferrompi tutorial</title>
+<meta name="description" content="What MPI is, how a launcher starts and wires up an MPI job, how ferrompi initializes and finalizes MPI, and how communicators group processes.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#what-mpi-is-for">What MPI is for</a></li>
+      <li><a href="#a-standard-not-a-library">A standard, not a library</a></li>
+      <li><a href="#one-program-many-processes">One program, many processes</a></li>
+      <li><a href="#launching-a-job">Launching a job</a></li>
+      <li><a href="#initializing-and-finalizing">Initializing and finalizing MPI</a></li>
+      <li><a href="#ranks-and-the-world-communicator">Ranks and the world communicator</a></li>
+      <li><a href="#communicators">Communicators</a></li>
+      <li><a href="#when-something-goes-wrong">When something goes wrong</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part I · Chapter 1</p>
+<h1>The MPI model</h1>
+
+<p class="lede">What MPI is and how an MPI program runs: the standard and the
+libraries that implement it, the processes a launcher starts, how MPI is
+initialized and finalized, and the communicators that every MPI call goes
+through.</p>
+
+<p>By the end of the chapter you can launch a ferrompi program on any number of
+processes, explain the output it prints, and split its processes into smaller
+communicators. <a href="index.html#before-you-start">Before you start</a>, on
+the tutorial’s contents page, says how to install MPI and build the
+examples.</p>
+
+<h2 id="what-mpi-is-for">What MPI is for</h2>
+
+<p>A cluster is many computers, called nodes, joined by a network. Each node
+has its own memory, and a process on one node cannot read the memory of
+another. Threads share memory, so they help only inside one node. To use more
+than one node, a program runs as several processes, and the processes send
+each other the data they need as messages.</p>
+
+<p>MPI, the Message Passing Interface, is the standard interface for this. Most
+large scientific codes use it. It is used inside a single node too: some
+programs run one MPI process per core, and others run one process per node or
+per socket and use threads inside it (chapter 6).</p>
+
+<h2 id="a-standard-not-a-library">A standard, not a library</h2>
+
+<p>MPI is a specification published by the MPI Forum, a body of vendors,
+laboratories and universities. It defines functions, constants and what they
+mean, in C and Fortran; the C++ bindings of MPI-2 were removed in MPI-3.0. It
+does not define an implementation: it says nothing about how a message
+travels, which algorithm a collective uses, or what a handle looks like in
+memory.</p>
+
+<p>An MPI implementation is what you install. It provides:</p>
+
+<ul>
+  <li>a library (<code>libmpi</code>, <code>libmpich</code>) and its
+  <code>mpi.h</code> header;</li>
+  <li>compiler wrappers (<code>mpicc</code>, <code>mpifort</code>) that add the
+  include and link flags;</li>
+  <li>a launcher (<code>mpiexec</code>, often also installed as
+  <code>mpirun</code>) that starts the processes of a job.</li>
+</ul>
+
+<p>MPICH and Open MPI are the two main open-source implementations, and most
+vendor MPIs derive from one of them; chapter 7 compares them. ferrompi compiles
+against the <code>mpi.h</code> of one implementation and links its library,
+chosen when ferrompi is built
+(<a href="../ferrompi/doc/mpi_compatibility/index.html#building">the
+compatibility guide’s Building section</a>).</p>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Version</th><th>Year</th><th>What it added</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>MPI-1</td><td>1994</td><td>point-to-point messages, collectives, communicators, derived datatypes</td></tr>
+    <tr><td>MPI-2</td><td>1997</td><td>one-sided communication, parallel I/O, dynamic processes, thread levels</td></tr>
+    <tr><td>MPI-3.0 / 3.1</td><td>2012 / 2015</td><td>nonblocking collectives, shared-memory windows, new one-sided synchronization</td></tr>
+    <tr><td>MPI-4.0 / 4.1</td><td>2021 / 2023</td><td>persistent collectives, counts above <code>i32::MAX</code>, sessions</td></tr>
+    <tr><td>MPI-5.0</td><td>2025</td><td>a standard binary interface (ABI)</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>A library has two version numbers: the version of the standard it
+implements, and its own release number. ferrompi reports both, with
+<a href="../ferrompi/struct.Mpi.html#method.version"><code>Mpi::version</code></a>
+and
+<a href="../ferrompi/struct.Mpi.html#method.library_version"><code>Mpi::library_version</code></a>:</p>
+
+<pre data-lang="rust" data-run="1" id="versions"><code>use ferrompi::Mpi;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let _mpi = Mpi::init()?;
+    println!("standard: {}", Mpi::version()?);
+    println!("library:  {}", Mpi::library_version()?);
+    Ok(())
+}</code></pre>
+
+<p>With MPICH 4.2 the first line is <code>standard: MPI 4.1</code>, and the
+second starts with <code>library:  MPICH Version:</code> and the release
+number, such as <code>4.2.3</code>, followed by MPICH’s build details. Open MPI
+4.1 and 5.0 both report MPI 3.1, although Open MPI 5 implements some MPI-4.0
+features. ferrompi needs a library that implements at least MPI 3.1, and
+enables an MPI-4.0 feature only where the library has it;
+<a href="../ferrompi/doc/mpi_compatibility/index.html#platforms-and-mpi-libraries">the
+compatibility guide</a> lists which feature needs which library.</p>
+
+<h2 id="one-program-many-processes">One program, many processes</h2>
+
+<p><code>mpiexec -n 4 ./prog</code> starts four processes, all running the
+same program. This model is called SPMD: single program, multiple data. The
+processes share no memory. Each one has its own copy of every variable, and a
+value computed by one is visible to another only if it is sent there.</p>
+
+<p>What tells the processes apart is their rank, an integer from 0 to n − 1
+that MPI assigns. A program reads its rank and acts on it: which part of the
+data to work on, or whether it is the process that reads the input file.</p>
+
+<pre data-lang="rust" data-run="4" id="hello"><code>use ferrompi::Mpi;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    println!(
+        "Hello from rank {} of {} on {}",
+        world.rank(),
+        world.size(),
+        world.processor_name()?
+    );
+    Ok(())
+}</code></pre>
+
+<p>With four processes on a machine named <code>node01</code>, it prints:</p>
+
+<pre class="output"><code>Hello from rank 2 of 4 on node01
+Hello from rank 0 of 4 on node01
+Hello from rank 3 of 4 on node01
+Hello from rank 1 of 4 on node01</code></pre>
+
+<p>The order changes from run to run. Each process writes to its own standard
+output, and the launcher forwards each line as it arrives. A barrier before the
+<code>println!</code> does not fix the order: it synchronizes the processes,
+not the launcher’s forwarding. To print in rank order, send the lines to one
+process and print them there (chapter 3).</p>
+
+<h2 id="launching-a-job">Launching a job</h2>
+
+<h3 id="what-the-launcher-does">What the launcher does</h3>
+
+<p><code>mpiexec</code> does five things:</p>
+
+<ol>
+  <li>It starts the processes, on the local machine or on the hosts of a host
+  file or of the batch system’s allocation.</li>
+  <li>It tells each process its rank, the size of the job, and how to reach the
+  launcher’s process-management service, called PMI or PMIx.</li>
+  <li>It runs that service while the processes start. Inside
+  <code>MPI_Init</code>, each process publishes its network address to the
+  service and reads the addresses of the others. This step is called
+  wire-up.</li>
+  <li>It forwards standard output, standard error and signals between your
+  terminal and the processes.</li>
+  <li>It ends the job when the processes exit, and kills the remaining
+  processes when one of them fails. How quickly it does so varies;
+  <a href="../ferrompi/doc/mpi_compatibility/index.html#known-implementation-issues">the
+  compatibility guide’s known issues</a> record a case where it does not.</li>
+</ol>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 320" role="img" style="min-width: 44rem" aria-label="Three stages of a four-process job. Start: mpiexec starts the same program four times and gives each copy its rank. Wire-up: inside MPI_Init each process puts its address into the launcher’s PMI service and reads the other three. Run: the processes message each other directly, and mpiexec only forwards their output.">
+  <defs>
+    <marker id="launch-arrow-steel" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" class="f-steel"/>
+    </marker>
+  </defs>
+
+  <line x1="295" y1="0" x2="295" y2="320" class="s-rule" stroke-width="1"/>
+  <line x1="605" y1="0" x2="605" y2="320" class="s-rule" stroke-width="1"/>
+
+  <g>
+    <text x="10" y="18" class="t-label"><tspan class="f-accent">1</tspan><tspan dx="8" class="f-muted">Start</tspan></text>
+    <rect x="65" y="40" width="150" height="50" rx="6" class="f-steel-soft s-steel" stroke-width="1.5"/>
+    <text x="140" y="70" text-anchor="middle" class="t-mono">mpiexec -n 4</text>
+    <line x1="140" y1="90" x2="140" y2="150" class="s-steel" stroke-width="1.5"/>
+    <line x1="38" y1="150" x2="242" y2="150" class="s-steel" stroke-width="1.5"/>
+    <line x1="38" y1="150" x2="38" y2="198" class="s-steel" stroke-width="1.5" marker-end="url(#launch-arrow-steel)"/>
+    <line x1="106" y1="150" x2="106" y2="198" class="s-steel" stroke-width="1.5" marker-end="url(#launch-arrow-steel)"/>
+    <line x1="174" y1="150" x2="174" y2="198" class="s-steel" stroke-width="1.5" marker-end="url(#launch-arrow-steel)"/>
+    <line x1="242" y1="150" x2="242" y2="198" class="s-steel" stroke-width="1.5" marker-end="url(#launch-arrow-steel)"/>
+    <text x="148" y="112" class="t-small f-muted">starts ./prog ×4</text>
+    <text x="148" y="127" class="t-small f-muted">sets rank, size, PMI</text>
+    <rect x="10" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <rect x="78" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <rect x="146" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <rect x="214" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <text x="38" y="221" text-anchor="middle" class="t-head">rank 0</text>
+    <text x="106" y="221" text-anchor="middle" class="t-head">rank 1</text>
+    <text x="174" y="221" text-anchor="middle" class="t-head">rank 2</text>
+    <text x="242" y="221" text-anchor="middle" class="t-head">rank 3</text>
+    <text x="38" y="239" text-anchor="middle" class="t-mono f-muted">./prog</text>
+    <text x="106" y="239" text-anchor="middle" class="t-mono f-muted">./prog</text>
+    <text x="174" y="239" text-anchor="middle" class="t-mono f-muted">./prog</text>
+    <text x="242" y="239" text-anchor="middle" class="t-mono f-muted">./prog</text>
+    <text x="140" y="306" text-anchor="middle" class="t-small f-muted">one program, four separate memories</text>
+  </g>
+
+  <g transform="translate(310 0)">
+    <text x="10" y="18" class="t-label"><tspan class="f-accent">2</tspan><tspan dx="8" class="f-muted">Wire-up, inside MPI_Init</tspan></text>
+    <rect x="10" y="40" width="260" height="82" rx="6" class="f-steel-soft s-steel" stroke-width="1.5"/>
+    <text x="20" y="58" class="t-small f-steel">PMI service in the launcher</text>
+    <rect x="12" y="68" width="52" height="34" rx="4" class="f-surface s-steel" stroke-width="1"/>
+    <rect x="80" y="68" width="52" height="34" rx="4" class="f-surface s-steel" stroke-width="1"/>
+    <rect x="148" y="68" width="52" height="34" rx="4" class="f-surface s-steel" stroke-width="1"/>
+    <rect x="216" y="68" width="52" height="34" rx="4" class="f-surface s-steel" stroke-width="1"/>
+    <text x="38" y="90" text-anchor="middle" class="t-mono">addr 0</text>
+    <text x="106" y="90" text-anchor="middle" class="t-mono">addr 1</text>
+    <text x="174" y="90" text-anchor="middle" class="t-mono">addr 2</text>
+    <text x="242" y="90" text-anchor="middle" class="t-mono">addr 3</text>
+    <line x1="38" y1="198" x2="38" y2="104" class="s-steel" stroke-width="1.5" marker-start="url(#launch-arrow-steel)" marker-end="url(#launch-arrow-steel)"/>
+    <line x1="106" y1="198" x2="106" y2="104" class="s-steel" stroke-width="1.5" marker-start="url(#launch-arrow-steel)" marker-end="url(#launch-arrow-steel)"/>
+    <line x1="174" y1="198" x2="174" y2="104" class="s-steel" stroke-width="1.5" marker-start="url(#launch-arrow-steel)" marker-end="url(#launch-arrow-steel)"/>
+    <line x1="242" y1="198" x2="242" y2="104" class="s-steel" stroke-width="1.5" marker-start="url(#launch-arrow-steel)" marker-end="url(#launch-arrow-steel)"/>
+    <text x="44" y="150" class="t-small f-muted">put</text>
+    <text x="44" y="166" class="t-small f-muted">get</text>
+    <rect x="10" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <rect x="78" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <rect x="146" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <rect x="214" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <text x="38" y="221" text-anchor="middle" class="t-head">rank 0</text>
+    <text x="106" y="221" text-anchor="middle" class="t-head">rank 1</text>
+    <text x="174" y="221" text-anchor="middle" class="t-head">rank 2</text>
+    <text x="242" y="221" text-anchor="middle" class="t-head">rank 3</text>
+    <g class="f-accent">
+      <rect x="18" y="231" width="7" height="7"/><rect x="29" y="231" width="7" height="7"/><rect x="40" y="231" width="7" height="7"/><rect x="51" y="231" width="7" height="7"/>
+      <rect x="86" y="231" width="7" height="7"/><rect x="97" y="231" width="7" height="7"/><rect x="108" y="231" width="7" height="7"/><rect x="119" y="231" width="7" height="7"/>
+      <rect x="154" y="231" width="7" height="7"/><rect x="165" y="231" width="7" height="7"/><rect x="176" y="231" width="7" height="7"/><rect x="187" y="231" width="7" height="7"/>
+      <rect x="222" y="231" width="7" height="7"/><rect x="233" y="231" width="7" height="7"/><rect x="244" y="231" width="7" height="7"/><rect x="255" y="231" width="7" height="7"/>
+    </g>
+    <text x="140" y="306" text-anchor="middle" class="t-small f-muted">each process now holds all four addresses</text>
+  </g>
+
+  <g transform="translate(620 0)">
+    <text x="10" y="18" class="t-label"><tspan class="f-accent">3</tspan><tspan dx="8" class="f-muted">Run</tspan></text>
+    <rect x="65" y="40" width="150" height="50" rx="6" class="f-steel-soft s-steel" stroke-width="1.5"/>
+    <text x="140" y="61" text-anchor="middle" class="t-mono">mpiexec</text>
+    <text x="140" y="79" text-anchor="middle" class="t-small f-steel">forwards output only</text>
+    <line x1="38" y1="198" x2="92" y2="94" class="s-steel" stroke-width="1.2" stroke-dasharray="4 4" marker-end="url(#launch-arrow-steel)"/>
+    <line x1="106" y1="198" x2="124" y2="94" class="s-steel" stroke-width="1.2" stroke-dasharray="4 4" marker-end="url(#launch-arrow-steel)"/>
+    <line x1="174" y1="198" x2="156" y2="94" class="s-steel" stroke-width="1.2" stroke-dasharray="4 4" marker-end="url(#launch-arrow-steel)"/>
+    <line x1="242" y1="198" x2="188" y2="94" class="s-steel" stroke-width="1.2" stroke-dasharray="4 4" marker-end="url(#launch-arrow-steel)"/>
+    <rect x="10" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <rect x="78" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <rect x="146" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <rect x="214" y="200" width="56" height="50" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+    <text x="38" y="221" text-anchor="middle" class="t-head">rank 0</text>
+    <text x="106" y="221" text-anchor="middle" class="t-head">rank 1</text>
+    <text x="174" y="221" text-anchor="middle" class="t-head">rank 2</text>
+    <text x="242" y="221" text-anchor="middle" class="t-head">rank 3</text>
+    <text x="38" y="239" text-anchor="middle" class="t-mono f-muted">./prog</text>
+    <text x="106" y="239" text-anchor="middle" class="t-mono f-muted">./prog</text>
+    <text x="174" y="239" text-anchor="middle" class="t-mono f-muted">./prog</text>
+    <text x="242" y="239" text-anchor="middle" class="t-mono f-muted">./prog</text>
+    <g fill="none" class="s-accent" stroke-width="1.6">
+      <path d="M38 250 Q72 274 106 250"/>
+      <path d="M106 250 Q140 274 174 250"/>
+      <path d="M174 250 Q208 274 242 250"/>
+      <path d="M38 250 Q106 298 174 250"/>
+      <path d="M106 250 Q174 298 242 250"/>
+      <path d="M38 250 Q140 322 242 250"/>
+    </g>
+    <text x="140" y="306" text-anchor="middle" class="t-small f-accent">direct: shared memory or network</text>
+  </g>
+</svg>
+</div>
+<figcaption>The launcher starts the same program four times and tells each copy
+its rank. Inside <code>MPI_Init</code>, each process puts its address into the
+launcher’s PMI service and gets the other three. From then on the processes
+exchange messages directly, and the launcher only forwards their output.</figcaption>
+</figure>
+
+<p>After wire-up the processes talk to each other directly, over shared memory
+or the network. The launcher carries no message data.</p>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Implementation</th><th>Launcher</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>MPICH</td><td>Hydra (<code>mpiexec.hydra</code>, installed as <code>mpiexec</code>)</td></tr>
+    <tr><td>Open MPI 4</td><td>ORTE (<code>mpirun</code>, <code>mpiexec</code>)</td></tr>
+    <tr><td>Open MPI 5</td><td>PRRTE (<code>mpirun</code>, <code>mpiexec</code>)</td></tr>
+    <tr><td>Slurm</td><td><code>srun --mpi=pmix</code> or <code>srun --mpi=pmi2</code>, whichever the MPI library supports</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="build-then-launch">Build, then launch the binary</h3>
+
+<pre data-lang="bash"><code>cargo build --release --example hello_world
+mpiexec -n 4 target/release/examples/hello_world</code></pre>
+
+<p><code>mpiexec -n 4 cargo run --example hello_world</code> also works once
+the build is up to date, but it starts four <code>cargo</code> processes, each
+of which checks the build before it runs the program. Build once and launch the
+binary.</p>
+
+<h3 id="without-a-launcher">A process started without a launcher</h3>
+
+<p>Run the binary on its own and MPI starts a job of one process: rank 0 of 1.
+The standard calls this a singleton <code>MPI_Init</code>, and MPICH and Open
+MPI support it. It is handy for a quick check, and it is how ferrompi’s one
+unit test that initializes MPI runs.</p>
+
+<h3 id="every-process-says-rank-0-of-1">When every process says “rank 0 of 1”</h3>
+
+<p>If <code>mpiexec -n 2</code> prints this:</p>
+
+<pre class="output"><code>Hello from rank 0 of 1 on node01
+Hello from rank 0 of 1 on node01</code></pre>
+
+<p>each process failed to reach the launcher’s service and started as a
+singleton. There are two usual causes:</p>
+
+<ul>
+  <li>The launcher comes from a different implementation than the library the
+  program is linked against, for example Open MPI’s <code>mpiexec</code>
+  starting a program built against MPICH. Each library talks only to its own
+  implementation’s launcher.</li>
+  <li>Ubuntu 24.04’s MPICH 4.2.0 package, which does this even under its own
+  launcher; <a href="index.html#before-you-start">Before you start</a> says
+  which package to use instead.</li>
+</ul>
+
+<p>Two commands tell you which implementation each side is:</p>
+
+<pre data-lang="bash"><code>mpiexec --version
+ldd target/release/examples/hello_world | grep -i mpi</code></pre>
+
+<p>The first names the launcher’s implementation; the second shows the MPI
+library the program loads: <code>libmpi.so.12</code> for an MPICH built from
+source, <code>libmpich.so.12</code> for the Debian and Ubuntu MPICH packages,
+and <code>libmpi.so.40</code> for Open MPI.
+<code>Mpi::library_version()</code> reports the same from inside the
+program.</p>
+
+<h2 id="initializing-and-finalizing">Initializing and finalizing MPI</h2>
+
+<p>The standard sets three rules:</p>
+
+<ul>
+  <li><code>MPI_Init</code> (or <code>MPI_Init_thread</code>) runs once per
+  process, before any other MPI call. A few queries, such as the version, are
+  allowed before it.</li>
+  <li><code>MPI_Finalize</code> runs once, after the process’s last MPI call.
+  Every process calls it, and a process completes all its communication before
+  calling it.</li>
+  <li>After <code>MPI_Finalize</code>, MPI cannot be initialized again.</li>
+</ul>
+
+<p>ferrompi turns these rules into a value.
+<a href="../ferrompi/struct.Mpi.html#method.init"><code>Mpi::init()</code></a>
+initializes MPI and returns an
+<a href="../ferrompi/struct.Mpi.html"><code>Mpi</code></a> handle, and
+dropping the handle finalizes MPI. There is one handle per process:</p>
+
+<ul>
+  <li>While the handle exists, a second <code>Mpi::init()</code> returns
+  <code>Err(<a href="../ferrompi/enum.Error.html#variant.AlreadyInitialized">Error::AlreadyInitialized</a>)</code>.</li>
+  <li>After the handle is dropped, <code>Mpi::init()</code> returns
+  <code>Err(<a href="../ferrompi/enum.Error.html#variant.Finalized">Error::Finalized</a>)</code>,
+  and so does every call that would reach MPI through a communicator or
+  another handle, without calling MPI.</li>
+</ul>
+
+<p><code>Mpi::init()</code> requests the <code>Single</code> thread level;
+<a href="../ferrompi/struct.Mpi.html#method.init_thread"><code>Mpi::init_thread</code></a>
+requests another one (chapter 6). <code>Mpi</code> is neither
+<code>Send</code> nor <code>Sync</code>, so it stays on the thread that
+initialized MPI.</p>
+
+<aside class="warn">
+<span class="label">Pitfall</span>
+<p>Because dropping the handle finalizes MPI, keep it in a named variable for
+as long as the program uses MPI. <code>let _ = Mpi::init()?;</code> finalizes
+at once: <code>_</code> binds nothing, so the handle is dropped at the end of
+that statement. Write <code>let _mpi = Mpi::init()?;</code> when you need the
+handle only to keep MPI initialized.</p>
+</aside>
+
+<p>A <a href="../ferrompi/struct.Communicator.html"><code>Communicator</code></a>
+does not borrow the <code>Mpi</code> handle, so one struct can own both. Rust
+drops a struct’s fields in declaration order, so declare the <code>Mpi</code>
+field last; every other handle in the struct is then freed while MPI is still
+initialized:</p>
+
+<pre data-lang="rust" data-run="2" id="context"><code>use ferrompi::{Communicator, Mpi};
+
+/// Fields drop in declaration order: `comm` is freed while MPI is still
+/// initialized, then `mpi` finalizes MPI.
+struct Context {
+    comm: Communicator,
+    mpi: Mpi,
+}
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let comm = mpi.world().duplicate()?;
+    let ctx = Context { comm, mpi };
+    println!(
+        "rank {} of {} at thread level {:?}",
+        ctx.comm.rank(),
+        ctx.comm.size(),
+        ctx.mpi.thread_level()
+    );
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="context"><code>rank 0 of 2 at thread level Single
+rank 1 of 2 at thread level Single</code></pre>
+
+<p>The order matters most for RMA windows (chapter 5): if a window is still
+alive when the <code>Mpi</code> handle is dropped, ferrompi skips
+<code>MPI_Finalize</code> and prints a warning. A communicator, group or
+datatype still alive at that point is freed by ferrompi’s own finalization
+instead, and its later drop makes no MPI call.
+<a href="11-the-safety-model.html#tokens">Chapter 11</a> lists every case in
+which <code>MPI_Finalize</code> is skipped; the
+<a href="../ferrompi/struct.Mpi.html">rustdoc of <code>Mpi</code></a> has the
+complete rule.</p>
+
+<h2 id="ranks-and-the-world-communicator">Ranks and the world communicator</h2>
+
+<p><code>mpi.world()</code> returns <code>MPI_COMM_WORLD</code>, the
+communicator of every process the launcher started. It makes no MPI call:
+ferrompi reads the rank and the size once, when MPI is initialized.
+<a href="../ferrompi/struct.Communicator.html#method.rank"><code>rank()</code></a>
+and
+<a href="../ferrompi/struct.Communicator.html#method.size"><code>size()</code></a>
+on any <code>Communicator</code> also return values read when that
+communicator was created.</p>
+
+<p>A rank belongs to a communicator, not to a process. The same process usually
+has different ranks in different communicators, so “rank 0” always means rank
+0 of some communicator.</p>
+
+<h2 id="communicators">Communicators</h2>
+
+<p>A communicator is a group of processes plus a context, a private channel
+that the MPI library assigns. A message sent on one communicator can be
+received only on that same communicator, never on another one, even one with
+the same processes and a message with the same tag.</p>
+
+<p>The context is what lets libraries share a program safely. If a program and
+a library it calls both send on the world communicator with tag 0, the program
+can receive a message the library meant for itself. A library that works on its
+own duplicate of the communicator has its own context and cannot be confused
+with its caller. That is what
+<a href="../ferrompi/struct.Communicator.html#method.duplicate"><code>duplicate()</code></a>
+(<code>MPI_Comm_dup</code>) is for: each component that communicates
+internally gets its own duplicate.</p>
+
+<h3 id="creating-is-collective">Creating a communicator is collective</h3>
+
+<p>A call that creates a communicator is collective over its parent: every
+process of the parent makes the same call, in the same order relative to the
+other collective calls on the parent. A process that skips it leaves the
+others waiting inside the call, and the job hangs. This holds for
+<code>duplicate</code>, <code>split</code>, <code>split_type</code>,
+<code>split_shared</code> and <code>create</code>;
+<a href="../ferrompi/struct.Communicator.html#method.create_group"><code>create_group</code></a>
+is collective only over the processes of the group.</p>
+
+<p>Dropping a <code>Communicator</code> frees it with
+<code>MPI_Comm_free</code>, which the standard also defines as collective: drop
+each communicator on every one of its processes, just as you created it on
+every one.</p>
+
+<h3 id="splitting-by-color-and-key">Splitting by color and key</h3>
+
+<p><a href="../ferrompi/struct.Communicator.html#method.split"><code>split(color, key)</code></a>
+puts the processes that pass the same color into the same new communicator,
+ordered by key; processes with equal keys keep their order in the parent. A
+process that passes <code>None</code> joins no communicator and gets
+<code>None</code> back. A negative color returns
+<code>Err(<a href="../ferrompi/enum.Error.html#variant.InvalidArgument">Error::InvalidArgument</a>)</code>
+on the process that passed it. That check is local, so the other processes
+still enter the split and can block waiting for this one.</p>
+
+<pre data-lang="rust" data-run="5" id="split-even-odd"><code>use ferrompi::Mpi;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // Even ranks take color 0 and odd ranks color 1. Keying on the world rank
+    // keeps the world's order inside each half.
+    if let Some(half) = world.split(Some(rank % 2), rank)? {
+        println!(
+            "world rank {rank} is rank {} of {} in its half",
+            half.rank(),
+            half.size()
+        );
+    }
+    Ok(())
+}</code></pre>
+
+<p>With five processes it prints:</p>
+
+<pre class="output" data-output-of="split-even-odd"><code>world rank 0 is rank 0 of 3 in its half
+world rank 1 is rank 0 of 2 in its half
+world rank 2 is rank 1 of 3 in its half
+world rank 3 is rank 1 of 2 in its half
+world rank 4 is rank 2 of 3 in its half</code></pre>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 760 300" role="img" aria-label="Five world ranks split by color. World ranks 0, 2 and 4 pass color 0 and become ranks 0, 1 and 2 of one new communicator; world ranks 1 and 3 pass color 1 and become ranks 0 and 1 of another.">
+  <defs>
+    <marker id="split-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+    <marker id="split-arrow-copper" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-copper"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="20" width="720" height="96" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="40" class="t-label f-muted">world · 5 processes</text>
+
+  <rect x="62" y="54" width="96" height="46" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="197" y="54" width="96" height="46" rx="6" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <rect x="332" y="54" width="96" height="46" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="467" y="54" width="96" height="46" rx="6" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <rect x="602" y="54" width="96" height="46" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="110" y="74" text-anchor="middle" class="t-head">rank 0</text>
+  <text x="245" y="74" text-anchor="middle" class="t-head">rank 1</text>
+  <text x="380" y="74" text-anchor="middle" class="t-head">rank 2</text>
+  <text x="515" y="74" text-anchor="middle" class="t-head">rank 3</text>
+  <text x="650" y="74" text-anchor="middle" class="t-head">rank 4</text>
+  <text x="110" y="91" text-anchor="middle" class="t-small f-accent">color 0 · key 0</text>
+  <text x="245" y="91" text-anchor="middle" class="t-small f-copper">color 1 · key 1</text>
+  <text x="380" y="91" text-anchor="middle" class="t-small f-accent">color 0 · key 2</text>
+  <text x="515" y="91" text-anchor="middle" class="t-small f-copper">color 1 · key 3</text>
+  <text x="650" y="91" text-anchor="middle" class="t-small f-accent">color 0 · key 4</text>
+
+  <rect x="20" y="180" width="420" height="102" rx="10" class="f-paper s-accent" stroke-width="1.2"/>
+  <text x="36" y="200" class="t-label f-accent">color 0 · 3 processes</text>
+  <rect x="470" y="180" width="270" height="102" rx="10" class="f-paper s-copper" stroke-width="1.2"/>
+  <text x="486" y="200" class="t-label f-copper">color 1 · 2 processes</text>
+
+  <g fill="none" stroke-width="1.5">
+    <line x1="110" y1="100" x2="110" y2="213" class="s-accent" marker-end="url(#split-arrow-accent)"/>
+    <line x1="380" y1="100" x2="230" y2="213" class="s-accent" marker-end="url(#split-arrow-accent)"/>
+    <line x1="650" y1="100" x2="350" y2="213" class="s-accent" marker-end="url(#split-arrow-accent)"/>
+    <line x1="245" y1="100" x2="550" y2="213" class="s-copper" marker-end="url(#split-arrow-copper)"/>
+    <line x1="515" y1="100" x2="660" y2="213" class="s-copper" marker-end="url(#split-arrow-copper)"/>
+  </g>
+
+  <rect x="62" y="216" width="96" height="46" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="182" y="216" width="96" height="46" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="302" y="216" width="96" height="46" rx="6" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <rect x="502" y="216" width="96" height="46" rx="6" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <rect x="612" y="216" width="96" height="46" rx="6" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="110" y="236" text-anchor="middle" class="t-head">rank 0</text>
+  <text x="230" y="236" text-anchor="middle" class="t-head">rank 1</text>
+  <text x="350" y="236" text-anchor="middle" class="t-head">rank 2</text>
+  <text x="550" y="236" text-anchor="middle" class="t-head">rank 0</text>
+  <text x="660" y="236" text-anchor="middle" class="t-head">rank 1</text>
+  <text x="110" y="253" text-anchor="middle" class="t-small f-muted">world 0</text>
+  <text x="230" y="253" text-anchor="middle" class="t-small f-muted">world 2</text>
+  <text x="350" y="253" text-anchor="middle" class="t-small f-muted">world 4</text>
+  <text x="550" y="253" text-anchor="middle" class="t-small f-muted">world 1</text>
+  <text x="660" y="253" text-anchor="middle" class="t-small f-muted">world 3</text>
+</svg>
+</div>
+<figcaption><code>split(Some(rank % 2), rank)</code> on five processes. The
+color picks the new communicator and the key orders the processes inside it:
+world ranks 0, 2 and 4 become ranks 0, 1 and 2 of the color-0 communicator,
+and world ranks 1 and 3 become ranks 0 and 1 of the color-1
+communicator.</figcaption>
+</figure>
+
+<p><a href="https://github.com/cobre-rs/ferrompi/blob/main/examples/comm_split.rs"><code>examples/comm_split.rs</code></a>
+is the same split, followed by a reduction inside each half.</p>
+
+<h3 id="one-communicator-per-node">One communicator per node</h3>
+
+<p><a href="../ferrompi/struct.Communicator.html#method.split_shared"><code>split_shared()</code></a>
+(<code>MPI_Comm_split_type</code> with <code>MPI_COMM_TYPE_SHARED</code>)
+groups the processes that can share memory, which in practice means the
+processes on one node. It is the starting point for node-shared memory windows
+(chapter 5) and for a two-level layout in which one process per node, the node
+leader, talks to the other nodes:</p>
+
+<pre data-lang="rust" data-run="4" id="node-leaders"><code>use ferrompi::Mpi;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    // The processes on this node.
+    let node = world.split_shared()?;
+
+    // One leader per node: local rank 0 joins, every other process opts out.
+    let color = if node.rank() == 0 { Some(0) } else { None };
+    match world.split(color, world.rank())? {
+        Some(leaders) =&gt; println!(
+            "world rank {}: leader {} of {}, with {} processes on its node",
+            world.rank(),
+            leaders.rank(),
+            leaders.size(),
+            node.size()
+        ),
+        None =&gt; println!(
+            "world rank {}: local rank {} on its node",
+            world.rank(),
+            node.rank()
+        ),
+    }
+    Ok(())
+}</code></pre>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 760 300" role="img" aria-label="Eight processes on two nodes. Each node has its own node communicator with local ranks 0 to 3. World ranks 0 and 4, local rank 0 on each node, also form a leaders communicator in which they are leaders 0 and 1.">
+  <text x="380" y="14" text-anchor="middle" class="t-label f-muted">world · 8 processes</text>
+  <path d="M20 30 V24 H740 V30" fill="none" class="s-muted" stroke-width="1"/>
+
+  <rect x="20" y="40" width="350" height="170" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <rect x="390" y="40" width="350" height="170" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="62" class="t-mono f-muted">node01</text>
+  <text x="406" y="62" class="t-mono f-muted">node02</text>
+
+  <rect x="30" y="76" width="330" height="122" rx="8" class="f-steel-soft s-steel" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <rect x="400" y="76" width="330" height="122" rx="8" class="f-steel-soft s-steel" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <text x="44" y="96" class="t-label f-steel">node communicator</text>
+  <text x="414" y="96" class="t-label f-steel">node communicator</text>
+
+  <rect x="35" y="112" width="74" height="56" rx="6" class="f-copper-soft s-copper" stroke-width="2"/>
+  <rect x="117" y="112" width="74" height="56" rx="6" class="f-surface s-muted" stroke-width="1.2"/>
+  <rect x="199" y="112" width="74" height="56" rx="6" class="f-surface s-muted" stroke-width="1.2"/>
+  <rect x="281" y="112" width="74" height="56" rx="6" class="f-surface s-muted" stroke-width="1.2"/>
+  <rect x="405" y="112" width="74" height="56" rx="6" class="f-copper-soft s-copper" stroke-width="2"/>
+  <rect x="487" y="112" width="74" height="56" rx="6" class="f-surface s-muted" stroke-width="1.2"/>
+  <rect x="569" y="112" width="74" height="56" rx="6" class="f-surface s-muted" stroke-width="1.2"/>
+  <rect x="651" y="112" width="74" height="56" rx="6" class="f-surface s-muted" stroke-width="1.2"/>
+  <text x="72" y="136" text-anchor="middle" class="t-head">world 0</text>
+  <text x="154" y="136" text-anchor="middle" class="t-head">world 1</text>
+  <text x="236" y="136" text-anchor="middle" class="t-head">world 2</text>
+  <text x="318" y="136" text-anchor="middle" class="t-head">world 3</text>
+  <text x="442" y="136" text-anchor="middle" class="t-head">world 4</text>
+  <text x="524" y="136" text-anchor="middle" class="t-head">world 5</text>
+  <text x="606" y="136" text-anchor="middle" class="t-head">world 6</text>
+  <text x="688" y="136" text-anchor="middle" class="t-head">world 7</text>
+  <text x="72" y="155" text-anchor="middle" class="t-small f-steel">local 0</text>
+  <text x="154" y="155" text-anchor="middle" class="t-small f-steel">local 1</text>
+  <text x="236" y="155" text-anchor="middle" class="t-small f-steel">local 2</text>
+  <text x="318" y="155" text-anchor="middle" class="t-small f-steel">local 3</text>
+  <text x="442" y="155" text-anchor="middle" class="t-small f-steel">local 0</text>
+  <text x="524" y="155" text-anchor="middle" class="t-small f-steel">local 1</text>
+  <text x="606" y="155" text-anchor="middle" class="t-small f-steel">local 2</text>
+  <text x="688" y="155" text-anchor="middle" class="t-small f-steel">local 3</text>
+
+  <path d="M72 168 V246 Q72 258 84 258 H430 Q442 258 442 246 V168" fill="none" class="s-copper" stroke-width="2.2"/>
+  <text x="80" y="236" class="t-small f-copper">leader 0</text>
+  <text x="450" y="236" class="t-small f-copper">leader 1</text>
+  <text x="257" y="282" text-anchor="middle" class="t-label f-copper">leaders communicator · 2 processes</text>
+</svg>
+</div>
+<figcaption>The node-leader program on two nodes with four processes each, the
+launcher placing world ranks 0–3 on <code>node01</code>.
+<code>split_shared</code> gives each node a communicator with local ranks 0 to
+3; the two processes with local rank 0 then form the leaders communicator.
+World rank 4 has three ranks: 4 in the world, 0 on its node and 1 among the
+leaders.</figcaption>
+</figure>
+
+<h3 id="groups">Groups</h3>
+
+<p>A group is an ordered set of processes without a context.
+<a href="../ferrompi/struct.Communicator.html#method.group"><code>world.group()</code></a>
+returns a communicator’s group, and
+<a href="../ferrompi/struct.Group.html#method.include"><code>Group::include</code></a>
+and
+<a href="../ferrompi/struct.Group.html#method.exclude"><code>Group::exclude</code></a>
+build smaller groups from it. Group operations are local and make no
+communication. Turning a group into a communicator is collective:
+<a href="../ferrompi/struct.Communicator.html#method.create"><code>create</code></a>
+over the parent communicator, <code>create_group</code> over the processes of
+the group. Most programs need only <code>split</code>.</p>
+
+<h2 id="when-something-goes-wrong">When something goes wrong</h2>
+
+<p>MPI’s default reaction to an error is to abort the whole job. ferrompi
+installs MPI’s <code>MPI_ERRORS_RETURN</code> handler instead, so a failing
+call returns <code>Err</code>. The exception is an error inside
+<code>MPI_Init</code> itself, which usually aborts the process before
+<code>Mpi::init()</code> can return.</p>
+
+<p>An <code>Err</code>, a panic or an early return on one process is not
+reported to the others. They carry on until they need that process, usually at
+their next collective call, and wait there. Whether the launcher then ends the
+job depends on how the process exited and on the launcher, so give every batch
+job a time limit.</p>
+
+<p>To end the whole job on purpose, call
+<a href="../ferrompi/struct.Communicator.html#method.abort"><code>world.abort(code)</code></a>,
+which wraps <code>MPI_Abort</code> and never returns. MPI makes a best effort
+to end every process of the communicator; if <code>MPI_Abort</code> returns
+anyway, ferrompi ends the calling process with
+<code>std::process::abort</code>. Use it when one process meets an error the
+others cannot recover from. Returning <code>Err</code> from <code>main</code>
+on that one process does not stop the others.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>Build <code>examples/hello_world.rs</code> and run it with
+  <code>-n 1</code>, <code>-n 2</code> and <code>-n 4</code>, then run the
+  binary without <code>mpiexec</code>. A run with n processes prints n
+  different ranks; if yours does not, read
+  <a href="#every-process-says-rank-0-of-1">When every process says “rank 0 of
+  1”</a>.</li>
+  <li>Run the version program and compare its output with
+  <code>mpiexec --version</code>. Which standard version does your library
+  implement, and does ferrompi enable persistent collectives on it?
+  <a href="../ferrompi/doc/mpi_compatibility/index.html#platforms-and-mpi-libraries">The
+  compatibility guide</a> has the answer.</li>
+  <li>In the even/odd split, change the key to <code>world.size() - rank</code>.
+  Predict each process’s rank in its half with five processes, then run
+  it.</li>
+  <li>Run the node-leader program with <code>-n 4</code> on one machine. How
+  many leaders do you expect, and what node size does each process
+  report?</li>
+  <li>Make rank 0 skip the split: call <code>world.split(..)</code> only when
+  <code>rank != 0</code>, and run with <code>-n 2</code>. The job hangs,
+  because the other process waits inside the split for a process that never
+  calls it. Stop it with Ctrl-C. This is what a mismatched collective call
+  looks like.</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>MPI is a standard. MPICH and Open MPI implement it, and ferrompi builds
+  on one of them, chosen when ferrompi is built.</li>
+  <li>A job is n processes running one program. They share no memory, and each
+  one is identified by its rank.</li>
+  <li>The launcher starts the processes and wires them up, then carries no
+  data. The launcher and the library must come from the same
+  implementation.</li>
+  <li><code>Mpi::init()</code> returns the one <code>Mpi</code> handle of the
+  process, and dropping it finalizes MPI. Keep it alive for as long as you use
+  MPI, and declare it last in a struct that owns other handles.</li>
+  <li>All communication happens on a communicator, and contexts keep
+  communicators apart. Creating or freeing a communicator is collective.</li>
+  <li>An error stays on the process where it happened. A process that stops
+  taking part makes the others hang; <code>abort</code> ends the whole
+  job.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="index.html">Contents</a>
+  <a class="next" href="02-point-to-point.html">Next: chapter 2, point-to-point communication</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

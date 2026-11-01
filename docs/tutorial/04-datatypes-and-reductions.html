@@ -1,0 +1,1316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>4. Datatypes and reductions · ferrompi tutorial</title>
+<meta name="description" content="How MPI types the data in a message: derived datatypes for structs, columns and strided data, MAXLOC and MINLOC, reduce-scatter, and reduction operations you define yourself.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#types-in-a-message">Types in a message</a></li>
+      <li><a href="#derived-datatypes">Derived datatypes</a></li>
+      <li><a href="#where-the-maximum-is">Where the maximum is</a></li>
+      <li><a href="#reduce-scatter">Reduce-scatter</a></li>
+      <li><a href="#operations-you-define">Operations you define</a></li>
+      <li><a href="#when-types-do-not-match">When types do not match</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part I · Chapter 4</p>
+<h1>Datatypes and reductions</h1>
+
+<p class="lede">Every MPI message is a sequence of typed values, and every
+reduction combines values with an operation. This chapter covers data that is
+not one plain slice, such as part of a struct or a column of a grid, and
+reductions that MPI does not predefine.</p>
+
+<p>By the end of the chapter you can describe a struct or a strided layout to
+MPI, find which process holds a maximum, give each process one block of a
+reduced result, and write a reduction of your own. The chapter assumes
+<a href="02-point-to-point.html">chapter 2</a> for sends and receives and
+<a href="03-collective-communication.html#reductions">chapter 3</a> for
+reductions and scans.</p>
+
+<h2 id="types-in-a-message">Types in a message</h2>
+
+<p>An MPI call describes a buffer with three things: its address, a count, and
+a datatype. The datatype says what each element is, and so how many bytes it
+takes. In ferrompi the slice’s element type picks the datatype, and the slice’s
+length is the count:</p>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Rust type</th><th>MPI datatype</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>f32</code></td><td><code>MPI_FLOAT</code></td></tr>
+    <tr><td><code>f64</code></td><td><code>MPI_DOUBLE</code></td></tr>
+    <tr><td><code>i32</code></td><td><code>MPI_INT32_T</code></td></tr>
+    <tr><td><code>i64</code></td><td><code>MPI_INT64_T</code></td></tr>
+    <tr><td><code>u8</code></td><td><code>MPI_UINT8_T</code></td></tr>
+    <tr><td><code>u32</code></td><td><code>MPI_UINT32_T</code></td></tr>
+    <tr><td><code>u64</code></td><td><code>MPI_UINT64_T</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>These are the types that implement
+<a href="../ferrompi/trait.MpiDatatype.html"><code>MpiDatatype</code></a>.
+The trait is sealed, so no other type can claim an MPI datatype that does not
+describe it.</p>
+
+<p>MPI defines a message by its <dfn>type signature</dfn>: the sequence of
+basic types it holds, such as two <code>MPI_DOUBLE</code>. A receive matches
+the message only if its own datatype and count give the same sequence, or a
+longer one that starts with it
+(<a href="02-point-to-point.html#when-a-receive-fails">chapter 2</a>). The
+rule is about types, not bytes. Two <code>f64</code> and two <code>i64</code>
+are both 16 bytes, but their signatures differ, and receiving one as the other
+is an error. The libraries do not check it, and
+<a href="#when-types-do-not-match">When types do not match</a> shows what
+happens instead.</p>
+
+<p>Types, not bytes, because a library may have to convert. MPI allows a job to
+span machines that store numbers differently, in another byte order say, and
+the datatype is what tells the library how to translate each value. Few
+clusters mix such machines today; on the common ones the bytes arrive as they
+were sent.</p>
+
+<p>One datatype carries no meaning: <code>MPI_BYTE</code>, a byte that is never
+converted. ferrompi uses it in
+<a href="../ferrompi/struct.Communicator.html#method.allreduce_bytes"><code>allreduce_bytes(send, recv, op)</code></a>,
+a <code>BitwiseOr</code>, <code>BitwiseAnd</code> or <code>BitwiseXor</code>
+reduction on slices of any
+<a href="../ferrompi/trait.BytePermutable.html"><code>BytePermutable</code></a>
+type. Those are the integer types, including <code>i8</code>,
+<code>i16</code> and <code>u16</code>, which have no MPI datatype in ferrompi,
+and arrays of them. A bitwise operation treats each bit on its own, so it gives
+the same result on the bytes as on the integers they make up.</p>
+
+<h2 id="derived-datatypes">Derived datatypes</h2>
+
+<p>A slice of <code>f64</code> is one basic type, repeated, with no gaps. Much
+real data is not like that. A struct mixes types and may hold fields that
+should not travel, and a column of a grid stored row by row is spread through
+memory at a fixed stride. You could copy such data into a contiguous buffer,
+send that, and copy it out again on the other side. A <dfn>derived
+datatype</dfn> describes the layout to MPI instead, and the library reads the
+values from where they are and writes them where they belong.</p>
+
+<p>A derived datatype is a <dfn>type map</dfn>: a list of basic types, each at
+a byte displacement from the start of the element. Its type signature is the
+list of types without the displacements. Its <dfn>lower bound</dfn> and
+<dfn>upper bound</dfn> are where its data begins and ends, the upper bound
+rounded up for alignment, and its <dfn>extent</dfn> is the distance between
+them. When a buffer holds several elements of the type, element <i>k</i>
+starts <i>k</i> extents after the first.
+<a href="../ferrompi/struct.CustomDatatype.html"><code>CustomDatatype</code></a>
+builds them:</p>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Constructor</th><th>MPI function</th><th>Type map</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><a href="../ferrompi/struct.CustomDatatype.html#method.contiguous"><code>contiguous::&lt;T&gt;(count)</code></a></td>
+    <td><code>MPI_Type_contiguous</code></td>
+    <td><code>count</code> values of <code>T</code> in a row</td></tr>
+    <tr><td><a href="../ferrompi/struct.CustomDatatype.html#method.vector"><code>vector::&lt;T&gt;(count, blocklength, stride)</code></a></td>
+    <td><code>MPI_Type_vector</code></td>
+    <td><code>count</code> blocks of <code>blocklength</code> values of
+    <code>T</code>, each block starting <code>stride</code> values after the
+    one before</td></tr>
+    <tr><td><a href="../ferrompi/struct.CustomDatatype.html#method.create_struct"><code>create_struct(&amp;fields)</code></a></td>
+    <td><code>MPI_Type_create_struct</code></td>
+    <td>for each
+    <a href="../ferrompi/struct.StructField.html"><code>StructField::new::&lt;T&gt;(blocklength, displacement)</code></a>,
+    <code>blocklength</code> values of <code>T</code> at
+    <code>displacement</code> bytes</td></tr>
+    <tr><td><a href="../ferrompi/struct.CustomDatatype.html#method.resized"><code>dt.resized(lb, extent)</code></a></td>
+    <td><code>MPI_Type_create_resized</code></td>
+    <td><code>dt</code>’s type map, with a new lower bound and extent, in
+    bytes</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Every base type <code>T</code> is an <code>MpiDatatype</code>: a struct
+field cannot be another derived type. Each constructor commits the type
+(<code>MPI_Type_commit</code>) before it returns, and dropping the
+<code>CustomDatatype</code> frees it (<code>MPI_Type_free</code>). A process
+can hold 64 at a time; one more returns
+<code>Err(Error::ResourceExhausted)</code>.</p>
+
+<p><a href="../ferrompi/struct.Communicator.html#method.send_custom"><code>send_custom(buf, &amp;dt, dest, tag)</code></a>
+and
+<a href="../ferrompi/struct.Communicator.html#method.recv_custom"><code>recv_custom(buf, &amp;dt, source, tag)</code></a>
+send and receive with a derived datatype, and
+<a href="../ferrompi/struct.Communicator.html#method.isend_custom"><code>isend_custom</code></a>
+and
+<a href="../ferrompi/struct.Communicator.html#method.irecv_custom"><code>irecv_custom</code></a>
+are their nonblocking forms. The datatype describes one element of the slice,
+whose element type <code>T</code> is yours to choose, and the count is the
+slice’s length. Before it calls MPI, ferrompi checks that the datatype fits
+that element: its extent must be <code>size_of::&lt;T&gt;()</code>, and its
+data must lie within one <code>T</code>. Otherwise the call returns
+<code>Err(Error::InvalidArgument)</code> with <code>arg: "datatype"</code>.
+MPI reads and writes the buffer wherever the type map points, element after
+element, and the two checks keep every one of those places inside the slice.
+Derived datatypes work with these point-to-point calls only; ferrompi’s
+collectives take slices of <code>MpiDatatype</code> types.</p>
+
+<p>The element type must implement
+<a href="../ferrompi/trait.PlainData.html"><code>PlainData</code></a>, an
+<code>unsafe</code> trait that promises every bit pattern is a valid value,
+because a receive writes whatever bytes arrive. Numbers qualify, and so do
+<code>#[repr(C)]</code> structs and arrays of numbers. A reference, a
+<code>Box</code> or <code>Vec</code>, a <code>bool</code>, a
+<code>char</code>, an enum or a <code>NonZero</code> integer does not: some of
+its bit patterns are not values. The primitive types, and arrays of
+<code>PlainData</code> types, implement it already. For a struct of your own
+you write the <code>unsafe impl</code>, with a comment that says why it
+holds.</p>
+
+<h3 id="sending-part-of-a-struct">Sending part of a struct</h3>
+
+<p>A particle simulation moves particles between processes as they cross from
+one process’s region into another’s. The new owner needs each particle’s
+position and id, but not the force on it, which it recomputes. This program
+sends three particles without their forces:</p>
+
+<pre data-lang="rust" data-run="2" id="particles"><code>use std::mem::{offset_of, size_of};
+
+use ferrompi::{CustomDatatype, Mpi, PlainData, StructField};
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Particle {
+    pos: [f64; 3],
+    id: i64,
+    // Recomputed by the process that owns the particle, so never sent.
+    force: [f64; 3],
+}
+
+// SAFETY: Particle is #[repr(C)] and holds only f64 and i64 values, for which
+// every bit pattern is valid.
+unsafe impl PlainData for Particle {}
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    // The fields to send, at their byte offsets in a Particle.
+    let fields = CustomDatatype::create_struct(&amp;[
+        StructField::new::&lt;f64&gt;(3, offset_of!(Particle, pos) as i64),
+        StructField::new::&lt;i64&gt;(1, offset_of!(Particle, id) as i64),
+    ])?;
+    // That type ends where `id` does. Stretch its extent to a whole Particle,
+    // so that element k of a slice starts k Particles in.
+    let particle = fields.resized(0, size_of::&lt;Particle&gt;() as i64)?;
+
+    match world.rank() {
+        0 =&gt; {
+            let leaving: Vec&lt;Particle&gt; = (0..3)
+                .map(|k| Particle {
+                    pos: [k as f64, 0.5, 1.0],
+                    id: 100 + k,
+                    force: [9.9; 3],
+                })
+                .collect();
+            world.send_custom(&amp;leaving, &amp;particle, 1, 0)?;
+        }
+        1 =&gt; {
+            let empty = Particle { pos: [0.0; 3], id: 0, force: [0.0; 3] };
+            let mut arriving = [empty; 3];
+            let status = world.recv_custom(&amp;mut arriving, &amp;particle, 0, 0)?;
+            println!("received {:?} particles", status.count);
+            for p in &amp;arriving {
+                println!("id {} at {:?}, force {:?}", p.id, p.pos, p.force);
+            }
+        }
+        _ =&gt; {}
+    }
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="particles"><code>received Some(3) particles
+id 100 at [0.0, 0.5, 1.0], force [0.0, 0.0, 0.0]
+id 101 at [1.0, 0.5, 1.0], force [0.0, 0.0, 0.0]
+id 102 at [2.0, 0.5, 1.0], force [0.0, 0.0, 0.0]</code></pre>
+
+<p>The type lists two blocks: three <code>f64</code> at the offset of
+<code>pos</code>, and one <code>i64</code> at the offset of <code>id</code>.
+<code>offset_of!</code> gives the offsets the compiler chose, and
+<code>#[repr(C)]</code> makes those the C layout, in field order. The type ends
+where <code>id</code> does, at byte 32, so as built its extent is 32 bytes,
+while a <code>Particle</code> is 56. <code>resized(0, 56)</code> keeps the type
+map and makes the extent one particle, so element 1 starts where the second
+particle does.</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 300" role="img" aria-label="Two Particles in memory, 56 bytes each: pos, 24 bytes at offset 0; id, 8 bytes at offset 24; force, 24 bytes at offset 32. The struct type lists pos and id only, so as built its extent is 32 bytes, and a second element would start at byte 32, inside the first particle’s force: ferrompi rejects it. Resized to 56 bytes, element 1 starts at byte 56, where the second particle does. The message holds only pos and id of each particle: 64 bytes for two.">
+  <text x="20" y="74" class="t-label f-muted">memory</text>
+  <text x="345" y="44" text-anchor="middle" class="t-mono">particles[0]</text>
+  <rect x="170" y="56" width="150" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="245" y="74" text-anchor="middle" class="t-mono">pos</text>
+  <rect x="320" y="56" width="50" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="345" y="74" text-anchor="middle" class="t-mono">id</text>
+  <rect x="370" y="56" width="150" height="28" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="445" y="74" text-anchor="middle" class="t-mono f-muted">force</text>
+  <text x="695" y="44" text-anchor="middle" class="t-mono">particles[1]</text>
+  <rect x="520" y="56" width="150" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="595" y="74" text-anchor="middle" class="t-mono">pos</text>
+  <rect x="670" y="56" width="50" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="695" y="74" text-anchor="middle" class="t-mono">id</text>
+  <rect x="720" y="56" width="150" height="28" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="795" y="74" text-anchor="middle" class="t-mono f-muted">force</text>
+  <line x1="170" y1="88" x2="170" y2="94" class="s-muted" stroke-width="1"/>
+  <text x="170" y="107" text-anchor="middle" class="t-small f-muted">0</text>
+  <line x1="320" y1="88" x2="320" y2="94" class="s-muted" stroke-width="1"/>
+  <text x="320" y="107" text-anchor="middle" class="t-small f-muted">24</text>
+  <line x1="370" y1="88" x2="370" y2="94" class="s-muted" stroke-width="1"/>
+  <text x="370" y="107" text-anchor="middle" class="t-small f-muted">32</text>
+  <line x1="520" y1="88" x2="520" y2="94" class="s-muted" stroke-width="1"/>
+  <text x="520" y="107" text-anchor="middle" class="t-small f-muted">56</text>
+  <line x1="670" y1="88" x2="670" y2="94" class="s-muted" stroke-width="1"/>
+  <text x="670" y="107" text-anchor="middle" class="t-small f-muted">80</text>
+  <line x1="720" y1="88" x2="720" y2="94" class="s-muted" stroke-width="1"/>
+  <text x="720" y="107" text-anchor="middle" class="t-small f-muted">88</text>
+  <line x1="870" y1="88" x2="870" y2="94" class="s-muted" stroke-width="1"/>
+  <text x="870" y="107" text-anchor="middle" class="t-small f-muted">112</text>
+  <text x="20" y="107" class="t-label f-muted">byte</text>
+  <text x="20" y="146" class="t-label f-muted">as built</text>
+  <rect x="170" y="130" width="200" height="24" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="270" y="146" text-anchor="middle" class="t-small">extent 32</text>
+  <rect x="370" y="130" width="200" height="24" rx="4" fill="none" class="s-copper" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <text x="470" y="146" text-anchor="middle" class="t-small">element 1 at byte 32</text>
+  <text x="582" y="146" class="t-small f-muted">rejected: not one Particle</text>
+  <text x="20" y="200" class="t-label f-muted">resized</text>
+  <rect x="170" y="184" width="350" height="24" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="345" y="200" text-anchor="middle" class="t-small">element 0: extent 56</text>
+  <rect x="520" y="184" width="350" height="24" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="695" y="200" text-anchor="middle" class="t-small">element 1: extent 56</text>
+  <text x="20" y="266" class="t-label f-muted">message</text>
+  <rect x="170" y="248" width="150" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="245" y="266" text-anchor="middle" class="t-mono">pos</text>
+  <rect x="320" y="248" width="50" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="345" y="266" text-anchor="middle" class="t-mono">id</text>
+  <rect x="370" y="248" width="150" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="445" y="266" text-anchor="middle" class="t-mono">pos</text>
+  <rect x="520" y="248" width="50" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="545" y="266" text-anchor="middle" class="t-mono">id</text>
+  <text x="582" y="266" class="t-small f-muted">64 bytes for two particles</text>
+</svg>
+</div>
+<figcaption>The particle type against two particles in memory. As built, the
+type ends with <code>id</code>, and a second element would begin inside the
+first particle’s force, which ferrompi rejects. Resized to 56 bytes, each
+element covers one particle. Only <code>pos</code> and <code>id</code> travel:
+64 bytes for two particles, against 112 in memory.</figcaption>
+</figure>
+
+<p>Pass <code>fields</code> instead of <code>particle</code>, without the
+resize, and both processes stop at the check, before either calls MPI:</p>
+
+<pre class="output"><code>Error: InvalidArgument { arg: "datatype", reason: "extent differs from the element size" }
+Error: InvalidArgument { arg: "datatype", reason: "extent differs from the element size" }</code></pre>
+
+<p>The receiver’s <code>force</code> fields kept the zeros they held: a receive
+writes only where the type map points. The count in the status is in elements
+of the datatype, three particles, not in basic values.</p>
+
+<p>To send a whole struct, list every field. The upper bound is then the end of
+the last field, rounded up to the alignment of the most-aligned one, which for
+a <code>#[repr(C)]</code> struct usually makes the extent
+<code>size_of</code>. But each library applies its own idea of alignment, so
+resize to <code>size_of::&lt;T&gt;()</code> anyway. It costs nothing, and the
+check then passes under every library.</p>
+
+<h3 id="sending-a-column">Sending a column</h3>
+
+<p><a href="02-point-to-point.html#a-halo-exchange">Chapter 2’s halo
+exchange</a> split a line of cells among the processes, and each process sent
+its edge cells to its neighbors. Split a grid into blocks side by side
+instead, and the edge to send is a column. In a grid stored row by row, the
+entries of a column are one row apart in memory.</p>
+
+<p>In C, the usual column type is <code>MPI_Type_vector(rows, 1, N)</code>:
+one value per row, <i>N</i> values apart, sent as a single element that starts
+at the column’s first entry. In ferrompi a datatype describes one element of a
+slice, and a grid stored as a slice of rows has rows for elements. So the
+column type is one row long and holds one entry: an <code>f64</code> at the
+column’s offset, resized to the length of a row. Element <i>i</i> of the slice
+is then row <i>i</i>’s entry, and the elements together make up the
+column:</p>
+
+<pre data-lang="rust" data-run="2" id="column"><code>use std::mem::size_of;
+
+use ferrompi::{CustomDatatype, Mpi, StructField};
+
+/// A row: a ghost entry at each end, and the two entries this process owns.
+type Row = [f64; 4];
+
+/// Column `j` of a slice of rows: the entry at column `j`, in a type one row
+/// long, so element `i` of the slice is row `i`'s entry.
+fn column(j: usize) -&gt; ferrompi::Result&lt;CustomDatatype&gt; {
+    let offset = (j * size_of::&lt;f64&gt;()) as i64;
+    let entry = CustomDatatype::create_struct(&amp;[StructField::new::&lt;f64&gt;(1, offset)])?;
+    entry.resized(0, size_of::&lt;Row&gt;() as i64)
+}
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank() as usize;
+
+    // Each process owns columns 1 and 2 of three rows of a grid, stored row by
+    // row; columns 0 and 3 are ghosts, for copies of the neighbors' edges. The
+    // owned entry (i, j) of rank r is 100 r + 10 i + j; the ghosts start at 0.
+    let mut block: Vec&lt;Row&gt; = (0..3)
+        .map(|i| {
+            std::array::from_fn(|j| match j {
+                1 | 2 =&gt; (100 * rank + 10 * i + j) as f64,
+                _ =&gt; 0.0,
+            })
+        })
+        .collect();
+
+    match rank {
+        // Rank 1's block sits to the right of rank 0's, so rank 0's last owned
+        // column, 2, is rank 1's left ghost column, 0.
+        0 =&gt; world.send_custom(&amp;block, &amp;column(2)?, 1, 0)?,
+        1 =&gt; {
+            world.recv_custom(&amp;mut block, &amp;column(0)?, 0, 0)?;
+            for (i, row) in block.iter().enumerate() {
+                println!("rank 1, row {i}: {row:?}");
+            }
+        }
+        _ =&gt; {}
+    }
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="column"><code>rank 1, row 0: [2.0, 101.0, 102.0, 0.0]
+rank 1, row 1: [12.0, 111.0, 112.0, 0.0]
+rank 1, row 2: [22.0, 121.0, 122.0, 0.0]</code></pre>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 372" role="img" aria-label="Top: rank 0’s and rank 1’s blocks of a grid, three rows of four columns each; columns 0 and 3 are ghosts. Rank 0’s column 2, holding 2, 12 and 22, is sent to rank 1’s ghost column 0. Bottom: the same blocks in memory, row after row. The column type holds one f64 and is one row long, so element i of the slice is the entry of row i: rank 0 sends the third entry of each row, the message is the three values 2, 12 and 22 in a row, and rank 1 writes them into the first entry of each of its rows." style="min-width: 44rem">
+  <defs>
+    <marker id="col-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+  <text x="324" y="26" text-anchor="middle" class="t-head">rank 0</text>
+  <text x="258" y="46" text-anchor="middle" class="t-small f-muted">0</text>
+  <text x="302" y="46" text-anchor="middle" class="t-small f-muted">1</text>
+  <text x="346" y="46" text-anchor="middle" class="t-small f-muted">2</text>
+  <text x="390" y="46" text-anchor="middle" class="t-small f-muted">3</text>
+  <text x="226" y="70" text-anchor="end" class="t-small f-muted">row 0</text>
+  <rect x="238" y="54" width="40" height="24" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="258" y="70" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="282" y="54" width="40" height="24" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="302" y="70" text-anchor="middle" class="t-mono">1</text>
+  <rect x="326" y="54" width="40" height="24" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="346" y="70" text-anchor="middle" class="t-mono">2</text>
+  <rect x="370" y="54" width="40" height="24" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="390" y="70" text-anchor="middle" class="t-mono f-muted">0</text>
+  <text x="226" y="98" text-anchor="end" class="t-small f-muted">row 1</text>
+  <rect x="238" y="82" width="40" height="24" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="258" y="98" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="282" y="82" width="40" height="24" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="302" y="98" text-anchor="middle" class="t-mono">11</text>
+  <rect x="326" y="82" width="40" height="24" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="346" y="98" text-anchor="middle" class="t-mono">12</text>
+  <rect x="370" y="82" width="40" height="24" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="390" y="98" text-anchor="middle" class="t-mono f-muted">0</text>
+  <text x="226" y="126" text-anchor="end" class="t-small f-muted">row 2</text>
+  <rect x="238" y="110" width="40" height="24" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="258" y="126" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="282" y="110" width="40" height="24" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="302" y="126" text-anchor="middle" class="t-mono">21</text>
+  <rect x="326" y="110" width="40" height="24" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="346" y="126" text-anchor="middle" class="t-mono">22</text>
+  <rect x="370" y="110" width="40" height="24" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="390" y="126" text-anchor="middle" class="t-mono f-muted">0</text>
+  <text x="664" y="26" text-anchor="middle" class="t-head">rank 1</text>
+  <text x="598" y="46" text-anchor="middle" class="t-small f-muted">0</text>
+  <text x="642" y="46" text-anchor="middle" class="t-small f-muted">1</text>
+  <text x="686" y="46" text-anchor="middle" class="t-small f-muted">2</text>
+  <text x="730" y="46" text-anchor="middle" class="t-small f-muted">3</text>
+  <rect x="578" y="54" width="40" height="24" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="598" y="70" text-anchor="middle" class="t-mono">2</text>
+  <rect x="622" y="54" width="40" height="24" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="642" y="70" text-anchor="middle" class="t-mono">101</text>
+  <rect x="666" y="54" width="40" height="24" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="686" y="70" text-anchor="middle" class="t-mono">102</text>
+  <rect x="710" y="54" width="40" height="24" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="730" y="70" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="578" y="82" width="40" height="24" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="598" y="98" text-anchor="middle" class="t-mono">12</text>
+  <rect x="622" y="82" width="40" height="24" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="642" y="98" text-anchor="middle" class="t-mono">111</text>
+  <rect x="666" y="82" width="40" height="24" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="686" y="98" text-anchor="middle" class="t-mono">112</text>
+  <rect x="710" y="82" width="40" height="24" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="730" y="98" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="578" y="110" width="40" height="24" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="598" y="126" text-anchor="middle" class="t-mono">22</text>
+  <rect x="622" y="110" width="40" height="24" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="642" y="126" text-anchor="middle" class="t-mono">121</text>
+  <rect x="666" y="110" width="40" height="24" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="686" y="126" text-anchor="middle" class="t-mono">122</text>
+  <rect x="710" y="110" width="40" height="24" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="730" y="126" text-anchor="middle" class="t-mono f-muted">0</text>
+  <line x1="422" y1="94" x2="566" y2="94" class="s-accent" stroke-width="1.5" marker-end="url(#col-arrow)"/>
+  <text x="494" y="86" text-anchor="middle" class="t-small f-muted">column 2 to ghost column 0</text>
+  <text x="20" y="218" class="t-label f-muted">rank 0 memory</text>
+  <path d="M239 186V180H433V186" fill="none" class="s-muted" stroke-width="1"/>
+  <text x="336" y="174" text-anchor="middle" class="t-small f-muted">row 0: one extent</text>
+  <path d="M439 186V180H633V186" fill="none" class="s-muted" stroke-width="1"/>
+  <text x="536" y="174" text-anchor="middle" class="t-small f-muted">row 1: one extent</text>
+  <path d="M639 186V180H833V186" fill="none" class="s-muted" stroke-width="1"/>
+  <text x="736" y="174" text-anchor="middle" class="t-small f-muted">row 2: one extent</text>
+  <rect x="238" y="200" width="46" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="261" y="217" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="288" y="200" width="46" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="311" y="217" text-anchor="middle" class="t-mono">1</text>
+  <rect x="338" y="200" width="46" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="361" y="217" text-anchor="middle" class="t-mono">2</text>
+  <rect x="388" y="200" width="46" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="411" y="217" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="438" y="200" width="46" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="461" y="217" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="488" y="200" width="46" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="511" y="217" text-anchor="middle" class="t-mono">11</text>
+  <rect x="538" y="200" width="46" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="561" y="217" text-anchor="middle" class="t-mono">12</text>
+  <rect x="588" y="200" width="46" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="611" y="217" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="638" y="200" width="46" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="661" y="217" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="688" y="200" width="46" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="711" y="217" text-anchor="middle" class="t-mono">21</text>
+  <rect x="738" y="200" width="46" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="761" y="217" text-anchor="middle" class="t-mono">22</text>
+  <rect x="788" y="200" width="46" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="811" y="217" text-anchor="middle" class="t-mono f-muted">0</text>
+  <text x="20" y="284" class="t-label f-muted">message</text>
+  <rect x="468" y="266" width="46" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="491" y="283" text-anchor="middle" class="t-mono">2</text>
+  <line x1="361" y1="228" x2="491" y2="262" class="s-accent" stroke-width="1.5" marker-end="url(#col-arrow)"/>
+  <line x1="491" y1="294" x2="261" y2="328" class="s-accent" stroke-width="1.5" marker-end="url(#col-arrow)"/>
+  <rect x="518" y="266" width="46" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="541" y="283" text-anchor="middle" class="t-mono">12</text>
+  <line x1="561" y1="228" x2="541" y2="262" class="s-accent" stroke-width="1.5" marker-end="url(#col-arrow)"/>
+  <line x1="541" y1="294" x2="461" y2="328" class="s-accent" stroke-width="1.5" marker-end="url(#col-arrow)"/>
+  <rect x="568" y="266" width="46" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="591" y="283" text-anchor="middle" class="t-mono">22</text>
+  <line x1="761" y1="228" x2="591" y2="262" class="s-accent" stroke-width="1.5" marker-end="url(#col-arrow)"/>
+  <line x1="591" y1="294" x2="661" y2="328" class="s-accent" stroke-width="1.5" marker-end="url(#col-arrow)"/>
+  <text x="626" y="284" class="t-small f-muted">3 f64 in a row</text>
+  <text x="20" y="350" class="t-label f-muted">rank 1 memory</text>
+  <rect x="238" y="332" width="46" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="261" y="349" text-anchor="middle" class="t-mono">2</text>
+  <rect x="288" y="332" width="46" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="311" y="349" text-anchor="middle" class="t-mono">101</text>
+  <rect x="338" y="332" width="46" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="361" y="349" text-anchor="middle" class="t-mono">102</text>
+  <rect x="388" y="332" width="46" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="411" y="349" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="438" y="332" width="46" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="461" y="349" text-anchor="middle" class="t-mono">12</text>
+  <rect x="488" y="332" width="46" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="511" y="349" text-anchor="middle" class="t-mono">111</text>
+  <rect x="538" y="332" width="46" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="561" y="349" text-anchor="middle" class="t-mono">112</text>
+  <rect x="588" y="332" width="46" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="611" y="349" text-anchor="middle" class="t-mono f-muted">0</text>
+  <rect x="638" y="332" width="46" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="661" y="349" text-anchor="middle" class="t-mono">22</text>
+  <rect x="688" y="332" width="46" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="711" y="349" text-anchor="middle" class="t-mono">121</text>
+  <rect x="738" y="332" width="46" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="761" y="349" text-anchor="middle" class="t-mono">122</text>
+  <rect x="788" y="332" width="46" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="811" y="349" text-anchor="middle" class="t-mono f-muted">0</text>
+</svg>
+</div>
+<figcaption>Rank 0 sends its column 2, and rank 1 receives it into its ghost
+column 0. In memory the column type spans one row, so element <i>i</i> of the
+slice is the entry of row <i>i</i>. The message itself is three contiguous
+<code>f64</code>.</figcaption>
+</figure>
+
+<p>The two sides use different types, column 2 and column 0, with the same
+signature: three <code>f64</code>. That is all MPI requires; the displacements
+never leave the process that uses them.</p>
+
+<h3 id="a-strided-pattern">A strided pattern</h3>
+
+<p>A vector type picks values at a fixed stride. This program sends the
+diagonals of two 3 × 3 matrices: three blocks of one <code>f64</code>, four
+values apart, which are entries (0, 0), (1, 1) and (2, 2). The type spans from
+the first entry to the end of the ninth, so its extent is already one matrix,
+and the check passes without a resize. The receiver uses no derived type at
+all:</p>
+
+<pre data-lang="rust" data-run="2" id="diagonals"><code>use ferrompi::{CustomDatatype, Mpi};
+
+type Matrix = [[f64; 3]; 3];
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    // A matrix's diagonal: 3 blocks of 1 f64, each starting 4 f64 after the
+    // last. The type spans from the first entry to the end of the ninth, so its
+    // extent is one Matrix.
+    let diagonal = CustomDatatype::vector::&lt;f64&gt;(3, 1, 4)?;
+
+    match world.rank() {
+        0 =&gt; {
+            // Entry (i, j) of matrix m is 100 m + 10 i + j.
+            let batch: Vec&lt;Matrix&gt; = (0..2)
+                .map(|m| {
+                    std::array::from_fn(|i| {
+                        std::array::from_fn(|j| (100 * m + 10 * i + j) as f64)
+                    })
+                })
+                .collect();
+            world.send_custom(&amp;batch, &amp;diagonal, 1, 0)?;
+        }
+        1 =&gt; {
+            // The message holds six f64, and six f64 in a row receive it.
+            let mut diagonals = [0.0f64; 6];
+            world.recv(&amp;mut diagonals, 0, 0)?;
+            println!("diagonals {diagonals:?}");
+        }
+        _ =&gt; {}
+    }
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="diagonals"><code>diagonals [0.0, 11.0, 22.0, 100.0, 111.0, 122.0]</code></pre>
+
+<p>Type maps need not match, only signatures: the sender’s six
+<code>f64</code> are spread over two matrices, the receiver’s are six in a row.
+A derived type on the sending side gathers scattered values into a contiguous
+message, and one on the receiving side scatters a message where it
+belongs.</p>
+
+<h3 id="when-to-copy-instead">When to copy instead</h3>
+
+<p>A derived datatype saves you a copy; it does not save the library one. To
+send values that are spread out, the library still has to collect them.
+Between nodes, most libraries pack them into a contiguous buffer of their own
+before the network sees them, and unpack them on the other side, though some
+networks can send from a list of addresses and skip that copy. So a derived
+type is seldom much faster than copying into a <code>Vec</code> yourself, and
+when the pieces are single values, a plain loop that copies them can be faster
+still. Use one when it makes the program clearer, or when a profile shows the
+copies. Build each type once, outside the loop that sends with it: creating
+and committing a type are MPI calls of their own.</p>
+
+<h2 id="where-the-maximum-is">Where the maximum is</h2>
+
+<p>A <code>Max</code> reduction gives the largest value, but not who has it.
+<code>MPI_MAXLOC</code> and <code>MPI_MINLOC</code> reduce pairs of a value and
+an index: the result is the largest, or smallest, value, with the index that
+came with it. The index is any <code>i32</code> you choose, such as a global
+index or a rank. When several pairs hold that value, the result takes the
+smallest of their indices. The MPI standard fixes that rule, so every library
+gives the same answer.</p>
+
+<p>Each kind of pair is an MPI datatype of its own, the layout of a C struct
+of a value and an <code>int</code>. ferrompi mirrors each with a
+<code>#[repr(C)]</code> struct with fields <code>value</code> and
+<code>index</code>, an <code>i32</code>:</p>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Pair type</th><th><code>value</code></th><th>MPI datatype</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>FloatInt</code></td><td><code>f32</code></td><td><code>MPI_FLOAT_INT</code></td></tr>
+    <tr><td><a href="../ferrompi/struct.DoubleInt.html"><code>DoubleInt</code></a></td><td><code>f64</code></td><td><code>MPI_DOUBLE_INT</code></td></tr>
+    <tr><td><code>Int2</code></td><td><code>i32</code></td><td><code>MPI_2INT</code></td></tr>
+    <tr><td><code>ShortInt</code></td><td><code>i16</code></td><td><code>MPI_SHORT_INT</code></td></tr>
+    <tr><td><code>LongInt</code></td><td><code>i64</code>, a C <code>long</code></td><td><code>MPI_LONG_INT</code></td></tr>
+    <tr><td><code>LongDoubleInt</code></td><td>the 16 bytes of a C <code>long double</code></td><td><code>MPI_LONG_DOUBLE_INT</code></td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><code>LongInt</code> and <code>LongDoubleInt</code> exist only on Linux on
+x86_64, aarch64 and ppc64le, where ferrompi knows how C lays them out.</p>
+
+<p><a href="../ferrompi/struct.Communicator.html#method.allreduce_indexed"><code>allreduce_indexed(send, recv, op)</code></a>
+reduces slices of pairs element by element and gives the result to every
+process. Its <code>op</code> is
+<a href="../ferrompi/struct.CollectiveOp.html"><code>CollectiveOp::MAX_LOC</code></a>
+or <code>CollectiveOp::MIN_LOC</code>: no other operation compiles with a pair
+type, and <code>MAX_LOC</code> does not compile with a plain number. This
+program finds the largest entry of a vector spread over four processes, and
+where it is:</p>
+
+<pre data-lang="rust" data-run="4" id="maxloc"><code>use ferrompi::{CollectiveOp, DoubleInt, Mpi};
+
+const PER_RANK: i32 = 3;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // Entry g of a vector spread over the processes is 5 g mod 6. This process
+    // holds entries 3 rank to 3 rank + 2, and finds its largest.
+    let first = PER_RANK * rank;
+    let mut best = DoubleInt { value: f64::NEG_INFINITY, index: -1 };
+    for g in first..first + PER_RANK {
+        let value = f64::from(5 * g % 6);
+        if value &gt; best.value {
+            best = DoubleInt { value, index: g };
+        }
+    }
+
+    // The largest entry anywhere, and its index.
+    let mut found = [DoubleInt { value: 0.0, index: 0 }];
+    world.allreduce_indexed(&amp;[best], &amp;mut found, CollectiveOp::MAX_LOC)?;
+    let [top] = found;
+    println!(
+        "rank {rank}: here {} at {}, anywhere {} at {}, held by rank {}",
+        best.value,
+        best.index,
+        top.value,
+        top.index,
+        top.index / PER_RANK
+    );
+    Ok(())
+}</code></pre>
+
+<p>With four processes it prints:</p>
+
+<pre class="output" data-output-of="maxloc"><code>rank 0: here 5 at 1, anywhere 5 at 1, held by rank 0
+rank 1: here 3 at 3, anywhere 5 at 1, held by rank 0
+rank 2: here 5 at 7, anywhere 5 at 1, held by rank 0
+rank 3: here 3 at 9, anywhere 5 at 1, held by rank 0</code></pre>
+
+<p>The largest value, 5, appears twice: at index 1 on rank 0 and at index 7
+on rank 2. The reduction returns index 1, the smaller. Each process’s own
+search keeps the first of equal values, since it replaces its best only on
+<code>&gt;</code>, so the smallest index wins within a process too.</p>
+
+<h2 id="reduce-scatter">Reduce-scatter</h2>
+
+<p><a href="../ferrompi/struct.Communicator.html#method.reduce_scatter_block"><code>reduce_scatter_block(send, recv, op)</code></a>
+(<code>MPI_Reduce_scatter_block</code>) combines the processes’
+<code>send</code> slices element by element, like an allreduce, then splits
+the result into one block per process, <code>recv.len()</code> elements each,
+and gives block <i>r</i> to rank <i>r</i>. <code>send</code> must hold
+<code>recv.len()</code> elements for each process, or the call returns an
+error. Use it when each process needs only its share of a result: no process
+needs a buffer for all of it, and the library is free to split the combining
+so that each process adds up only its own share.</p>
+
+<p>This program builds a histogram of values spread over the processes. Each
+process counts its own values in every bin, and each ends up with the totals
+of the two bins it owns:</p>
+
+<pre data-lang="rust" data-run="4" id="histogram"><code>use ferrompi::{Mpi, ReduceOp};
+
+const BINS_EACH: usize = 2;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let (rank, size) = (world.rank() as usize, world.size() as usize);
+    let bins = BINS_EACH * size;
+
+    // Each process counts its ten values, each a bin number, in a histogram of
+    // every bin.
+    let mut counts = vec![0u64; bins];
+    for k in 0..10 {
+        counts[(7 * rank + 3 * k) % bins] += 1;
+    }
+
+    // Process r owns bins 2 r and 2 r + 1, and receives their totals.
+    let mut mine = [0u64; BINS_EACH];
+    world.reduce_scatter_block(&amp;counts, &amp;mut mine, ReduceOp::Sum)?;
+    let first = BINS_EACH * rank;
+    println!("rank {rank}: bins {first} and {} hold {mine:?}", first + 1);
+    Ok(())
+}</code></pre>
+
+<p>With four processes it prints:</p>
+
+<pre class="output" data-output-of="histogram"><code>rank 0: bins 0 and 1 hold [6, 5]
+rank 1: bins 2 and 3 hold [5, 5]
+rank 2: bins 4 and 5 hold [4, 5]
+rank 3: bins 6 and 7 hold [5, 5]</code></pre>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 250" role="img" aria-label="Four processes each count ten values in eight bins: rank 0 has 2, 1, 1, 2, 1, 1, 1, 1; rank 1 1, 1, 2, 1, 1, 1, 1, 2; rank 2 1, 2, 1, 1, 1, 1, 2, 1; rank 3 2, 1, 1, 1, 1, 2, 1, 1. The totals are 6, 5, 5, 5, 4, 5, 5, 5, but no process receives them all: reduce_scatter_block gives rank 0 bins 0 and 1, rank 1 bins 2 and 3, rank 2 bins 4 and 5, and rank 3 bins 6 and 7.">
+  <defs>
+    <marker id="rs-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+  <text x="20" y="40" class="t-label f-muted">bin</text>
+  <text x="137" y="40" text-anchor="middle" class="t-small f-muted">0</text>
+  <text x="177" y="40" text-anchor="middle" class="t-small f-muted">1</text>
+  <text x="217" y="40" text-anchor="middle" class="t-small f-muted">2</text>
+  <text x="257" y="40" text-anchor="middle" class="t-small f-muted">3</text>
+  <text x="297" y="40" text-anchor="middle" class="t-small f-muted">4</text>
+  <text x="337" y="40" text-anchor="middle" class="t-small f-muted">5</text>
+  <text x="377" y="40" text-anchor="middle" class="t-small f-muted">6</text>
+  <text x="417" y="40" text-anchor="middle" class="t-small f-muted">7</text>
+  <text x="108" y="69" text-anchor="end" class="t-small f-muted">rank 0</text>
+  <rect x="120" y="52" width="34" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="137" y="69" text-anchor="middle" class="t-mono">2</text>
+  <rect x="160" y="52" width="34" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="177" y="69" text-anchor="middle" class="t-mono">1</text>
+  <rect x="200" y="52" width="34" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="217" y="69" text-anchor="middle" class="t-mono">1</text>
+  <rect x="240" y="52" width="34" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="257" y="69" text-anchor="middle" class="t-mono">2</text>
+  <rect x="280" y="52" width="34" height="26" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="297" y="69" text-anchor="middle" class="t-mono">1</text>
+  <rect x="320" y="52" width="34" height="26" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="337" y="69" text-anchor="middle" class="t-mono">1</text>
+  <rect x="360" y="52" width="34" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="377" y="69" text-anchor="middle" class="t-mono">1</text>
+  <rect x="400" y="52" width="34" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="417" y="69" text-anchor="middle" class="t-mono">1</text>
+  <text x="108" y="101" text-anchor="end" class="t-small f-muted">rank 1</text>
+  <rect x="120" y="84" width="34" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="137" y="101" text-anchor="middle" class="t-mono">1</text>
+  <rect x="160" y="84" width="34" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="177" y="101" text-anchor="middle" class="t-mono">1</text>
+  <rect x="200" y="84" width="34" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="217" y="101" text-anchor="middle" class="t-mono">2</text>
+  <rect x="240" y="84" width="34" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="257" y="101" text-anchor="middle" class="t-mono">1</text>
+  <rect x="280" y="84" width="34" height="26" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="297" y="101" text-anchor="middle" class="t-mono">1</text>
+  <rect x="320" y="84" width="34" height="26" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="337" y="101" text-anchor="middle" class="t-mono">1</text>
+  <rect x="360" y="84" width="34" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="377" y="101" text-anchor="middle" class="t-mono">1</text>
+  <rect x="400" y="84" width="34" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="417" y="101" text-anchor="middle" class="t-mono">2</text>
+  <text x="108" y="133" text-anchor="end" class="t-small f-muted">rank 2</text>
+  <rect x="120" y="116" width="34" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="137" y="133" text-anchor="middle" class="t-mono">1</text>
+  <rect x="160" y="116" width="34" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="177" y="133" text-anchor="middle" class="t-mono">2</text>
+  <rect x="200" y="116" width="34" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="217" y="133" text-anchor="middle" class="t-mono">1</text>
+  <rect x="240" y="116" width="34" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="257" y="133" text-anchor="middle" class="t-mono">1</text>
+  <rect x="280" y="116" width="34" height="26" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="297" y="133" text-anchor="middle" class="t-mono">1</text>
+  <rect x="320" y="116" width="34" height="26" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="337" y="133" text-anchor="middle" class="t-mono">1</text>
+  <rect x="360" y="116" width="34" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="377" y="133" text-anchor="middle" class="t-mono">2</text>
+  <rect x="400" y="116" width="34" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="417" y="133" text-anchor="middle" class="t-mono">1</text>
+  <text x="108" y="165" text-anchor="end" class="t-small f-muted">rank 3</text>
+  <rect x="120" y="148" width="34" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="137" y="165" text-anchor="middle" class="t-mono">2</text>
+  <rect x="160" y="148" width="34" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="177" y="165" text-anchor="middle" class="t-mono">1</text>
+  <rect x="200" y="148" width="34" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="217" y="165" text-anchor="middle" class="t-mono">1</text>
+  <rect x="240" y="148" width="34" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="257" y="165" text-anchor="middle" class="t-mono">1</text>
+  <rect x="280" y="148" width="34" height="26" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="297" y="165" text-anchor="middle" class="t-mono">1</text>
+  <rect x="320" y="148" width="34" height="26" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="337" y="165" text-anchor="middle" class="t-mono">2</text>
+  <rect x="360" y="148" width="34" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="377" y="165" text-anchor="middle" class="t-mono">1</text>
+  <rect x="400" y="148" width="34" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="417" y="165" text-anchor="middle" class="t-mono">1</text>
+  <text x="108" y="209" text-anchor="end" class="t-small f-muted">total</text>
+  <rect x="120" y="192" width="34" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="137" y="209" text-anchor="middle" class="t-mono f-muted">6</text>
+  <rect x="160" y="192" width="34" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="177" y="209" text-anchor="middle" class="t-mono f-muted">5</text>
+  <rect x="200" y="192" width="34" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="217" y="209" text-anchor="middle" class="t-mono f-muted">5</text>
+  <rect x="240" y="192" width="34" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="257" y="209" text-anchor="middle" class="t-mono f-muted">5</text>
+  <rect x="280" y="192" width="34" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="297" y="209" text-anchor="middle" class="t-mono f-muted">4</text>
+  <rect x="320" y="192" width="34" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="337" y="209" text-anchor="middle" class="t-mono f-muted">5</text>
+  <rect x="360" y="192" width="34" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="377" y="209" text-anchor="middle" class="t-mono f-muted">5</text>
+  <rect x="400" y="192" width="34" height="26" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="417" y="209" text-anchor="middle" class="t-mono f-muted">5</text>
+  <text x="120" y="238" class="t-small f-muted">the totals: no process receives them all</text>
+  <line x1="460" y1="116" x2="620" y2="116" class="s-accent" stroke-width="1.5" marker-end="url(#rs-arrow)"/>
+  <text x="540" y="106" text-anchor="middle" class="t-mono">reduce_scatter_block</text>
+  <text x="540" y="136" text-anchor="middle" class="t-small f-muted">sum, then rank r keeps</text>
+  <text x="540" y="152" text-anchor="middle" class="t-small f-muted">bins 2r and 2r + 1</text>
+  <text x="644" y="40" class="t-label f-muted">each rank receives</text>
+  <rect x="644" y="52" width="34" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="661" y="69" text-anchor="middle" class="t-mono">6</text>
+  <rect x="684" y="52" width="34" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="701" y="69" text-anchor="middle" class="t-mono">5</text>
+  <text x="730" y="69" class="t-small f-muted">rank 0: bins 0, 1</text>
+  <rect x="644" y="84" width="34" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="661" y="101" text-anchor="middle" class="t-mono">5</text>
+  <rect x="684" y="84" width="34" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="701" y="101" text-anchor="middle" class="t-mono">5</text>
+  <text x="730" y="101" class="t-small f-muted">rank 1: bins 2, 3</text>
+  <rect x="644" y="116" width="34" height="26" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="661" y="133" text-anchor="middle" class="t-mono">4</text>
+  <rect x="684" y="116" width="34" height="26" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="701" y="133" text-anchor="middle" class="t-mono">5</text>
+  <text x="730" y="133" class="t-small f-muted">rank 2: bins 4, 5</text>
+  <rect x="644" y="148" width="34" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="661" y="165" text-anchor="middle" class="t-mono">5</text>
+  <rect x="684" y="148" width="34" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="701" y="165" text-anchor="middle" class="t-mono">5</text>
+  <text x="730" y="165" class="t-small f-muted">rank 3: bins 6, 7</text>
+</svg>
+</div>
+<figcaption>Each process counts its ten values in all eight bins. The
+reduce-scatter sums each bin over the processes and gives rank <i>r</i> the
+totals of bins 2<i>r</i> and 2<i>r</i> + 1, so the program never holds the row
+of totals whole.</figcaption>
+</figure>
+
+<p>Like the reductions of chapter 3, it has a
+<a href="03-collective-communication.html#persistent-collectives">persistent
+form</a>, <code>reduce_scatter_block_init</code>.</p>
+
+<h2 id="operations-you-define">Operations you define</h2>
+
+<p>When no predefined operation fits,
+<a href="../ferrompi/struct.UserOp.html"><code>UserOp</code></a> turns a Rust
+closure into one (<code>MPI_Op_create</code>). The closure takes two slices of
+equal length, by convention <code>invec</code> and <code>inoutvec</code>, and
+combines them element by element into the second: <code>inoutvec[i]</code>
+becomes <code>invec[i]</code> ∘ <code>inoutvec[i]</code>, where ∘ is your
+operation and <code>invec</code> holds the earlier operand. A
+<code>&amp;UserOp</code> goes wherever a reduction takes an operation:
+<code>reduce</code>, <code>allreduce</code>, <code>scan</code>,
+<code>exscan</code>, <code>reduce_scatter_block</code>, and their scalar,
+nonblocking and persistent forms.</p>
+
+<p>MPI groups the operands however its algorithm needs:
+(<i>a</i> ∘ <i>b</i>) ∘ (<i>c</i> ∘ <i>d</i>) in one call,
+((<i>a</i> ∘ <i>b</i>) ∘ <i>c</i>) ∘ <i>d</i> in another. So the operation
+must be associative, or its results depend on the library and the process
+count. Floating-point addition is associative only up to rounding, which is
+why <a href="03-collective-communication.html#floating-point-results">chapter
+3’s sums</a> change in the last bits.</p>
+
+<p><a href="../ferrompi/struct.UserOp.html#method.new"><code>UserOp::new</code></a>
+also declares the operation commutative, which lets MPI swap operands as well
+as group them.
+<a href="../ferrompi/struct.UserOp.html#method.new_noncommutative"><code>UserOp::new_noncommutative</code></a>
+does not: MPI then keeps the operands in rank order, with the lower ranks’
+values in <code>invec</code>. Matrix multiplication is associative but not
+commutative, and so is “the later value wins”, which fills gaps in data. This
+program fills the gaps in a time series spread over four processes:</p>
+
+<pre data-lang="rust" data-run="4" id="forward-fill"><code>use ferrompi::{Mpi, UserOp};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // A time series split over the processes, three samples each, with the
+    // missing samples marked NaN.
+    let gap = f64::NAN;
+    let mut series = match rank {
+        0 =&gt; [1.0, gap, 2.0],
+        1 =&gt; [gap, gap, gap],
+        2 =&gt; [gap, 5.0, gap],
+        _ =&gt; [gap, 7.0, 8.0],
+    };
+
+    // `earlier` then `later` gives the later sample, or the earlier one when
+    // the later is missing. That is associative, but not commutative.
+    let latest = UserOp::new_noncommutative(|earlier: &amp;[f64], later: &amp;mut [f64]| {
+        for (e, l) in earlier.iter().zip(later.iter_mut()) {
+            if l.is_nan() {
+                *l = *e;
+            }
+        }
+    })?;
+
+    // The latest sample on the lower ranks fills this process's leading gaps.
+    // Rank 0 has no lower ranks, and its result is undefined.
+    let last_here = series.iter().rev().copied().find(|x| !x.is_nan()).unwrap_or(gap);
+    let before = world.exscan_scalar(last_here, &amp;latest)?;
+    let mut carry = if rank == 0 { gap } else { before };
+    for x in &amp;mut series {
+        if x.is_nan() {
+            *x = carry;
+        } else {
+            carry = *x;
+        }
+    }
+    println!("rank {rank}: {series:?}");
+    Ok(())
+}</code></pre>
+
+<p>With four processes it prints:</p>
+
+<pre class="output" data-output-of="forward-fill"><code>rank 0: [1.0, 1.0, 2.0]
+rank 1: [2.0, 2.0, 2.0]
+rank 2: [2.0, 5.0, 5.0]
+rank 3: [5.0, 7.0, 8.0]</code></pre>
+
+<p>Each process passes its last sample to
+<a href="../ferrompi/struct.Communicator.html#method.exscan_scalar"><code>exscan_scalar</code></a>,
+which returns the latest sample of the lower ranks. Rank 3 gets rank 0’s 2.0,
+rank 1’s gap and rank 2’s 5.0 combined in that order, which is 5.0. Rank 1 has
+no sample, so it passes a gap, and rank 0’s 2.0 crosses it to reach rank 2.
+Rank 0’s <code>exscan</code> result is undefined, as in
+<a href="03-collective-communication.html#scans">chapter 3</a>, and the program
+does not use it.</p>
+
+<h3 id="commutative-or-not">Commutative or not</h3>
+
+<p>Declaring an operation commutative when it is not is an error no library
+detects, and what it does depends on the library’s algorithm. This program
+declares “the later value wins” both ways and runs an allreduce with
+each:</p>
+
+<pre data-lang="rust" data-run="4" id="commutative"><code>use ferrompi::{Mpi, UserOp};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // `earlier` then `later` gives `later`, so combining every process's value
+    // in rank order gives the last rank's. Associative, not commutative.
+    let keep_later = |_earlier: &amp;[f64], _later: &amp;mut [f64]| {};
+    let in_order = UserOp::new_noncommutative(keep_later)?;
+    // Wrong: the same operation, declared commutative.
+    let any_order = UserOp::new(keep_later)?;
+
+    let mine = [f64::from(rank)];
+    let (mut right, mut wrong) = ([0.0], [0.0]);
+    world.allreduce(&amp;mine, &amp;mut right, &amp;in_order)?;
+    world.allreduce(&amp;mine, &amp;mut wrong, &amp;any_order)?;
+    println!("rank {rank}: in rank order {}, declared commutative {}", right[0], wrong[0]);
+    Ok(())
+}</code></pre>
+
+<p>Under MPICH 4.2.3 with four processes it prints:</p>
+
+<pre class="output"><code>rank 0: in rank order 3, declared commutative 0
+rank 1: in rank order 3, declared commutative 1
+rank 2: in rank order 3, declared commutative 2
+rank 3: in rank order 3, declared commutative 3</code></pre>
+
+<p>In rank order, the later value wins and the last rank’s 3 comes back
+everywhere. Declared commutative, every process got a different answer, its
+own value, and no error. For a small allreduce MPICH uses recursive doubling:
+in each step every process exchanges its partial result with a partner and
+combines the two. For a commutative operation it puts the partner’s value in
+<code>invec</code>, so “the later value wins” keeps the process’s own value at
+every step. For a non-commutative one it puts the lower ranks’ value
+there.</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 336" role="img" aria-label="An allreduce of the values a, b, c and d of ranks 0 to 3, by recursive doubling. In step 1 ranks 0 and 1 swap values, and so do ranks 2 and 3; in step 2 ranks 0 and 2, and ranks 1 and 3. Declared non-commutative, every process combines in rank order: after step 1 ranks 0 and 1 hold a∘b and ranks 2 and 3 hold c∘d, and after step 2 all hold a∘b∘c∘d; if x∘y is y, every process gets d, which is 3. Declared commutative, each process puts its partner’s value first: after step 1 rank 0 holds b∘a, rank 1 a∘b, rank 2 d∘c and rank 3 c∘d; after step 2 rank 0 holds d∘c∘b∘a, rank 1 c∘d∘a∘b, rank 2 b∘a∘d∘c and rank 3 a∘b∘c∘d. If x∘y is y, ranks 0 to 3 get 0, 1, 2 and 3." style="min-width: 44rem">
+  <defs>
+    <marker id="ord-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="20" width="424" height="296" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="48" class="t-head">Declared non-commutative</text>
+  <text x="36" y="68" class="t-small f-muted">each process puts lower ranks first</text>
+  <text x="167" y="96" text-anchor="middle" class="t-small f-muted">rank 0</text>
+  <text x="245" y="96" text-anchor="middle" class="t-small f-muted">rank 1</text>
+  <text x="323" y="96" text-anchor="middle" class="t-small f-muted">rank 2</text>
+  <text x="401" y="96" text-anchor="middle" class="t-small f-muted">rank 3</text>
+  <text x="36" y="123" class="t-small f-muted">start</text>
+  <rect x="132" y="106" width="70" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="167" y="123" text-anchor="middle" class="t-mono">a = 0</text>
+  <rect x="210" y="106" width="70" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="245" y="123" text-anchor="middle" class="t-mono">b = 1</text>
+  <rect x="288" y="106" width="70" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="323" y="123" text-anchor="middle" class="t-mono">c = 2</text>
+  <rect x="366" y="106" width="70" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="401" y="123" text-anchor="middle" class="t-mono">d = 3</text>
+  <text x="36" y="183" class="t-small f-muted">step 1</text>
+  <rect x="132" y="166" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="167" y="183" text-anchor="middle" class="t-mono">a∘b</text>
+  <rect x="210" y="166" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="245" y="183" text-anchor="middle" class="t-mono">a∘b</text>
+  <rect x="288" y="166" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="323" y="183" text-anchor="middle" class="t-mono">c∘d</text>
+  <rect x="366" y="166" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="401" y="183" text-anchor="middle" class="t-mono">c∘d</text>
+  <text x="36" y="243" class="t-small f-muted">step 2</text>
+  <rect x="132" y="226" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="167" y="243" text-anchor="middle" class="t-mono">a∘b∘c∘d</text>
+  <rect x="210" y="226" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="245" y="243" text-anchor="middle" class="t-mono">a∘b∘c∘d</text>
+  <rect x="288" y="226" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="323" y="243" text-anchor="middle" class="t-mono">a∘b∘c∘d</text>
+  <rect x="366" y="226" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="401" y="243" text-anchor="middle" class="t-mono">a∘b∘c∘d</text>
+  <text x="36" y="293" class="t-small f-muted">if x∘y = y</text>
+  <rect x="132" y="276" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="167" y="293" text-anchor="middle" class="t-mono">3</text>
+  <rect x="210" y="276" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="245" y="293" text-anchor="middle" class="t-mono">3</text>
+  <rect x="288" y="276" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="323" y="293" text-anchor="middle" class="t-mono">3</text>
+  <rect x="366" y="276" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="401" y="293" text-anchor="middle" class="t-mono">3</text>
+  <line x1="173" y1="150" x2="239" y2="150" class="s-accent" stroke-width="1.5" marker-start="url(#ord-arrow)" marker-end="url(#ord-arrow)"/>
+  <line x1="329" y1="150" x2="395" y2="150" class="s-accent" stroke-width="1.5" marker-start="url(#ord-arrow)" marker-end="url(#ord-arrow)"/>
+  <line x1="173" y1="205" x2="317" y2="205" class="s-accent" stroke-width="1.5" marker-start="url(#ord-arrow)" marker-end="url(#ord-arrow)"/>
+  <line x1="251" y1="215" x2="395" y2="215" class="s-accent" stroke-width="1.5" marker-start="url(#ord-arrow)" marker-end="url(#ord-arrow)"/>
+
+  <rect x="456" y="20" width="424" height="296" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="472" y="48" class="t-head">Declared commutative</text>
+  <text x="472" y="68" class="t-small f-muted">each process puts partner first</text>
+  <text x="603" y="96" text-anchor="middle" class="t-small f-muted">rank 0</text>
+  <text x="681" y="96" text-anchor="middle" class="t-small f-muted">rank 1</text>
+  <text x="759" y="96" text-anchor="middle" class="t-small f-muted">rank 2</text>
+  <text x="837" y="96" text-anchor="middle" class="t-small f-muted">rank 3</text>
+  <text x="472" y="123" class="t-small f-muted">start</text>
+  <rect x="568" y="106" width="70" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="603" y="123" text-anchor="middle" class="t-mono">a = 0</text>
+  <rect x="646" y="106" width="70" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="681" y="123" text-anchor="middle" class="t-mono">b = 1</text>
+  <rect x="724" y="106" width="70" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="759" y="123" text-anchor="middle" class="t-mono">c = 2</text>
+  <rect x="802" y="106" width="70" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="837" y="123" text-anchor="middle" class="t-mono">d = 3</text>
+  <text x="472" y="183" class="t-small f-muted">step 1</text>
+  <rect x="568" y="166" width="70" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="603" y="183" text-anchor="middle" class="t-mono">b∘a</text>
+  <rect x="646" y="166" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="681" y="183" text-anchor="middle" class="t-mono">a∘b</text>
+  <rect x="724" y="166" width="70" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="759" y="183" text-anchor="middle" class="t-mono">d∘c</text>
+  <rect x="802" y="166" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="837" y="183" text-anchor="middle" class="t-mono">c∘d</text>
+  <text x="472" y="243" class="t-small f-muted">step 2</text>
+  <rect x="568" y="226" width="70" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="603" y="243" text-anchor="middle" class="t-mono">d∘c∘b∘a</text>
+  <rect x="646" y="226" width="70" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="681" y="243" text-anchor="middle" class="t-mono">c∘d∘a∘b</text>
+  <rect x="724" y="226" width="70" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="759" y="243" text-anchor="middle" class="t-mono">b∘a∘d∘c</text>
+  <rect x="802" y="226" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="837" y="243" text-anchor="middle" class="t-mono">a∘b∘c∘d</text>
+  <text x="472" y="293" class="t-small f-muted">if x∘y = y</text>
+  <rect x="568" y="276" width="70" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="603" y="293" text-anchor="middle" class="t-mono">0</text>
+  <rect x="646" y="276" width="70" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="681" y="293" text-anchor="middle" class="t-mono">1</text>
+  <rect x="724" y="276" width="70" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="759" y="293" text-anchor="middle" class="t-mono">2</text>
+  <rect x="802" y="276" width="70" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="837" y="293" text-anchor="middle" class="t-mono">3</text>
+  <line x1="609" y1="150" x2="675" y2="150" class="s-accent" stroke-width="1.5" marker-start="url(#ord-arrow)" marker-end="url(#ord-arrow)"/>
+  <line x1="765" y1="150" x2="831" y2="150" class="s-accent" stroke-width="1.5" marker-start="url(#ord-arrow)" marker-end="url(#ord-arrow)"/>
+  <line x1="609" y1="205" x2="753" y2="205" class="s-accent" stroke-width="1.5" marker-start="url(#ord-arrow)" marker-end="url(#ord-arrow)"/>
+  <line x1="687" y1="215" x2="831" y2="215" class="s-accent" stroke-width="1.5" marker-start="url(#ord-arrow)" marker-end="url(#ord-arrow)"/>
+</svg>
+</div>
+<figcaption>MPICH’s recursive-doubling allreduce on four processes. Declared
+non-commutative, each process combines in rank order, and all end with
+<i>a</i> ∘ <i>b</i> ∘ <i>c</i> ∘ <i>d</i>. Declared commutative, each process
+puts its partner’s value first, and each ends with the same operands in a
+different order. For “the later value wins”, that is a different result on
+every process.</figcaption>
+</figure>
+
+<p>Another library, or another process count, can give another wrong answer,
+or the right one by luck. Unless swapping the operands gives the same result,
+use <code>new_noncommutative</code>. It costs only the freedom to reorder,
+which some algorithms need: MPICH, for example, uses its large-message
+allreduce, a reduce-scatter followed by an allgather, only for commutative
+operations.</p>
+
+<h3 id="what-the-closure-may-do">What the closure may do</h3>
+
+<p>MPI calls the closure from inside the reductions that use the operation,
+as often as its algorithm needs, each time on part of the buffers. Three rules
+follow:</p>
+
+<ul>
+  <li>It is <code>Fn + Send + Sync + 'static</code>. It may run on another
+  thread, and long after the line that created it: until the operation is
+  freed, and a persistent reduction keeps its operation until the request is
+  freed.</li>
+  <li>It must not panic. A panic cannot unwind through MPI’s C frames, so
+  ferrompi aborts the process instead.</li>
+  <li>It must work element by element. Its slices are of an
+  <code>MpiDatatype</code>, a single number, and MPI may call it on any part
+  of a buffer. An operation that reads two neighboring <code>f64</code> as one
+  value, a mean and a count say, can see the pair split across two
+  calls.</li>
+</ul>
+
+<p>A process can hold 16 <code>UserOp</code>s at a time; one more returns
+<code>Err(Error::ResourceExhausted)</code>.</p>
+
+<h2 id="when-types-do-not-match">When types do not match</h2>
+
+<p>MPI requires a receive to name the type signature that was sent, and leaves
+checking that to the program. This program sends two <code>f64</code> and
+receives them as <code>i64</code>:</p>
+
+<pre data-lang="rust" data-run="2" id="mismatch"><code>use ferrompi::Mpi;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    match world.rank() {
+        0 =&gt; world.send(&amp;[1.0f64, 0.5], 1, 0)?,
+        1 =&gt; {
+            // The message holds two f64. Received as two i64, it is the same
+            // 16 bytes read as integers, and nothing reports an error.
+            let mut ints = [0i64; 2];
+            let status = world.recv(&amp;mut ints, 0, 0)?;
+            println!("received {ints:?}, count {:?}", status.count);
+            let back = ints.map(|i| f64::from_bits(i as u64));
+            println!("the same bits as f64: {back:?}");
+        }
+        _ =&gt; {}
+    }
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="mismatch"><code>received [4607182418800017408, 4602678819172646912], count Some(2)
+the same bits as f64: [1.0, 0.5]</code></pre>
+
+<p>Nothing failed. Both types are eight bytes, so the 16 bytes fill two
+<code>i64</code>, the status counts two elements, and the integers are the bit
+patterns of 1.0 and 0.5. A mismatch that keeps the size, like this one, shows
+only as wrong numbers.</p>
+
+<p>ferrompi checks what one process can. The slice’s element type picks its
+datatype, so on each side the buffer and the datatype agree, and a derived
+datatype must fit its element type. Whether the two sides agree with each
+other is the program’s to ensure, as with tags. Keep the element type of each
+kind of message in one place, a type alias or a shared struct, and build each
+derived type in one function that both sides call, as the column program does.
+Correctness tools such as MUST check type signatures while the program runs;
+reach for one when a receive produces numbers that look like garbage.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>In the particle program, pass <code>fields</code> instead of
+  <code>particle</code> to both calls and read the error. Then build a type of
+  all three fields, without <code>resized</code>. Does the check pass under
+  your MPI library, and why resize it anyway?</li>
+  <li>Finish the column program’s halo exchange: rank 1 also sends its
+  column 1 to rank 0’s ghost column 3. Post both transfers on each process
+  with <code>isend_custom</code> and <code>irecv_custom</code> in one scope
+  (<a href="02-point-to-point.html#requests-and-scopes">chapter 2</a>), so
+  that neither process waits for the other.</li>
+  <li>In the diagonals program, receive with <code>recv_custom</code> and the
+  same <code>diagonal</code> type into two matrices filled with −1. What do the
+  entries off the diagonal hold afterwards?</li>
+  <li>Change the MAXLOC program to <code>MIN_LOC</code>, and predict what it
+  prints before you run it. Then pair each process’s best value with its rank
+  instead of the entry’s index. What does the result tell you now, and what
+  does it no longer say?</li>
+  <li>In the forward-fill program, declare the operation with
+  <code>UserOp::new</code>, and run it with 4 and then 8 processes. Is the
+  result still right under MPICH? Why is the program wrong even when it
+  is?</li>
+  <li>Rewrite the histogram program with a <code>reduce</code> to rank 0
+  followed by a <code>scatter</code>. How many elements does each process need
+  for the result now, and how many with
+  <code>reduce_scatter_block</code>?</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>A message is a sequence of basic types, its type signature, and a
+  receive must name the same sequence. The libraries do not check: a mismatch
+  of the same size gives wrong numbers and no error.</li>
+  <li>In ferrompi the slice’s element type picks the MPI datatype.
+  <code>allreduce_bytes</code> reduces any integer type bit by bit, as
+  <code>MPI_BYTE</code>.</li>
+  <li>A derived datatype is a type map: basic types at byte displacements. Its
+  extent is the distance from one element to the next.
+  <code>CustomDatatype</code> builds contiguous, vector and struct types, and
+  resizes them.</li>
+  <li><code>send_custom</code> and <code>recv_custom</code> take a slice of a
+  <code>PlainData</code> type and a datatype that describes one element, whose
+  extent must be the element’s size. Resize a type that ends early. A column
+  of a slice of rows is one entry, resized to a row.</li>
+  <li>A derived type saves your copy, not the library’s. Use one for clarity,
+  and build it once.</li>
+  <li>MAXLOC and MINLOC reduce value–index pairs with
+  <code>allreduce_indexed</code>; a tie gives the smallest index.</li>
+  <li><code>reduce_scatter_block</code> gives each process one block of a
+  reduced result.</li>
+  <li>A <code>UserOp</code> must be associative, work element by element, and
+  not panic. Declare it with <code>new_noncommutative</code> unless swapping
+  operands gives the same result: an operation wrongly declared commutative
+  gives wrong answers, which can differ from process to process, with no
+  error.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="03-collective-communication.html">Previous: chapter 3, collective communication</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="05-one-sided-communication.html">Next: chapter 5, one-sided communication and shared-memory windows</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

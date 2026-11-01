@@ -1,0 +1,1045 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>9. A tour of the layers · ferrompi tutorial</title>
+<meta name="description" content="One ferrompi call followed through every layer it crosses, in a debugger and in the source: the public API, the guard, the C layer and the MPI library, and the way an error comes back. Which layer refuses which mistake, what a program links, what the layers cost, where ferrompi keeps its state, and a map of the source.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#the-layers">Six layers</a></li>
+      <li><a href="#one-call">One call, layer by layer</a></li>
+      <li><a href="#the-way-back">The way back</a></li>
+      <li><a href="#who-refuses-what">Which layer refuses what</a></li>
+      <li><a href="#what-a-program-links">What a program links</a></li>
+      <li><a href="#what-the-layers-cost">What the layers cost</a></li>
+      <li><a href="#where-state-lives">Where the state lives</a></li>
+      <li><a href="#source-map">A map of the source</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part II · Chapter 9</p>
+<h1>A tour of the layers</h1>
+
+<p class="lede">Every ferrompi call crosses the same layers on its way to MPI:
+the method you call, a guard, a C function and the MPI library. This chapter
+follows one allreduce down through all of them and back, in a debugger and in
+the source, then looks at what each layer refuses, what the layers cost, and
+where each one’s code lives.</p>
+
+<p>By the end of the chapter you can name the layer of each frame in a
+backtrace, follow any call through ferrompi’s source, tell from an error which
+layer refused a call, and find the file to change for each part of the crate.
+The chapters after this one take the layers one at a time.</p>
+
+<p>The excerpts of ferrompi’s source below name the file they come from. A
+comment <code>// …</code> or <code>/* ... */</code> marks lines left out. CI
+checks that every excerpt still matches its file.</p>
+
+<h2 id="the-layers">Six layers</h2>
+
+<p>A ferrompi program holds code from three places in one process: your Rust,
+ferrompi’s Rust and C, and the MPI library. ferrompi’s part is three layers
+thick, and the call that goes through them starts in your program and ends in
+the other processes of the job:</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 572" role="img" aria-label="One allreduce on its way down through ferrompi’s layers and its result on the way back. Your program calls world.allreduce with two slices and ReduceOp::Sum. The public API, in src/comm/blocking.rs, checks the operation and the lengths, and calls ffi::ferrompi_allreduce with two pointers, the count 4, the datatype tag 1, the operation code 0 and the communicator handle 0. The guard in src/ffi.rs checks the thread and the lifecycle and calls the C function. Below that line the code is C. The C layer, in csrc/ferrompi.c, looks up MPI’s own handles and calls MPI_Allreduce with MPI_DOUBLE, MPI_SUM and MPI_COMM_WORLD. Everything so far is in your program’s binary; the MPI library is libmpi.so.12, loaded when the program starts. It runs the allreduce over shared memory or the network. On the way back, MPI returns MPI_SUCCESS or an error code, the C layer returns that code or its own, the guard returns it or a refusal, and the public API turns it into a Result." style="min-width: 44rem">
+  <defs>
+    <marker id="lay-down" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+    <marker id="lay-up" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-muted"/>
+    </marker>
+  </defs>
+  <text x="40" y="34" class="t-label f-muted">Layer</text>
+  <text x="232" y="34" class="t-label f-muted">What it calls</text>
+  <text x="696" y="34" class="t-label f-muted">What it returns</text>
+  <text x="40" y="72" class="t-head">your program</text>
+  <text x="40" y="90" class="t-mono f-muted">examples/one_call.rs</text>
+  <rect x="232" y="62" width="440" height="42" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="452" y="87" text-anchor="middle" class="t-mono">world.allreduce(&amp;send, &amp;mut recv, Sum)</text>
+  <line x1="452" y1="104" x2="452" y2="138" class="s-accent" stroke-width="1.5" marker-end="url(#lay-down)"/>
+  <text x="40" y="150" class="t-head">public API</text>
+  <text x="40" y="168" class="t-mono f-muted">src/comm/blocking.rs</text>
+  <text x="40" y="185" class="t-small f-muted">checks the op and the lengths</text>
+  <rect x="232" y="140" width="440" height="42" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="452" y="165" text-anchor="middle" class="t-mono">ffi::ferrompi_allreduce(sp, rp, 4, 1, 0, 0)</text>
+  <rect x="696" y="140" width="172" height="42" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="782" y="165" text-anchor="middle" class="t-small">Result&lt;()&gt;</text>
+  <line x1="452" y1="182" x2="452" y2="232" class="s-accent" stroke-width="1.5" marker-end="url(#lay-down)"/>
+  <text x="40" y="244" class="t-head">guard</text>
+  <text x="40" y="262" class="t-mono f-muted">src/ffi.rs</text>
+  <text x="40" y="279" class="t-small f-muted">checks the thread and the lifecycle</text>
+  <rect x="232" y="234" width="440" height="42" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="452" y="259" text-anchor="middle" class="t-mono">raw::ferrompi_allreduce(sp, rp, 4, 1, 0, 0)</text>
+  <rect x="696" y="234" width="172" height="42" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="782" y="259" text-anchor="middle" class="t-small">0, a code, or a refusal</text>
+  <line x1="452" y1="276" x2="452" y2="326" class="s-accent" stroke-width="1.5" marker-end="url(#lay-down)"/>
+  <line x1="782" y1="234" x2="782" y2="184" class="s-muted" stroke-width="1.5" marker-end="url(#lay-up)"/>
+  <text x="40" y="338" class="t-head">C layer</text>
+  <text x="40" y="356" class="t-mono f-muted">csrc/ferrompi.c</text>
+  <text x="40" y="373" class="t-small f-muted">looks up MPI’s own handles</text>
+  <rect x="232" y="328" width="440" height="42" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="452" y="353" text-anchor="middle" class="t-mono">MPI_Allreduce(…, 4, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD)</text>
+  <rect x="696" y="328" width="172" height="42" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="782" y="353" text-anchor="middle" class="t-small">0, or an error code</text>
+  <line x1="452" y1="370" x2="452" y2="420" class="s-accent" stroke-width="1.5" marker-end="url(#lay-down)"/>
+  <line x1="782" y1="328" x2="782" y2="278" class="s-muted" stroke-width="1.5" marker-end="url(#lay-up)"/>
+  <text x="40" y="432" class="t-head">MPI library</text>
+  <text x="40" y="450" class="t-mono f-muted">libmpi.so.12</text>
+  <text x="40" y="467" class="t-small f-muted">picks an algorithm</text>
+  <rect x="232" y="422" width="440" height="42" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="452" y="447" text-anchor="middle" class="t-mono">shared memory or the network</text>
+  <rect x="696" y="422" width="172" height="42" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="782" y="447" text-anchor="middle" class="t-small">MPI_SUCCESS, or a code</text>
+  <line x1="452" y1="464" x2="452" y2="498" class="s-accent" stroke-width="1.5" marker-end="url(#lay-down)"/>
+  <line x1="782" y1="422" x2="782" y2="372" class="s-muted" stroke-width="1.5" marker-end="url(#lay-up)"/>
+  <text x="40" y="510" class="t-head">other processes</text>
+  <text x="40" y="528" class="t-mono f-muted">the same job</text>
+  <rect x="232" y="500" width="440" height="42" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="452" y="525" text-anchor="middle" class="t-small f-muted">their own copies of the library</text>
+  <path d="M782.0 140 V83 H674" fill="none" class="s-muted" stroke-width="1.5" marker-end="url(#lay-up)"/>
+  <line x1="40" y1="303" x2="868" y2="303" class="s-rule" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <text x="868" y="298" text-anchor="end" class="t-small f-muted">↑ Rust</text>
+  <text x="868" y="316" text-anchor="end" class="t-small f-muted">↓ C</text>
+  <line x1="40" y1="397" x2="868" y2="397" class="s-rule" stroke-width="1.2" stroke-dasharray="5 4"/>
+  <text x="868" y="392" text-anchor="end" class="t-small f-muted">↑ your binary</text>
+  <text x="868" y="410" text-anchor="end" class="t-small f-muted">↓ loaded at start</text>
+</svg>
+</div>
+<figcaption>One allreduce on its way down, and its result on the way back.
+ferrompi’s Rust turns slices and enums into addresses and small integers, and
+its C turns those into MPI’s own values. Everything above the second dashed
+line is in your program’s binary.</figcaption>
+</figure>
+
+<ul>
+  <li>The <strong>public API</strong> is the methods of <code>Mpi</code>,
+  <code>Communicator</code>, <code>Win</code> and the other types, in
+  <code>src/</code> outside <code>ffi.rs</code> and <code>rt.rs</code>. It
+  checks what the types cannot express,
+  and takes each argument apart into values C can take.</li>
+  <li>The <strong>guard</strong> is a wrapper that <code>src/ffi.rs</code>
+  puts around each C function, with its checks in <code>src/rt.rs</code>. It
+  refuses a call from the wrong thread, before init or after finalize.</li>
+  <li>The <strong>C layer</strong> is one file, <code>csrc/ferrompi.c</code>,
+  compiled against the MPI library’s <code>mpi.h</code>
+  (<a href="08-building-and-running.html#what-cargo-builds">chapter 8</a>). It
+  turns ferrompi’s integers into MPI’s handles and calls the library.</li>
+  <li>The <strong>MPI library</strong>, MPICH or Open MPI or another, is
+  loaded when the program starts, and does the communication.</li>
+</ul>
+
+<p>The architecture guide’s
+<a href="../ferrompi/doc/architecture/index.html#layer-diagram">layer
+diagram</a> draws the same six layers and gives the rules for crossing each
+boundary. This chapter shows the layers at work.</p>
+
+<h2 id="one-call">One call, layer by layer</h2>
+
+<p>Besides init and finalize, this program makes one MPI call:</p>
+
+<pre data-lang="rust" data-run="2" id="one_call"><code>use ferrompi::{Mpi, ReduceOp};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // Each process contributes four values, and every process gets the sums.
+    let send = [f64::from(rank + 1); 4];
+    let mut recv = [0.0f64; 4];
+    world.allreduce(&amp;send, &amp;mut recv, ReduceOp::Sum)?;
+    println!("rank {rank}: {recv:?}");
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="one_call"><code>rank 0: [3.0, 3.0, 3.0, 3.0]
+rank 1: [3.0, 3.0, 3.0, 3.0]</code></pre>
+
+<h3 id="in-a-debugger">In a debugger</h3>
+
+<p>gdb can stop the program where it enters the MPI library and print the path
+the call took to get there. MPICH’s allreduce starts at
+<code>PMPI_Allreduce</code>; the section on the library, below, says why it
+has that name. The library is not loaded yet when gdb starts, so the breakpoint
+has to be allowed to wait for it. One process is enough, since an allreduce
+over one process is still a call to the library:</p>
+
+<pre data-lang="bash"><code>mpiexec -n 1 gdb -q -batch -ex 'set breakpoint pending on' -ex 'break PMPI_Allreduce' -ex run -ex bt --args target/debug/examples/one_call</code></pre>
+
+<p>Without its startup messages, gdb prints:</p>
+
+<pre class="output"><code>Thread 1 "one_call" hit Breakpoint 1, 0x… in PMPI_Allreduce () from $PREFIX/lib/libmpi.so.12
+#0  0x… in PMPI_Allreduce () from $PREFIX/lib/libmpi.so.12
+#1  0x… in ferrompi_allreduce (sendbuf=0x…, recvbuf=0x…, count=4, datatype_tag=1, op=0, comm_handle=0) at csrc/ferrompi.c:1612
+#2  0x… in ferrompi::ffi::ferrompi_allreduce (sendbuf=0x…, recvbuf=0x…, count=4, datatype_tag=1, op=0, comm=0) at …/ferrompi/src/ffi.rs:234
+#3  ferrompi::comm::Communicator::allreduce&lt;f64, ferrompi::op::ReduceOp&gt; (self=0x…, send=..., recv=..., op=ferrompi::op::ReduceOp::Sum) at …/ferrompi/src/comm/blocking.rs:279
+#4  0x… in one_call::main () at examples/one_call.rs:11</code></pre>
+
+<p>Read it from the bottom, one frame for each layer: your <code>main</code>,
+at the line of the call; the public API, <code>Communicator::allreduce</code>,
+whose arguments are still Rust values, <code>f64</code> slices and
+<code>ReduceOp::Sum</code>; the guard,
+<code>ferrompi::ffi::ferrompi_allreduce</code>, where they have become two
+addresses and four integers; the C function of the same name; and the
+library.</p>
+
+<p>Frame 3 prints no address. Frame 2 is not a call of its own: the guard is
+marked <code>#[inline(always)]</code>, so the compiler copies its code into
+<code>allreduce</code>, and gdb shows it as a frame because the debug
+information records where inlined code came from.</p>
+
+<h3 id="public-api">The public API</h3>
+
+<p><code>Communicator::allreduce</code> is in <code>src/comm/blocking.rs</code>,
+with the other blocking collectives:</p>
+
+<pre data-lang="rust" data-source="src/comm/blocking.rs"><code>    pub fn allreduce&lt;'a, T: MpiDatatype&gt;(
+        &amp;self,
+        send: &amp;[T],
+        recv: &amp;mut [T],
+        op: impl Into&lt;CollectiveOp&lt;'a, T&gt;&gt;,
+    ) -&gt; Result&lt;()&gt; {
+        let op = op.into().code(tag_of::&lt;T&gt;())?;
+        check_same_len("recv", send.len(), recv.len())?;
+        let (sp, n, dt) = buf(send);
+        let (rp, _, _) = buf_mut(recv);
+        // SAFETY: send.len() == recv.len() is verified above; the two slices cannot alias
+        // (&amp;[T] vs &amp;mut [T]).
+        let ret = unsafe { ffi::ferrompi_allreduce(sp, rp, n, dt, op, self.handle) };
+        Error::check_with_op(ret, "allreduce")
+    }</code></pre>
+
+<p>It does three things before it calls C. <code>op.into().code(…)</code>
+turns the operation into the integer C expects, and refuses one that does not
+apply to the element type, such as a bitwise OR of <code>f64</code> values.
+<code>check_same_len</code> refuses buffers of different lengths, which MPI
+would not notice: it would read <code>count</code> elements from one and
+write <code>count</code> into the other. And <code>buf</code> and
+<code>buf_mut</code>, in <code>src/datatype.rs</code>, take each slice
+apart:</p>
+
+<pre data-lang="rust" data-source="src/datatype.rs"><code>pub(crate) fn buf&lt;T: MpiDatatype&gt;(s: &amp;[T]) -&gt; (*const c_void, i64, i32) {
+    (
+        buf_ptr(s.as_ptr(), s.len(), false),
+        s.len() as i64,
+        tag_of::&lt;T&gt;() as i32,
+    )
+}</code></pre>
+
+<p>A slice becomes its address, its length as an <code>i64</code>, and the
+tag of its element type, an integer that <code>MpiDatatype</code> gives each
+type ferrompi can send: 1 for <code>f64</code>. <code>buf_ptr</code> passes the
+address on unchanged, except for an empty slice, whose placeholder address
+some libraries would read as <code>MPI_IN_PLACE</code>. Here is everything
+that crosses into C:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>In Rust</th><th>Crosses as</th><th>C parameter</th></tr></thead>
+  <tbody>
+    <tr><td><code>&amp;send</code>, four <code>f64</code></td><td>its address, and the count 4</td><td><code>const void* sendbuf</code>, <code>int64_t count</code></td></tr>
+    <tr><td><code>&amp;mut recv</code></td><td>its address</td><td><code>void* recvbuf</code></td></tr>
+    <tr><td>the element type, <code>f64</code></td><td>the tag 1</td><td><code>int32_t datatype_tag</code></td></tr>
+    <tr><td><code>ReduceOp::Sum</code></td><td>the code 0</td><td><code>int32_t op</code></td></tr>
+    <tr><td><code>world</code></td><td>the handle 0</td><td><code>int32_t comm_handle</code></td></tr>
+    <tr><td>the result</td><td>0, or an error code</td><td><code>int</code>, returned</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>No Rust type crosses: no slice, enum, reference or <code>Result</code>,
+only addresses and integers of fixed width, which mean the same thing to both
+compilers. The count is 64 bits wide whatever the library uses; the C layer
+decides what to do with a count too large for an <code>int</code>.</p>
+
+<p>The last two lines of <code>allreduce</code> are the call and its check. The
+call is <code>unsafe</code> because the compiler cannot check a C function’s
+contract, and the <code>SAFETY</code> comment above it says how the method
+upholds it. <code>Error::check_with_op</code> turns the integer the call
+returns into the <code>Result</code> your program sees, and names the call,
+<code>"allreduce"</code>, in any error. <a href="#the-way-back">The way
+back</a>, below, follows it.</p>
+
+<h3 id="the-guard">The guard</h3>
+
+<p>In <code>src/ffi.rs</code>, <code>ffi::ferrompi_allreduce</code> is declared
+exactly like the C function it calls:</p>
+
+<pre data-lang="rust" data-source="src/ffi.rs"><code>    pub fn ferrompi_allreduce(
+        sendbuf: *const c_void,
+        recvbuf: *mut c_void,
+        count: int64_t,
+        datatype_tag: int32_t,
+        op: int32_t,
+        comm: int32_t,
+    ) -&gt; c_int;</code></pre>
+
+<p>The declaration sits in a <code>guarded_extern!</code> block. The macro puts
+each declaration in an inner module, <code>raw</code>, which is the real
+<code>extern "C"</code> block, and defines in <code>ffi</code> a Rust function
+of the same name and arguments, with this body:</p>
+
+<pre data-lang="rust" data-source="src/ffi.rs"><code>            pub unsafe fn $name($($arg: $ty),*) -&gt; c_int {
+                let _call = match $enter() {
+                    Ok(token) =&gt; token,
+                    Err(code) =&gt; return code,
+                };
+                // …
+                unsafe { raw::$name($($arg),*) }
+            }</code></pre>
+
+<p><code>$name</code> is the function’s name, and <code>$enter</code> is
+<code>rt::enter</code> for most functions. The lines left out add a check to
+debug builds only: at <code>Serialized</code>, that no two calls are in MPI at
+once. <code>rt::enter</code> is in <code>src/rt.rs</code>:</p>
+
+<pre data-lang="rust" data-source="src/rt.rs"><code>pub(crate) fn enter() -&gt; std::result::Result&lt;InFlight, c_int&gt; {
+    // …
+    let state = STATE.load(Ordering::Relaxed);
+    if state == ACTIVE_SINGLE || state == ACTIVE_FUNNELED {
+        if ON_INIT_THREAD.with(Cell::get) {
+            return Ok(InFlight(None));
+        }
+        return Err(FERROMPI_ERR_THREAD_LEVEL);
+    }
+    enter_other(state)
+}</code></pre>
+
+<p>It reads the process’s state, one atomic byte. At <code>Single</code> and
+<code>Funneled</code>, the common levels, it checks a thread-local flag, set on
+the thread that initialized MPI, and refuses every other thread. Every other
+state goes to <code>enter_other</code>, kept out of line: at
+<code>Serialized</code> and <code>Multiple</code> it counts the call as in
+flight, so that finalize can wait for it, and before init or once finalize has
+begun it refuses the call. A refusal is one of ferrompi’s own error codes,
+which the wrapper returns as if the C function had returned it, without
+calling the C function at all. The MPI standard calls a call after
+<code>MPI_Finalize</code>, or from a thread the thread level does not allow,
+erroneous, and does not say what happens. The guard turns both into
+errors.</p>
+
+<p>The token, <code>_call</code>, lives until the wrapper returns, so at
+<code>Serialized</code> and <code>Multiple</code> the count ends after the C
+function has returned. The functions that complete a request or close an epoch
+use <code>rt::enter_completion</code> instead, which also admits them while
+finalize waits for the calls in flight. The architecture guide’s
+<a href="../ferrompi/doc/architecture/index.html#lifecycle-guard">lifecycle
+guard</a> section describes the states and the few functions that skip the
+guard; <a href="11-the-safety-model.html#lifecycle">chapter 11</a> explains
+why ferrompi needs them.</p>
+
+<h3 id="the-c-layer">The C layer</h3>
+
+<p>The function the guard calls is in <code>csrc/ferrompi.c</code>:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>int ferrompi_allreduce(
+    const void* sendbuf,
+    void* recvbuf,
+    int64_t count,
+    int32_t datatype_tag,
+    int32_t op,
+    int32_t comm_handle
+) {
+    MPI_Comm comm = get_comm(comm_handle);
+    MPI_Datatype dt = get_datatype(datatype_tag);
+    if (dt == MPI_DATATYPE_NULL) return MPI_ERR_TYPE;
+    MPI_Op mpi_op = get_op(op);
+    const void* sb = sendbuf ? sendbuf : MPI_IN_PLACE;
+    if (count &gt; INT_MAX) {
+        if (is_user_op(op)) return MPI_ERR_COUNT;
+#if MPI_VERSION &gt;= 4
+        return MPI_Allreduce_c(sb, recvbuf, (MPI_Count)count, dt, mpi_op, comm);
+#else
+        return MPI_ERR_COUNT;
+#endif
+    }
+    return MPI_Allreduce(sb, recvbuf, (int)count, dt, mpi_op, comm);
+}</code></pre>
+
+<p>Each integer becomes an MPI value. The datatype tag goes through a
+<code>switch</code>, <code>get_datatype</code>, to <code>MPI_DOUBLE</code>, and
+the operation code through another, <code>get_op</code>, to
+<code>MPI_SUM</code>. The communicator handle is an index into a table:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>static MPI_Comm get_comm(int32_t handle) {
+    if (handle &lt; 0 || handle &gt;= MAX_COMMS) {
+        return MPI_COMM_NULL;
+    }
+    if (handle != 0 &amp;&amp;
+            !atomic_load_explicit(&amp;comm_used[handle], memory_order_acquire)) {
+        return MPI_COMM_NULL;
+    }
+    return comm_table[handle];
+}</code></pre>
+
+<p><code>comm_table</code> holds every communicator ferrompi has made, and an
+index means the same thing whatever type the library gives
+<code>MPI_Comm</code>: an <code>int</code> in MPICH, a pointer in Open MPI
+(<a href="07-implementations-networks-and-abi.html#abi-problem">chapter
+7</a>). Init stores <code>MPI_COMM_WORLD</code> at index 0. A handle out of
+range, or a slot not in use, gives <code>MPI_COMM_NULL</code>, so a stale handle
+never reaches MPI as another communicator.</p>
+
+<p>Two more lines are the C layer’s own decisions. A null send buffer becomes
+<code>MPI_IN_PLACE</code>, which lets the in-place variants of
+<code>allreduce</code> share this function. A count above
+<code>INT_MAX</code> goes to <code>MPI_Allreduce_c</code>, the large-count call
+MPI 4.0 added, as the send in
+<a href="07-implementations-networks-and-abi.html#how-ferrompi-builds">chapter
+7</a> did. It is an error with an older library, and with a user-defined
+operation, whose callback takes an <code>int</code> count. The last line calls
+the library; gdb’s frame 1 stopped there.</p>
+
+<h3 id="into-mpi">Into the library</h3>
+
+<p>The breakpoint was on <code>PMPI_Allreduce</code>, and gdb named frame 0 that
+way, for a call the C layer makes to <code>MPI_Allreduce</code>. The library
+defines both names, at one address:</p>
+
+<pre data-lang="bash"><code>nm -D $PREFIX/lib/libmpi.so.12 | grep -w -e MPI_Allreduce -e PMPI_Allreduce</code></pre>
+
+<pre class="output"><code>00000000000eeb40 W MPI_Allreduce
+00000000000eeb40 T PMPI_Allreduce</code></pre>
+
+<p>This is MPI’s profiling interface. The standard requires every
+<code>MPI_</code> function to be callable also by its <code>PMPI_</code> name,
+so that a tool can define its own <code>MPI_Allreduce</code>, do its work, and
+call the library’s through <code>PMPI_Allreduce</code>. <code>T</code> marks a
+function the library defines; <code>W</code> marks a weak name, which another
+definition can replace without a duplicate-symbol error when a tool is linked
+statically. A shared library replaces it more simply: the loader binds each
+name to the first library in its search order that defines it, and a library
+named in <code>LD_PRELOAD</code> comes first.</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 272" role="img" aria-label="How the call to MPI_Allreduce in ferrompi’s C layer finds its code. Your program holds ferrompi_allreduce, which calls MPI_Allreduce, a name the program leaves undefined. libmpi.so.12 defines the code as PMPI_Allreduce and gives it a second, weak name, MPI_Allreduce, at the same address. Normally the loader binds the call to that weak name. With a profiling library in LD_PRELOAD, the loader finds that library’s own MPI_Allreduce first and binds the call to it; the profiling library records the call and calls PMPI_Allreduce, which reaches the same code in libmpi.so.12." style="min-width: 44rem">
+  <defs>
+    <marker id="sym-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+    <marker id="sym-dim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-muted"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="16" width="250" height="240" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="42" class="t-head">your program</text>
+  <rect x="36" y="56" width="218" height="40" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="145" y="80" text-anchor="middle" class="t-mono">ferrompi_allreduce</text>
+  <text x="36" y="120" class="t-small f-muted">calls MPI_Allreduce,</text>
+  <text x="36" y="136" class="t-small f-muted">which it leaves undefined</text>
+
+  <rect x="630" y="16" width="250" height="240" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="646" y="42" class="t-head">libmpi.so.12</text>
+  <rect x="646" y="56" width="218" height="40" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="755" y="80" text-anchor="middle" class="t-mono">MPI_Allreduce: weak</text>
+  <rect x="646" y="176" width="218" height="40" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="755" y="200" text-anchor="middle" class="t-mono">PMPI_Allreduce</text>
+  <text x="755" y="140" text-anchor="middle" class="t-small f-muted">the same address</text>
+  <line x1="755" y1="96" x2="755" y2="126" class="s-muted" stroke-width="1.2"/>
+  <line x1="755" y1="148" x2="755" y2="176" class="s-muted" stroke-width="1.2"/>
+
+  <rect x="325" y="120" width="250" height="136" rx="10" class="f-paper s-accent" stroke-width="1.2"/>
+  <text x="341" y="146" class="t-head">libcount_allreduce.so</text>
+  <text x="341" y="162" class="t-small f-muted">named in LD_PRELOAD</text>
+  <rect x="341" y="176" width="218" height="40" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="450" y="200" text-anchor="middle" class="t-mono">MPI_Allreduce</text>
+  <text x="341" y="238" class="t-small f-muted">prints, then calls PMPI_Allreduce</text>
+  <path d="M254 76 H644" fill="none" class="s-muted" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#sym-dim)"/>
+  <text x="450" y="68" text-anchor="middle" class="t-small f-muted">without a preload</text>
+  <path d="M236 96 V196 H339" fill="none" class="s-accent" stroke-width="1.5" marker-end="url(#sym-arrow)"/>
+  <text x="287" y="188" text-anchor="middle" class="t-small f-muted">with one</text>
+  <line x1="559" y1="196" x2="644" y2="196" class="s-accent" stroke-width="1.5" marker-end="url(#sym-arrow)"/>
+</svg>
+</div>
+<figcaption>Without a preload, the program’s call to
+<code>MPI_Allreduce</code> binds to the library’s code. A library named in
+<code>LD_PRELOAD</code> is searched first, so its <code>MPI_Allreduce</code>
+takes the call, and reaches the same code through
+<code>PMPI_Allreduce</code>.</figcaption>
+</figure>
+
+<p>A tool of a dozen lines shows it. It prints each allreduce it sees, then
+passes it on:</p>
+
+<pre data-lang="c"><code>#include &lt;mpi.h&gt;
+#include &lt;stdio.h&gt;
+
+/* Replaces MPI_Allreduce for every caller in the process. MPI's profiling
+   interface guarantees the real one is also reachable as PMPI_Allreduce. */
+int MPI_Allreduce(const void *sendbuf, void *recvbuf, int count,
+                  MPI_Datatype datatype, MPI_Op op, MPI_Comm comm) {
+    int rank, size;
+    PMPI_Comm_rank(comm, &amp;rank);
+    PMPI_Type_size(datatype, &amp;size);
+    fprintf(stderr, "rank %d: MPI_Allreduce of %d elements of %d bytes\n",
+            rank, count, size);
+    return PMPI_Allreduce(sendbuf, recvbuf, count, datatype, op, comm);
+}</code></pre>
+
+<p>Save it as <code>count_allreduce.c</code>, build it as a shared library with
+the MPI compiler wrapper, and run the program with it. <code>env</code> sets
+<code>LD_PRELOAD</code> in each process the launcher starts, not in
+<code>mpiexec</code> itself:</p>
+
+<pre data-lang="bash"><code>mpicc -shared -fPIC -o libcount_allreduce.so count_allreduce.c
+mpiexec -n 2 env LD_PRELOAD=$PWD/libcount_allreduce.so target/debug/examples/one_call</code></pre>
+
+<pre class="output"><code>rank 0: MPI_Allreduce of 4 elements of 8 bytes
+rank 1: MPI_Allreduce of 4 elements of 8 bytes
+rank 0: [3.0, 3.0, 3.0, 3.0]
+rank 1: [3.0, 3.0, 3.0, 3.0]</code></pre>
+
+<p>The tool sees the call as the C layer made it: 4 elements of
+<code>MPI_DOUBLE</code>, 8 bytes each. Neither ferrompi nor the program changed,
+and that is how profilers and tracers that use the profiling interface, such
+as mpiP and Score-P, see a ferrompi program.</p>
+
+<p>Under <code>MPI_Allreduce</code>, the library picks an algorithm for the
+message size and the number of processes, and moves the data through shared
+memory or the network, as chapters
+<a href="03-collective-communication.html">3</a> and
+<a href="07-implementations-networks-and-abi.html#moving-bytes">7</a>
+described. ferrompi has no part in that.</p>
+
+<h2 id="the-way-back">The way back</h2>
+
+<p>Every MPI function returns an <code>int</code>: <code>MPI_SUCCESS</code>,
+which is 0, or an error code. It returns an error only if the error handler of
+the communicator lets it; the default handler,
+<code>MPI_ERRORS_ARE_FATAL</code>, ends the job instead. ferrompi replaces it
+in <code>ferrompi_init_thread</code>, right after the library starts:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>    int ret = MPI_Init_thread(NULL, NULL, mpi_required, &amp;mpi_provided);
+    /* ... */
+        comm_table[0] = MPI_COMM_WORLD;
+        atomic_store_explicit(&amp;comm_used[0], 1, memory_order_release);
+        int eh_ret = install_errors_return(MPI_COMM_WORLD);
+        if (eh_ret == MPI_SUCCESS) {
+            eh_ret = install_errors_return(MPI_COMM_SELF);
+        }</code></pre>
+
+<p>The lines left out check that <code>MPI_Init_thread</code> succeeded. If
+either handler cannot be installed, the lines after the excerpt end the job,
+since MPI cannot be initialized a second time. The function that installs the
+handler says where else it is used:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>/* Install MPI_ERRORS_RETURN on the given communicator so that MPI
+ * errors are returned as codes to ferrompi rather than aborting the
+ * process via MPI_ERRORS_ARE_FATAL. Called from every site that
+ * creates or adopts an MPI_Comm before handing it to Rust, and also on
+ * MPI_COMM_SELF at init, since MPI 4 delivers errors that are not
+ * associated with any object (e.g. group construction) through
+ * MPI_COMM_SELF's handler. */
+static int install_errors_return(MPI_Comm comm) {
+    return MPI_Comm_set_errhandler(comm, MPI_ERRORS_RETURN);
+}</code></pre>
+
+<p>So an error comes back as an integer, through the C function, the guard and
+<code>allreduce</code>, to <code>check_with_op</code>, in
+<code>src/error.rs</code>:</p>
+
+<pre data-lang="rust" data-source="src/error.rs"><code>    pub(crate) fn check_with_op(code: i32, operation: &amp;'static str) -&gt; Result&lt;()&gt; {
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(Error::from_code_with_op(code, operation))
+        }
+    }</code></pre>
+
+<p>0 becomes <code>Ok(())</code>. Any other code goes to
+<code>from_code</code>, which is marked <code>#[cold]</code>, so the compiler
+keeps it out of the way of the success path, which stays one compare and one
+branch. <code>from_code</code> turns ferrompi’s own codes into their errors
+first:</p>
+
+<pre data-lang="rust" data-source="src/error.rs"><code>        if code == FERROMPI_ERR_FINALIZED {
+            return Error::Finalized;
+        }
+        if code == FERROMPI_ERR_THREAD_LEVEL {
+            return Error::ThreadLevelViolation;
+        }
+        // …
+        let ret = unsafe {
+            ffi::ferrompi_error_info(
+                code,
+                &amp;mut class,
+                msg_buf.as_mut_ptr().cast::&lt;std::ffi::c_char&gt;(),
+                &amp;mut msg_len,
+            )
+        };</code></pre>
+
+<p>ferrompi’s codes are the ones the guard and the C layer return without
+calling MPI: the guard’s refusals, a full table in the C layer, a call the
+library is too old for. They are negative, in the −7000s, and MPI’s never are,
+so the two cannot collide. Any other code is MPI’s.
+<code>ferrompi_error_info</code>, in C, asks the library for its class and
+message, with <code>MPI_Error_class</code> and <code>MPI_Error_string</code>,
+and <code>from_code</code> puts both in <code>Error::Mpi</code>, to which
+<code>check_with_op</code> adds the name of the call.
+<a href="07-implementations-networks-and-abi.html#error-codes">Chapter 7</a>
+explains classes, and why their values differ from one library to
+another.</p>
+
+<h2 id="who-refuses-what">Which layer refuses what</h2>
+
+<p>Each layer refuses the mistakes it can see, and the error a program gets
+says which layer did. This program makes five calls that end in different
+layers, then one more after <code>drop(mpi)</code>. Rank 0 prints the layer
+that answered each, and every process prints the error itself to standard
+error:</p>
+
+<pre data-lang="rust" data-run="2" id="refusals"><code>use ferrompi::{Error, Mpi, ReduceOp};
+
+/// Names the layer that refused a call, from the error the call returned.
+fn refused_by(result: &amp;ferrompi::Result&lt;()&gt;) -&gt; String {
+    match result {
+        Ok(()) =&gt; "no layer refused it".to_string(),
+        Err(Error::InvalidArgument { arg, .. } | Error::BufferSize { arg, .. }) =&gt; {
+            format!("the public API, over `{arg}`")
+        }
+        Err(Error::ThreadLevelViolation | Error::Finalized) =&gt; "the guard".to_string(),
+        Err(Error::Mpi {
+            class, operation, ..
+        }) =&gt; {
+            format!("MPI, with {class}, in {}", operation.unwrap_or("?"))
+        }
+        Err(other) =&gt; format!("another error: {other}"),
+    }
+}
+
+/// Prints the layer on rank 0, and the error itself on every rank, to
+/// standard error.
+fn report(rank: i32, call: &amp;str, result: ferrompi::Result&lt;()&gt;) {
+    if let Err(err) = &amp;result {
+        eprintln!("rank {rank}: {call}: {err}");
+    }
+    if rank == 0 {
+        println!("{call}: {}", refused_by(&amp;result));
+    }
+}
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+    let send = [1.0f64, 2.0];
+    let mut recv = [0.0f64; 2];
+    let mut short = [0.0f64; 1];
+
+    // Every process makes the same calls, in the same order.
+    let calls = [
+        (
+            "a sum of f64s",
+            world.allreduce(&amp;send, &amp;mut recv, ReduceOp::Sum),
+        ),
+        (
+            "a bitwise OR of f64s",
+            world.allreduce(&amp;send, &amp;mut recv, ReduceOp::BitwiseOr),
+        ),
+        (
+            "a short receive buffer",
+            world.allreduce(&amp;send, &amp;mut short, ReduceOp::Sum),
+        ),
+        (
+            "a barrier on another thread",
+            std::thread::scope(|s| s.spawn(|| world.barrier()).join().unwrap()),
+        ),
+        (
+            "a send past the last rank",
+            world.send(&amp;send, world.size(), 0),
+        ),
+    ];
+    for (call, result) in calls {
+        report(rank, call, result);
+    }
+
+    drop(mpi);
+    report(rank, "a barrier after drop(mpi)", world.barrier());
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="refusals"><code>a sum of f64s: no layer refused it
+a bitwise OR of f64s: the public API, over `op`
+a short receive buffer: the public API, over `recv`
+a barrier on another thread: the guard
+a send past the last rank: MPI, with ERR_RANK, in send
+a barrier after drop(mpi): the guard</code></pre>
+
+<p>and rank 0’s lines on standard error read:</p>
+
+<pre class="output"><code>rank 0: a bitwise OR of f64s: invalid argument `op`: bitwise and logical ops do not apply to floating-point types
+rank 0: a short receive buffer: buffer `recv` has 1 elements, 2 required
+rank 0: a barrier on another thread: MPI call not permitted on this thread at the provided thread level
+rank 0: a send past the last rank: MPI error in send: Invalid rank, error stack:
+internal_Send(63826): MPI_Send(buf=0x…, count=2, MPI_DOUBLE, 2, 0, MPI_COMM_WORLD) failed
+internal_Send(63780): Invalid rank has value 2 but must be nonnegative and less than 2 (class=ERR_RANK, code=…)
+rank 0: a barrier after drop(mpi): MPI has been finalized or the Mpi handle dropped</code></pre>
+
+<ul>
+  <li>The bitwise OR and the short buffer never left the public API.
+  <code>Error::InvalidArgument</code> and <code>Error::BufferSize</code> name
+  the argument at fault.</li>
+  <li>The barrier on another thread stopped at the guard.
+  <code>Mpi::init</code> asks for <code>Single</code>, so only the thread that
+  called it may call MPI
+  (<a href="06-threads-and-hybrid-mpi.html#what-ferrompi-checks">chapter
+  6</a>).</li>
+  <li>The send to rank 2, in a job of two, reached MPICH, which checked the
+  rank and returned an error. <code>MPI_ERRORS_RETURN</code> let it come back
+  as <code>Error::Mpi</code>, with the class, MPICH’s own message and error
+  stack, and the name of the call. The code differs from run to run and from
+  process to process, because MPICH makes a new one for each error it
+  reports.</li>
+  <li>A <code>Communicator</code> does not borrow the <code>Mpi</code>, so
+  <code>world</code> outlives <code>drop(mpi)</code>, but every call it makes
+  after finalize stops at the guard.</li>
+</ul>
+
+<p>One layer comes before all of these: the compiler.
+<code>MpiDatatype</code> is implemented only for the types the C layer has a
+tag for, and it is sealed, so no other crate can add one. An allreduce of
+<code>u16</code> values does not build:</p>
+
+<pre class="output"><code>error[E0277]: the trait bound `u16: MpiDatatype` is not satisfied
+   --&gt; examples/u16.rs:8:11
+    |
+  8 |     world.allreduce(&amp;send, &amp;mut recv, ReduceOp::Sum)?;
+    |           ^^^^^^^^^ the trait `MpiDatatype` is not implemented for `u16`
+    |
+    = help: the following other types implement trait `MpiDatatype`:
+              f32
+              f64
+              i32
+              i64
+              u32
+              u64
+              u8</code></pre>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Layer</th><th>Refuses</th><th>The program gets</th></tr></thead>
+  <tbody>
+    <tr><td>compiler</td><td>an element type ferrompi cannot send; a shared slice where MPI writes</td><td>a build error</td></tr>
+    <tr><td>public API</td><td>an operation that does not apply to the type; buffers whose lengths do not fit the call</td><td><code>Error::InvalidArgument</code>, <code>Error::BufferSize</code></td></tr>
+    <tr><td>guard</td><td>a call from a thread the level does not allow; a call before init or after finalize</td><td><code>Error::ThreadLevelViolation</code>, <code>Error::InvalidState</code>, <code>Error::Finalized</code></td></tr>
+    <tr><td>C layer</td><td>a full table; a count too large for the library; an unknown datatype</td><td><code>Error::ResourceExhausted</code>, or <code>Error::Mpi</code> with <code>ERR_COUNT</code> or <code>ERR_TYPE</code></td></tr>
+    <tr><td>MPI library</td><td>whatever it checks: ranks, tags, communicators, types, and what goes wrong on the network</td><td><code>Error::Mpi</code>, with the class and the library’s message</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Two cautions. A check that fails on one process only does not stop the
+others: they enter the collective and wait for a process that never comes, as
+in <a href="03-collective-communication.html#when-a-collective-hangs">chapter
+3</a>. Here every process made the same mistakes, so none waited. And some
+mistakes reach no layer at all: the <code>f64</code> values received as
+<code>i64</code> in
+<a href="04-datatypes-and-reductions.html#when-types-do-not-match">chapter
+4</a> are legal MPI, and nothing reports them.</p>
+
+<h2 id="what-a-program-links">What a program links</h2>
+
+<p>The C layer is compiled into a static library, <code>libferrompi.a</code>,
+of 154 functions, most of them one for each MPI call ferrompi wraps. A program
+contains only the ones it uses. These are the <code>ferrompi_</code> functions
+<code>one_call</code> defines:</p>
+
+<pre data-lang="bash"><code>nm --defined-only target/debug/examples/one_call | awk '$3 ~ /^ferrompi_/ {print $2, $3}'</code></pre>
+
+<pre class="output"><code>T ferrompi_allreduce
+T ferrompi_comm_free
+T ferrompi_comm_rank
+T ferrompi_comm_size
+T ferrompi_error_class_index
+T ferrompi_error_info
+T ferrompi_finalize
+T ferrompi_finalized
+T ferrompi_init_thread
+T ferrompi_op_drop_closure
+T ferrompi_op_free</code></pre>
+
+<p>Ten are C: the call <code>one_call</code> makes, and the ones init, finalize
+and the error path need. The other, <code>ferrompi_op_drop_closure</code>, is
+Rust, in <code>src/op.rs</code>. The C layer calls it when it frees a
+user-defined operation, as finalize does with any left in its table, so calls
+cross the boundary upward too. <a href="12-user-defined-reductions-and-derived-datatypes.html#closure-as-op">Chapter 12</a> follows a user-defined operation,
+whose function MPI calls through C into Rust. No binding generator is involved
+in either direction: each side declares the other’s functions by hand.</p>
+
+<p>The other 144 C functions were dropped by the linker. The cc crate compiles
+the C file with <code>-ffunction-sections</code>, which puts each function in
+a section of its own, and rustc links with <code>--gc-sections</code>, which
+drops every section nothing refers to. What is left needs these names from the
+MPI library, which the loader looks up when the program starts:</p>
+
+<pre data-lang="bash"><code>nm --undefined-only target/debug/examples/one_call | awk '$2 ~ /MPI_/ {print $2}'</code></pre>
+
+<pre class="output"><code>MPI_Abort
+MPI_Allreduce
+MPI_Allreduce_c
+MPI_Comm_free
+MPI_Comm_rank
+MPI_Comm_set_errhandler
+MPI_Comm_size
+MPI_Error_class
+MPI_Error_string
+MPI_Finalize
+MPI_Finalized
+MPI_Group_free
+MPI_Init_thread
+MPI_Op_free
+MPI_Request_free
+MPI_Type_free</code></pre>
+
+<p><code>MPI_Allreduce_c</code> is there although <code>one_call</code> never
+sends two billion elements: <code>ferrompi_allreduce</code> names it, so the
+program needs it, and a library without it would fail to load the program.
+Built against a library older than MPI 4.0, the <code>#if</code> leaves the
+name out. The free functions are finalize’s: it frees whatever handles are
+left in the C layer’s tables.</p>
+
+<h2 id="what-the-layers-cost">What the layers cost</h2>
+
+<p>Each layer adds work to a call: the guard’s load and compare, the checks
+in the public API, the switches and the table lookup in C.
+<code>benches/ffi_overhead.rs</code> measures it, by timing each call through
+ferrompi against the same MPI call made directly, on one process so that no
+network hides the difference. Its first case times a direct call against
+itself, to show the noise. On the laptop this chapter was written
+on, at <code>Funneled</code>, pinned to its four fast cores:</p>
+
+<pre data-lang="bash"><code>cargo bench --bench ffi_overhead --no-run
+taskset -c 0-3 mpiexec -n 1 target/release/deps/ffi_overhead-&lt;hash&gt;</code></pre>
+
+<p><code>cargo</code> prints the path of the benchmark, with its hash, and
+<code>lscpu -e</code> shows which of your cores are fast. Three runs gave these
+medians, in nanoseconds per call:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Call</th><th>Direct</th><th>Through ferrompi</th><th>Difference</th></tr></thead>
+  <tbody>
+    <tr><td>allreduce of one <code>f64</code>, sum</td><td>50</td><td>55</td><td>+5</td></tr>
+    <tr><td>barrier</td><td>6</td><td>9</td><td>+3</td></tr>
+    <tr><td>an <code>isend</code> and an <code>irecv</code> to itself, and both waits</td><td>157</td><td>285</td><td>+128</td></tr>
+    <tr><td>a direct <code>iallreduce</code> and wait, against itself</td><td>82</td><td>82</td><td>from −2 to 0</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>A blocking call costs a few nanoseconds more, the time of a few dozen
+instructions. A message between two processes takes far longer, as
+<a href="07-implementations-networks-and-abi.html#measuring">chapter 7</a>’s
+ping-pong measured, so in a real job the layers vanish in the call’s own
+time. The nonblocking pair costs more because
+ferrompi does more for it: the C layer keeps each <code>MPI_Request</code> in a
+table and returns its index, each wait looks it up, fills a
+<code>Status</code> and frees the slot, and the
+<a href="02-point-to-point.html#requests-and-scopes">scope</a> keeps track of
+the requests so that none outlives its buffer. The
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/benches/README.md">benches
+README</a> records the same benchmark measured with more care, on a desktop
+processor where every difference is smaller, and the budgets each release is
+checked against.</p>
+
+<h2 id="where-state-lives">Where the state lives</h2>
+
+<p>Your program’s ferrompi values hold little: a <code>Communicator</code> is
+three integers, its handle and the process’s rank and size in it, which is why
+<code>world.rank()</code> calls nothing. What the handles refer to lives in a
+few statics:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>State</th><th>File</th><th>Holds</th></tr></thead>
+  <tbody>
+    <tr><td><code>STATE</code></td><td><code>src/rt.rs</code></td><td>the lifecycle and the thread level: the byte the guard reads on every call</td></tr>
+    <tr><td><code>ON_INIT_THREAD</code></td><td><code>src/rt.rs</code></td><td>a thread-local flag, set on the thread that initialized MPI</td></tr>
+    <tr><td><code>IN_FLIGHT</code></td><td><code>src/rt.rs</code></td><td>the calls in MPI at <code>Serialized</code> and <code>Multiple</code>, which finalize waits for, counted in shards so threads do not contend</td></tr>
+    <tr><td><code>REGISTRY</code></td><td><code>src/op.rs</code></td><td>the closures of user-defined operations, by slot</td></tr>
+    <tr><td><code>LIVE_WINDOWS</code></td><td><code>src/window.rs</code></td><td>the number of windows alive, which keeps finalize from running under one</td></tr>
+    <tr><td><code>comm_table</code>, <code>request_table</code>, <code>win_table</code>, <code>group_table</code>, <code>datatype_table</code>, <code>op_table</code></td><td><code>csrc/ferrompi.c</code></td><td>MPI’s own handles, by the index Rust holds</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Each C table has a fixed size, set in the source:</p>
+
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>// Communicator table size, COMM_WORLD included: it holds slot 0, so at most
+// MAX_COMMS - 1 other communicators can exist at once
+#define MAX_COMMS 256
+
+// Maximum number of concurrent requests
+#define MAX_REQUESTS 16384
+/* ... */
+// Maximum number of concurrent MPI_Group objects
+#define MAX_GROUPS 64
+
+// Maximum number of concurrent custom (derived) MPI_Datatype objects
+#define MAX_DATATYPES 64
+
+// Maximum number of concurrent RMA windows
+#define MAX_WINDOWS 256
+/* ... */
+// Maximum number of concurrent user-defined MPI_Op objects
+#define MAX_OPS 16</code></pre>
+
+<p>A program that holds more at once gets
+<code>Error::ResourceExhausted</code>. The architecture guide’s
+<a href="../ferrompi/doc/architecture/index.html#handle-tables">handle
+tables</a> section describes how slots are claimed and freed, and
+<a href="10-the-c-shim.html#threads">chapter 10</a> shows how threads share
+the tables.</p>
+
+<h2 id="source-map">A map of the source</h2>
+
+<p>All of this lives in a few files. The ones you will open most:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Path</th><th>Holds</th></tr></thead>
+  <tbody>
+    <tr><td><code>src/lib.rs</code></td><td><code>Mpi</code>: init, finalize and the thread level, and the crate’s exports</td></tr>
+    <tr><td><code>src/comm/</code></td><td><code>Communicator</code>: <code>blocking.rs</code> for the collectives, <code>p2p.rs</code> for sends, receives and probes, <code>nonblocking.rs</code>, <code>v_collective.rs</code>, <code>persistent.rs</code>, <code>mgmt.rs</code> for duplicating and splitting, and <code>mod.rs</code> for the argument checks</td></tr>
+    <tr><td><code>src/datatype.rs</code>, <code>src/datatype_builder.rs</code></td><td><code>MpiDatatype</code> and its tags; derived datatypes</td></tr>
+    <tr><td><code>src/op.rs</code></td><td><code>ReduceOp</code> and user-defined operations, with the functions the C layer calls back</td></tr>
+    <tr><td><code>src/request.rs</code>, <code>src/scope.rs</code>, <code>src/persistent.rs</code>, <code>src/message.rs</code>, <code>src/status.rs</code></td><td>requests and the scope that owns them; persistent requests; matched probes; status</td></tr>
+    <tr><td><code>src/window.rs</code></td><td>windows and one-sided communication, with the <code>rma</code> feature</td></tr>
+    <tr><td><code>src/group.rs</code>, <code>src/topology.rs</code>, <code>src/slurm.rs</code></td><td>groups; where the processes run</td></tr>
+    <tr><td><code>src/error.rs</code></td><td><code>Error</code>, <code>MpiErrorClass</code>, and the mapping from codes</td></tr>
+    <tr><td><code>src/rt.rs</code></td><td>the guard and the lifecycle</td></tr>
+    <tr><td><code>src/ffi.rs</code></td><td>the declaration of every C function, and the guard’s wrappers</td></tr>
+    <tr><td><code>csrc/ferrompi.c</code>, <code>csrc/ferrompi.h</code></td><td>the C layer, and its declarations, which <code>src/ffi.rs</code> must match</td></tr>
+    <tr><td><code>build.rs</code></td><td>finds MPI and compiles the C layer (<a href="08-building-and-running.html#what-cargo-builds">chapter 8</a>)</td></tr>
+    <tr><td><code>examples/</code></td><td>21 programs, and 103 integration tests, <code>test_*.rs</code>, each with a <code>// mpi-test:</code> line that tells <code>tests/run_mpi_tests.sh</code> how to run it</td></tr>
+    <tr><td><code>benches/</code></td><td>the overhead benchmark and two benchmarks of collectives, with their README</td></tr>
+    <tr><td><code>docs/</code></td><td>the architecture guide, the ADRs, the migration guides and this tutorial; <code>src/doc.rs</code> puts the guides and the ADRs into the API reference</td></tr>
+    <tr><td><code>audits/</code></td><td>a full review of the crate, with the status of each finding</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The <a href="../ferrompi/doc/adr_0001_why_c_wrapper/index.html">first
+ADR</a> says why there is a C layer at all, and the others record the decisions
+the later chapters explain.</p>
+
+<h3 id="finding-the-code">Finding the code for a call</h3>
+
+<p>Every call follows the path <code>allreduce</code> did, under one name. The
+public method calls <code>ffi::ferrompi_<i>name</i></code>, declared in
+<code>src/ffi.rs</code>, and the C function of that name is in
+<code>csrc/ferrompi.c</code>, declared in <code>csrc/ferrompi.h</code>. One
+search finds them all:</p>
+
+<pre data-lang="bash"><code>git grep -n 'ferrompi_barrier\b' -- src csrc</code></pre>
+
+<pre class="output"><code>csrc/ferrompi.c:1106:int ferrompi_barrier(int32_t comm_handle) {
+csrc/ferrompi.h:178:int ferrompi_barrier(int32_t comm);
+src/comm/blocking.rs:27:        // communicator table. ferrompi_barrier delegates to MPI_Barrier which requires no
+src/comm/blocking.rs:29:        let ret = unsafe { ffi::ferrompi_barrier(self.handle) };
+src/ffi.rs:389:    pub fn ferrompi_barrier(comm: int32_t) -> c_int;</code></pre>
+
+<p>The architecture guide’s
+<a href="../ferrompi/doc/architecture/index.html#entry-point-pattern">entry-point
+pattern</a> lists the five places a new call touches, in order;
+<a href="14-adding-an-mpi-call.html">chapter 14</a> follows one call through
+them.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>Run <code>hello_world</code>, or any program that calls
+  <code>barrier</code>, under gdb with a breakpoint on
+  <code>PMPI_Barrier</code>, and name the layer of each frame. Do the same
+  with <code>--release</code>, and say which frames are missing and why.</li>
+  <li>Make <code>recv</code> in <code>one_call</code> three elements long, and
+  say which layer refuses the call. Then make only rank 1’s buffer short, run
+  it under <code>timeout 20</code>, and explain what happens to rank 0.</li>
+  <li>Add <code>MPI_Barrier</code> and <code>MPI_Send</code> to the profiling
+  tool, and run the refusals program with it. Which of its calls reach the
+  library?</li>
+  <li>List the <code>ferrompi_</code> functions in the refusals program with
+  <code>nm</code>, and say which call needs each one that
+  <code>one_call</code> lacks.</li>
+  <li>Find the C function behind <code>Communicator::broadcast</code>. Then
+  find a declaration in <code>src/ffi.rs</code> outside
+  <code>guarded_extern!</code>, and read in the architecture guide why it
+  skips the guard.</li>
+  <li>Run the overhead benchmark on your machine, and compare its differences
+  with the ones above and with the benches README.</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>A ferrompi call crosses six layers: your program, the public API in
+  <code>src/</code>, the guard in <code>src/ffi.rs</code> and
+  <code>src/rt.rs</code>, the C layer in <code>csrc/ferrompi.c</code>, the MPI
+  library, and the other processes. A backtrace shows a frame for each of the
+  first five.</li>
+  <li>The public API checks what the types cannot, and takes Rust values apart:
+  a slice into its address and length, the element type into a tag, the
+  operation into a code, a communicator into a handle. Only addresses and
+  fixed-width integers cross into C.</li>
+  <li>The guard is an inlined wrapper around each C function. It reads one
+  atomic byte and, at <code>Single</code> and <code>Funneled</code>, a
+  thread-local flag, and returns one of ferrompi’s error codes instead of
+  calling C when the thread or the moment is wrong.</li>
+  <li>The C layer turns tags, codes and handles into MPI’s own values, through
+  switches and tables, and makes the decisions that need <code>mpi.h</code>,
+  such as <code>MPI_IN_PLACE</code> and the large-count calls.</li>
+  <li>Every <code>MPI_</code> function is also a <code>PMPI_</code> function. A
+  library in <code>LD_PRELOAD</code> can take the <code>MPI_</code> calls and
+  pass them on, which is how profilers see a ferrompi program.</li>
+  <li>Errors come back as integers. ferrompi installs
+  <code>MPI_ERRORS_RETURN</code> so that MPI returns them, and
+  <code>check_with_op</code> turns them into <code>Error</code>, keeping
+  ferrompi’s own negative codes apart from MPI’s.</li>
+  <li>Each layer refuses its own kind of mistake, and the error variant names
+  the layer. A mistake made on one process only can still hang a
+  collective.</li>
+  <li>A program links only the C functions it uses. The layers add a few
+  nanoseconds to a blocking call, and more to a nonblocking one, for the
+  request table and the scope.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="08-building-and-running.html">Previous: chapter 8, building and running</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="10-the-c-shim.html">Next: chapter 10, the C shim</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>

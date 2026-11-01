@@ -1,0 +1,1089 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>5. One-sided communication · ferrompi tutorial</title>
+<meta name="description" content="MPI’s one-sided communication with ferrompi: windows, fence, post-start-complete-wait and lock epochs, accumulates and atomic operations, and shared-memory windows on a node.">
+<link rel="stylesheet" href="tutorial.css">
+</head>
+<body>
+<header class="site-bar">
+  <nav aria-label="Site">
+    <a class="home" href="index.html">ferrompi tutorial</a>
+    <a href="index.html#chapters">Chapters</a>
+    <a href="../ferrompi/index.html">API reference</a>
+    <a href="https://github.com/cobre-rs/ferrompi">GitHub</a>
+  </nav>
+</header>
+
+<div class="page with-toc">
+<nav class="toc" aria-label="On this page">
+  <div>
+    <h2>On this page</h2>
+    <ol>
+      <li><a href="#what-one-sided-means">What one-sided means</a></li>
+      <li><a href="#windows">Windows</a></li>
+      <li><a href="#fence-epochs">Fence epochs</a></li>
+      <li><a href="#accumulate-and-atomics">Accumulate and atomic operations</a></li>
+      <li><a href="#passive-target">Passive target: locks</a></li>
+      <li><a href="#neighbors-only">Synchronizing with neighbors only</a></li>
+      <li><a href="#shared-memory-windows">Shared-memory windows</a></li>
+      <li><a href="#when-one-sided-goes-wrong">When one-sided goes wrong</a></li>
+      <li><a href="#exercises">Exercises</a></li>
+      <li><a href="#summary">Summary</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+<p class="eyebrow">Part I · Chapter 5</p>
+<h1>One-sided communication and shared-memory windows</h1>
+
+<p class="lede">In one-sided communication a process reads or writes another
+process’s memory, and the other process makes no call for the transfer. This
+chapter covers the memory a process exposes, the three ways to synchronize
+access to it, the operations that update it atomically, and memory that the
+processes of one node share.</p>
+
+<p>By the end of the chapter you can write a halo exchange with puts, keep
+counters that any process can add to, hand out work from a queue that no
+process serves, and keep one copy of a table per node instead of one per
+process. The chapter assumes
+<a href="02-point-to-point.html">chapter 2</a> for the halo exchange and
+<a href="03-collective-communication.html">chapter 3</a> for barriers and
+reductions.</p>
+
+<aside class="note">
+<span class="label">The <code>rma</code> feature</span>
+<p>ferrompi builds its one-sided API only with the <code>rma</code> feature.
+Enable it in <code>Cargo.toml</code>:</p>
+<pre data-lang="toml"><code>[dependencies]
+ferrompi = { version = "0.7", features = ["rma"] }</code></pre>
+<p>Inside the ferrompi repository, build the examples with
+<code>cargo build --examples --features rma</code>.</p>
+</aside>
+
+<h2 id="what-one-sided-means">What one-sided means</h2>
+
+<p>Every message in chapter 2 took two calls: a send at one process and a
+matching receive at the other. The receiver had to expect the message and say
+where to put it. One-sided communication, which MPI calls remote memory access
+(RMA), has no receive. A process exposes part of its memory as a
+<em>window</em>. Another process, the <em>origin</em>, puts data into it, gets
+data from it, or combines data with it, naming the <em>target</em> process and
+a position in the target’s window. The target makes no call for the
+transfer.</p>
+
+<p>The target still takes part in synchronization. A put is not visible at the
+target when the origin issues it. MPI completes it by the end of an
+<em>epoch</em>, a stretch of the program that one synchronization call opens
+and another closes. Every transfer belongs to an epoch, and the call that closes
+the epoch is the point after which both sides can rely on it.</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 236" role="img" aria-label="Two timelines of two processes. Two-sided: process 0 calls send and process 1 calls recv, and the message goes from the send to the receive. One-sided: both processes call fence, then process 0 calls put, whose data goes into process 1’s window while process 1 makes no call, and then both call fence again; the closing fence is where process 1 can rely on the data.">
+  <defs>
+    <marker id="sides-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="16" width="424" height="204" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="44" class="t-head">Two-sided</text>
+  <text x="36" y="64" class="t-small f-muted">both processes make a call for the message</text>
+  <text x="36" y="116" class="t-small f-muted">process 0</text>
+  <text x="36" y="186" class="t-small f-muted">process 1</text>
+  <line x1="116" y1="112" x2="428" y2="112" class="s-rule" stroke-width="1.2"/>
+  <line x1="116" y1="182" x2="428" y2="182" class="s-rule" stroke-width="1.2"/>
+
+  <rect x="456" y="16" width="424" height="204" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="472" y="44" class="t-head">One-sided</text>
+  <text x="472" y="64" class="t-small f-muted">only the origin makes a call for the data</text>
+  <text x="472" y="116" class="t-small f-muted">process 0</text>
+  <text x="472" y="186" class="t-small f-muted">process 1</text>
+  <line x1="552" y1="112" x2="864" y2="112" class="s-rule" stroke-width="1.2"/>
+  <line x1="552" y1="182" x2="864" y2="182" class="s-rule" stroke-width="1.2"/>
+  <rect x="150" y="98" width="118" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="209" y="116" text-anchor="middle" class="t-mono">send(&amp;x, 1)</text>
+  <rect x="234" y="168" width="150" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="309" y="186" text-anchor="middle" class="t-mono">recv(&amp;mut y, 0)</text>
+  <line x1="220" y1="127" x2="282" y2="166" class="s-accent" stroke-width="1.5" marker-end="url(#sides-arrow)"/>
+  <text x="264" y="151" class="t-small f-muted">message</text>
+  <rect x="562" y="98" width="56" height="28" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="590" y="116" text-anchor="middle" class="t-mono">fence</text>
+  <rect x="562" y="168" width="56" height="28" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="590" y="186" text-anchor="middle" class="t-mono">fence</text>
+  <line x1="590" y1="127" x2="590" y2="167" class="s-muted" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <rect x="802" y="98" width="56" height="28" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="830" y="116" text-anchor="middle" class="t-mono">fence</text>
+  <rect x="802" y="168" width="56" height="28" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="830" y="186" text-anchor="middle" class="t-mono">fence</text>
+  <line x1="830" y1="127" x2="830" y2="167" class="s-muted" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <rect x="628" y="98" width="150" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="703" y="116" text-anchor="middle" class="t-mono">put(&amp;x, 1, 3)</text>
+  <rect x="628" y="168" width="160" height="28" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="708" y="186" text-anchor="middle" class="t-small f-muted">no call: computes</text>
+  <line x1="676" y1="127" x2="704" y2="166" class="s-accent" stroke-width="1.5" marker-end="url(#sides-arrow)"/>
+  <text x="702" y="151" class="t-small f-muted">into its window</text>
+</svg>
+</div>
+<figcaption>Two-sided, the receiver makes a call and names the buffer.
+One-sided, the origin names the place in the target’s window, and the target
+only joins the synchronization around it.</figcaption>
+</figure>
+
+<p>One-sided communication suits patterns the target cannot predict: updates to
+data that other processes own, work handed out on demand, and reads of a large
+table that lives at another process. It also fits a regular exchange, such as a
+halo, where it skips the matching of sends with receives. Whether that makes
+the exchange faster depends on the library and the network, so measure before
+you switch.</p>
+
+<h2 id="windows">Windows</h2>
+
+<p>A window is created by every process of a communicator together: the
+constructors are collective, like the collectives of
+<a href="03-collective-communication.html">chapter 3</a>. Each process
+contributes its own memory, of any length, including none. The element type may
+differ from process to process, but its size may not. ferrompi has three
+constructors:</p>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Constructor</th><th>MPI call</th><th>Memory</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><a href="../ferrompi/struct.Win.html#method.create"><code>Win::create(&amp;comm, vec)</code></a></td><td><code>MPI_Win_create</code></td><td>a <code>Vec</code> you fill first; the window owns it, and <a href="../ferrompi/struct.Win.html#method.into_buffer"><code>into_buffer</code></a> gives it back</td></tr>
+    <tr><td><a href="../ferrompi/struct.Win.html#method.allocate"><code>Win::allocate(&amp;comm, count)</code></a></td><td><code>MPI_Win_allocate</code></td><td>allocated by MPI, which can pick memory suited to RMA on its network; starts at zero</td></tr>
+    <tr><td><a href="../ferrompi/struct.Win.html#method.allocate_shared"><code>Win::allocate_shared(&amp;comm, count)</code></a></td><td><code>MPI_Win_allocate_shared</code></td><td>allocated by MPI in memory that every process of <code>comm</code> can load and store; starts at zero</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>A position in a window is a <em>displacement</em>, counted in elements:
+ferrompi sets the displacement unit to <code>size_of::&lt;T&gt;()</code>, so
+displacement 3 of a <code>Win&lt;f64&gt;</code> is its fourth element, at
+byte 24. Each process’s window starts at displacement 0, wherever it is in
+memory.</p>
+
+<p>A process reads and writes its own window through a
+<a href="../ferrompi/struct.WinView.html"><code>WinView</code></a>, from
+<a href="../ferrompi/struct.Win.html#method.local"><code>win.local()</code></a>
+outside an epoch or from the epoch handle inside one. A view has
+<code>read(i)</code>, <code>write(i, value)</code>,
+<code>copy_to_slice</code> and <code>copy_from_slice</code>, but no safe
+<code>&amp;[T]</code>: another process may write the memory at any time, and
+the compiler may assume that a slice does not change while it is borrowed. The
+view’s accesses are relaxed atomic loads and stores, which stay sound while
+that happens.</p>
+
+<p>Dropping a window frees it with <code>MPI_Win_free</code>, which is
+collective. Every process must drop it: a process that keeps its window while
+the others drop theirs leaves them waiting in <code>MPI_Win_free</code>. A
+window still alive when the <code>Mpi</code> handle is dropped makes ferrompi
+skip <code>MPI_Finalize</code>, as
+<a href="01-the-mpi-model.html#initializing-and-finalizing">chapter 1</a>
+said, so drop windows before it, in the same order at every process.</p>
+
+<h2 id="fence-epochs">Fence epochs</h2>
+
+<p>The simplest synchronization is the fence.
+<a href="../ferrompi/struct.Win.html#method.fence"><code>Win::fence</code></a>
+calls <code>MPI_Win_fence</code>, runs a closure in which the process issues
+its transfers, and calls <code>MPI_Win_fence</code> again when the closure
+returns. A fence is collective over the window’s communicator, like a barrier.
+When the closing fence returns at a process, the transfers that process issued
+are complete, and the transfers that targeted its window have landed.</p>
+
+<p>Here is chapter 2’s
+<a href="02-point-to-point.html#a-halo-exchange">halo exchange</a> written
+with puts. Each process’s window holds its three cells between two ghost
+cells, at displacements 0 and 4, and each process puts its edge cells straight
+into its neighbors’ ghost cells:</p>
+
+<pre data-lang="rust" data-run="4" id="halo-put"><code>use ferrompi::{Mpi, Win, WinFenceAssert};
+
+const CELLS: usize = 3;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let (rank, size) = (world.rank(), world.size());
+
+    let first = rank * CELLS as i32;
+    let cells: Vec&lt;i32&gt; = (first..first + CELLS as i32).collect();
+
+    // The window holds a ghost cell, the three cells, and another ghost cell:
+    // the ghosts are displacements 0 and CELLS + 1.
+    let mut window = vec![0i32; CELLS + 2];
+    window[1..=CELLS].copy_from_slice(&amp;cells);
+    let mut win = Win::create(&amp;world, window)?;
+
+    // The origin buffers of the puts are declared before the epoch: MPI reads
+    // them until the closing fence returns.
+    let first_cell = [cells[0]];
+    let last_cell = [cells[CELLS - 1]];
+
+    // No RMA call came before the opening fence, and none comes after the
+    // closing one.
+    win.fence(WinFenceAssert::no_precede(), WinFenceAssert::no_succeed(), |e| {
+        // Write the edge cells straight into the neighbors' ghost cells. The
+        // neighbors make no call for them.
+        if rank + 1 &lt; size {
+            e.put(&amp;last_cell, rank + 1, 0)?;
+        }
+        if rank &gt; 0 {
+            e.put(&amp;first_cell, rank - 1, CELLS as i64 + 1)?;
+        }
+        Ok(())
+    })?;
+
+    // The closing fence has returned at every process: the puts that target
+    // this process have landed.
+    let view = win.local();
+    let ghost_left = view.read(0);
+    let ghost_right = view.read(CELLS + 1);
+    let mut next = [0i32; CELLS];
+    next[0] = ghost_left + cells[0] + cells[1];
+    for i in 1..CELLS - 1 {
+        next[i] = cells[i - 1] + cells[i] + cells[i + 1];
+    }
+    next[CELLS - 1] = cells[CELLS - 2] + cells[CELLS - 1] + ghost_right;
+    println!("rank {rank}: {cells:?} -&gt; {next:?}");
+    Ok(())
+}</code></pre>
+
+<p>With four processes it prints what chapter 2’s version printed:</p>
+
+<pre class="output" data-output-of="halo-put"><code>rank 0: [0, 1, 2] -&gt; [1, 3, 6]
+rank 1: [3, 4, 5] -&gt; [9, 12, 15]
+rank 2: [6, 7, 8] -&gt; [18, 21, 24]
+rank 3: [9, 10, 11] -&gt; [27, 30, 21]</code></pre>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 196" role="img" aria-label="Four windows of five cells, one per process. Displacements 0 and 4 are ghost cells; displacements 1 to 3 hold the process’s cells: 0, 1, 2 at process 0, 3, 4, 5 at process 1, 6, 7, 8 at process 2 and 9, 10, 11 at process 3. Each process puts its last cell into displacement 0 of the next process’s window, and its first cell into displacement 4 of the previous process’s window. After the fence, process 1’s ghost cells hold 2 and 6, for example. The outer ghost cells of processes 0 and 3 receive nothing and stay 0." style="min-width: 44rem">
+  <defs>
+    <marker id="halo-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+    <marker id="halo-arrow-copper" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-copper"/>
+    </marker>
+  </defs>
+  <text x="123" y="58" text-anchor="middle" class="t-small f-muted">process 0</text>
+  <rect x="29" y="84" width="36" height="44" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="47" y="104" text-anchor="middle" class="t-mono">0</text>
+  <text x="47" y="120" text-anchor="middle" class="t-small f-muted">0</text>
+  <rect x="67" y="84" width="36" height="44" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="85" y="104" text-anchor="middle" class="t-mono">0</text>
+  <text x="85" y="120" text-anchor="middle" class="t-small f-muted">1</text>
+  <rect x="105" y="84" width="36" height="44" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="123" y="104" text-anchor="middle" class="t-mono">1</text>
+  <text x="123" y="120" text-anchor="middle" class="t-small f-muted">2</text>
+  <rect x="143" y="84" width="36" height="44" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="161" y="104" text-anchor="middle" class="t-mono">2</text>
+  <text x="161" y="120" text-anchor="middle" class="t-small f-muted">3</text>
+  <rect x="181" y="84" width="36" height="44" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="199" y="104" text-anchor="middle" class="t-mono">3</text>
+  <text x="199" y="120" text-anchor="middle" class="t-small f-muted">4</text>
+  <text x="341" y="58" text-anchor="middle" class="t-small f-muted">process 1</text>
+  <rect x="247" y="84" width="36" height="44" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="265" y="104" text-anchor="middle" class="t-mono">2</text>
+  <text x="265" y="120" text-anchor="middle" class="t-small f-muted">0</text>
+  <rect x="285" y="84" width="36" height="44" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="303" y="104" text-anchor="middle" class="t-mono">3</text>
+  <text x="303" y="120" text-anchor="middle" class="t-small f-muted">1</text>
+  <rect x="323" y="84" width="36" height="44" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="341" y="104" text-anchor="middle" class="t-mono">4</text>
+  <text x="341" y="120" text-anchor="middle" class="t-small f-muted">2</text>
+  <rect x="361" y="84" width="36" height="44" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="379" y="104" text-anchor="middle" class="t-mono">5</text>
+  <text x="379" y="120" text-anchor="middle" class="t-small f-muted">3</text>
+  <rect x="399" y="84" width="36" height="44" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="417" y="104" text-anchor="middle" class="t-mono">6</text>
+  <text x="417" y="120" text-anchor="middle" class="t-small f-muted">4</text>
+  <text x="559" y="58" text-anchor="middle" class="t-small f-muted">process 2</text>
+  <rect x="465" y="84" width="36" height="44" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="483" y="104" text-anchor="middle" class="t-mono">5</text>
+  <text x="483" y="120" text-anchor="middle" class="t-small f-muted">0</text>
+  <rect x="503" y="84" width="36" height="44" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="521" y="104" text-anchor="middle" class="t-mono">6</text>
+  <text x="521" y="120" text-anchor="middle" class="t-small f-muted">1</text>
+  <rect x="541" y="84" width="36" height="44" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="559" y="104" text-anchor="middle" class="t-mono">7</text>
+  <text x="559" y="120" text-anchor="middle" class="t-small f-muted">2</text>
+  <rect x="579" y="84" width="36" height="44" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="597" y="104" text-anchor="middle" class="t-mono">8</text>
+  <text x="597" y="120" text-anchor="middle" class="t-small f-muted">3</text>
+  <rect x="617" y="84" width="36" height="44" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="635" y="104" text-anchor="middle" class="t-mono">9</text>
+  <text x="635" y="120" text-anchor="middle" class="t-small f-muted">4</text>
+  <text x="777" y="58" text-anchor="middle" class="t-small f-muted">process 3</text>
+  <rect x="683" y="84" width="36" height="44" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="701" y="104" text-anchor="middle" class="t-mono">8</text>
+  <text x="701" y="120" text-anchor="middle" class="t-small f-muted">0</text>
+  <rect x="721" y="84" width="36" height="44" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="739" y="104" text-anchor="middle" class="t-mono">9</text>
+  <text x="739" y="120" text-anchor="middle" class="t-small f-muted">1</text>
+  <rect x="759" y="84" width="36" height="44" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="777" y="104" text-anchor="middle" class="t-mono">10</text>
+  <text x="777" y="120" text-anchor="middle" class="t-small f-muted">2</text>
+  <rect x="797" y="84" width="36" height="44" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="815" y="104" text-anchor="middle" class="t-mono">11</text>
+  <text x="815" y="120" text-anchor="middle" class="t-small f-muted">3</text>
+  <rect x="835" y="84" width="36" height="44" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="853" y="104" text-anchor="middle" class="t-mono">0</text>
+  <text x="853" y="120" text-anchor="middle" class="t-small f-muted">4</text>
+  <path d="M165 82Q213 32 261 82" fill="none" class="s-accent" stroke-width="1.5" marker-end="url(#halo-arrow-accent)"/>
+  <path d="M299 130Q251 180 203 130" fill="none" class="s-copper" stroke-width="1.5" marker-end="url(#halo-arrow-copper)"/>
+  <path d="M383 82Q431 32 479 82" fill="none" class="s-accent" stroke-width="1.5" marker-end="url(#halo-arrow-accent)"/>
+  <path d="M517 130Q469 180 421 130" fill="none" class="s-copper" stroke-width="1.5" marker-end="url(#halo-arrow-copper)"/>
+  <path d="M601 82Q649 32 697 82" fill="none" class="s-accent" stroke-width="1.5" marker-end="url(#halo-arrow-accent)"/>
+  <path d="M735 130Q687 180 639 130" fill="none" class="s-copper" stroke-width="1.5" marker-end="url(#halo-arrow-copper)"/>
+  <text x="29" y="24" class="t-small f-muted">each last cell → displacement 0 of the next window</text>
+  <text x="29" y="182" class="t-small f-muted">each first cell → displacement 4 of the previous window</text>
+</svg>
+</div>
+<figcaption>Each window is a ghost cell, three cells and a ghost cell; the
+small number in a cell is its displacement, and its color is the process that
+wrote it. Each process puts its last cell at displacement 0 of the next window
+and its first cell at displacement 4 of the previous one.</figcaption>
+</figure>
+
+<p>Compared with chapter 2’s version, there are no receives, tags or requests:
+each process says where its data goes, and its neighbors make no call for it.
+The closing fence is the one point at which every process waits. In C, one
+<code>MPI_Win_fence</code> between two steps of a time loop closes one epoch
+and opens the next. ferrompi gives each epoch its own closure, with a fence on
+each side, so a loop that calls <code>fence</code> once per step makes two
+fences per step.</p>
+
+<h3 id="origin-buffers">Origin buffers belong to MPI until the epoch closes</h3>
+
+<p><a href="../ferrompi/struct.ActiveEpoch.html#method.put"><code>put</code></a>
+does not copy its origin slice when it is called: MPI may read the slice at any
+time until the closing fence returns. ferrompi enforces that with the borrow
+that chapter 2’s scope used. Every buffer an operation names is borrowed
+until the epoch closes, so the program cannot change it or drop it sooner.
+A buffer declared inside the closure would be dropped before the closing
+fence, so ferrompi rejects it: declare the origin buffers, and the
+destinations of <code>get</code>, before the call to <code>fence</code>, as
+the program does with <code>first_cell</code> and <code>last_cell</code>.</p>
+
+<h3 id="fence-assertions">Assertions</h3>
+
+<p>The two
+<a href="../ferrompi/struct.WinFenceAssert.html"><code>WinFenceAssert</code></a>
+arguments are promises that let MPI skip work. The program makes the two most
+common ones: its opening fence asserts that no earlier transfer is waiting for
+it, and its closing fence that no epoch follows. Each of those two must be made
+at every process or at none.</p>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Assertion</th><th>MPI mode</th><th>The promise</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>none()</code></td><td>0</td><td>none</td></tr>
+    <tr><td><code>no_store()</code></td><td><code>MPI_MODE_NOSTORE</code></td><td>this process stored nothing into its window since the last synchronization</td></tr>
+    <tr><td><code>no_put()</code></td><td><code>MPI_MODE_NOPUT</code></td><td>no put or accumulate will update this process’s window before the next synchronization</td></tr>
+    <tr><td><code>no_precede()</code></td><td><code>MPI_MODE_NOPRECEDE</code></td><td>the fence completes no transfer; opening fence only</td></tr>
+    <tr><td><code>no_succeed()</code></td><td><code>MPI_MODE_NOSUCCEED</code></td><td>the fence opens no epoch; closing fence only</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>Combine them with <code>|</code>. ferrompi refuses <code>no_succeed</code>
+on an opening fence and <code>no_precede</code> on a closing one, either of
+which would let MPI keep using a buffer after the closing fence returned. Any
+other false promise goes undetected and can give wrong data, so pass
+<code>none()</code> unless you know an assertion holds.</p>
+
+<h2 id="accumulate-and-atomics">Accumulate and atomic operations</h2>
+
+<p>Two puts to the same element in one epoch conflict, and so do a put and a
+get of it: MPI does not say what lands or what is read. Accumulates are the
+exception.
+<a href="../ferrompi/struct.ActiveEpoch.html#method.accumulate"><code>accumulate</code></a>
+combines its data into the target with a reduction operation, and accumulates
+from any number of processes to one element in one epoch all take effect, as
+long as they use the same operation. Each one is atomic per element.</p>
+
+<p>A tally is the plain case. Here each candidate’s tally lives at one process,
+and every process adds its ballots to the tallies wherever they live:</p>
+
+<pre data-lang="rust" data-run="4" id="votes"><code>use ferrompi::{Mpi, ReduceOp, Win, WinFenceAssert};
+
+const CANDIDATES: usize = 8;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let (rank, size) = (world.rank(), world.size());
+
+    // The tally of candidate c lives at process c % size, in slot c / size.
+    let owned = (CANDIDATES - rank as usize).div_ceil(size as usize);
+    let mut win = Win::&lt;u64&gt;::allocate(&amp;world, owned)?;
+
+    // Each process holds five ballots; candidate 5 is on all of them.
+    let ballots: Vec&lt;usize&gt; = (0..4)
+        .map(|i| (rank as usize * 3 + i) % CANDIDATES)
+        .chain([5])
+        .collect();
+    let one = [1u64];
+
+    win.fence(WinFenceAssert::no_precede(), WinFenceAssert::no_succeed(), |e| {
+        for &amp;c in &amp;ballots {
+            let owner = (c % size as usize) as i32;
+            let slot = (c / size as usize) as i64;
+            // Several processes add to one tally in the same epoch. Each
+            // accumulate is atomic per element, so no vote is lost.
+            e.accumulate(&amp;one, owner, slot, ReduceOp::Sum)?;
+        }
+        Ok(())
+    })?;
+
+    let view = win.local();
+    let tallies: Vec&lt;String&gt; = (0..view.len())
+        .map(|slot| {
+            let c = slot * size as usize + rank as usize;
+            format!("candidate {c}: {}", view.read(slot))
+        })
+        .collect();
+    println!("rank {rank}: {}", tallies.join(", "));
+    Ok(())
+}</code></pre>
+
+<p>With four processes it prints:</p>
+
+<pre class="output" data-output-of="votes"><code>rank 0: candidate 0: 2, candidate 4: 2
+rank 1: candidate 1: 3, candidate 5: 5
+rank 2: candidate 2: 2, candidate 6: 2
+rank 3: candidate 3: 3, candidate 7: 1</code></pre>
+
+<p>All four processes added to candidate 5’s tally in the same epoch, process 1
+twice, and no vote was lost. Compare it with chapter 4’s
+<a href="04-datatypes-and-reductions.html#reduce-scatter">histogram</a>, built
+with <code>reduce_scatter_block</code>, where every process sent a count for
+every bin. Here a process sends one operation per ballot to the process that
+owns the tally, and the owner never learns how many arrived. That suits a
+large table of which each process touches a few entries.</p>
+
+<p><code>accumulate</code> returns nothing. Three more operations also fetch
+the value that was there, atomically with the update:</p>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Method</th><th>MPI call</th><th>What it does</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>accumulate(&amp;origin, rank, disp, op)</code></td><td><code>MPI_Accumulate</code></td><td>combines <code>origin</code> into the target</td></tr>
+    <tr><td><code>get_accumulate(&amp;origin, &amp;mut result, rank, disp, op)</code></td><td><code>MPI_Get_accumulate</code></td><td>the same, and fetches the old values into <code>result</code></td></tr>
+    <tr><td><code>fetch_and_op(&amp;origin, &amp;mut result, rank, disp, op)</code></td><td><code>MPI_Fetch_and_op</code></td><td>the same for one element, which libraries can do faster</td></tr>
+    <tr><td><code>compare_and_swap(&amp;origin, &amp;compare, &amp;mut result, rank, disp)</code></td><td><code>MPI_Compare_and_swap</code></td><td>for one element: stores <code>origin</code> if the target equals <code>compare</code>, and fetches the old value; integers only</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>The operation is a <code>ReduceOp</code>, or
+<a href="../ferrompi/struct.AccumulateOp.html"><code>AccumulateOp::REPLACE</code></a>
+to store the data atomically. The two fetching operations take a
+<a href="../ferrompi/struct.FetchOp.html"><code>FetchOp</code></a>, which adds
+<code>FetchOp::NO_OP</code>: it changes nothing and fetches the value, an
+atomic read. <code>compare_and_swap</code> is offered for the integer types
+only, since comparing floating-point values bit by bit is rarely what a
+program means.</p>
+
+<h2 id="passive-target">Passive target: locks</h2>
+
+<p>Every process takes part in a fence, so a fence epoch is one-sided only for
+the data. In a <em>passive-target</em> epoch the target takes no part at all:
+the origin locks the target’s window, issues its operations, and unlocks it.
+<a href="../ferrompi/struct.Win.html#method.lock"><code>Win::lock(lock_type, rank, f)</code></a>
+locks <code>rank</code>’s window, runs the closure, and unlocks the window when
+the closure returns. An
+<a href="../ferrompi/enum.LockType.html"><code>Exclusive</code></a> lock keeps
+every other origin out. Several origins can hold a <code>Shared</code> lock at
+once, which is enough when their operations are accumulates or do not
+conflict.
+<a href="../ferrompi/struct.Win.html#method.lock_all"><code>lock_all</code></a>
+takes a shared lock on every process’s window.</p>
+
+<p>One counter can hand out work. Here process 0’s window holds the number of
+the next task. Each process claims a task with
+<a href="../ferrompi/struct.PassiveEpoch.html#method.fetch_and_op"><code>fetch_and_op</code></a>,
+which adds 1 to the counter and returns its old value, and does the task with
+that number, until the numbers run out. No process serves the queue, and a
+process that finishes its tasks sooner takes more of them:</p>
+
+<pre data-lang="rust" data-run="4" id="task_counter"><code>use ferrompi::{LockType, Mpi, ReduceOp, Win};
+
+const TASKS: u64 = 20;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let rank = world.rank();
+
+    // One counter, the next task to hand out, at process 0. An allocated
+    // window starts at zero.
+    let mut win = Win::&lt;u64&gt;::allocate(&amp;world, if rank == 0 { 1 } else { 0 })?;
+
+    let one = 1u64;
+    let mut task = 0u64;
+    let mut done = vec![0u64; TASKS as usize];
+    loop {
+        // Take the next task: add 1 to the counter and fetch its old value,
+        // in one atomic operation. The lock is shared, so other processes can
+        // take tasks at the same time.
+        win.lock(LockType::Shared, 0, |e| {
+            e.fetch_and_op(&amp;one, &amp;mut task, 0, 0, ReduceOp::Sum)
+        })?;
+        // The unlock has returned: `task` is valid.
+        if task &gt;= TASKS {
+            break;
+        }
+        // The task itself; here, mark it done.
+        done[task as usize] += 1;
+    }
+
+    // Count how often each task ran, over every process.
+    let mut runs = vec![0u64; TASKS as usize];
+    world.allreduce(&amp;done, &amp;mut runs, ReduceOp::Sum)?;
+    if rank == 0 {
+        println!("{} tasks done", runs.iter().sum::&lt;u64&gt;());
+        println!(
+            "every task ran exactly once: {}",
+            runs.iter().all(|&amp;n| n == 1)
+        );
+    }
+    Ok(())
+}</code></pre>
+
+<p>With four processes, process 0 prints:</p>
+
+<pre class="output" data-output-of="task_counter"><code>20 tasks done
+every task ran exactly once: true</code></pre>
+
+<p>Which process takes which task changes from run to run, but no number goes
+to two processes, because <code>fetch_and_op</code> is atomic. Each process
+stops at its first number past the last task, so the counter ends at 20 plus
+the number of processes.</p>
+
+<h3 id="what-the-compiler-rejects">What the compiler rejects</h3>
+
+<p>The program reads <code>task</code> after <code>lock</code> returns. MPI
+would allow reading it sooner:
+<a href="../ferrompi/struct.PassiveEpoch.html#method.flush"><code>flush(0)</code></a>
+completes the epoch’s operations on process 0 without ending the epoch. Try
+it: call <code>e.flush(0)?</code> after the <code>fetch_and_op</code>, return
+<code>Ok(task &lt; TASKS)</code> from the closure, and stop the loop when
+<code>lock</code> returns <code>false</code>. The program does not
+compile:</p>
+
+<pre class="output"><code>error[E0503]: cannot use `task` because it was mutably borrowed
+  --&gt; src/main.rs:24:16
+   |
+21 |         let more = win.lock(LockType::Shared, 0, |e| {
+   |                                                   - has type `&amp;'1 PassiveEpoch&lt;'1, '_, u64&gt;`
+22 |             e.fetch_and_op(&amp;one, &amp;mut task, 0, 0, ReduceOp::Sum)?;
+   |             ----------------------------------------------------
+   |             |                    |
+   |             |                    `task` is borrowed here
+   |             argument requires that `task` is borrowed for `'1`
+23 |             e.flush(0)?;
+24 |             Ok(task &lt; TASKS)
+   |                ^^^^ use of borrowed `task`</code></pre>
+
+<p>The borrow of <code>task</code> lasts until the epoch closes, whatever
+happens inside it, so ferrompi is stricter here than MPI: data fetched in an
+epoch is read after it. A program that needs a value sooner ends the epoch
+there and opens another, as the counter loop does with one lock per task. The
+flushes still complete transfers at the target without giving up the lock,
+which a program needs before it tells another process, by a message, that the
+data is there. The
+<a href="../ferrompi/struct.Win.html#compile-time-guarantees">rustdoc of
+<code>Win</code></a> lists what else the borrows reject.</p>
+
+<h3 id="progress">When the target must make progress</h3>
+
+<p>A passive target makes no call, but its MPI library may still have work to
+do for the origin. Where the network cannot apply an operation by itself, the
+target’s library applies it, and the library usually runs only inside an MPI
+call. A target that computes for a long time without calling MPI can then hold
+up every origin that locked it, whose unlock waits until the target’s
+library runs. In the counter program process 0 is a worker too and calls MPI
+for every task, so the counter never waits long. For a target that computes
+for long stretches, MPICH can run a progress thread:
+<code>MPIR_CVAR_ASYNC_PROGRESS=1</code> in the environment starts one, and
+raises the thread level to <code>Multiple</code>, which chapter 6
+covers.</p>
+
+<h2 id="neighbors-only">Synchronizing with neighbors only</h2>
+
+<p>A fence synchronizes every process of the window, even in a halo exchange,
+where each process deals with two others. The third mode,
+post-start-complete-wait (PSCW), narrows the synchronization to groups. A
+target opens an <em>exposure</em> epoch for a group of origins with
+<a href="../ferrompi/struct.Win.html#method.post"><code>post</code></a>, and
+closes it with
+<a href="../ferrompi/struct.Win.html#method.wait_exposure"><code>wait_exposure</code></a>,
+which returns once they have all finished. An origin opens an
+<em>access</em> epoch to a group of targets with
+<a href="../ferrompi/struct.Win.html#method.start"><code>start</code></a>,
+which runs a closure and calls <code>MPI_Win_complete</code> when it returns.
+The groups are the ones of
+<a href="01-the-mpi-model.html#groups">chapter 1</a>. Here is the halo
+exchange again, with each process synchronizing with its neighbors only:</p>
+
+<pre data-lang="rust" data-run="4" id="halo-pscw"><code>use ferrompi::{Mpi, Win, WinPscwAssert};
+
+const CELLS: usize = 3;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+    let (rank, size) = (world.rank(), world.size());
+
+    let first = rank * CELLS as i32;
+    let cells: Vec&lt;i32&gt; = (first..first + CELLS as i32).collect();
+    let mut window = vec![0i32; CELLS + 2];
+    window[1..=CELLS].copy_from_slice(&amp;cells);
+    let mut win = Win::create(&amp;world, window)?;
+
+    // The neighbors are the processes that write here, and the processes
+    // this one writes to.
+    let neighbors: Vec&lt;i32&gt; = [rank - 1, rank + 1]
+        .into_iter()
+        .filter(|&amp;r| (0..size).contains(&amp;r))
+        .collect();
+    let group = world.group()?.include(&amp;neighbors)?;
+
+    let first_cell = [cells[0]];
+    let last_cell = [cells[CELLS - 1]];
+
+    // Expose this window to the neighbors, then write into theirs.
+    win.post(&amp;group, WinPscwAssert::none())?;
+    win.start(&amp;group, WinPscwAssert::none(), |e| {
+        if rank + 1 &lt; size {
+            e.put(&amp;last_cell, rank + 1, 0)?;
+        }
+        if rank &gt; 0 {
+            e.put(&amp;first_cell, rank - 1, CELLS as i64 + 1)?;
+        }
+        Ok(())
+    })?;
+    // Wait until both neighbors have finished writing here.
+    win.wait_exposure()?;
+
+    let view = win.local();
+    let ghost_left = view.read(0);
+    let ghost_right = view.read(CELLS + 1);
+    let mut next = [0i32; CELLS];
+    next[0] = ghost_left + cells[0] + cells[1];
+    for i in 1..CELLS - 1 {
+        next[i] = cells[i - 1] + cells[i] + cells[i + 1];
+    }
+    next[CELLS - 1] = cells[CELLS - 2] + cells[CELLS - 1] + ghost_right;
+    println!("rank {rank}: {cells:?} -&gt; {next:?}");
+    Ok(())
+}</code></pre>
+
+<p>It prints the same lines:</p>
+
+<pre class="output" data-output-of="halo-pscw"><code>rank 0: [0, 1, 2] -&gt; [1, 3, 6]
+rank 1: [3, 4, 5] -&gt; [9, 12, 15]
+rank 2: [6, 7, 8] -&gt; [18, 21, 24]
+rank 3: [9, 10, 11] -&gt; [27, 30, 21]</code></pre>
+
+<p>Each process is a target, for the neighbors that write its ghost cells, and
+an origin, writing theirs, so it posts and starts with the same group.
+<code>start</code> may wait until every target has posted, so post first: two
+neighbors that each start before they post can wait for each other forever.</p>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 452" role="img" aria-label="Timelines of three processes under each synchronization mode. Fence: every process calls fence, the processes put into each other’s windows, and every process calls fence again. Post, start, complete, wait: process 1 posts its window to process 0 and later waits; process 0 starts, puts into process 1’s window and completes; process 2 is in neither group and makes no call. Lock: process 0 locks process 1’s window, runs a fetch_and_op on it and unlocks; later process 2 does the same; process 1, the target, makes no call for either, though its MPI library must make progress." style="min-width: 44rem">
+  <defs>
+    <marker id="modes-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+    <marker id="modes-arrow-both" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="16" width="860" height="132" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="42" class="t-head">Fence</text>
+  <text x="290" y="42" class="t-small f-muted">every process opens and closes each epoch together</text>
+  <text x="36" y="78" class="t-small f-muted">process 0</text>
+  <line x1="130" y1="74" x2="864" y2="74" class="s-rule" stroke-width="1.2"/>
+  <text x="36" y="106" class="t-small f-muted">process 1</text>
+  <line x1="130" y1="102" x2="864" y2="102" class="s-rule" stroke-width="1.2"/>
+  <text x="36" y="134" class="t-small f-muted">process 2</text>
+  <line x1="130" y1="130" x2="864" y2="130" class="s-rule" stroke-width="1.2"/>
+  <rect x="190" y="62" width="60" height="80" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="220" y="106" text-anchor="middle" class="t-mono">fence</text>
+  <rect x="700" y="62" width="60" height="80" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="730" y="106" text-anchor="middle" class="t-mono">fence</text>
+  <line x1="320" y1="77" x2="350" y2="97" class="s-accent" stroke-width="1.5" marker-end="url(#modes-arrow)"/>
+  <line x1="440" y1="127" x2="470" y2="107" class="s-accent" stroke-width="1.5" marker-end="url(#modes-arrow)"/>
+  <line x1="560" y1="99" x2="590" y2="79" class="s-accent" stroke-width="1.5" marker-end="url(#modes-arrow)"/>
+  <text x="358" y="92" class="t-small f-muted">put</text>
+  <text x="478" y="120" class="t-small f-muted">put</text>
+  <text x="598" y="92" class="t-small f-muted">put</text>
+
+  <rect x="20" y="160" width="860" height="132" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="186" class="t-head">Post, start, complete, wait</text>
+  <text x="290" y="186" class="t-small f-muted">only the processes in the groups synchronize</text>
+  <text x="36" y="222" class="t-small f-muted">process 0</text>
+  <line x1="130" y1="218" x2="864" y2="218" class="s-rule" stroke-width="1.2"/>
+  <text x="36" y="250" class="t-small f-muted">process 1</text>
+  <line x1="130" y1="246" x2="864" y2="246" class="s-rule" stroke-width="1.2"/>
+  <text x="36" y="278" class="t-small f-muted">process 2</text>
+  <line x1="130" y1="274" x2="864" y2="274" class="s-rule" stroke-width="1.2"/>
+  <rect x="190" y="235" width="60" height="22" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="220" y="250" text-anchor="middle" class="t-mono">post</text>
+  <rect x="270" y="207" width="60" height="22" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="300" y="222" text-anchor="middle" class="t-mono">start</text>
+  <line x1="420" y1="221" x2="450" y2="241" class="s-accent" stroke-width="1.5" marker-end="url(#modes-arrow)"/>
+  <text x="458" y="236" class="t-small f-muted">put</text>
+  <rect x="560" y="207" width="84" height="22" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="602" y="222" text-anchor="middle" class="t-mono">complete</text>
+  <rect x="690" y="235" width="60" height="22" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="720" y="250" text-anchor="middle" class="t-mono">wait</text>
+  <rect x="190" y="263" width="560" height="22" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="470" y="278" text-anchor="middle" class="t-small f-muted">in neither group: no call</text>
+
+  <rect x="20" y="304" width="860" height="132" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="330" class="t-head">Lock</text>
+  <text x="290" y="330" class="t-small f-muted">the target makes no call</text>
+  <text x="36" y="366" class="t-small f-muted">process 0</text>
+  <line x1="130" y1="362" x2="864" y2="362" class="s-rule" stroke-width="1.2"/>
+  <text x="36" y="394" class="t-small f-muted">process 1</text>
+  <line x1="130" y1="390" x2="864" y2="390" class="s-rule" stroke-width="1.2"/>
+  <text x="36" y="422" class="t-small f-muted">process 2</text>
+  <line x1="130" y1="418" x2="864" y2="418" class="s-rule" stroke-width="1.2"/>
+  <rect x="190" y="351" width="60" height="22" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="220" y="366" text-anchor="middle" class="t-mono">lock</text>
+  <line x1="300" y1="365" x2="330" y2="385" class="s-accent" stroke-width="1.5" marker-start="url(#modes-arrow-both)" marker-end="url(#modes-arrow-both)"/>
+  <text x="338" y="376" class="t-small f-muted">fetch_and_op</text>
+  <rect x="440" y="351" width="70" height="22" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="475" y="366" text-anchor="middle" class="t-mono">unlock</text>
+  <rect x="470" y="407" width="60" height="22" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="500" y="422" text-anchor="middle" class="t-mono">lock</text>
+  <line x1="580" y1="415" x2="610" y2="395" class="s-accent" stroke-width="1.5" marker-start="url(#modes-arrow-both)" marker-end="url(#modes-arrow-both)"/>
+  <text x="618" y="413" class="t-small f-muted">fetch_and_op</text>
+  <rect x="720" y="407" width="70" height="22" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="755" y="422" text-anchor="middle" class="t-mono">unlock</text>
+  <rect x="150" y="381" width="714" height="18" rx="4" fill="none" class="s-rule" stroke-width="1.2" stroke-dasharray="3 3"/>
+  <text x="660" y="394" class="t-small f-muted">no call; must make progress</text>
+</svg>
+</div>
+<figcaption>The three ways to synchronize a window. In ferrompi,
+<code>fence</code>, <code>start</code> and <code>lock</code> take a closure, and
+the closing call (the second fence, complete, unlock) is made when it
+returns.</figcaption>
+</figure>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Mode</th><th>ferrompi</th><th>Who synchronizes</th><th>Suits</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Fence</td><td><code>fence</code></td><td>every process of the window</td><td>phases in which every process communicates</td></tr>
+    <tr><td>Post, start, complete, wait</td><td><code>post</code>, <code>start</code>, <code>wait_exposure</code></td><td>the processes in each group</td><td>fixed neighbors, such as a halo exchange</td></tr>
+    <tr><td>Lock</td><td><code>lock</code>, <code>lock_all</code></td><td>no process: the origin alone</td><td>irregular access: counters, queues, reads of remote data</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>A fence epoch and a lock epoch must not overlap at any process. To move from
+fences to locks, close the last fence with <code>no_succeed</code> and meet at
+a barrier before the first lock; to move back, meet at a barrier between the
+unlock and the next fence.
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/examples/shared_memory.rs"><code>examples/shared_memory.rs</code></a>
+moves from fences to a lock this way.</p>
+
+<h2 id="shared-memory-windows">Shared-memory windows</h2>
+
+<p>Processes on one node share the node’s memory, but each has its own address
+space, so a table that every process needs is usually held once per process.
+<a href="../ferrompi/struct.Win.html#method.allocate_shared"><code>Win::allocate_shared</code></a>
+allocates a window in memory that every process of a node maps, and each
+process can then load and store the other processes’ parts of it directly,
+with no MPI call per access. Its communicator must hold only processes that can
+share memory, which
+<a href="01-the-mpi-model.html#one-communicator-per-node"><code>split_shared</code></a>
+gives. Here node rank 0 holds a table and the other processes of the node read
+it in place:</p>
+
+<pre data-lang="rust" data-run="4" id="shared-table"><code>use ferrompi::{Mpi, Win, WinFenceAssert};
+
+const ENTRIES: usize = 1000;
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    // The processes that share memory: here, every process on this machine.
+    let node = world.split_shared()?;
+    let (rank, size) = (node.rank(), node.size());
+
+    // The whole table is allocated once per node, at node rank 0. The other
+    // processes allocate nothing.
+    let count = if rank == 0 { ENTRIES } else { 0 };
+    let mut win = Win::&lt;u64&gt;::allocate_shared(&amp;node, count)?;
+
+    // Node rank 0 fills the table. The closing fence publishes its stores to
+    // every process of the node.
+    win.fence(WinFenceAssert::no_precede(), WinFenceAssert::no_succeed(), |e| {
+        if rank == 0 {
+            let squares: Vec&lt;u64&gt; = (0..ENTRIES as u64).map(|i| i * i).collect();
+            e.local().copy_from_slice(&amp;squares);
+        }
+        Ok(())
+    })?;
+
+    // Every process reads node rank 0's memory in place: loads, not messages.
+    let table = win.remote(0)?;
+    let sum: u64 = (rank as usize..table.len())
+        .step_by(size as usize)
+        .map(|i| table.read(i))
+        .sum();
+    println!(
+        "node rank {rank}: owns {} entries, reads {} in place, sum of its share = {sum}",
+        win.local().len(),
+        table.len()
+    );
+    Ok(())
+}</code></pre>
+
+<p>On one machine, with four processes, it prints:</p>
+
+<pre class="output" data-output-of="shared-table"><code>node rank 0: owns 1000 entries, reads 1000 in place, sum of its share = 82834000
+node rank 1: owns 0 entries, reads 1000 in place, sum of its share = 83083250
+node rank 2: owns 0 entries, reads 1000 in place, sum of its share = 83333000
+node rank 3: owns 0 entries, reads 1000 in place, sum of its share = 83583250</code></pre>
+
+<figure>
+<div class="canvas">
+<svg viewBox="0 0 900 270" role="img" aria-label="Four processes on one node that all need a table of 1000 u64 values, 8000 bytes. Without a shared window each process holds its own copy: 32000 bytes on the node. With allocate_shared, the node’s window is one allocation in which node rank 0’s segment holds the table and the segments of node ranks 1 to 3 are empty; every process loads from node rank 0’s segment through remote(0): 8000 bytes on the node.">
+  <defs>
+    <marker id="node-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10z" class="f-accent"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="16" width="424" height="238" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="36" y="44" class="t-head">One copy per process</text>
+  <text x="36" y="64" class="t-small f-muted">Vec&lt;u64&gt; in every process</text>
+  <text x="36" y="100" class="t-small f-muted">process 0</text>
+  <rect x="116" y="82" width="312" height="26" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="272" y="99" text-anchor="middle" class="t-small">table, 8000 bytes</text>
+  <text x="36" y="136" class="t-small f-muted">process 1</text>
+  <rect x="116" y="118" width="312" height="26" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="272" y="135" text-anchor="middle" class="t-small">table, 8000 bytes</text>
+  <text x="36" y="172" class="t-small f-muted">process 2</text>
+  <rect x="116" y="154" width="312" height="26" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="272" y="171" text-anchor="middle" class="t-small">table, 8000 bytes</text>
+  <text x="36" y="208" class="t-small f-muted">process 3</text>
+  <rect x="116" y="190" width="312" height="26" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="272" y="207" text-anchor="middle" class="t-small">table, 8000 bytes</text>
+  <text x="36" y="240" class="t-small">32000 bytes on the node</text>
+
+  <rect x="456" y="16" width="424" height="238" rx="10" class="f-paper s-rule" stroke-width="1.2"/>
+  <text x="472" y="44" class="t-head">One shared window</text>
+  <text x="472" y="64" class="t-small f-muted">Win::allocate_shared; each process loads through remote(0)</text>
+  <rect x="478" y="82" width="86" height="28" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="521" y="100" text-anchor="middle" class="t-small">process 0</text>
+  <line x1="521" y1="112" x2="521" y2="166" class="s-accent" stroke-width="1.5" marker-end="url(#node-arrow)"/>
+  <rect x="578" y="82" width="86" height="28" rx="4" class="f-copper-soft s-copper" stroke-width="1.5"/>
+  <text x="621" y="100" text-anchor="middle" class="t-small">process 1</text>
+  <line x1="621" y1="112" x2="621" y2="166" class="s-accent" stroke-width="1.5" marker-end="url(#node-arrow)"/>
+  <rect x="678" y="82" width="86" height="28" rx="4" class="f-steel-soft s-steel" stroke-width="1.5"/>
+  <text x="721" y="100" text-anchor="middle" class="t-small">process 2</text>
+  <line x1="721" y1="112" x2="721" y2="166" class="s-accent" stroke-width="1.5" marker-end="url(#node-arrow)"/>
+  <rect x="778" y="82" width="86" height="28" rx="4" class="f-code s-muted" stroke-width="1.5"/>
+  <text x="821" y="100" text-anchor="middle" class="t-small">process 3</text>
+  <line x1="821" y1="112" x2="821" y2="166" class="s-accent" stroke-width="1.5" marker-end="url(#node-arrow)"/>
+  <rect x="478" y="168" width="350" height="30" rx="4" class="f-accent-soft s-accent" stroke-width="1.5"/>
+  <text x="653" y="187" text-anchor="middle" class="t-small">node rank 0’s segment: the table</text>
+  <line x1="836" y1="166" x2="836" y2="200" class="s-copper" stroke-width="2"/>
+  <line x1="850" y1="166" x2="850" y2="200" class="s-steel" stroke-width="2"/>
+  <line x1="864" y1="166" x2="864" y2="200" class="s-muted" stroke-width="2"/>
+  <text x="864" y="216" text-anchor="end" class="t-small f-muted">node ranks 1, 2, 3: empty</text>
+  <text x="472" y="240" class="t-small">8000 bytes on the node</text>
+</svg>
+</div>
+<figcaption>Four processes on a node that all need one 8000-byte table. With a
+shared window the node holds it once, in node rank 0’s part of the window, and
+the other processes load from it. By default MPI places the parts one after
+another, in rank order, so the empty parts of node ranks 1 to 3 sit at its
+end.</figcaption>
+</figure>
+
+<p><a href="../ferrompi/struct.Win.html#method.remote"><code>remote(0)</code></a>
+returns a view of node rank 0’s part. It makes no MPI call: ferrompi asked MPI
+for every part’s address when it created the window, and the view reads with
+the same relaxed atomic loads as <code>local()</code>. On a node with 64
+processes, a table read by all of them is held once instead of 64 times.</p>
+
+<p>Stores into shared memory are not messages, and MPI orders them for you only
+at a synchronization. In the program, the closing fence publishes the table:
+it returns at each reader only after node rank 0 has entered it, and node
+rank 0 has finished its stores by then. Without fences, the writer stores and
+calls <code>sync</code> inside a <code>lock_all</code> epoch, the processes meet
+at a barrier, and the readers call <code>sync</code> before they load;
+<a href="https://github.com/cobre-rs/ferrompi/blob/main/examples/shared_memory.rs"><code>examples/shared_memory.rs</code></a>
+shows that pattern.</p>
+
+<p>Direct access needs MPI’s <em>unified</em> memory model, in which loads,
+stores and RMA operations all see one copy of the window. MPI reports the model
+of each window, and <code>remote</code> returns
+<code>Error::NotSupported</code> if it is not unified, as well as for a window
+that is not shared.</p>
+
+<h2 id="when-one-sided-goes-wrong">When one-sided goes wrong</h2>
+
+<p>Most one-sided mistakes give wrong data rather than an error, and many depend
+on timing, so a program can work until the network gets faster or slower.
+ferrompi refuses the mistakes it can see at the origin before it calls MPI. A
+transfer past the end of the target’s window, or to a process outside the
+epoch, is one:</p>
+
+<pre data-lang="rust" data-run="2" id="refused"><code>use ferrompi::{LockType, Mpi, Win};
+
+fn main() -&gt; ferrompi::Result&lt;()&gt; {
+    let mpi = Mpi::init()?;
+    let world = mpi.world();
+
+    // Four elements at every process: displacements 0 to 3.
+    let mut win = Win::&lt;i32&gt;::allocate(&amp;world, 4)?;
+
+    let value = [7i32];
+    if world.rank() == 0 {
+        let (past_end, outside) = win.lock(LockType::Exclusive, 1, |e| {
+            // One element past the end of process 1's window.
+            let past_end = e.put(&amp;value, 1, 4);
+            // Process 0's window, which this lock does not cover.
+            let outside = e.put(&amp;value, 0, 0);
+            Ok((past_end, outside))
+        })?;
+        if let Err(err) = past_end {
+            println!("put at displacement 4: {err}");
+        }
+        if let Err(err) = outside {
+            println!("put to process 0 under a lock on 1: {err}");
+        }
+    }
+    Ok(())
+}</code></pre>
+
+<p>With two processes it prints:</p>
+
+<pre class="output" data-output-of="refused"><code>put at displacement 4: invalid argument `target_disp`: access extends past the target's window
+put to process 0 under a lock on 1: invalid argument `target_rank`: rank outside the epoch's access set</code></pre>
+
+<p>Both are refused with <code>Error::InvalidArgument</code>, and neither
+reaches MPI. In C both are erroneous: the first can write past the end of
+process 1’s window, and nothing completes the second, since the lock covers
+process 1 only. The other mistakes are up to you:</p>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Mistake</th><th>What happens</th><th>In ferrompi</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Reading or reusing a buffer before its epoch closes</td><td>MPI may still be reading or writing it</td><td>a compile error: the buffer is borrowed until the epoch closes</td></tr>
+    <tr><td>A transfer past the target’s window, or outside the epoch</td><td>erroneous; can overwrite memory</td><td><code>Error::InvalidArgument</code>, with no MPI call</td></tr>
+    <tr><td>Two puts, or a put and a get, of one element in one epoch</td><td>undefined result</td><td>not detected: use accumulates</td></tr>
+    <tr><td>Reading a window before the epoch that writes it closes</td><td>old or partly written data</td><td>not detected: read after the synchronization</td></tr>
+    <tr><td>A fence epoch overlapping a lock epoch</td><td>erroneous</td><td>not detected: close the fences with <code>no_succeed</code>, then a barrier</td></tr>
+    <tr><td>A window dropped at some processes only</td><td>the others wait in <code>MPI_Win_free</code></td><td>not detected: drop it everywhere</td></tr>
+    <tr><td>A panic inside an epoch</td><td>one process skips a closing call</td><td><code>fence</code> and <code>start</code> abort the process; <code>lock</code> unlocks, then unwinds</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>A <code>Win</code> and its views are neither <code>Send</code> nor
+<code>Sync</code>, so a window stays on the thread that created it; chapter 6
+covers MPI with threads.</p>
+
+<h2 id="exercises">Exercises</h2>
+
+<ol>
+  <li>Turn the halo program into a loop of five steps: after each epoch,
+  compute <code>next</code>, write it into the window’s cells with
+  <code>win.local().write</code>, and put the new edge cells in the next
+  epoch. Check the result against chapter 2’s program extended the same way.
+  How many times does each process call <code>MPI_Win_fence</code>?</li>
+  <li>In the vote program, replace <code>accumulate</code> with a
+  <code>put</code> of each process’s own count for each candidate. Why is the
+  result undefined, even when it looks right?</li>
+  <li>Make the counter program print how many tasks each process did. Then make
+  process 0 sleep for 100 milliseconds after each of its tasks, with
+  <code>std::thread::sleep</code>. How does the split change? What happens to
+  the other processes if process 0 sleeps for two seconds once, before it takes
+  its first task?</li>
+  <li>Take task numbers with <code>compare_and_swap</code> instead: read the counter
+  with <code>fetch_and_op</code> and <code>FetchOp::NO_OP</code>, then swap in
+  the value plus one if the counter still holds it, and retry if not. Count the
+  retries of each process.</li>
+  <li>Split the shared table across the node: each process allocates
+  <code>ENTRIES / size</code> entries, fills its own part in the fence epoch,
+  and sums the whole table by reading every part through
+  <code>remote(r)</code>. Does every process get the same sum?</li>
+  <li>In the PSCW program, start an access epoch to the right neighbor only,
+  and read the error that the put to the left neighbor returns. Then restore
+  it, and post to the right neighbor only. What happens, and why? Run it under
+  <code>timeout</code>.</li>
+</ol>
+
+<h2 id="summary">Summary</h2>
+
+<ul>
+  <li>In one-sided communication an origin puts, gets or accumulates into a
+  target’s window, and the target makes no call for the transfer. Transfers
+  belong to epochs, and are complete when the epoch’s closing call
+  returns.</li>
+  <li>A window is created by every process of a communicator together, and
+  freed when every process drops it. <code>Win::create</code> owns a
+  <code>Vec</code>; <code>allocate</code> and <code>allocate_shared</code> let
+  MPI allocate. Displacements count elements.</li>
+  <li>A fence synchronizes every process; post-start-complete-wait, the
+  processes of a group; a lock, no process but the origin. In ferrompi each
+  epoch is a closure, and the closing call is made when it returns.</li>
+  <li>Every buffer an operation names is borrowed until the epoch closes:
+  declare it before the epoch, and read fetched data after it.</li>
+  <li>Puts to one element in one epoch conflict; accumulates with one
+  operation do not. <code>fetch_and_op</code> and
+  <code>compare_and_swap</code> update one element atomically and return the
+  old value.</li>
+  <li>A passive target may still need to make MPI progress for its
+  origins.</li>
+  <li><code>allocate_shared</code> on a <code>split_shared</code> communicator
+  gives memory that every process of a node loads and stores directly; a fence,
+  or <code>sync</code> with a barrier, publishes the stores.</li>
+  <li>ferrompi refuses a transfer outside the target’s window or the epoch.
+  Conflicting accesses, early reads and mixed epochs are not detected.</li>
+</ul>
+
+<nav class="pager" aria-label="Chapters">
+  <a href="04-datatypes-and-reductions.html">Previous: chapter 4, datatypes and reductions</a>
+  <a href="index.html">Contents</a>
+  <a class="next" href="06-threads-and-hybrid-mpi.html">Next: chapter 6, threads and hybrid MPI</a>
+</nav>
+</main>
+</div>
+<script src="tutorial.js"></script>
+</body>
+</html>
