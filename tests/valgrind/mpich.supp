@@ -22,3 +22,7 @@
 #
 # --leak-check is off because RMA window memory is deliberately left
 # unfreed at finalize, so no entry here is a Leak suppression.
+#
+# The file has no entry yet: every example tagged `valgrind` runs clean
+# on that job without one. The runner passes it anyway, so a first entry
+# needs no other change.
