@@ -46,7 +46,7 @@ fn main() {
     }
 
     // ========================================================================
-    // Test 3: create_struct(&[]) returns Err with class Arg.
+    // Test 2: create_struct(&[]) returns Err with class Arg.
     //
     // The C shim rejects an empty field list before the stack arrays are
     // filled, returning MPI_ERR_ARG without calling into MPI, on every MPI
@@ -59,12 +59,12 @@ fn main() {
                 ..
             }) => {
                 if rank == 0 {
-                    println!("PASS: Test 3 — create_struct(&[]) returned Err(class: Arg)");
+                    println!("PASS: Test 2 — create_struct(&[]) returned Err(class: Arg)");
                 }
             }
             other => {
                 eprintln!(
-                    "rank {rank}: FAIL Test 3 — expected Err(class: Arg), got: {:?}",
+                    "rank {rank}: FAIL Test 2 — expected Err(class: Arg), got: {:?}",
                     other
                 );
                 local_ok = false;
