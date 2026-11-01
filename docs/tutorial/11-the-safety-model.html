@@ -725,9 +725,9 @@ fn main() -&gt; ferrompi::Result&lt;()&gt; {
 }</code></pre>
 
 <pre class="output" data-output-of="forgotten"><code>rank 0: Mpi dropped
-rank 0: barrier after the drop: MPI has been finalized
+rank 0: barrier after the drop: MPI has been finalized or the Mpi handle dropped
 rank 1: Mpi dropped
-rank 1: barrier after the drop: MPI has been finalized</code></pre>
+rank 1: barrier after the drop: MPI has been finalized or the Mpi handle dropped</code></pre>
 
 <p>Each rank writes one line to standard error:</p>
 
@@ -741,9 +741,10 @@ buffer, during <code>MPI_Finalize</code>, so ferrompi skips the call and lets
 the process exit with MPI initialized. Under MPICH the exit status stays 0.
 Open MPI turns an exit without <code>MPI_Finalize</code> into status 1, and
 <code>tests/run_mpi_tests.sh</code> accepts both for the examples it expects
-to skip finalize. The barrier’s error reads “MPI has been finalized” although
-<code>MPI_Finalize</code> never ran: <code>Error::Finalized</code> means the
-<code>Mpi</code> handle is gone, whatever became of MPI.</p>
+to skip finalize. Of the two things the barrier’s error names, only the
+second happened here: <code>MPI_Finalize</code> never ran.
+<code>Error::Finalized</code> means the <code>Mpi</code> handle is gone,
+whatever became of MPI.</p>
 
 <p>Windows follow the same rule. <code>Win::create</code> takes a
 <code>Vec&lt;T&gt;</code>, and <code>into_buffer</code>, which is collective,

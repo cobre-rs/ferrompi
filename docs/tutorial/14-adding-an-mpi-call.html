@@ -314,9 +314,11 @@ them: no build step compares the two numbers. A unit test in
 <code>src/error.rs</code> checks that the Rust constant maps to
 <code>Error::InvalidArgument</code>, which runs without MPI
 (<a href="13-testing.html#unit-tests">chapter 13</a>). The C layer’s
-codes run from <code>-7001</code> to <code>-7009</code>; those from
-<code>-7101</code> on are the guard’s, defined in Rust alone, since C never
-returns them.</p>
+codes run from <code>-7001</code> to <code>-7009</code>, with a gap:
+<code>-7007</code> reported a full info table, the table was removed in
+0.7.0, and the header marks the number retired, so a new code never reuses
+it. Those from <code>-7101</code> on are the guard’s, defined in Rust alone,
+since C never returns them.</p>
 
 <h2 id="the-declaration">The Rust declaration</h2>
 
@@ -338,11 +340,19 @@ comment there lists: one that is legal before init or after finalize, one that
 makes no MPI call, <code>wtime</code>, one called only from a
 <code>Drop</code>, or the op-table calls of <code>UserOp</code>.</p>
 
-<p>Nothing checks this declaration against the header. Rust takes an
-<code>extern</code> block on trust: with a wrong type or a missing argument,
-the crate compiles, links and passes garbage to the C function. The reviewer
-compares the two by eye, argument by argument, and the MPI tests catch a
-mismatch only when it makes a result wrong.</p>
+<p>The compiler does not check this declaration against the header. Rust
+takes an <code>extern</code> block on trust: with a wrong type or a missing
+argument, the crate compiles, links and passes garbage to the C function.
+<code>.github/scripts/check-ffi-signatures.py</code> makes the comparison
+instead. It requires an <code>extern</code> for every <code>ferrompi_*</code>
+prototype and a prototype for every <code>extern</code>, with the same number
+of parameters and corresponding types: <code>int</code> is
+<code>c_int</code>, <code>int32_t</code> is <code>int32_t</code> or
+<code>i32</code>, <code>const T*</code> is <code>*const T</code> and
+<code>T*</code> is <code>*mut T</code>. It runs in CI and in the pre-commit
+hook that CONTRIBUTING.md describes. It does not compare parameter names, and
+a prototype that has no Rust caller by design goes in its
+<code>UNBOUND_PROTOTYPES</code> list, with the reason.</p>
 
 <h2 id="the-method">The safe method</h2>
 
@@ -737,7 +747,7 @@ scope violation. What a reviewer reads in each:</p>
     <tr><td><code>csrc/ferrompi.h</code></td><td>Fixed-width types and an <code>int</code> result. The comment says over which processes the call is collective, what a process outside it gets, and which ferrompi codes it returns.</td></tr>
     <tr><td><code>csrc/ferrompi.c</code></td><td>Handles decoded through the tables, and one that names nothing refused. Every value MPI does not fix translated here. <code>MPI_ERRORS_RETURN</code> on a new communicator before Rust sees it. The large-count branch, or the reason there is none. A call from MPI 4.0 under the version test, with its stub. The group lock around a local group call only, never around a collective. No new compiler warning.</td></tr>
     <tr><td><code>src/error.rs</code></td><td>A new code defined with the same number as in the header, a comment on each side naming the other, an arm that maps it, and a unit test.</td></tr>
-    <tr><td><code>src/ffi.rs</code></td><td>The same types in the same order as the header. Inside the guarded block, unless the function is one of the kinds outside it.</td></tr>
+    <tr><td><code>src/ffi.rs</code></td><td>Inside the guarded block, unless the function is one of the kinds outside it. <code>check-ffi-signatures.py</code> compares the types with the header’s.</td></tr>
     <tr><td>The method</td><td>Every buffer, rank and count that MPI cannot check, checked before the call. A <code>SAFETY</code> comment that says why the call is sound. The name given to <code>check_with_op</code>. <code>-1</code> mapped to <code>None</code>. Documentation that says who calls, what is checked, and each error.</td></tr>
     <tr><td>The test</td><td>A directive. Steps ordered so that a likely mistake fails before a step where it would hang. Every step through <code>common::check</code>. Runs at each process count the directive allows, on MPICH and Open MPI in CI.</td></tr>
     <tr><td><code>CHANGELOG.md</code></td><td>An entry under <code>[Unreleased]</code> that says what a user can now do.</td></tr>
@@ -791,8 +801,8 @@ identifiers out of the shipped files.</p>
   values MPI does not fix, and hands a new communicator to
   <code>store_comm</code>. A new ferrompi code is defined in the header and in
   <code>src/error.rs</code>, tied only by comments and a unit test.</li>
-  <li>Nothing checks the Rust declaration against the header; the reviewer
-  does, by eye.</li>
+  <li>The compiler takes the Rust declaration on trust;
+  <code>check-ffi-signatures.py</code> compares it with the header.</li>
   <li>The method checks in Rust what MPI cannot, through the validators,
   documents who calls and each error, and maps the code with
   <code>check_with_op</code>.</li>

@@ -703,7 +703,7 @@ rank 0: a barrier on another thread: MPI call not permitted on this thread at th
 rank 0: a send past the last rank: MPI error in send: Invalid rank, error stack:
 internal_Send(63826): MPI_Send(buf=0x…, count=2, MPI_DOUBLE, 2, 0, MPI_COMM_WORLD) failed
 internal_Send(63780): Invalid rank has value 2 but must be nonnegative and less than 2 (class=ERR_RANK, code=…)
-rank 0: a barrier after drop(mpi): MPI has been finalized</code></pre>
+rank 0: a barrier after drop(mpi): MPI has been finalized or the Mpi handle dropped</code></pre>
 
 <ul>
   <li>The bitwise OR and the short buffer never left the public API.
@@ -895,7 +895,8 @@ few statics:</p>
 
 <p>Each C table has a fixed size, set in the source:</p>
 
-<pre data-lang="c" data-source="csrc/ferrompi.c"><code>// Maximum number of concurrent communicators (excluding COMM_WORLD)
+<pre data-lang="c" data-source="csrc/ferrompi.c"><code>// Communicator table size, COMM_WORLD included: it holds slot 0, so at most
+// MAX_COMMS - 1 other communicators can exist at once
 #define MAX_COMMS 256
 
 // Maximum number of concurrent requests

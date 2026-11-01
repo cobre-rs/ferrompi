@@ -115,7 +115,7 @@ fn main() {
 <pre class="output" data-output-of="once"><code>before init: invalid state: MPI is not initialized
 init: a world of 1
 second init: MPI has already been initialized
-init after the drop: MPI has been finalized</code></pre>
+init after the drop: MPI has been finalized or the Mpi handle dropped</code></pre>
 
 <p>Before <code>Mpi::init</code>, the lifecycle guard
 (<a href="11-the-safety-model.html#lifecycle">chapter 11</a>) refuses the
