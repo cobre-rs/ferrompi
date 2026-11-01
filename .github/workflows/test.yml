@@ -82,6 +82,12 @@ jobs:
           bash .github/scripts/check-no-plan-leaks-test.sh
           bash .github/scripts/check-no-plan-leaks.sh
 
+      - name: FFI signature check
+        if: matrix.mpi == 'mpich' && matrix.features == ''
+        run: |
+          bash .github/scripts/check-ffi-signatures-test.sh
+          python3 .github/scripts/check-ffi-signatures.py
+
       - name: Configure OpenMPI environment
         if: matrix.mpi == 'openmpi'
         run: |
