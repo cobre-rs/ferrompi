@@ -19,6 +19,8 @@ const FERROMPI_ERR_DATATYPES_FULL: i32 = -7003;
 const FERROMPI_ERR_OPS_FULL: i32 = -7004;
 const FERROMPI_ERR_WINDOWS_FULL: i32 = -7005;
 const FERROMPI_ERR_GROUPS_FULL: i32 = -7006;
+// -7007 is retired: it was the info table's sentinel, removed in 0.7.0. Do
+// not reuse it.
 
 // Returned by the persistent-collective and comm_create_from_group stubs
 // compiled without FERROMPI_HAVE_MPI4_COLLECTIVES (the library lacks the
